@@ -246,6 +246,153 @@ pub async fn generate_plan_and_run(
         .into_response())
 }
 
+// -----------------------------------------------------------------------
+// Execute Plan (idempotent)
+// -----------------------------------------------------------------------
+
+#[derive(Debug, Serialize, TS)]
+pub struct ExecutePlanResponse {
+    pub execution_id: Uuid,
+}
+
+pub async fn execute_plan(
+    Extension(session): Extension<ChatSession>,
+    State(deployment): State<DeploymentImpl>,
+    axum::extract::Path(plan_id): axum::extract::Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let pool = &deployment.db().pool;
+
+    // Verify the plan belongs to this session
+    let plan = WorkflowPlan::find_by_id(pool, plan_id)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("Plan not found.".to_string()))?;
+    if plan.session_id != session.id {
+        return Err(ApiError::BadRequest("Plan not found in this session.".to_string()));
+    }
+
+    let bootstrap = WorkflowOrchestrator::execute_plan(
+        pool,
+        deployment.chat_runner(),
+        plan_id,
+    )
+    .await
+    .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+
+    // Wake the scheduler to start executing steps
+    let deployment_clone = deployment.clone();
+    let execution_id = bootstrap.execution.id;
+    tokio::spawn(async move {
+        if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+            deployment_clone.db(),
+            deployment_clone.chat_runner(),
+            execution_id,
+        )
+        .await
+        {
+            tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed");
+        }
+    });
+
+    Ok((
+        StatusCode::OK,
+        ResponseJson(ApiResponse::<ExecutePlanResponse>::success(
+            ExecutePlanResponse {
+                execution_id: bootstrap.execution.id,
+            },
+        )),
+    )
+        .into_response())
+}
+
+// -----------------------------------------------------------------------
+// Pause All
+// -----------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, TS)]
+pub struct PauseAllRequest {
+    pub execution_id: Uuid,
+}
+
+#[derive(Debug, Serialize, TS)]
+pub struct PauseAllResponse {
+    pub status: String,
+}
+
+pub async fn pause_all(
+    Extension(session): Extension<ChatSession>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<PauseAllRequest>,
+) -> Result<Response, ApiError> {
+    let pool = &deployment.db().pool;
+
+    let execution = WorkflowExecution::find_by_id(pool, payload.execution_id)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("Execution not found.".to_string()))?;
+    if execution.session_id != session.id {
+        return Err(ApiError::BadRequest("Execution not found in this session.".to_string()));
+    }
+
+    let execution = WorkflowOrchestrator::pause_all(pool, payload.execution_id)
+        .await
+        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+
+    Ok((
+        StatusCode::OK,
+        ResponseJson(ApiResponse::<PauseAllResponse>::success(PauseAllResponse {
+            status: format!("{:?}", execution.status),
+        })),
+    )
+        .into_response())
+}
+
+// -----------------------------------------------------------------------
+// Interrupt Step
+// -----------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, TS)]
+pub struct InterruptStepRequest {
+    pub execution_id: Uuid,
+    pub step_id: Uuid,
+}
+
+#[derive(Debug, Serialize, TS)]
+pub struct InterruptStepResponse {
+    pub status: String,
+}
+
+pub async fn interrupt_step(
+    Extension(session): Extension<ChatSession>,
+    State(deployment): State<DeploymentImpl>,
+    Json(payload): Json<InterruptStepRequest>,
+) -> Result<Response, ApiError> {
+    let pool = &deployment.db().pool;
+
+    let execution = WorkflowExecution::find_by_id(pool, payload.execution_id)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("Execution not found.".to_string()))?;
+    if execution.session_id != session.id {
+        return Err(ApiError::BadRequest("Execution not found in this session.".to_string()));
+    }
+
+    let step = WorkflowOrchestrator::interrupt_step(
+        pool,
+        payload.execution_id,
+        payload.step_id,
+    )
+    .await
+    .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+
+    Ok((
+        StatusCode::OK,
+        ResponseJson(ApiResponse::<InterruptStepResponse>::success(
+            InterruptStepResponse {
+                status: format!("{:?}", step.status),
+            },
+        )),
+    )
+        .into_response())
+}
+
 async fn persist_invalid_plan(
     pool: &sqlx::SqlitePool,
     session_id: Uuid,

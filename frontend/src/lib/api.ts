@@ -99,6 +99,18 @@ export interface GeneratePlanAndRunResponse {
   workflow_card_message: ChatMessage;
 }
 
+export interface ExecutePlanResponse {
+  execution_id: string;
+}
+
+export interface PauseAllResponse {
+  status: string;
+}
+
+export interface InterruptStepResponse {
+  status: string;
+}
+
 export class ApiError<E = unknown> extends Error {
   public status?: number;
   public error_data?: E;
@@ -781,6 +793,46 @@ export const chatApi = {
       }
     );
     return handleApiResponse<GeneratePlanAndRunResponse>(response);
+  },
+
+  executePlan: async (
+    sessionId: string,
+    planId: string
+  ): Promise<ExecutePlanResponse> => {
+    const response = await makeRequest(
+      `/api/chat/sessions/${sessionId}/workflow/plans/${planId}/execute`,
+      { method: 'POST' }
+    );
+    return handleApiResponse<ExecutePlanResponse>(response);
+  },
+
+  pauseAll: async (
+    sessionId: string,
+    executionId: string
+  ): Promise<PauseAllResponse> => {
+    const response = await makeRequest(
+      `/api/chat/sessions/${sessionId}/workflow/pause-all`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ execution_id: executionId }),
+      }
+    );
+    return handleApiResponse<PauseAllResponse>(response);
+  },
+
+  interruptStep: async (
+    sessionId: string,
+    executionId: string,
+    stepId: string
+  ): Promise<InterruptStepResponse> => {
+    const response = await makeRequest(
+      `/api/chat/sessions/${sessionId}/workflow/interrupt-step`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ execution_id: executionId, step_id: stepId }),
+      }
+    );
+    return handleApiResponse<InterruptStepResponse>(response);
   },
 
   createMessage: async (

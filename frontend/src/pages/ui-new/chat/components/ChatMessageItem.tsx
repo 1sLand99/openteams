@@ -113,6 +113,9 @@ export interface ChatMessageItemProps {
   isCleanupMode: boolean;
   isSelected: boolean;
   onToggleSelect: () => void;
+  // Workflow controls
+  onExecutePlan?: (planId: string) => void;
+  onPauseAll?: (executionId: string) => void;
 }
 
 export function ChatMessageItem({
@@ -137,6 +140,8 @@ export function ChatMessageItem({
   isCleanupMode,
   isSelected,
   onToggleSelect,
+  onExecutePlan,
+  onPauseAll,
 }: ChatMessageItemProps) {
   const { t } = useTranslation('chat');
   const isUser = message.sender_type === ChatSenderType.user;
@@ -272,7 +277,7 @@ export function ChatMessageItem({
             aria-checked={isCleanupMode ? isSelected : undefined}
             tabIndex={isCleanupMode ? 0 : undefined}
           >
-            <ChatWorkflowCard message={message} />
+            <ChatWorkflowCard message={message} onExecute={onExecutePlan} onPauseAll={onPauseAll} />
           </div>
         </div>
       );

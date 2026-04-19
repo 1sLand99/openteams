@@ -53,6 +53,18 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
             axum::routing::post(workflow::generate_plan_and_run),
         )
         .route(
+            "/workflow/plans/{plan_id}/execute",
+            axum::routing::post(workflow::execute_plan),
+        )
+        .route(
+            "/workflow/pause-all",
+            axum::routing::post(workflow::pause_all),
+        )
+        .route(
+            "/workflow/interrupt-step",
+            axum::routing::post(workflow::interrupt_step),
+        )
+        .route(
             "/messages/batch-delete",
             axum::routing::post(messages::delete_messages_batch),
         )

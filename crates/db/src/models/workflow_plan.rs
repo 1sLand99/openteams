@@ -10,6 +10,7 @@ const WORKFLOW_PLAN_SELECT: &str = r#"
     SELECT id, session_id, source_message_id, created_by_session_agent_id,
            status, title, summary_text, plan_json, plan_schema_version,
            plan_hash, validation_status, validation_errors_json,
+           workflow_card_message_id,
            created_at, updated_at
     FROM chat_workflow_plans
 "#;
@@ -28,6 +29,7 @@ pub struct WorkflowPlan {
     pub plan_hash: String,
     pub validation_status: WorkflowValidationStatus,
     pub validation_errors_json: Option<String>,
+    pub workflow_card_message_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -82,7 +84,7 @@ impl WorkflowPlan {
             RETURNING id, session_id, source_message_id, created_by_session_agent_id,
                       status, title, summary_text, plan_json, plan_schema_version,
                       plan_hash, validation_status, validation_errors_json,
-                      created_at, updated_at
+                      workflow_card_message_id, created_at, updated_at
             "#,
         )
         .bind(id)
@@ -113,7 +115,7 @@ impl WorkflowPlan {
             RETURNING id, session_id, source_message_id, created_by_session_agent_id,
                       status, title, summary_text, plan_json, plan_schema_version,
                       plan_hash, validation_status, validation_errors_json,
-                      created_at, updated_at
+                      workflow_card_message_id, created_at, updated_at
             "#,
         )
         .bind(id)
@@ -138,12 +140,35 @@ impl WorkflowPlan {
             RETURNING id, session_id, source_message_id, created_by_session_agent_id,
                       status, title, summary_text, plan_json, plan_schema_version,
                       plan_hash, validation_status, validation_errors_json,
-                      created_at, updated_at
+                      workflow_card_message_id, created_at, updated_at
             "#,
         )
         .bind(id)
         .bind(validation_status)
         .bind(validation_errors_json)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn update_workflow_card_message_id(
+        pool: &SqlitePool,
+        id: Uuid,
+        workflow_card_message_id: Uuid,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_plans
+            SET workflow_card_message_id = ?2,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1
+            RETURNING id, session_id, source_message_id, created_by_session_agent_id,
+                      status, title, summary_text, plan_json, plan_schema_version,
+                      plan_hash, validation_status, validation_errors_json,
+                      workflow_card_message_id, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(workflow_card_message_id)
         .fetch_one(pool)
         .await
     }

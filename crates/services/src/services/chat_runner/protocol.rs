@@ -248,7 +248,9 @@ impl ChatRunner {
         match message_type {
             AgentProtocolMessageType::Artifact => Some(ChatWorkItemType::Artifact),
             AgentProtocolMessageType::Conclusion => Some(ChatWorkItemType::Conclusion),
-            AgentProtocolMessageType::Send | AgentProtocolMessageType::Record => None,
+            AgentProtocolMessageType::Send
+            | AgentProtocolMessageType::Record
+            | AgentProtocolMessageType::WorkflowGenerate => None,
         }
     }
 
@@ -563,6 +565,9 @@ impl ChatRunner {
             }
         };
 
+        let mut workflow_generate_detected = false;
+        let mut workflow_generate_content = String::new();
+
         for message in &protocol_messages {
             match &message.message_type {
                 AgentProtocolMessageType::Record => {
@@ -598,6 +603,10 @@ impl ChatRunner {
                         message.content.clone(),
                     )
                     .await?;
+                }
+                AgentProtocolMessageType::WorkflowGenerate => {
+                    workflow_generate_detected = true;
+                    workflow_generate_content = message.content.clone();
                 }
                 AgentProtocolMessageType::Send => {}
             }
@@ -674,6 +683,281 @@ impl ChatRunner {
             send_count += 1;
         }
 
-        Ok(ProtocolProcessResult::Success(send_count))
+        if workflow_generate_detected {
+            Ok(ProtocolProcessResult::WorkflowGenerateDetected {
+                send_count,
+                workflow_content: workflow_generate_content,
+            })
+        } else {
+            Ok(ProtocolProcessResult::Success(send_count))
+        }
+    }
+
+    /// Trigger the plan generation pipeline after detecting `workflow_generate`.
+    ///
+    /// This implements the second stage of the two-stage plan generation:
+    /// 1. Session agent returns `workflow_generate` (first stage, already done)
+    /// 2. System sends a follow-up prompt with plan JSON schema to the lead agent
+    ///    and creates plan preview (this method)
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn trigger_plan_generation(
+        &self,
+        session_id: Uuid,
+        _session_agent_id: Uuid,
+        _agent_id: Uuid,
+        _agent_name: &str,
+        _source_message_id: Uuid,
+        _workflow_content: &str,
+    ) -> Result<(), ChatRunnerError> {
+        use super::super::workflow_orchestrator::WorkflowOrchestrator;
+        use super::super::workflow_runtime::{
+            WorkflowCardAgent, build_plan_generation_prompt, extract_json_payload,
+            run_workflow_agent_prompt,
+        };
+        use super::super::workflow_compiler::WorkflowCompiler;
+        use super::super::workflow_validator;
+        use db::models::{
+            chat_agent::ChatAgent,
+            chat_message::ChatMessage as DbChatMessage,
+            chat_session::ChatSession,
+            chat_session_agent::ChatSessionAgent,
+            workflow_execution::WorkflowExecution,
+            workflow_plan::{CreateWorkflowPlan, WorkflowPlan},
+            workflow_plan_revision::{CreateWorkflowPlanRevision, WorkflowPlanRevision},
+            workflow_types::*,
+        };
+
+        let pool = &self.db.pool;
+
+        let session = ChatSession::find_by_id(pool, session_id)
+            .await?
+            .ok_or_else(|| ChatRunnerError::SessionNotFound(session_id))?;
+
+        // Check for active executions
+        if !WorkflowExecution::find_active_by_session(pool, session_id)
+            .await
+            .unwrap_or_default()
+            .is_empty()
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                "[plan_generation] skipping: active execution already exists"
+            );
+            return Ok(());
+        }
+
+        let session_agents = ChatSessionAgent::find_all_for_session(pool, session_id).await?;
+        if session_agents.is_empty() {
+            tracing::warn!(session_id = %session_id, "[plan_generation] no session agents");
+            return Ok(());
+        }
+
+        let mut agents = Vec::with_capacity(session_agents.len());
+        for sa in &session_agents {
+            if let Some(agent) = ChatAgent::find_by_id(pool, sa.agent_id).await? {
+                agents.push(agent);
+            }
+        }
+
+        // Resolve lead (Phase 1b fallback: first session agent)
+        let lead_session_agent = &session_agents[0];
+        let lead_agent = agents
+            .iter()
+            .find(|a| a.id == lead_session_agent.agent_id)
+            .ok_or_else(|| {
+                ChatRunnerError::AgentNotFound("lead agent not found".to_string())
+            })?;
+
+        // Resolve user goal from messages
+        let messages = DbChatMessage::find_by_session_id(pool, session_id, None).await?;
+        let user_goal = super::super::workflow_runtime::resolve_workflow_goal(None, &messages)
+            .unwrap_or_else(|| "Complete the requested task".to_string());
+        let source_msg_id = messages
+            .iter()
+            .rev()
+            .find(|m| m.sender_type == db::models::chat_message::ChatSenderType::User)
+            .map(|m| m.id);
+
+        let available_agents: Vec<WorkflowCardAgent> = session_agents
+            .iter()
+            .filter_map(|sa| {
+                let agent = agents.iter().find(|a| a.id == sa.agent_id)?;
+                Some(WorkflowCardAgent {
+                    session_agent_id: sa.id.to_string(),
+                    agent_id: agent.id.to_string(),
+                    name: agent.name.clone(),
+                })
+            })
+            .collect();
+
+        // Build the plan generation prompt (second-stage schema-guided prompt)
+        let prompt = build_plan_generation_prompt(
+            &user_goal,
+            &lead_agent.id.to_string(),
+            &available_agents,
+        );
+
+        // Run the plan generation (second-stage run)
+        let raw_plan_output = match run_workflow_agent_prompt(
+            &self.db,
+            &session,
+            lead_agent,
+            lead_session_agent,
+            &prompt,
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(err) => {
+                tracing::error!(
+                    session_id = %session_id,
+                    error = %err,
+                    "[plan_generation] plan generation run failed"
+                );
+                // Create a system message to inform the user
+                let error_msg = format!("Workflow plan generation failed: {}", err);
+                let _ = chat::create_message(
+                    pool,
+                    session_id,
+                    ChatSenderType::System,
+                    None,
+                    error_msg,
+                    Some(serde_json::json!({"card_type": "workflow_plan_error"})),
+                )
+                .await;
+                return Ok(());
+            }
+        };
+
+        let plan_json = match extract_json_payload(&raw_plan_output) {
+            Some(json) => json,
+            None => {
+                tracing::error!(
+                    session_id = %session_id,
+                    "[plan_generation] lead agent did not return a JSON object"
+                );
+                return Ok(());
+            }
+        };
+
+        // Parse and validate
+        let parsed_plan: WorkflowPlanJson = match serde_json::from_str(&plan_json) {
+            Ok(plan) => plan,
+            Err(err) => {
+                tracing::error!(
+                    session_id = %session_id,
+                    error = %err,
+                    "[plan_generation] invalid workflow JSON"
+                );
+                return Ok(());
+            }
+        };
+
+        let valid_agent_ids: Vec<String> =
+            agents.iter().map(|a| a.id.to_string()).collect();
+        let validation = workflow_validator::validate_plan(&parsed_plan, &valid_agent_ids);
+
+        if !validation.is_valid {
+            // Persist invalid plan with validation errors
+            let validation_errors_json =
+                serde_json::to_string(&validation.errors).unwrap_or_default();
+            let plan_hash = WorkflowCompiler::compute_hash(&parsed_plan);
+
+            let plan = WorkflowPlan::create(
+                pool,
+                &CreateWorkflowPlan {
+                    session_id,
+                    source_message_id: source_msg_id,
+                    created_by_session_agent_id: Some(lead_session_agent.id),
+                    title: parsed_plan.title.clone(),
+                    summary_text: Some(parsed_plan.goal.clone()),
+                    plan_json: plan_json.clone(),
+                    plan_schema_version: parsed_plan.version as i32,
+                    plan_hash: plan_hash.clone(),
+                    validation_status: WorkflowValidationStatus::Invalid,
+                    validation_errors_json: Some(validation_errors_json.clone()),
+                },
+                Uuid::new_v4(),
+            )
+            .await?;
+            let _plan = WorkflowPlan::update_status(pool, plan.id, WorkflowPlanStatus::Draft).await?;
+
+            let _revision = WorkflowPlanRevision::create(
+                pool,
+                &CreateWorkflowPlanRevision {
+                    plan_id: plan.id,
+                    revision_no: 1,
+                    edited_by: WorkflowRevisionEditor::Lead,
+                    editor_session_agent_id: Some(lead_session_agent.id),
+                    reason: Some("workflow_generate-invalid".to_string()),
+                    plan_json: plan_json.clone(),
+                    plan_hash,
+                    validation_status: WorkflowValidationStatus::Invalid,
+                    validation_errors_json: Some(validation_errors_json.clone()),
+                },
+                Uuid::new_v4(),
+            )
+            .await?;
+
+            // Create a preview_invalid card
+            let validation_summary = validation
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let card_meta = serde_json::json!({
+                "card_type": "workflow_plan",
+                "workflow_plan_id": plan.id,
+                "display_state": "preview_invalid",
+                "validation_errors": validation_summary,
+                "plan_title": parsed_plan.title,
+                "plan_goal": parsed_plan.goal,
+            });
+            let card_message = chat::create_message(
+                pool,
+                session_id,
+                ChatSenderType::System,
+                None,
+                "Workflow Plan (Invalid)".to_string(),
+                Some(card_meta),
+            )
+            .await?;
+            self.emit_message_new(session_id, card_message);
+            return Ok(());
+        }
+
+        // Validation passed - create plan preview (no execution yet)
+        let (plan, revision, workflow_card_message) =
+            WorkflowOrchestrator::create_workflow_plan_preview_card(
+                pool,
+                self,
+                &session,
+                source_msg_id,
+                lead_session_agent,
+                &plan_json,
+            )
+            .await
+            .map_err(|err| {
+                ChatRunnerError::AgentNotFound(format!("plan creation failed: {}", err))
+            })?;
+
+        tracing::info!(
+            session_id = %session_id,
+            plan_id = %plan.id,
+            revision_id = %revision.id,
+            "[plan_generation] plan preview created successfully"
+        );
+
+        self.emit(
+            session_id,
+            ChatStreamEvent::WorkflowPlanPreviewReady {
+                session_id,
+                plan_id: plan.id,
+                workflow_card_message,
+            },
+        );
+
+        Ok(())
     }
 }

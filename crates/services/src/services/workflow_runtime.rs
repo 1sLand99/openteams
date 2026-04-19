@@ -68,6 +68,8 @@ pub struct WorkflowCardAgent {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowCardState {
+    PreviewReady,
+    PreviewInvalid,
     Running,
     Completed,
     Failed,
@@ -85,7 +87,7 @@ pub struct WorkflowCardStep {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct WorkflowCardProjection {
-    pub execution_id: String,
+    pub execution_id: Option<String>,
     pub plan_id: String,
     pub revision_id: String,
     pub title: String,
@@ -102,6 +104,7 @@ pub struct WorkflowCardProjection {
     pub plan: WorkflowPlanJson,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+    pub validation_errors: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,7 +415,7 @@ pub fn build_workflow_card_projection(
     };
 
     Ok(WorkflowCardProjection {
-        execution_id: execution.id.to_string(),
+        execution_id: Some(execution.id.to_string()),
         plan_id: plan.id.to_string(),
         revision_id: revision.id.to_string(),
         title: plan.title.clone(),
@@ -433,6 +436,7 @@ pub fn build_workflow_card_projection(
         plan: plan_json,
         started_at: execution.started_at.map(|value| value.to_rfc3339()),
         completed_at: execution.completed_at.map(|value| value.to_rfc3339()),
+        validation_errors: None,
     })
 }
 

@@ -155,6 +155,15 @@ const PROTOCOL_OUTPUT_SCHEMA_JSON: &str = r#"{
         },
         "required": ["type", "content"],
         "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "type": { "const": "workflow_generate" },
+          "content": { "type": "string" }
+        },
+        "required": ["type"],
+        "additionalProperties": false
       }
     ]
   },
@@ -241,6 +250,7 @@ enum AgentProtocolMessageType {
     #[serde(alias = "artiface", alias = "artefact")]
     Artifact,
     Conclusion,
+    WorkflowGenerate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +285,15 @@ pub(super) enum ProtocolProcessResult {
     RetryableParseFailure {
         code: ChatProtocolNoticeCode,
         detail: Option<String>,
+    },
+    /// A `workflow_generate` control signal was detected in the agent output.
+    /// The caller should trigger the plan generation pipeline after processing
+    /// any co-occurring `send`/`artifact`/`record`/`conclusion` messages.
+    WorkflowGenerateDetected {
+        /// Number of `send` messages created alongside the workflow_generate.
+        send_count: usize,
+        /// The content field from the workflow_generate message (may be empty).
+        workflow_content: String,
     },
 }
 
@@ -543,6 +562,20 @@ pub enum ChatStreamEvent {
         agent_id: Option<Uuid>,
         reason: String,
     },
+    WorkflowGenerateDetected {
+        session_id: Uuid,
+        session_agent_id: Uuid,
+        run_id: Uuid,
+    },
+    WorkflowPlanPreviewReady {
+        session_id: Uuid,
+        plan_id: Uuid,
+        workflow_card_message: ChatMessage,
+    },
+    WorkflowExecutionUpdated {
+        session_id: Uuid,
+        execution_id: Uuid,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -558,6 +591,8 @@ pub enum ChatStreamDeltaType {
 pub enum ChatRunnerError {
     #[error("chat agent not found: {0}")]
     AgentNotFound(String),
+    #[error("session not found: {0}")]
+    SessionNotFound(Uuid),
     #[error("unknown runner type: {0}")]
     UnknownRunnerType(String),
     #[error(transparent)]

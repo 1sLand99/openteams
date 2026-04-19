@@ -2145,6 +2145,16 @@ impl ChatRunner {
                         content,
                     });
                 }
+                AgentProtocolMessageType::WorkflowGenerate => {
+                    // workflow_generate is a control signal; content may be empty.
+                    // Does not require `to` or `intent`.
+                    validated.push(AgentProtocolMessage {
+                        message_type: AgentProtocolMessageType::WorkflowGenerate,
+                        to: None,
+                        intent: None,
+                        content: message.content.trim().to_string(),
+                    });
+                }
             }
         }
 

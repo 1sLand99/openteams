@@ -1017,6 +1017,345 @@ impl WorkflowOrchestrator {
         chat_runner.emit_message_new(message.session_id, message.clone());
         Ok((plan, revision, message))
     }
+
+    /// Create a plan in `ready` state and a preview card (no execution created).
+    /// Used by the `workflow_generate` -> plan_generation pipeline.
+    pub async fn create_workflow_plan_preview_card(
+        pool: &SqlitePool,
+        chat_runner: &ChatRunner,
+        session: &ChatSession,
+        source_message_id: Option<Uuid>,
+        lead_session_agent: &ChatSessionAgent,
+        plan_json: &str,
+    ) -> Result<(WorkflowPlan, WorkflowPlanRevision, ChatMessage), OrchestratorError> {
+        let parsed_plan: WorkflowPlanJson = serde_json::from_str(plan_json)?;
+        let plan_hash = WorkflowCompiler::compute_hash(&parsed_plan);
+        let plan = WorkflowPlan::create(
+            pool,
+            &CreateWorkflowPlan {
+                session_id: session.id,
+                source_message_id,
+                created_by_session_agent_id: Some(lead_session_agent.id),
+                title: parsed_plan.title.clone(),
+                summary_text: Some(parsed_plan.goal.clone()),
+                plan_json: plan_json.to_string(),
+                plan_schema_version: parsed_plan.version as i32,
+                plan_hash: plan_hash.clone(),
+                validation_status: WorkflowValidationStatus::Valid,
+                validation_errors_json: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await?;
+        let plan = WorkflowPlan::update_status(pool, plan.id, WorkflowPlanStatus::Ready).await?;
+        let revision = WorkflowPlanRevision::create(
+            pool,
+            &CreateWorkflowPlanRevision {
+                plan_id: plan.id,
+                revision_no: 1,
+                edited_by: WorkflowRevisionEditor::Lead,
+                editor_session_agent_id: Some(lead_session_agent.id),
+                reason: Some("workflow_generate".to_string()),
+                plan_json: plan_json.to_string(),
+                plan_hash,
+                validation_status: WorkflowValidationStatus::Valid,
+                validation_errors_json: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await?;
+
+        // Build preview projection
+        let session_agents =
+            ChatSessionAgent::find_all_for_session(pool, session.id).await?;
+        let agents = load_agents_for_session(pool, &session_agents).await?;
+        let agent_views: Vec<super::workflow_runtime::WorkflowCardAgent> = session_agents
+            .iter()
+            .filter_map(|sa| {
+                let agent = agents.iter().find(|a| a.id == sa.agent_id)?;
+                Some(super::workflow_runtime::WorkflowCardAgent {
+                    session_agent_id: sa.id.to_string(),
+                    agent_id: agent.id.to_string(),
+                    name: agent.name.clone(),
+                })
+            })
+            .collect();
+
+        let step_views: Vec<super::workflow_runtime::WorkflowCardStep> = parsed_plan
+            .nodes
+            .iter()
+            .map(|n| {
+                let step_type_str = if n.data.step_type.is_empty() {
+                    "task".to_string()
+                } else {
+                    n.data.step_type.to_lowercase()
+                };
+                super::workflow_runtime::WorkflowCardStep {
+                    id: n.id.clone(),
+                    title: n.data.title.clone(),
+                    step_type: step_type_str,
+                    status: "pending".to_string(),
+                    agent_name: n.data.agent_id.clone(),
+                    summary_text: None,
+                }
+            })
+            .collect();
+
+        let preview = super::workflow_runtime::WorkflowCardProjection {
+            execution_id: None,
+            plan_id: plan.id.to_string(),
+            revision_id: revision.id.to_string(),
+            title: plan.title.clone(),
+            goal: plan
+                .summary_text
+                .clone()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| plan.title.clone()),
+            state: super::workflow_runtime::WorkflowCardState::PreviewReady,
+            execution_status: "preview".to_string(),
+            error_message: None,
+            completed_step_count: 0,
+            total_step_count: parsed_plan.nodes.len(),
+            result_summary: None,
+            outputs: Vec::new(),
+            agents: agent_views,
+            steps: step_views,
+            plan: parsed_plan,
+            started_at: None,
+            completed_at: None,
+            validation_errors: None,
+        };
+
+        let card_meta = serde_json::json!({
+            "card_type": "workflow_plan",
+            "workflow_plan_id": plan.id,
+            "active_revision_id": revision.id,
+            "display_state": "preview_ready",
+            "workflow_card": serde_json::to_value(&preview)?,
+        });
+
+        let message = chat::create_message(
+            pool,
+            session.id,
+            ChatSenderType::System,
+            None,
+            "Workflow Plan".to_string(),
+            Some(card_meta),
+        )
+        .await?;
+        chat_runner.emit_message_new(message.session_id, message.clone());
+
+        // Update plan with the card message id for later reference (e.g. execute_plan)
+        let plan =
+            WorkflowPlan::update_workflow_card_message_id(pool, plan.id, message.id).await?;
+
+        Ok((plan, revision, message))
+    }
+
+    // -----------------------------------------------------------------------
+    // Execute API: create execution from an existing ready plan (idempotent)
+    // -----------------------------------------------------------------------
+
+    /// Execute a plan that is in `ready` status.
+    /// Idempotent: if an active execution already exists for this plan, returns it.
+    pub async fn execute_plan(
+        pool: &SqlitePool,
+        chat_runner: &ChatRunner,
+        plan_id: Uuid,
+    ) -> Result<BootstrapResult, OrchestratorError> {
+        let plan = WorkflowPlan::find_by_id(pool, plan_id)
+            .await?
+            .ok_or_else(|| OrchestratorError::NotFound(format!("plan {} 未找到", plan_id)))?;
+
+        if plan.status != WorkflowPlanStatus::Ready {
+            return Err(OrchestratorError::IllegalTransition(format!(
+                "plan {} status is {:?}, expected Ready",
+                plan_id, plan.status
+            )));
+        }
+
+        // Idempotent check: if active execution exists for this plan, return early
+        let active_executions =
+            WorkflowExecution::find_active_by_session(pool, plan.session_id).await?;
+        for existing in &active_executions {
+            if existing.plan_id == plan_id {
+                // Already executing this plan
+                let steps = WorkflowStep::find_by_execution(pool, existing.id).await?;
+                let edges = WorkflowStepEdge::find_by_execution(pool, existing.id).await?;
+                let agent_sessions =
+                    WorkflowAgentSession::find_by_execution(pool, existing.id).await?;
+                let round = existing
+                    .active_round_id
+                    .and_then(|_| {
+                        // We can't do async in and_then easily, so skip
+                        None::<WorkflowRound>
+                    });
+                let events = WorkflowEvent::find_by_execution(pool, existing.id).await?;
+                return Ok(BootstrapResult {
+                    execution: existing.clone(),
+                    round,
+                    steps,
+                    edges,
+                    agent_sessions,
+                    events,
+                    failed: false,
+                    failure_reason: None,
+                });
+            }
+        }
+        if !active_executions.is_empty() {
+            return Err(OrchestratorError::IllegalTransition(
+                "another workflow execution is already active in this session".to_string(),
+            ));
+        }
+
+        let revision = WorkflowPlanRevision::find_latest_by_plan(pool, plan_id)
+            .await?
+            .ok_or_else(|| {
+                OrchestratorError::NotFound(format!("plan {} 缺少 revision", plan_id))
+            })?;
+
+        let session = ChatSession::find_by_id(pool, plan.session_id)
+            .await?
+            .ok_or_else(|| {
+                OrchestratorError::NotFound(format!("session {} 未找到", plan.session_id))
+            })?;
+        let session_agents =
+            ChatSessionAgent::find_all_for_session(pool, session.id).await?;
+        let agents = load_agents_for_session(pool, &session_agents).await?;
+
+        let lead_session_agent_id = plan
+            .created_by_session_agent_id
+            .or_else(|| session_agents.first().map(|sa| sa.id));
+
+        let valid_agent_ids: Vec<String> =
+            agents.iter().map(|a| a.id.to_string()).collect();
+        let agent_id_map: HashMap<String, Uuid> = session_agents
+            .iter()
+            .map(|sa| (sa.agent_id.to_string(), sa.id))
+            .collect();
+
+        let bootstrap = Self::bootstrap_execution(
+            pool,
+            &plan,
+            &revision,
+            lead_session_agent_id,
+            &valid_agent_ids,
+            &agent_id_map,
+        )
+        .await?;
+
+        // Update the workflow card if it exists
+        if let Some(card_msg_id) = plan.workflow_card_message_id {
+            let _ = WorkflowExecution::update_workflow_card_message_id(
+                pool,
+                bootstrap.execution.id,
+                card_msg_id,
+            )
+            .await;
+
+            // Refresh the card to show running state
+            Self::refresh_workflow_card(
+                pool,
+                chat_runner,
+                &bootstrap.execution,
+                &plan,
+                &revision,
+                &session_agents,
+                &agents,
+                bootstrap.failure_reason.clone(),
+            )
+            .await?;
+        }
+
+        Ok(bootstrap)
+    }
+
+    // -----------------------------------------------------------------------
+    // Pause / Interrupt controls
+    // -----------------------------------------------------------------------
+
+    /// Pause all running steps in the execution.
+    pub async fn pause_all(
+        pool: &SqlitePool,
+        execution_id: Uuid,
+    ) -> Result<WorkflowExecution, OrchestratorError> {
+        let execution = WorkflowExecution::find_by_id(pool, execution_id)
+            .await?
+            .ok_or_else(|| {
+                OrchestratorError::NotFound(format!("execution {} 未找到", execution_id))
+            })?;
+
+        if execution.status != WorkflowExecutionStatus::Running {
+            return Err(OrchestratorError::IllegalTransition(format!(
+                "cannot pause: execution is {:?}",
+                execution.status
+            )));
+        }
+
+        // Transition to pausing
+        let tr = reducer::transition_execution(
+            pool,
+            &execution,
+            WorkflowExecutionStatus::Pausing,
+        )
+        .await?;
+
+        // For MVP, immediately go to paused (no async convergence needed yet)
+        let tr = reducer::transition_execution(
+            pool,
+            &tr.entity,
+            WorkflowExecutionStatus::Paused,
+        )
+        .await?;
+
+        Ok(tr.entity)
+    }
+
+    /// Interrupt a specific step.
+    pub async fn interrupt_step(
+        pool: &SqlitePool,
+        execution_id: Uuid,
+        step_id: Uuid,
+    ) -> Result<WorkflowStep, OrchestratorError> {
+        let execution = WorkflowExecution::find_by_id(pool, execution_id)
+            .await?
+            .ok_or_else(|| {
+                OrchestratorError::NotFound(format!("execution {} 未找到", execution_id))
+            })?;
+
+        let step = WorkflowStep::find_by_id(pool, step_id)
+            .await?
+            .ok_or_else(|| {
+                OrchestratorError::NotFound(format!("step {} 未找到", step_id))
+            })?;
+
+        if step.status != WorkflowStepStatus::Running {
+            return Err(OrchestratorError::IllegalTransition(format!(
+                "cannot interrupt: step is {:?}",
+                step.status
+            )));
+        }
+
+        let tr = reducer::transition_step(
+            pool,
+            &execution,
+            &step,
+            WorkflowStepStatus::InterruptRequested,
+        )
+        .await?;
+
+        // For MVP, immediately transition to interrupted
+        let tr = reducer::transition_step(
+            pool,
+            &execution,
+            &tr.entity,
+            WorkflowStepStatus::Interrupted,
+        )
+        .await?;
+
+        Ok(tr.entity)
+    }
 }
 
 /// Bootstrap 结果

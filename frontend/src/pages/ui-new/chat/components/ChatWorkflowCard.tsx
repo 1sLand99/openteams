@@ -1,5 +1,5 @@
 import type { ChatMessage } from 'shared/types';
-import { CheckCircleIcon, ClockIcon, WarningCircleIcon } from '@phosphor-icons/react';
+import { CheckCircleIcon, ClockIcon, PlayIcon, WarningCircleIcon, PauseIcon } from '@phosphor-icons/react';
 import { cn } from '@/lib/utils';
 
 type WorkflowCardNode = {
@@ -21,10 +21,12 @@ type WorkflowCardEdge = {
 };
 
 type WorkflowCardProjection = {
-  execution_id: string;
+  execution_id?: string | null;
+  plan_id?: string;
+  revision_id?: string;
   title: string;
   goal: string;
-  state: 'running' | 'completed' | 'failed';
+  state: 'preview_ready' | 'preview_invalid' | 'running' | 'completed' | 'failed' | 'paused';
   execution_status: string;
   error_message?: string | null;
   completed_step_count: number;
@@ -39,11 +41,17 @@ type WorkflowCardProjection = {
     agent_name?: string | null;
     summary_text?: string | null;
   }>;
+  agents?: Array<{
+    session_agent_id: string;
+    agent_id: string;
+    name: string;
+  }>;
   plan: {
     nodes: WorkflowCardNode[];
     edges: WorkflowCardEdge[];
     viewport?: { x?: number; y?: number; zoom?: number };
   };
+  validation_errors?: string | null;
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -52,7 +60,10 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 export function extractWorkflowCardProjection(
   meta: unknown
 ): WorkflowCardProjection | null {
-  if (!isRecord(meta) || meta.card_type !== 'workflow_execution') {
+  if (!isRecord(meta)) return null;
+
+  // Support both workflow_execution (legacy) and workflow_plan (new preview) card types
+  if (meta.card_type !== 'workflow_execution' && meta.card_type !== 'workflow_plan') {
     return null;
   }
 
@@ -146,17 +157,30 @@ function WorkflowGraph({ nodes, edges }: { nodes: WorkflowCardNode[]; edges: Wor
   );
 }
 
-export function ChatWorkflowCard({ message }: { message: ChatMessage }) {
+type ChatWorkflowCardProps = {
+  message: ChatMessage;
+  onExecute?: (planId: string) => void;
+  onPauseAll?: (executionId: string) => void;
+};
+
+export function ChatWorkflowCard({ message, onExecute, onPauseAll }: ChatWorkflowCardProps) {
   const projection = extractWorkflowCardProjection(message.meta);
   if (!projection) {
     return null;
   }
 
+  const isPreview = projection.state === 'preview_ready' || projection.state === 'preview_invalid';
+  const isInvalid = projection.state === 'preview_invalid';
+
   const stateIcon =
     projection.state === 'completed' ? (
       <CheckCircleIcon className="size-icon-sm text-[#15803D]" weight="fill" />
-    ) : projection.state === 'failed' ? (
+    ) : projection.state === 'failed' || isInvalid ? (
       <WarningCircleIcon className="size-icon-sm text-[#DC2626]" weight="fill" />
+    ) : projection.state === 'preview_ready' ? (
+      <PlayIcon className="size-icon-sm text-[#D97706]" weight="fill" />
+    ) : projection.state === 'paused' ? (
+      <PauseIcon className="size-icon-sm text-[#D97706]" weight="fill" />
     ) : (
       <ClockIcon className="size-icon-sm text-[#2563EB]" weight="fill" />
     );
@@ -166,7 +190,13 @@ export function ChatWorkflowCard({ message }: { message: ChatMessage }) {
       ? 'Work Item'
       : projection.state === 'failed'
         ? 'Execution Failed'
-        : 'Workflow Running';
+        : projection.state === 'preview_ready'
+          ? 'Plan Ready'
+          : projection.state === 'preview_invalid'
+            ? 'Plan Invalid'
+            : projection.state === 'paused'
+              ? 'Paused'
+              : 'Workflow Running';
 
   return (
     <div className="w-full max-w-[760px] rounded-[28px] border border-[#D8E2F0] bg-white p-4 shadow-sm">
@@ -187,6 +217,20 @@ export function ChatWorkflowCard({ message }: { message: ChatMessage }) {
           {projection.completed_step_count}/{projection.total_step_count}
         </div>
       </div>
+
+      {/* Agent list (preview mode) */}
+      {isPreview && projection.agents && projection.agents.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {projection.agents.map((agent) => (
+            <span
+              key={agent.session_agent_id}
+              className="rounded-full bg-[#F1F5F9] px-3 py-1 text-xs font-medium text-[#475569]"
+            >
+              {agent.name}
+            </span>
+          ))}
+        </div>
+      )}
 
       <div className="mt-4">
         <WorkflowGraph
@@ -230,6 +274,42 @@ export function ChatWorkflowCard({ message }: { message: ChatMessage }) {
           </div>
         ))}
       </div>
+
+      {/* Validation errors (preview_invalid) */}
+      {isInvalid && projection.validation_errors && (
+        <div className="mt-4 rounded-[24px] border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm leading-6 text-[#991B1B]">
+          <div className="text-xs font-bold uppercase tracking-[0.16em]">Validation Errors</div>
+          <div className="mt-1">{projection.validation_errors}</div>
+        </div>
+      )}
+
+      {/* Execute button (preview_ready) */}
+      {projection.state === 'preview_ready' && projection.plan_id && onExecute && (
+        <div className="mt-4 flex justify-end">
+          <button
+            type="button"
+            onClick={() => onExecute(projection.plan_id!)}
+            className="flex items-center gap-2 rounded-full bg-[#2563EB] px-5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-[#1D4ED8] transition-colors"
+          >
+            <PlayIcon className="size-4" weight="bold" />
+            Execute Plan
+          </button>
+        </div>
+      )}
+
+      {/* Pause button (running) */}
+      {projection.state === 'running' && projection.execution_id && onPauseAll && (
+        <div className="mt-4 flex justify-end">
+          <button
+            type="button"
+            onClick={() => onPauseAll(projection.execution_id!)}
+            className="flex items-center gap-2 rounded-full bg-[#D97706] px-5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-[#B45309] transition-colors"
+          >
+            <PauseIcon className="size-4" weight="bold" />
+            Pause All
+          </button>
+        </div>
+      )}
 
       {projection.state === 'completed' && (
         <div className="mt-4 rounded-[24px] border border-[#D1FAE5] bg-[#ECFDF5] p-4">

@@ -903,6 +903,34 @@ export function ChatSessions() {
     },
   });
 
+  const executePlanMutation = useMutation({
+    mutationFn: async (planId: string) => {
+      if (!activeSessionId) throw new Error('No active session');
+      return chatApi.executePlan(activeSessionId, planId);
+    },
+  });
+
+  const pauseAllMutation = useMutation({
+    mutationFn: async (executionId: string) => {
+      if (!activeSessionId) throw new Error('No active session');
+      return chatApi.pauseAll(activeSessionId, executionId);
+    },
+  });
+
+  const handleExecutePlan = useCallback(
+    (planId: string) => {
+      executePlanMutation.mutate(planId);
+    },
+    [executePlanMutation]
+  );
+
+  const handlePauseAll = useCallback(
+    (executionId: string) => {
+      pauseAllMutation.mutate(executionId);
+    },
+    [pauseAllMutation]
+  );
+
   // Message input
   const getMessageMentionHandle = useCallback(
     (message: ChatMessage) => {
@@ -1487,6 +1515,7 @@ export function ChatSessions() {
 
         return !(
           workflowCard.state === 'completed' &&
+          workflowCard.execution_id != null &&
           completedWorkflowExecutionIdsWithWorkItems.has(
             workflowCard.execution_id
           )
@@ -4408,6 +4437,8 @@ export function ChatSessions() {
                           onToggleSelect={() =>
                             handleToggleTimelineEntrySelection(entry.key)
                           }
+                          onExecutePlan={handleExecutePlan}
+                          onPauseAll={handlePauseAll}
                         />
                       );
                     })}
