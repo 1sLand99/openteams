@@ -758,5 +758,7 @@
       "diffAction": "Diff",
       "openExplorerSuccess": "Abierto en el administrador de archivos."
     }
-  }
+  },
+  "workflow_plan_generation_unavailable": "La generación de planes de flujo de trabajo no está disponible para esta sesión.",
+  "workflow_retry": "Reintentar"
 }

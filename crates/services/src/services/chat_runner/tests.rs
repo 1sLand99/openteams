@@ -1063,6 +1063,12 @@ fn build_exact_markdown_prompt_matches_expected_input_template() {
     assert!(prompt.contains("conclusion`: current-turn summary only"));
     assert!(prompt.contains(PROTOCOL_OUTPUT_SCHEMA_JSON));
     assert!(prompt.contains("### Example"));
+    assert!(prompt.contains("### workflow_generate"));
+    assert!(prompt.contains("plan_check"));
+    assert!(prompt.contains(
+        "Emit `workflow_generate` only when the user explicitly asks to start generating an execution plan."
+    ));
+    assert!(prompt.contains("`生成计划`, `开始执行`, `开始落实`, `进入执行`"));
     assert!(prompt.contains("## Agent"));
     assert!(prompt.contains("- name: fullstack"));
     assert!(prompt.contains("Full-stack Engineer"));

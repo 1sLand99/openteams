@@ -1,6 +1,8 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { useTranslation } from 'react-i18next';
 import {
+  ArrowClockwiseIcon,
   ArrowUpIcon,
   CaretDownIcon,
   FunnelIcon,
@@ -218,7 +220,8 @@ function buildWorkflowTranscriptRenderItems(
       const candidate = entries[cursor];
       if (
         candidate.entry_type !== 'thinking' ||
-        candidate.workflow_agent_session_id !== entry.workflow_agent_session_id ||
+        candidate.workflow_agent_session_id !==
+          entry.workflow_agent_session_id ||
         candidate.step_id !== entry.step_id ||
         candidate.agent_name !== entry.agent_name
       ) {
@@ -295,12 +298,15 @@ function buildStepContentTranscriptEntries(
     })
     .filter(
       (step) =>
-        !hasAgentTranscriptMessageForStep(existingEntries, step.id, step.step_key)
+        !hasAgentTranscriptMessageForStep(
+          existingEntries,
+          step.id,
+          step.step_key
+        )
     )
     .map((step) => {
       const relatedEntries = existingEntries.filter(
-        (entry) =>
-          entry.step_id === step.id || entry.step_key === step.step_key
+        (entry) => entry.step_id === step.id || entry.step_key === step.step_key
       );
       const latestRelatedTimestamp = Math.max(
         ...relatedEntries.map((entry) => Date.parse(entry.created_at)),
@@ -763,7 +769,12 @@ function WorkflowTranscriptFeed({
           return (
             <div key={item.id} className="py-5 first:pt-0 last:pb-0">
               <div className="flex gap-3">
-                <div className={cn('mt-1 h-4 w-1 shrink-0 rounded-full', tone.rail)} />
+                <div
+                  className={cn(
+                    'mt-1 h-4 w-1 shrink-0 rounded-full',
+                    tone.rail
+                  )}
+                />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-3 text-[11px]">
                     <span
@@ -840,7 +851,9 @@ function WorkflowTranscriptFeed({
         return (
           <div key={entry.id} className="py-5 first:pt-0 last:pb-0">
             <div className="flex gap-3">
-              <div className={cn('mt-1 h-4 w-1 shrink-0 rounded-full', tone.rail)} />
+              <div
+                className={cn('mt-1 h-4 w-1 shrink-0 rounded-full', tone.rail)}
+              />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 text-[11px]">
                   <span
@@ -1004,11 +1017,13 @@ export function WorkflowWindow({
   onResume,
   onInterruptStep,
   onStopStep,
+  onRetryStep,
   onSubmitStepInput,
   onApproval,
   onResolveFinalReview,
   pendingActionId,
 }: WorkflowWindowProps) {
+  const { t } = useTranslation('chat');
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [detailStepId, setDetailStepId] = useState<string | null>(null);
@@ -1024,6 +1039,8 @@ export function WorkflowWindow({
     projection.state === 'preview_ready' ||
     projection.state === 'preview_invalid';
   const isRunning = projection.execution_status === 'running';
+  const hasWorkflowCompleted = projection.state === 'completed';
+  const hasWorkflowFailed = projection.state === 'failed';
   const canResume =
     projection.execution_status === 'paused' ||
     projection.execution_status === 'failed' ||
@@ -1033,33 +1050,30 @@ export function WorkflowWindow({
   const leadAgentId =
     agents[0]?.workflow_agent_session_id ?? agents[0]?.session_agent_id ?? null;
   const leadAgentName = agents[0]?.name ?? 'Lead';
-  const agentSessionIdByLookup = useMemo(
-    () => {
-      const lookup = new Map<string, string>();
+  const agentSessionIdByLookup = useMemo(() => {
+    const lookup = new Map<string, string>();
 
-      for (const agent of agents) {
-        const agentSessionId =
-          agent.workflow_agent_session_id ?? agent.session_agent_id;
-        const keys = [
-          agent.name,
-          agent.agent_id,
-          agent.session_agent_id,
-          agent.workflow_agent_session_id,
-        ];
+    for (const agent of agents) {
+      const agentSessionId =
+        agent.workflow_agent_session_id ?? agent.session_agent_id;
+      const keys = [
+        agent.name,
+        agent.agent_id,
+        agent.session_agent_id,
+        agent.workflow_agent_session_id,
+      ];
 
-        for (const key of keys) {
-          const normalizedKey = key?.trim();
-          if (!normalizedKey || lookup.has(normalizedKey)) {
-            continue;
-          }
-          lookup.set(normalizedKey, agentSessionId);
+      for (const key of keys) {
+        const normalizedKey = key?.trim();
+        if (!normalizedKey || lookup.has(normalizedKey)) {
+          continue;
         }
+        lookup.set(normalizedKey, agentSessionId);
       }
+    }
 
-      return lookup;
-    },
-    [agents]
-  );
+    return lookup;
+  }, [agents]);
   const agentNameByLookup = useMemo(() => {
     const lookup = new Map<string, string>();
 
@@ -1266,7 +1280,8 @@ export function WorkflowWindow({
     agents[0] ??
     null;
   const selectedWorkflowAgentSessionId = selectedAgent
-    ? selectedAgent.workflow_agent_session_id ?? selectedAgent.session_agent_id
+    ? (selectedAgent.workflow_agent_session_id ??
+      selectedAgent.session_agent_id)
     : null;
   const selectedStepInputRequest = useMemo(() => {
     if (!selectedStep || selectedStep.status !== 'waiting_input') {
@@ -1354,15 +1369,20 @@ export function WorkflowWindow({
     let entries = transcript;
     if (selectedWorkflowAgentSessionId) {
       entries = entries.filter(
-        (entry) => entry.workflow_agent_session_id === selectedWorkflowAgentSessionId
+        (entry) =>
+          entry.workflow_agent_session_id === selectedWorkflowAgentSessionId
       );
     }
-    const liveThinkingEntries = liveThinkingTranscriptEntries.filter((entry) => {
-      if (!selectedWorkflowAgentSessionId) {
-        return true;
+    const liveThinkingEntries = liveThinkingTranscriptEntries.filter(
+      (entry) => {
+        if (!selectedWorkflowAgentSessionId) {
+          return true;
+        }
+        return (
+          entry.workflow_agent_session_id === selectedWorkflowAgentSessionId
+        );
       }
-      return entry.workflow_agent_session_id === selectedWorkflowAgentSessionId;
-    });
+    );
     const stepContentEntries = buildStepContentTranscriptEntries(
       projection.steps,
       entries,
@@ -1462,7 +1482,10 @@ export function WorkflowWindow({
         entry.step_id === detailStep?.id ||
         entry.step_key === detailStep?.step_key
     );
-    const mergedEntries = mergeAndSortTranscriptEntries(remoteEntries, localEntries);
+    const mergedEntries = mergeAndSortTranscriptEntries(
+      remoteEntries,
+      localEntries
+    );
     const stepContentEntries = detailStep
       ? buildStepContentTranscriptEntries(
           [detailStep],
@@ -1625,6 +1648,8 @@ export function WorkflowWindow({
               agents={agents}
               selectedStepId={selectedStepId}
               onSelectStep={handleSelectStep}
+              onRetryStep={onRetryStep}
+              pendingActionId={pendingActionId}
             />
 
             <div className="mt-4 flex items-center justify-between gap-3 rounded-[22px] border border-white/70 bg-white/80 px-4 py-3 text-xs text-[#475569] shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] dark:border-[#243041] dark:bg-[rgba(15,23,42,0.78)] dark:text-[#CBD5E1]">
@@ -1641,13 +1666,13 @@ export function WorkflowWindow({
                     {projection.completed_step_count}/
                     {projection.total_step_count} steps completed
                   </span>
-                  {projection.result_summary && (
-                    <span className="rounded-full bg-[#DCFCE7] px-2.5 py-1 font-semibold text-[#166534] dark:bg-[rgba(22,163,74,0.18)] dark:text-[#BBF7D0]">
+                  {hasWorkflowCompleted && projection.result_summary && (
+                    <span className="rounded-[10px] border border-[#16A34A] px-2.5 py-1 font-semibold text-[#166534] dark:border-[#22C55E] dark:text-[#BBF7D0]">
                       {projection.result_summary}
                     </span>
                   )}
-                  {projection.error_message && (
-                    <span className="rounded-full bg-[#FEE2E2] px-2.5 py-1 font-semibold text-[#991B1B] dark:bg-[rgba(220,38,38,0.18)] dark:text-[#FECACA]">
+                  {hasWorkflowFailed && projection.error_message && (
+                    <span className="rounded-[10px] border border-[#DC2626] px-2.5 py-1 font-semibold text-[#991B1B] dark:border-[#F87171] dark:text-[#FECACA]">
                       {projection.error_message}
                     </span>
                   )}
@@ -1886,6 +1911,45 @@ export function WorkflowWindow({
                     >
                       {detailStep.status}
                     </span>
+                    {detailStep.status === 'running' &&
+                      (onInterruptStep || onStopStep) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (onInterruptStep) {
+                              onInterruptStep(detailStep.id);
+                              return;
+                            }
+                            onStopStep?.(detailStep.id);
+                          }}
+                          className="inline-flex items-center gap-1 rounded-full bg-[#991B1B] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#7F1D1D]"
+                        >
+                          <StopIcon className="size-3.5" weight="bold" />
+                          Terminate
+                        </button>
+                      )}
+                    {(detailStep.status === 'failed' ||
+                      detailStep.status === 'interrupted') &&
+                      onRetryStep && (
+                        <button
+                          type="button"
+                          onClick={() => onRetryStep(detailStep.id)}
+                          disabled={pendingActionId === detailStep.id}
+                          className="inline-flex items-center gap-1 rounded-full bg-[#DC2626] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#B91C1C] disabled:cursor-not-allowed disabled:bg-[#FCA5A5] disabled:text-white/90"
+                        >
+                          <ArrowClockwiseIcon
+                            className={cn(
+                              'size-3.5',
+                              pendingActionId === detailStep.id &&
+                                'animate-spin'
+                            )}
+                            weight="bold"
+                          />
+                          {t('workflow_retry', {
+                            defaultValue: '重试',
+                          })}
+                        </button>
+                      )}
                   </div>
                   <div className="mt-2 text-xs text-[#64748B] dark:text-[#94A3B8]">
                     {detailStep.step_type}
@@ -1895,23 +1959,6 @@ export function WorkflowWindow({
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  {detailStep.status === 'running' &&
-                    (onInterruptStep || onStopStep) && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (onInterruptStep) {
-                            onInterruptStep(detailStep.id);
-                            return;
-                          }
-                          onStopStep?.(detailStep.id);
-                        }}
-                        className="inline-flex items-center gap-1 rounded-full bg-[#991B1B] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#7F1D1D]"
-                      >
-                        <StopIcon className="size-3.5" weight="bold" />
-                        Terminate
-                      </button>
-                    )}
                   <button
                     type="button"
                     onClick={() => setDetailStepId(null)}

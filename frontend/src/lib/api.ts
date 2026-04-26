@@ -185,6 +185,11 @@ export interface ResumeExecutionResponse {
   status: string;
 }
 
+export interface RetryWorkflowPlanGenerationResponse {
+  status: string;
+  message_id: string;
+}
+
 export class ApiError<E = unknown> extends Error {
   public status?: number;
   public error_data?: E;
@@ -920,6 +925,17 @@ export const chatApi = {
     return handleApiResponse<ResumeExecutionResponse>(response);
   },
 
+  retryWorkflowPlanGeneration: async (
+    sessionId: string,
+    messageId: string
+  ): Promise<RetryWorkflowPlanGenerationResponse> => {
+    const response = await makeRequest(
+      `/api/chat/sessions/${sessionId}/workflow/plan-generations/${messageId}/retry`,
+      { method: 'POST' }
+    );
+    return handleApiResponse<RetryWorkflowPlanGenerationResponse>(response);
+  },
+
   getWorkflowStepTranscripts: async (
     sessionId: string,
     stepId: string,
@@ -1107,7 +1123,9 @@ export const chatApi = {
   },
 
   getWorkflowCard: async (messageId: string): Promise<WorkflowCardData> => {
-    const response = await makeRequest(`/api/chat/messages/${messageId}/workflow-card`);
+    const response = await makeRequest(
+      `/api/chat/messages/${messageId}/workflow-card`
+    );
     return handleApiResponse<WorkflowCardData>(response);
   },
 

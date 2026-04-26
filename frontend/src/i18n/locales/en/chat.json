@@ -758,5 +758,7 @@
       "diffAction": "Diff",
       "openExplorerSuccess": "Opened in file manager."
     }
-  }
+  },
+  "workflow_plan_generation_unavailable": "Workflow plan generation is unavailable for this session.",
+  "workflow_retry": "Retry"
 }

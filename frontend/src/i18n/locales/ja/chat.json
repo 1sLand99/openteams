@@ -758,5 +758,7 @@
       "diffAction": "差分",
       "openExplorerSuccess": "ファイルマネージャーで開きました。"
     }
-  }
+  },
+  "workflow_plan_generation_unavailable": "このセッションではワークフロープラン生成を利用できません。",
+  "workflow_retry": "再試行"
 }

@@ -1,4 +1,4 @@
-﻿//! Workflow Orchestrator 骨架
+//! Workflow Orchestrator 骨架
 //!
 //! Phase 1a 职责：
 //! - command handler: 接收 bootstrap 命令
@@ -1310,6 +1310,102 @@ impl WorkflowOrchestrator {
         .await
     }
 
+    fn is_step_ready_input(status: &WorkflowStepStatus) -> bool {
+        matches!(
+            status,
+            WorkflowStepStatus::WaitingInput
+                | WorkflowStepStatus::Failed
+                | WorkflowStepStatus::WaitingReview
+        )
+    }
+
+    fn derive_failed_step_follow_up_context(
+        step: &WorkflowStep,
+        transcripts: &[WorkflowTranscript],
+    ) -> FailedStepFollowUpContext {
+        if let Some(entry) = transcripts
+            .iter()
+            .rev()
+            .find(|entry| entry.sender_type != "user" && !entry.content.trim().is_empty())
+        {
+            return FailedStepFollowUpContext {
+                source_transcript_id: Some(entry.id),
+                previous_message_content: entry.content.trim().to_string(),
+            };
+        }
+
+        if let Some(payload) = parse_summary_payload(step.summary_text.as_deref()) {
+            if let Some(content) = payload
+                .content
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return FailedStepFollowUpContext {
+                    source_transcript_id: None,
+                    previous_message_content: content.to_string(),
+                };
+            }
+            let summary = payload.summary.trim();
+            if !summary.is_empty() {
+                return FailedStepFollowUpContext {
+                    source_transcript_id: None,
+                    previous_message_content: summary.to_string(),
+                };
+            }
+        }
+
+        FailedStepFollowUpContext {
+            source_transcript_id: None,
+            previous_message_content: format!(
+                "Step \"{}\" failed without a persisted agent reply. Continue from the latest user guidance and recover the same task.",
+                step.title
+            ),
+        }
+    }
+
+    async fn prepare_failed_step_input_follow_up(
+        pool: &SqlitePool,
+        chat_runner: &ChatRunner,
+        step: &WorkflowStep,
+        input_text: &str,
+    ) -> Result<
+        (
+            WorkflowExecution,
+            WorkflowStep,
+            WorkflowTranscript,
+            FailedStepFollowUpContext,
+        ),
+        OrchestratorError,
+    > {
+        let transcripts = WorkflowTranscript::find_by_step(pool, step.id).await?;
+        let follow_up_context = Self::derive_failed_step_follow_up_context(step, &transcripts);
+        let (execution, ready_step) = Self::prepare_step_retry(pool, chat_runner, step.id).await?;
+        let workflow_sessions = WorkflowAgentSession::find_by_execution(pool, execution.id).await?;
+        let workflow_session =
+            resolve_step_workflow_session(&execution, &workflow_sessions, &ready_step)?;
+        let transcript_meta = serde_json::json!({
+            "source_step_status": "failed",
+            "source_transcript_id": follow_up_context.source_transcript_id,
+            "action": "submitted",
+            "restart_mode": "follow_up",
+        })
+        .to_string();
+        let input_transcript = Self::write_transcript(
+            pool,
+            execution.id,
+            Some(ready_step.round_id),
+            Some(workflow_session.id),
+            Some(ready_step.id),
+            "user",
+            "message",
+            input_text,
+            Some(&transcript_meta),
+        )
+        .await?;
+        Ok((execution, ready_step, input_transcript, follow_up_context))
+    }
+
     pub async fn submit_step_input(
         db: &DBService,
         chat_runner: &ChatRunner,
@@ -1333,42 +1429,71 @@ impl WorkflowOrchestrator {
             ));
         }
 
-        if step.status == WorkflowStepStatus::WaitingInput {
-            let transcript = WorkflowTranscript::find_by_step(pool, step.id)
-                .await?
-                .into_iter()
-                .rev()
-                .find(|entry| {
-                    entry.entry_type == "input_request"
-                        && entry.meta_json.as_deref().map_or(true, |meta_json| {
-                            serde_json::from_str::<serde_json::Value>(meta_json)
-                                .ok()
-                                .and_then(|value| {
-                                    value
-                                        .get("resolved")
-                                        .and_then(|resolved| resolved.as_bool())
+        if Self::is_step_ready_input(&step.status) {
+            let (ready_step, input_transcript, previous_message_content, retry_execution, mode) =
+                if step.status == WorkflowStepStatus::Failed {
+                    let (prepared_execution, prepared_step, recorded_input, follow_up_context) =
+                        Self::prepare_failed_step_input_follow_up(
+                            pool,
+                            chat_runner,
+                            &step,
+                            input_text,
+                        )
+                        .await?;
+                    (
+                        prepared_step,
+                        recorded_input,
+                        follow_up_context.previous_message_content,
+                        prepared_execution,
+                        StepFollowUpMode::Failed,
+                    )
+                } else {
+                    let transcript = WorkflowTranscript::find_by_step(pool, step.id)
+                        .await?
+                        .into_iter()
+                        .rev()
+                        .find(|entry| {
+                            entry.entry_type == "input_request"
+                                && entry.meta_json.as_deref().map_or(true, |meta_json| {
+                                    serde_json::from_str::<serde_json::Value>(meta_json)
+                                        .ok()
+                                        .and_then(|value| {
+                                            value
+                                                .get("resolved")
+                                                .and_then(|resolved| resolved.as_bool())
+                                        })
+                                        != Some(true)
                                 })
-                                != Some(true)
                         })
-                })
-                .ok_or_else(|| {
-                    OrchestratorError::NotFound(format!(
-                        "step {} 缺少待处理的 input_request transcript",
-                        step.id
-                    ))
-                })?;
-            let resolved = Self::resolve_transcript_action(
-                pool,
-                chat_runner,
-                transcript.id,
-                "submitted",
-                Some(input_text),
-            )
-            .await?;
-
-            let ready_step = WorkflowStep::find_by_id(pool, step.id)
-                .await?
-                .ok_or_else(|| OrchestratorError::NotFound(format!("step {} 未找到", step.id)))?;
+                        .ok_or_else(|| {
+                            OrchestratorError::NotFound(format!(
+                                "step {} 缺少待处理的 input_request transcript",
+                                step.id
+                            ))
+                        })?;
+                    let previous_message_content = transcript.content.clone();
+                    let resolved = Self::resolve_transcript_action(
+                        pool,
+                        chat_runner,
+                        transcript.id,
+                        "submitted",
+                        Some(input_text),
+                    )
+                    .await?;
+                    let ready_step =
+                        WorkflowStep::find_by_id(pool, step.id)
+                            .await?
+                            .ok_or_else(|| {
+                                OrchestratorError::NotFound(format!("step {} 未找到", step.id))
+                            })?;
+                    (
+                        ready_step,
+                        resolved.transcript,
+                        previous_message_content,
+                        resolved.execution,
+                        StepFollowUpMode::Paused,
+                    )
+                };
             if ready_step.status != WorkflowStepStatus::Ready {
                 return Err(OrchestratorError::IllegalTransition(format!(
                     "step {} is {:?}, expected ready after input submission",
@@ -1377,7 +1502,7 @@ impl WorkflowOrchestrator {
             }
 
             let active_execution =
-                Self::activate_execution_for_step_retry(pool, chat_runner, &resolved.execution)
+                Self::activate_execution_for_step_retry(pool, chat_runner, &retry_execution)
                     .await?;
             let session = ChatSession::find_by_id(pool, active_execution.session_id)
                 .await?
@@ -1425,8 +1550,12 @@ impl WorkflowOrchestrator {
                 "step_resumed",
             )
             .await?;
-            let follow_up_prompt =
-                Self::build_step_follow_up_prompt(&running_step, &transcript.content, input_text);
+            let follow_up_prompt = Self::build_step_follow_up_prompt(
+                &running_step,
+                &previous_message_content,
+                input_text,
+                mode,
+            );
 
             let protocol_message = match run_workflow_step_agent_follow_up(
                 db,
@@ -1494,7 +1623,7 @@ impl WorkflowOrchestrator {
                             )
                             .await?;
                             return Ok(ResolvedTranscriptAction {
-                                transcript: resolved.transcript,
+                                transcript: input_transcript.clone(),
                                 execution,
                                 should_wake_scheduler: false,
                             });
@@ -1524,7 +1653,7 @@ impl WorkflowOrchestrator {
                     )
                     .await?;
                     return Ok(ResolvedTranscriptAction {
-                        transcript: resolved.transcript,
+                        transcript: input_transcript.clone(),
                         execution,
                         should_wake_scheduler: false,
                     });
@@ -1576,7 +1705,7 @@ impl WorkflowOrchestrator {
                     )
                     .await?;
                     return Ok(ResolvedTranscriptAction {
-                        transcript: resolved.transcript,
+                        transcript: input_transcript.clone(),
                         execution,
                         should_wake_scheduler: false,
                     });
@@ -1627,7 +1756,7 @@ impl WorkflowOrchestrator {
             };
 
             return Ok(ResolvedTranscriptAction {
-                transcript: resolved.transcript,
+                transcript: input_transcript,
                 execution,
                 should_wake_scheduler: false,
             });
@@ -2304,6 +2433,7 @@ impl WorkflowOrchestrator {
         source_message_id: Option<Uuid>,
         lead_session_agent: &ChatSessionAgent,
         plan_json: &str,
+        preferred_card_message_id: Option<Uuid>,
     ) -> Result<(WorkflowPlan, WorkflowPlanRevision, ChatMessage), OrchestratorError> {
         let parsed_plan: WorkflowPlanJson = serde_json::from_str(plan_json)?;
         let plan_hash = WorkflowCompiler::compute_hash(&parsed_plan);
@@ -2426,7 +2556,11 @@ impl WorkflowOrchestrator {
         });
 
         // Single-card contract: reuse existing workflow card if present
-        let existing_card_id = Self::find_session_workflow_card_message_id(pool, session.id).await;
+        let existing_card_id = if let Some(message_id) = preferred_card_message_id {
+            Some(message_id)
+        } else {
+            Self::find_session_workflow_card_message_id(pool, session.id).await
+        };
         let message = if let Some(existing_id) = existing_card_id {
             let updated = ChatMessage::update_content_and_meta(
                 pool,
@@ -2717,6 +2851,18 @@ enum TranscriptResolution {
     Fail(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepFollowUpMode {
+    Paused,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct FailedStepFollowUpContext {
+    source_transcript_id: Option<Uuid>,
+    previous_message_content: String,
+}
+
 /// Outcome of a single step execution within the scheduler.
 /// Step-level state transitions are handled internally; execution-level
 /// transitions are deferred to the caller.
@@ -2734,9 +2880,28 @@ impl WorkflowOrchestrator {
         step: &WorkflowStep,
         previous_message_content: &str,
         input_text: &str,
+        mode: StepFollowUpMode,
     ) -> String {
+        let opening = match mode {
+            StepFollowUpMode::Paused => format!(
+                "The user has replied while workflow step \"{}\" is paused.",
+                step.title
+            ),
+            StepFollowUpMode::Failed => format!(
+                "The previous attempt for workflow step \"{}\" failed. The user has now provided follow-up input to restart the same agent session and continue execution.",
+                step.title
+            ),
+        };
+        let resume_rule = match mode {
+            StepFollowUpMode::Paused => {
+                "Do not repeat the whole task from scratch. Resume from the paused point."
+            }
+            StepFollowUpMode::Failed => {
+                "Do not restart the whole task from scratch unless required. Resume from the failed point and fix the issue that caused the failure."
+            }
+        };
         format!(
-            r#"The user has replied while workflow step "{step_title}" is paused.
+            r#"{opening}
 
 Previous agent message:
 {previous_message_content}
@@ -2745,7 +2910,7 @@ Latest user input:
 {input_text}
 
 Continue from the same session context and reply with exactly one workflow protocol JSON object.
-Do not repeat the whole task from scratch. Resume from the paused point.
+{resume_rule}
 
 Workflow step context:
 - step_key: {step_key}
@@ -2780,9 +2945,11 @@ Rules:
 - outputs must contain only relative workspace paths.
 - If the user input fully resolves the pause, continue and return final_result or the next appropriate protocol message.
 "#,
+            opening = opening,
             step_title = step.title,
             previous_message_content = previous_message_content.trim(),
             input_text = input_text,
+            resume_rule = resume_rule,
             step_key = step.step_key,
             execution_id = step.execution_id,
             step_type = format!("{:?}", step.step_type).to_lowercase(),
@@ -3264,5 +3431,107 @@ Rules:
         WorkflowTranscript::update_meta_json(pool, transcript_id, &meta.to_string())
             .await
             .map_err(OrchestratorError::Database)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+
+    fn sample_step(status: WorkflowStepStatus, summary_text: Option<String>) -> WorkflowStep {
+        let now = Utc::now();
+        WorkflowStep {
+            id: Uuid::new_v4(),
+            execution_id: Uuid::new_v4(),
+            round_id: Uuid::new_v4(),
+            compiled_revision_id: None,
+            step_key: "step-1".to_string(),
+            step_type: WorkflowStepType::Task,
+            title: "Implement fix".to_string(),
+            instructions: "Apply the requested change".to_string(),
+            assigned_workflow_agent_session_id: None,
+            status,
+            retry_count: 0,
+            max_retry: 1,
+            round_index: 1,
+            display_order: 0,
+            latest_run_id: None,
+            summary_text,
+            content: None,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn derive_failed_step_follow_up_context_prefers_latest_non_user_transcript() {
+        let step = sample_step(
+            WorkflowStepStatus::Failed,
+            Some(
+                serde_json::json!({
+                    "summary": "summary fallback",
+                    "content": "content fallback"
+                })
+                .to_string(),
+            ),
+        );
+        let source_id = Uuid::new_v4();
+        let transcripts = vec![
+            WorkflowTranscript {
+                id: Uuid::new_v4(),
+                execution_id: step.execution_id,
+                round_id: Some(step.round_id),
+                workflow_agent_session_id: Some(Uuid::new_v4()),
+                step_id: Some(step.id),
+                sender_type: "user".to_string(),
+                entry_type: "message".to_string(),
+                content: "first user reply".to_string(),
+                meta_json: None,
+                created_at: Utc::now().to_rfc3339(),
+            },
+            WorkflowTranscript {
+                id: source_id,
+                execution_id: step.execution_id,
+                round_id: Some(step.round_id),
+                workflow_agent_session_id: Some(Uuid::new_v4()),
+                step_id: Some(step.id),
+                sender_type: "system".to_string(),
+                entry_type: "message".to_string(),
+                content: "Step failed because dependency data was missing.".to_string(),
+                meta_json: None,
+                created_at: Utc::now().to_rfc3339(),
+            },
+        ];
+
+        let context =
+            WorkflowOrchestrator::derive_failed_step_follow_up_context(&step, &transcripts);
+
+        assert_eq!(context.source_transcript_id, Some(source_id));
+        assert_eq!(
+            context.previous_message_content,
+            "Step failed because dependency data was missing."
+        );
+    }
+
+    #[test]
+    fn build_step_follow_up_prompt_mentions_failed_restart() {
+        let step = sample_step(WorkflowStepStatus::Failed, None);
+
+        let prompt = WorkflowOrchestrator::build_step_follow_up_prompt(
+            &step,
+            "Previous attempt ended with an error.",
+            "I have provided the missing dependency data.",
+            StepFollowUpMode::Failed,
+        );
+
+        assert!(prompt.contains("previous attempt"));
+        assert!(prompt.contains("restart the same agent session"));
+        assert!(prompt.contains("Previous attempt ended with an error."));
+        assert!(prompt.contains("I have provided the missing dependency data."));
+        assert!(prompt.contains("Resume from the failed point"));
     }
 }

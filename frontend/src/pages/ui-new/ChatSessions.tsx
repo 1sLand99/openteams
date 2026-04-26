@@ -1022,6 +1022,20 @@ export function ChatSessions() {
     },
   });
 
+  const retryWorkflowPlanGenerationMutation = useMutation({
+    mutationFn: async (messageId: string) => {
+      if (!activeSessionId) throw new Error('No active session');
+      return chatApi.retryWorkflowPlanGeneration(activeSessionId, messageId);
+    },
+    onSuccess: () => {
+      if (!activeSessionId) return;
+      queryClient.invalidateQueries({
+        queryKey: ['chatMessages', activeSessionId],
+      });
+      setWorkflowCardRefreshNonce((prev) => prev + 1);
+    },
+  });
+
   const retryWorkflowStepMutation = useMutation({
     mutationFn: async (stepId: string) => {
       if (!activeSessionId) throw new Error('No active session');
@@ -4947,6 +4961,28 @@ export function ChatSessions() {
                           onPauseAll={handlePauseAll}
                           onResumeWorkflow={(executionId) =>
                             resumeWorkflowMutation.mutate(executionId)
+                          }
+                          onRetryWorkflowStep={(stepId) =>
+                            retryWorkflowStepMutation.mutate(stepId)
+                          }
+                          onRetryWorkflowPlanGeneration={(messageId) =>
+                            retryWorkflowPlanGenerationMutation.mutate(
+                              messageId
+                            )
+                          }
+                          workflowPlanGenerationRetryPending={
+                            retryWorkflowPlanGenerationMutation.isPending &&
+                            retryWorkflowPlanGenerationMutation.variables ===
+                              message.id
+                          }
+                          workflowPlanGenerationRetryError={
+                            retryWorkflowPlanGenerationMutation.isError &&
+                            retryWorkflowPlanGenerationMutation.variables ===
+                              message.id
+                              ? (retryWorkflowPlanGenerationMutation.error
+                                  ?.message ??
+                                'Failed to retry plan generation.')
+                              : null
                           }
                           workflowCardProjection={workflowCardProjection}
                           workflowFinalReviewAction={workflowFinalReviewAction}

@@ -881,7 +881,23 @@ impl ChatRunner {
             "6. `conclusion`: current-turn summary only (completed work, blockers, next steps). Max 3 sentences. Written to `",
         );
         markdown.push_str(&work_records_rel.to_string_lossy());
-        markdown.push_str("`.\n\n");
+        markdown.push_str("`.\n");
+        markdown.push_str("7. `workflow_generate`: \n");
+        markdown.push_str(
+            "- Emit `workflow_generate` only when the user explicitly asks to start generating an execution plan.\n",
+        );
+        markdown.push_str(
+            "- Treat explicit trigger phrases such as `生成计划`, `开始执行`, `开始落实`, `进入执行`, `generate plan`, or `start execution`, and close equivalents, as valid start-plan requests.\n",
+        );
+        markdown.push_str(
+            "- Review the chat history first and confirm that a final implementation plan has already been discussed and agreed on.\n",
+        );
+        markdown.push_str(
+            "- If no final plan is confirmed, emit `workflow_generate` with `plan_check: false` and also send a `send` message to the user explaining the current planning status.\n",
+        );
+        markdown.push_str(
+            "- If a final plan is confirmed, emit `workflow_generate` with `plan_check: true`; its `content` must be a concise plan-generation brief that includes the essential plan summary, relevant plan files, participating members, and other execution-defining context.\n\n",
+        );
 
         markdown.push_str("### Schema\n");
         markdown.push_str("```json\n");
@@ -1748,6 +1764,7 @@ impl ChatRunner {
             "record" => Some("record"),
             "artifact" | "artiface" | "artefact" => Some("artifact"),
             "conclusion" => Some("conclusion"),
+            "workflow_generate" => Some("workflow_generate"),
             _ => None,
         }
     }
@@ -1802,6 +1819,7 @@ impl ChatRunner {
                         message_type: AgentProtocolMessageType::Send,
                         to: Some(target),
                         intent,
+                        plan_check: None,
                         content: message.content.trim().to_string(),
                     });
                 }
@@ -1820,17 +1838,29 @@ impl ChatRunner {
                         message_type: message.message_type,
                         to: None,
                         intent: None,
+                        plan_check: None,
                         content,
                     });
                 }
                 AgentProtocolMessageType::WorkflowGenerate => {
-                    // workflow_generate is a control signal; content may be empty.
-                    // Does not require `to` or `intent`.
+                    let plan_check = message.plan_check.unwrap_or(false);
+                    let content = message.content.trim().to_string();
+                    if plan_check && content.is_empty() {
+                        return Err(AgentProtocolError {
+                            code: ChatProtocolNoticeCode::EmptyMessage,
+                            target: None,
+                            detail: Some(
+                                "`workflow_generate.content` is required when `plan_check` is true."
+                                    .to_string(),
+                            ),
+                        });
+                    }
                     validated.push(AgentProtocolMessage {
                         message_type: AgentProtocolMessageType::WorkflowGenerate,
                         to: None,
                         intent: None,
-                        content: message.content.trim().to_string(),
+                        plan_check: Some(plan_check),
+                        content,
                     });
                 }
             }

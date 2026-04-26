@@ -429,9 +429,10 @@ pub fn resolve_workflow_goal(
 }
 
 pub fn build_plan_generation_prompt(
-    user_goal: &str,
+    plan_goal: &str,
     lead_agent_id: &str,
     available_agents: &[WorkflowCardAgent],
+    previous_failure_reason: Option<&str>,
 ) -> String {
     let available_agents_json =
         serde_json::to_string_pretty(available_agents).unwrap_or_else(|_| "[]".to_string());
@@ -493,9 +494,9 @@ pub fn build_plan_generation_prompt(
   }
 }"#;
 
-    let prompt = format!(
-        r#"你是当前 workflow mode 的 lead agent。你需要先读取聊天记录，明确任务计划（如果没找见，让用户补充）。
-        你的任务是把当前拟定的方案计划解成一个可执行的 workflow plan。
+    let base_prompt = format!(
+        r#"你现在需要把当前拟定的方案计划解成一个可执行的 workflow plan。
+方案摘要：{plan_goal}
 
 你必须输出符合系统 schema 的 workflow JSON，用于后续编译和执行。计划真相源是 React Flow 兼容 JSON，而不是自然语言、YAML 或 Markdown。
 
@@ -514,9 +515,6 @@ pub fn build_plan_generation_prompt(
 
 你的输出会被系统直接校验、编译并启动执行；任何 schema 错误、循环依赖、非法 agent 引用、非法 agents.available 或缺失 result 节点都会导致本次“立即执行”失败。
 
-当前用户目标：
-{user_goal}
-
 当前可用团队成员：
 {available_agents_json}
 
@@ -526,7 +524,21 @@ lead agent 标识：
 请直接返回 workflow JSON。"#
     );
 
-    let mut prompt = prompt;
+    let mut prompt = String::new();
+    if let Some(reason) = previous_failure_reason
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+    {
+        prompt.push_str(
+            "The previous generated workflow plan contained errors. Regenerate the workflow plan.\n",
+        );
+        prompt.push_str("Error details:\n");
+        prompt.push_str(reason);
+        prompt.push_str(
+            "\n\nFix the error above in this regeneration request. Do not repeat the same failure.\n\n",
+        );
+    }
+    prompt.push_str(&base_prompt);
     prompt.push_str("\n\nWorkflowPlanJson schema reference:\n");
     prompt.push_str(plan_schema_definition);
     prompt.push_str("\n\nAdditional constraints:\n");
@@ -1588,6 +1600,23 @@ fn extract_latest_assistant_from_history(history: &[LogMsg]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_plan_generation_prompt_includes_previous_failure_reason() {
+        let prompt = build_plan_generation_prompt(
+            "Ship the confirmed implementation plan.",
+            "lead-agent-id",
+            &[],
+            Some("Missing result node in the previous workflow JSON."),
+        );
+
+        assert!(prompt.starts_with(
+            "The previous generated workflow plan contained errors. Regenerate the workflow plan.\nError details:\nMissing result node in the previous workflow JSON."
+        ));
+        assert!(prompt.contains("Missing result node in the previous workflow JSON."));
+        assert!(prompt.contains("Do not repeat the same failure."));
+        assert!(prompt.contains("Ship the confirmed implementation plan."));
+    }
 
     #[test]
     fn parse_step_protocol_output_accepts_approval_request() {

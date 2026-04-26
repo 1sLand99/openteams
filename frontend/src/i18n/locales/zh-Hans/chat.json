@@ -758,5 +758,7 @@
       "diffAction": "差异",
       "openExplorerSuccess": "已在文件管理器中打开。"
     }
-  }
+  },
+  "workflow_plan_generation_unavailable": "当前会话未开启工作流计划生成。",
+  "workflow_retry": "重试"
 }

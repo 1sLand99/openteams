@@ -1426,6 +1426,7 @@ impl ChatRunner {
                             Ok(ProtocolProcessResult::Success(count)) => count,
                             Ok(ProtocolProcessResult::WorkflowGenerateDetected {
                                 send_count,
+                                plan_check,
                                 workflow_content,
                             }) => {
                                 tracing::info!(
@@ -1433,48 +1434,76 @@ impl ChatRunner {
                                     run_id = %run_id,
                                     agent_id = %agent_id,
                                     agent_name = %agent_name,
+                                    plan_check,
                                     workflow_content_len = workflow_content.len(),
                                     send_count,
                                     "[chat_runner] workflow_generate detected; triggering plan generation pipeline"
                                 );
 
-                                // Emit a WebSocket event so the frontend knows a plan generation is starting
-                                runner.emit(
-                                    session_id,
-                                    ChatStreamEvent::WorkflowGenerateDetected {
+                                if !plan_check {
+                                    let notice_content = "workflow_plan_generation_unavailable";
+                                    match chat::create_message(
+                                        &db.pool,
                                         session_id,
-                                        session_agent_id,
-                                        run_id,
-                                    },
-                                );
-
-                                // Spawn the plan generation pipeline asynchronously
-                                let plan_runner = runner.clone();
-                                let plan_session_id = session_id;
-                                let plan_session_agent_id = session_agent_id;
-                                let plan_agent_id = agent_id;
-                                let plan_agent_name = agent_name.clone();
-                                let plan_source_message_id = source_message_id;
-                                tokio::spawn(async move {
-                                    if let Err(err) = plan_runner
-                                        .trigger_plan_generation(
-                                            plan_session_id,
-                                            plan_session_agent_id,
-                                            plan_agent_id,
-                                            &plan_agent_name,
-                                            plan_source_message_id,
-                                            &workflow_content,
-                                        )
-                                        .await
+                                        ChatSenderType::System,
+                                        None,
+                                        notice_content.to_string(),
+                                        Some(serde_json::json!({
+                                            "type": "workflow_plan_generation_unavailable",
+                                            "i18n": {
+                                                "key": "chat.workflow_plan_generation_unavailable",
+                                                "params": {}
+                                            }
+                                        })),
+                                    )
+                                    .await
                                     {
-                                        tracing::error!(
-                                            session_id = %plan_session_id,
-                                            agent_name = %plan_agent_name,
+                                        Ok(message) => runner.emit_message_new(session_id, message),
+                                        Err(err) => tracing::warn!(
+                                            session_id = %session_id,
                                             error = %err,
-                                            "[chat_runner] plan generation pipeline failed"
-                                        );
+                                            "[chat_runner] failed to persist workflow plan unavailable notice"
+                                        ),
                                     }
-                                });
+                                } else {
+                                    runner.emit(
+                                        session_id,
+                                        ChatStreamEvent::WorkflowGenerateDetected {
+                                            session_id,
+                                            session_agent_id,
+                                            run_id,
+                                        },
+                                    );
+
+                                    let plan_runner = runner.clone();
+                                    let plan_session_id = session_id;
+                                    let plan_session_agent_id = session_agent_id;
+                                    let plan_agent_id = agent_id;
+                                    let plan_agent_name = agent_name.clone();
+                                    let plan_source_message_id = source_message_id;
+                                    tokio::spawn(async move {
+                                        if let Err(err) = plan_runner
+                                            .trigger_plan_generation(
+                                                plan_session_id,
+                                                plan_session_agent_id,
+                                                plan_agent_id,
+                                                &plan_agent_name,
+                                                plan_source_message_id,
+                                                &workflow_content,
+                                                None,
+                                                None,
+                                            )
+                                            .await
+                                        {
+                                            tracing::error!(
+                                                session_id = %plan_session_id,
+                                                agent_name = %plan_agent_name,
+                                                error = %err,
+                                                "[chat_runner] plan generation pipeline failed"
+                                            );
+                                        }
+                                    });
+                                }
 
                                 send_count
                             }

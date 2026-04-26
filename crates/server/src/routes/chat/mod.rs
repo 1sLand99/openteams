@@ -57,6 +57,10 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
             axum::routing::post(workflow::execute_plan),
         )
         .route(
+            "/workflow/plan-generations/{message_id}/retry",
+            axum::routing::post(workflow::retry_plan_generation),
+        )
+        .route(
             "/workflow/executions/{execution_id}/resume",
             axum::routing::post(workflow::resume_execution),
         )

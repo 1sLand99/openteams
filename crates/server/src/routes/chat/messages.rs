@@ -394,6 +394,16 @@ pub async fn get_workflow_card(
     let projection = match card_type {
         "workflow_execution" => build_execution_workflow_card_projection(pool, &message).await?,
         "workflow_plan" => build_plan_workflow_card_projection(pool, &message).await?,
+        "workflow_plan_generation" => {
+            serde_json::from_value(message.meta.0.get("workflow_card").cloned().ok_or_else(
+                || {
+                    ApiError::BadRequest(
+                        "Workflow plan generation metadata is missing.".to_string(),
+                    )
+                },
+            )?)
+            .map_err(|err| ApiError::BadRequest(err.to_string()))?
+        }
         _ => {
             return Err(ApiError::BadRequest(
                 "Message is not a workflow card.".to_string(),

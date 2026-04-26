@@ -758,5 +758,7 @@
       "diffAction": "Diff",
       "openExplorerSuccess": "파일 관리자에서 열었습니다."
     }
-  }
+  },
+  "workflow_plan_generation_unavailable": "이 세션에서는 워크플로 계획 생성을 사용할 수 없습니다.",
+  "workflow_retry": "다시 시도"
 }

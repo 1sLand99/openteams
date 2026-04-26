@@ -711,19 +711,80 @@ async fn apply_workflow_agent_session_state_migration_shim(
         .execute(&mut *conn)
         .await?;
 
-        sqlx::query(
-            r#"
-            DELETE FROM chat_workflow_transcripts
-            WHERE workflow_agent_session_id IS NOT NULL
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM chat_workflow_agent_sessions s
-                  WHERE s.id = chat_workflow_transcripts.workflow_agent_session_id
-              )
-            "#,
+        let transcripts_table_exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'chat_workflow_transcripts'",
         )
-        .execute(&mut *conn)
+        .fetch_one(&mut *conn)
         .await?;
+        if transcripts_table_exists > 0 {
+            sqlx::query(
+                "ALTER TABLE chat_workflow_transcripts RENAME TO chat_workflow_transcripts_old",
+            )
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                r#"
+                CREATE TABLE chat_workflow_transcripts (
+                    id                        BLOB NOT NULL PRIMARY KEY,
+                    execution_id              BLOB NOT NULL REFERENCES chat_workflow_executions(id),
+                    round_id                  BLOB REFERENCES chat_workflow_rounds(id),
+                    workflow_agent_session_id BLOB REFERENCES chat_workflow_agent_sessions(id),
+                    step_id                   BLOB REFERENCES chat_workflow_steps(id),
+                    sender_type               TEXT NOT NULL DEFAULT 'system',
+                    entry_type                TEXT NOT NULL DEFAULT 'message',
+                    content                   TEXT NOT NULL DEFAULT '',
+                    meta_json                 TEXT,
+                    created_at                TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                "#,
+            )
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO chat_workflow_transcripts (
+                    id, execution_id, round_id, workflow_agent_session_id, step_id, sender_type,
+                    entry_type, content, meta_json, created_at
+                )
+                SELECT
+                    old.id, old.execution_id, old.round_id, old.workflow_agent_session_id,
+                    old.step_id, old.sender_type, old.entry_type, old.content, old.meta_json,
+                    old.created_at
+                FROM chat_workflow_transcripts_old old
+                WHERE old.workflow_agent_session_id IS NULL
+                   OR EXISTS (
+                       SELECT 1
+                       FROM chat_workflow_agent_sessions s
+                       WHERE s.id = old.workflow_agent_session_id
+                   )
+                "#,
+            )
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query("DROP TABLE chat_workflow_transcripts_old")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_workflow_transcripts_execution_id ON chat_workflow_transcripts(execution_id)",
+            )
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_workflow_transcripts_step_id ON chat_workflow_transcripts(step_id)",
+            )
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_workflow_transcripts_entry_type ON chat_workflow_transcripts(entry_type)",
+            )
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                "CREATE INDEX IF NOT EXISTS idx_workflow_transcripts_created_at ON chat_workflow_transcripts(created_at)",
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
 
         sqlx::query("DROP TABLE chat_workflow_agent_sessions_old")
             .execute(&mut *conn)
@@ -1005,5 +1066,212 @@ mod tests {
             !column_names.iter().any(|name| name == "bubble_font_size"),
             "chat_sessions should not keep the legacy bubble_font_size column after migrations"
         );
+    }
+
+    #[tokio::test]
+    async fn migrations_repair_workflow_transcript_agent_session_foreign_key() {
+        let repair_migration_version = 20260426014500_i64;
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("create sqlite memory pool");
+        run_migrations(&pool).await.expect("run migrations");
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("disable foreign keys");
+        sqlx::query("PRAGMA legacy_alter_table = ON")
+            .execute(&pool)
+            .await
+            .expect("enable legacy_alter_table");
+        sqlx::query(
+            "ALTER TABLE chat_workflow_agent_sessions RENAME TO chat_workflow_agent_sessions_old",
+        )
+        .execute(&pool)
+        .await
+        .expect("rename workflow agent sessions to old");
+        sqlx::query(
+            r#"
+            CREATE TABLE chat_workflow_agent_sessions (
+                id                      BLOB    NOT NULL PRIMARY KEY,
+                workflow_execution_id   BLOB    NOT NULL REFERENCES chat_workflow_executions(id),
+                session_agent_id        BLOB    NOT NULL,
+                role                    TEXT    NOT NULL DEFAULT 'worker'
+                                                CHECK (role IN ('lead', 'worker', 'reviewer')),
+                agent_session_id        TEXT,
+                agent_message_id        TEXT,
+                state                   TEXT    NOT NULL DEFAULT 'idle'
+                                                CHECK (state IN (
+                                                    'idle', 'running', 'interrupt_requested',
+                                                    'interrupted', 'paused', 'completed',
+                                                    'failed', 'expired'
+                                                )),
+                created_at              TEXT    NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at              TEXT    NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("recreate workflow agent sessions");
+        sqlx::query(
+            r#"
+            INSERT INTO chat_workflow_agent_sessions (
+                id, workflow_execution_id, session_agent_id, role, agent_session_id,
+                agent_message_id, state, created_at, updated_at
+            )
+            SELECT
+                id, workflow_execution_id, session_agent_id, role, agent_session_id,
+                agent_message_id, state, created_at, updated_at
+            FROM chat_workflow_agent_sessions_old
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("copy workflow agent sessions");
+        sqlx::query("DROP TABLE chat_workflow_agent_sessions_old")
+            .execute(&pool)
+            .await
+            .expect("drop old workflow agent sessions");
+        sqlx::query("PRAGMA legacy_alter_table = OFF")
+            .execute(&pool)
+            .await
+            .expect("disable legacy_alter_table");
+        sqlx::query("PRAGMA foreign_keys = ON")
+            .execute(&pool)
+            .await
+            .expect("re-enable foreign keys");
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = ?")
+            .bind(repair_migration_version)
+            .execute(&pool)
+            .await
+            .expect("delete repair migration record");
+
+        run_migrations(&pool)
+            .await
+            .expect("rerun migrations with repair");
+
+        let foreign_keys = sqlx::query("PRAGMA foreign_key_list(chat_workflow_transcripts)")
+            .fetch_all(&pool)
+            .await
+            .expect("read workflow transcript foreign keys");
+        let workflow_agent_session_fk_table = foreign_keys
+            .iter()
+            .find(|row| row.get::<String, _>("from") == "workflow_agent_session_id")
+            .map(|row| row.get::<String, _>("table"))
+            .expect("workflow_agent_session_id foreign key");
+        assert_eq!(
+            workflow_agent_session_fk_table,
+            "chat_workflow_agent_sessions"
+        );
+
+        let session = ChatSession::create(
+            &pool,
+            &CreateChatSession {
+                title: Some("workflow".to_string()),
+                workspace_path: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create chat session");
+        let agent = ChatAgent::create(
+            &pool,
+            &CreateChatAgent {
+                name: "tester".to_string(),
+                runner_type: "codex".to_string(),
+                system_prompt: Some(String::new()),
+                tools_enabled: Some(serde_json::json!({})),
+                model_name: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create chat agent");
+        let session_agent = ChatSessionAgent::create(
+            &pool,
+            &CreateChatSessionAgent {
+                session_id: session.id,
+                agent_id: agent.id,
+                workspace_path: None,
+                allowed_skill_ids: Vec::new(),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create session agent");
+
+        let plan_id = Uuid::new_v4();
+        let revision_id = Uuid::new_v4();
+        let execution_id = Uuid::new_v4();
+        let round_id = Uuid::new_v4();
+        let step_id = Uuid::new_v4();
+        let workflow_agent_session_id = Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO chat_workflow_plans (id, session_id, title, plan_json, plan_hash, validation_status) VALUES (?1, ?2, '', '{}', '', 'valid')",
+        )
+        .bind(plan_id)
+        .bind(session.id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow plan");
+        sqlx::query(
+            "INSERT INTO chat_workflow_plan_revisions (id, plan_id, revision_no, plan_json, plan_hash, validation_status) VALUES (?1, ?2, 1, '{}', '', 'valid')",
+        )
+        .bind(revision_id)
+        .bind(plan_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow revision");
+        sqlx::query(
+            "INSERT INTO chat_workflow_executions (id, session_id, plan_id, active_revision_id, status, title) VALUES (?1, ?2, ?3, ?4, 'running', '')",
+        )
+        .bind(execution_id)
+        .bind(session.id)
+        .bind(plan_id)
+        .bind(revision_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow execution");
+        sqlx::query(
+            "INSERT INTO chat_workflow_rounds (id, execution_id, round_index, source_revision_id, status) VALUES (?1, ?2, 1, ?3, 'running')",
+        )
+        .bind(round_id)
+        .bind(execution_id)
+        .bind(revision_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow round");
+        sqlx::query(
+            "INSERT INTO chat_workflow_agent_sessions (id, workflow_execution_id, session_agent_id, role, state) VALUES (?1, ?2, ?3, 'worker', 'running')",
+        )
+        .bind(workflow_agent_session_id)
+        .bind(execution_id)
+        .bind(session_agent.id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow agent session");
+        sqlx::query(
+            "INSERT INTO chat_workflow_steps (id, execution_id, round_id, compiled_revision_id, step_key, step_type, title, instructions, status) VALUES (?1, ?2, ?3, ?4, 'step-1', 'task', 'Do work', 'Run the task', 'running')",
+        )
+        .bind(step_id)
+        .bind(execution_id)
+        .bind(round_id)
+        .bind(revision_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow step");
+        sqlx::query(
+            "INSERT INTO chat_workflow_transcripts (id, execution_id, round_id, workflow_agent_session_id, step_id, sender_type, entry_type, content) VALUES (?1, ?2, ?3, ?4, ?5, 'agent', 'thinking', 'hello')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(execution_id)
+        .bind(round_id)
+        .bind(workflow_agent_session_id)
+        .bind(step_id)
+        .execute(&pool)
+        .await
+        .expect("insert workflow transcript");
     }
 }

@@ -69,6 +69,27 @@ const SUPPRESSED_PROTOCOL_ERROR_CODES = new Set([
   'empty_message',
 ]);
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === 'object' && !Array.isArray(value);
+
+const extractMessageI18nMeta = (
+  meta: unknown
+): { key: string; params: Record<string, unknown> } | null => {
+  if (!isRecord(meta) || !isRecord(meta.i18n)) {
+    return null;
+  }
+
+  const key = meta.i18n.key;
+  if (typeof key !== 'string' || key.trim() === '') {
+    return null;
+  }
+
+  return {
+    key,
+    params: isRecord(meta.i18n.params) ? meta.i18n.params : {},
+  };
+};
+
 const isInteractiveTarget = (target: EventTarget | null): boolean => {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -122,7 +143,11 @@ export interface ChatMessageItemProps {
   onExecutePlan?: (planId: string) => void;
   onPauseAll?: (executionId: string) => void;
   onResumeWorkflow?: (executionId: string) => void;
+  onRetryWorkflowStep?: (stepId: string) => void;
   onOpenWorkflowWindow?: (projection: unknown) => void;
+  onRetryWorkflowPlanGeneration?: (messageId: string) => void;
+  workflowPlanGenerationRetryPending?: boolean;
+  workflowPlanGenerationRetryError?: string | null;
   workflowCardProjection?: WorkflowCardProjection | null;
   workflowFinalReviewAction?: WorkflowFinalReviewActionData | null;
   onResolveWorkflowFinalReview?: (
@@ -158,7 +183,11 @@ export function ChatMessageItem({
   onExecutePlan,
   onPauseAll,
   onResumeWorkflow,
+  onRetryWorkflowStep,
   onOpenWorkflowWindow,
+  onRetryWorkflowPlanGeneration,
+  workflowPlanGenerationRetryPending,
+  workflowPlanGenerationRetryError,
   workflowCardProjection: workflowCardProjectionOverride,
   workflowFinalReviewAction,
   onResolveWorkflowFinalReview,
@@ -232,6 +261,7 @@ export function ChatMessageItem({
   const workflowCardProjection =
     workflowCardProjectionOverride ??
     extractWorkflowCardProjection(message.meta);
+  const messageI18nMeta = extractMessageI18nMeta(message.meta);
   const errorInfo = extractErrorFromMeta(message.meta);
   const apiError =
     isAgent && !errorInfo
@@ -304,9 +334,13 @@ export function ChatMessageItem({
                 onExecute={onExecutePlan}
                 onPauseAll={onPauseAll}
                 onResume={onResumeWorkflow}
+                onRetryStep={onRetryWorkflowStep}
                 finalReviewAction={workflowFinalReviewAction}
                 onResolveFinalReview={onResolveWorkflowFinalReview}
                 pendingActionId={pendingWorkflowActionId}
+                onRetryPlanGeneration={onRetryWorkflowPlanGeneration}
+                retryPlanGenerationPending={workflowPlanGenerationRetryPending}
+                retryPlanGenerationError={workflowPlanGenerationRetryError}
                 onOpenWindow={
                   onOpenWorkflowWindow
                     ? () => {
@@ -469,6 +503,8 @@ export function ChatMessageItem({
             ) : (
               <ChatSystemMessage
                 content={message.content}
+                i18nKey={messageI18nMeta?.key}
+                i18nParams={messageI18nMeta?.params}
                 expanded
                 textClassName={bubbleTextClassName}
               />

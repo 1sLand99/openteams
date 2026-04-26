@@ -1,4 +1,6 @@
+import { ArrowClockwiseIcon } from '@phosphor-icons/react';
 import { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
 
 type WorkflowGraphStep = {
@@ -44,6 +46,8 @@ type WorkflowGraphBoardProps = {
   agents?: WorkflowGraphAgent[];
   selectedStepId?: string | null;
   onSelectStep?: (id: string) => void;
+  onRetryStep?: (stepId: string) => void;
+  pendingActionId?: string | null;
   compact?: boolean;
   className?: string;
 };
@@ -349,9 +353,12 @@ export function WorkflowGraphBoard({
   agents = [],
   selectedStepId = null,
   onSelectStep,
+  onRetryStep,
+  pendingActionId = null,
   compact = false,
   className,
 }: WorkflowGraphBoardProps) {
+  const { t } = useTranslation('chat');
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const layout = useMemo(
     () => layoutGraph(nodes, edges, steps, compact),
@@ -498,6 +505,13 @@ export function WorkflowGraphBoard({
 
         {layout.nodes.map((node) => {
           const step = node.step;
+          const retryStepId = step?.id ?? null;
+          const canRetryStep =
+            !!onRetryStep &&
+            !!retryStepId &&
+            (step?.status === 'failed' || step?.status === 'interrupted');
+          const isRetryPending =
+            !!retryStepId && pendingActionId === retryStepId;
           const tone = statusTone(
             step?.status ?? node.data.status,
             node.id === selectedStepId
@@ -505,10 +519,10 @@ export function WorkflowGraphBoard({
           const stepAgentLabel = step?.agent_name?.trim();
           const agentName =
             (stepAgentLabel
-              ? agentNameByLookup.get(stepAgentLabel) ?? stepAgentLabel
+              ? (agentNameByLookup.get(stepAgentLabel) ?? stepAgentLabel)
               : null) ??
             (node.data.agentId
-              ? agentNameByLookup.get(node.data.agentId.trim()) ?? null
+              ? (agentNameByLookup.get(node.data.agentId.trim()) ?? null)
               : null) ??
             'Lead';
 
@@ -537,7 +551,9 @@ export function WorkflowGraphBoard({
               }
               className={cn(
                 'absolute flex flex-col rounded-[26px] border bg-white/92 text-left transition-all duration-200 hover:-translate-y-0.5 hover:bg-white dark:bg-[rgba(15,23,42,0.92)] dark:hover:bg-[rgba(15,23,42,0.98)]',
-                compact ? 'h-[104px] w-[184px] p-3' : 'h-[118px] w-[208px] p-3.5',
+                compact
+                  ? 'h-[104px] w-[184px] p-3'
+                  : 'h-[118px] w-[208px] p-3.5',
                 onSelectStep && 'cursor-pointer',
                 tone.glow,
                 (node.id === selectedStepId || node.id === hoveredNodeId) &&
@@ -566,15 +582,46 @@ export function WorkflowGraphBoard({
                 </span>
               </div>
 
-              <div className="mt-auto min-w-0">
-                <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#94A3B8]">
-                  Agent
-                </div>
-                <div className="min-w-0">
-                  <div className="mt-1 truncate text-xs font-semibold text-[#0F172A] dark:text-white">
-                    {agentName}
+              <div className="mt-auto flex items-end justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#94A3B8]">
+                    Agent
+                  </div>
+                  <div className="min-w-0">
+                    <div className="mt-1 truncate text-xs font-semibold text-[#0F172A] dark:text-white">
+                      {agentName}
+                    </div>
                   </div>
                 </div>
+                {canRetryStep ? (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (retryStepId) {
+                        onRetryStep?.(retryStepId);
+                      }
+                    }}
+                    disabled={isRetryPending}
+                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#DC2626] px-2.5 py-1 text-[10px] font-semibold text-white transition-colors hover:bg-[#B91C1C] disabled:cursor-not-allowed disabled:bg-[#FCA5A5] disabled:text-white/90"
+                    aria-label={t('workflow_retry', {
+                      defaultValue: '重试',
+                    })}
+                  >
+                    <ArrowClockwiseIcon
+                      className={cn(
+                        'size-3.5',
+                        isRetryPending && 'animate-spin'
+                      )}
+                      weight="bold"
+                    />
+                    <span>
+                      {t('workflow_retry', {
+                        defaultValue: '重试',
+                      })}
+                    </span>
+                  </button>
+                ) : null}
               </div>
             </div>
           );

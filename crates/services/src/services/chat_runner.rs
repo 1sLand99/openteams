@@ -142,9 +142,10 @@ const PROTOCOL_OUTPUT_SCHEMA_JSON: &str = r#"{
         "type": "object",
         "properties": {
           "type": { "const": "workflow_generate" },
+          "plan_check": { "type": "boolean" },
           "content": { "type": "string" }
         },
-        "required": ["type", "content"],
+        "required": ["type", "plan_check", "content"],
         "additionalProperties": false
       }
     ]
@@ -244,6 +245,8 @@ struct AgentProtocolMessage {
     #[serde(default)]
     intent: Option<String>,
     #[serde(default)]
+    plan_check: Option<bool>,
+    #[serde(default)]
     content: String,
 }
 
@@ -274,6 +277,8 @@ pub(super) enum ProtocolProcessResult {
     WorkflowGenerateDetected {
         /// Number of `send` messages created alongside the workflow_generate.
         send_count: usize,
+        /// Whether a finalized plan exists and plan generation should proceed.
+        plan_check: bool,
         /// The content field from the workflow_generate message (may be empty).
         workflow_content: String,
     },

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use axum::{
     Extension, Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json as ResponseJson, Response},
 };
@@ -47,6 +47,12 @@ pub struct GeneratePlanAndRunRequest {
 pub struct GeneratePlanAndRunResponse {
     pub execution_id: Uuid,
     pub workflow_card_message: db::models::chat_message::ChatMessage,
+}
+
+#[derive(Debug, Serialize, TS)]
+pub struct RetryPlanGenerationResponse {
+    pub status: String,
+    pub message_id: Uuid,
 }
 
 pub async fn generate_plan_and_run(
@@ -123,8 +129,12 @@ pub async fn generate_plan_and_run(
         })
         .collect::<Vec<_>>();
 
-    let prompt =
-        build_plan_generation_prompt(&user_goal, &lead_agent.id.to_string(), &available_agents);
+    let prompt = build_plan_generation_prompt(
+        &user_goal,
+        &lead_agent.id.to_string(),
+        &available_agents,
+        None,
+    );
 
     tracing::debug!("Plan generation prompt for lead agent:\n{}", prompt);
 
@@ -254,6 +264,109 @@ pub async fn generate_plan_and_run(
             GeneratePlanAndRunResponse {
                 execution_id: execution.id,
                 workflow_card_message,
+            },
+        )),
+    )
+        .into_response())
+}
+
+pub async fn retry_plan_generation(
+    Extension(session): Extension<ChatSession>,
+    State(deployment): State<DeploymentImpl>,
+    Path((_session_id, message_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, ApiError> {
+    let pool = &deployment.db().pool;
+    let message = ChatMessage::find_by_id(pool, message_id)
+        .await?
+        .ok_or(ApiError::Database(sqlx::Error::RowNotFound))?;
+    if message.session_id != session.id {
+        return Err(ApiError::BadRequest(
+            "Workflow plan generation message does not belong to this session.".to_string(),
+        ));
+    }
+
+    let card_type = message
+        .meta
+        .0
+        .get("card_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if card_type != "workflow_plan_generation" {
+        return Err(ApiError::BadRequest(
+            "Message is not a workflow plan generation card.".to_string(),
+        ));
+    }
+
+    let generation_meta = message
+        .meta
+        .0
+        .get("workflow_plan_generation")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            ApiError::BadRequest("Workflow plan generation metadata is missing.".to_string())
+        })?;
+    let status = generation_meta
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if status != "failed" {
+        return Ok((
+            StatusCode::CONFLICT,
+            ResponseJson(ApiResponse::<RetryPlanGenerationResponse>::error(
+                "Only failed workflow plan generation cards can be retried.",
+            )),
+        )
+            .into_response());
+    }
+
+    let plan_goal = generation_meta
+        .get("plan_goal")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::BadRequest("Workflow plan generation goal is missing.".to_string())
+        })?
+        .to_string();
+    let previous_failure_reason = generation_meta
+        .get("error_message")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let deployment_clone = deployment.clone();
+    let session_id = session.id;
+    tokio::spawn(async move {
+        if let Err(err) = deployment_clone
+            .chat_runner()
+            .trigger_plan_generation(
+                session_id,
+                Uuid::nil(),
+                Uuid::nil(),
+                "workflow_plan_retry",
+                message_id,
+                &plan_goal,
+                Some(message_id),
+                previous_failure_reason.as_deref(),
+            )
+            .await
+        {
+            tracing::error!(
+                session_id = %session_id,
+                message_id = %message_id,
+                error = %err,
+                "[workflow] retry plan generation failed"
+            );
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        ResponseJson(ApiResponse::<RetryPlanGenerationResponse>::success(
+            RetryPlanGenerationResponse {
+                status: "queued".to_string(),
+                message_id,
             },
         )),
     )
