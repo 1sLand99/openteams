@@ -1,4 +1,4 @@
-//! Workflow Orchestrator 骨架
+﻿//! Workflow Orchestrator 骨架
 //!
 //! Phase 1a 职责：
 //! - command handler: 接收 bootstrap 命令
@@ -1555,6 +1555,10 @@ impl WorkflowOrchestrator {
                 &previous_message_content,
                 input_text,
                 mode,
+            );
+            tracing::debug!(
+                follow_up_prompt=follow_up_prompt,
+                "submit step input for following up prompt"
             );
 
             let protocol_message = match run_workflow_step_agent_follow_up(

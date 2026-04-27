@@ -109,6 +109,20 @@ type WorkflowTranscriptSummaryPayload = {
   outputs?: string[];
 };
 
+const WORKFLOW_TERMINAL_STEP_STATUSES = new Set([
+  'completed',
+  'failed',
+  'interrupted',
+  'skipped',
+  'cancelled',
+]);
+
+const WORKFLOW_FAILURE_STEP_STATUSES = new Set([
+  'failed',
+  'interrupted',
+  'cancelled',
+]);
+
 function mergeAndSortTranscriptEntries(
   primary: WorkflowTranscriptEntry[],
   secondary: WorkflowTranscriptEntry[]
@@ -805,13 +819,13 @@ function WorkflowTranscriptFeed({
 
                   {!collapsed && (
                     <div
-                      className="mt-2 space-y-1 overflow-auto"
+                      className="mt-2 space-y-1 overflow-auto select-text"
                       style={{ maxHeight: WORKFLOW_COMPOSER_MAX_HEIGHT }}
                     >
                       {item.entries.map((thinkingEntry) => (
                         <div
                           key={thinkingEntry.id}
-                          className="truncate text-[12px] leading-6 text-[#334155] dark:text-[#CBD5E1]"
+                          className="truncate select-text text-[12px] leading-6 text-[#334155] dark:text-[#CBD5E1]"
                           title={thinkingEntry.content}
                         >
                           {thinkingEntry.content}
@@ -881,10 +895,10 @@ function WorkflowTranscriptFeed({
                     maxWidth="100%"
                     hideCopyButton
                     textClassName={markdownTextClassName}
-                    className="mt-2 w-full"
+                    className="mt-2 w-full select-text"
                   />
                 ) : (
-                  <div className="mt-2 whitespace-pre-wrap text-[13px] leading-6 text-[#0F172A] dark:text-white">
+                  <div className="mt-2 whitespace-pre-wrap select-text text-[13px] leading-6 text-[#0F172A] dark:text-white">
                     {entry.content}
                     {entry.entry_type === 'input_request' && descriptionText
                       ? `\n\n${descriptionText}`
@@ -893,7 +907,7 @@ function WorkflowTranscriptFeed({
                 )}
 
                 {entry.entry_type !== 'input_request' && descriptionText ? (
-                  <div className="mt-1 whitespace-pre-wrap text-[13px] leading-6 text-[#64748B] dark:text-[#94A3B8]">
+                  <div className="mt-1 whitespace-pre-wrap select-text text-[13px] leading-6 text-[#64748B] dark:text-[#94A3B8]">
                     {descriptionText}
                   </div>
                 ) : null}
@@ -1039,8 +1053,26 @@ export function WorkflowWindow({
     projection.state === 'preview_ready' ||
     projection.state === 'preview_invalid';
   const isRunning = projection.execution_status === 'running';
-  const hasWorkflowCompleted = projection.state === 'completed';
-  const hasWorkflowFailed = projection.state === 'failed';
+  const normalizedResultSummary = projection.result_summary?.trim() ?? '';
+  const normalizedErrorMessage = projection.error_message?.trim() ?? '';
+  const hasFailedWorkflowStep = projection.steps.some((step) =>
+    WORKFLOW_FAILURE_STEP_STATUSES.has(step.status)
+  );
+  const hasTerminalWorkflowSteps =
+    projection.steps.length > 0 &&
+    projection.steps.every((step) =>
+      WORKFLOW_TERMINAL_STEP_STATUSES.has(step.status)
+    );
+  const hasWorkflowCompleted =
+    projection.state === 'completed' ||
+    projection.execution_status === 'completed' ||
+    (normalizedResultSummary.length > 0 &&
+      hasTerminalWorkflowSteps &&
+      !hasFailedWorkflowStep);
+  const hasWorkflowFailed =
+    projection.state === 'failed' ||
+    projection.execution_status === 'failed' ||
+    (normalizedErrorMessage.length > 0 && hasFailedWorkflowStep);
   const canResume =
     projection.execution_status === 'paused' ||
     projection.execution_status === 'failed' ||
@@ -1608,7 +1640,7 @@ export function WorkflowWindow({
                 {projection.completed_step_count}/{projection.total_step_count}
               </div>
             </div>
-            <div className="mt-2 max-w-3xl text-sm leading-6 text-[#475569] dark:text-[#94A3B8]">
+            <div className="mt-2 max-w-3xl select-text text-sm leading-6 text-[#475569] dark:text-[#94A3B8]">
               {projection.goal}
             </div>
           </div>
@@ -1657,7 +1689,7 @@ export function WorkflowWindow({
                 <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
                   Step Inspector
                 </div>
-                <div className="mt-1 text-xs leading-5 text-[#475569] dark:text-[#CBD5E1]">
+                <div className="mt-1 select-text text-xs leading-5 text-[#475569] dark:text-[#CBD5E1]">
                   Click a step node to open its detail card with task
                   instructions, agent, status and transcript.
                 </div>
@@ -1666,14 +1698,14 @@ export function WorkflowWindow({
                     {projection.completed_step_count}/
                     {projection.total_step_count} steps completed
                   </span>
-                  {hasWorkflowCompleted && projection.result_summary && (
-                    <span className="rounded-[10px] border border-[#16A34A] px-2.5 py-1 font-semibold text-[#166534] dark:border-[#22C55E] dark:text-[#BBF7D0]">
-                      {projection.result_summary}
+                  {hasWorkflowCompleted && normalizedResultSummary && (
+                    <span className="select-text rounded-[10px] border border-[#16A34A] px-2.5 py-1 font-semibold text-[#166534] dark:border-[#22C55E] dark:text-[#BBF7D0]">
+                      {normalizedResultSummary}
                     </span>
                   )}
-                  {hasWorkflowFailed && projection.error_message && (
-                    <span className="rounded-[10px] border border-[#DC2626] px-2.5 py-1 font-semibold text-[#991B1B] dark:border-[#F87171] dark:text-[#FECACA]">
-                      {projection.error_message}
+                  {hasWorkflowFailed && normalizedErrorMessage && (
+                    <span className="select-text rounded-[10px] border border-[#DC2626] px-2.5 py-1 font-semibold text-[#991B1B] dark:border-[#F87171] dark:text-[#FECACA]">
+                      {normalizedErrorMessage}
                     </span>
                   )}
                 </div>
@@ -1724,7 +1756,7 @@ export function WorkflowWindow({
                   <div className="text-sm font-semibold text-[#0F172A] dark:text-white">
                     Plan Summary
                   </div>
-                  <div className="mt-2 text-sm leading-6 text-[#475569] dark:text-[#94A3B8]">
+                  <div className="mt-2 select-text text-sm leading-6 text-[#475569] dark:text-[#94A3B8]">
                     {projection.goal}
                   </div>
 
@@ -1733,7 +1765,7 @@ export function WorkflowWindow({
                       <div className="text-xs font-bold uppercase tracking-wider text-[#991B1B] dark:text-[#FCA5A5]">
                         Validation Errors
                       </div>
-                      <div className="mt-1 text-sm text-[#991B1B] dark:text-[#FECACA]">
+                      <div className="mt-1 select-text text-sm text-[#991B1B] dark:text-[#FECACA]">
                         {projection.validation_errors}
                       </div>
                     </div>
@@ -1773,11 +1805,11 @@ export function WorkflowWindow({
                               final review
                             </span>
                           </div>
-                          <div className="mt-2 whitespace-pre-wrap text-[13px] leading-6 text-[#0F172A] dark:text-white">
+                          <div className="mt-2 whitespace-pre-wrap select-text text-[13px] leading-6 text-[#0F172A] dark:text-white">
                             {workflowFinalReviewAction.message}
                           </div>
                           {workflowFinalReviewAction.description ? (
-                            <div className="mt-1 whitespace-pre-wrap text-[13px] leading-6 text-[#64748B] dark:text-[#94A3B8]">
+                            <div className="mt-1 whitespace-pre-wrap select-text text-[13px] leading-6 text-[#64748B] dark:text-[#94A3B8]">
                               {workflowFinalReviewAction.description}
                             </div>
                           ) : null}
@@ -1839,11 +1871,11 @@ export function WorkflowWindow({
                           <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#4338CA] dark:text-[#A5B4FC]">
                             Input Prompt
                           </div>
-                          <div className="mt-1 whitespace-pre-wrap text-xs leading-5 text-[#312E81] dark:text-[#E0E7FF]">
+                          <div className="mt-1 whitespace-pre-wrap select-text text-xs leading-5 text-[#312E81] dark:text-[#E0E7FF]">
                             {selectedStepInputRequest.prompt}
                           </div>
                           {selectedStepInputRequest.description && (
-                            <div className="mt-1 whitespace-pre-wrap text-xs leading-5 text-[#4338CA]/90 dark:text-[#C7D2FE]/90">
+                            <div className="mt-1 whitespace-pre-wrap select-text text-xs leading-5 text-[#4338CA]/90 dark:text-[#C7D2FE]/90">
                               {selectedStepInputRequest.description}
                             </div>
                           )}
@@ -1900,12 +1932,12 @@ export function WorkflowWindow({
                     Step Details
                   </div>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <div className="truncate text-lg font-semibold text-[#0F172A] dark:text-white">
+                    <div className="truncate select-text text-lg font-semibold text-[#0F172A] dark:text-white">
                       {detailStep.title}
                     </div>
                     <span
                       className={cn(
-                        'rounded-full border px-3 py-1 text-[10px] font-bold uppercase tracking-[0.16em]',
+                        'select-text rounded-full border px-3 py-1 text-[10px] font-bold uppercase tracking-[0.16em]',
                         workflowStatusBadgeClass(detailStep.status)
                       )}
                     >
@@ -1951,7 +1983,7 @@ export function WorkflowWindow({
                         </button>
                       )}
                   </div>
-                  <div className="mt-2 text-xs text-[#64748B] dark:text-[#94A3B8]">
+                  <div className="mt-2 select-text text-xs text-[#64748B] dark:text-[#94A3B8]">
                     {detailStep.step_type}
                     {detailStep.agent_name
                       ? ` · ${resolveStepAgentName(detailStep)}`
@@ -1988,7 +2020,7 @@ export function WorkflowWindow({
                     <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
                       Task Instruction
                     </div>
-                    <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[#334155] dark:text-[#CBD5E1]">
+                    <div className="mt-2 whitespace-pre-wrap select-text text-sm leading-6 text-[#334155] dark:text-[#CBD5E1]">
                       {detailStepNode?.data.instructions?.trim() ||
                         'No task instructions were provided for this step.'}
                     </div>
@@ -1998,7 +2030,7 @@ export function WorkflowWindow({
                     <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
                       Task Summary
                     </div>
-                    <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[#334155] dark:text-[#CBD5E1]">
+                    <div className="mt-2 whitespace-pre-wrap select-text text-sm leading-6 text-[#334155] dark:text-[#CBD5E1]">
                       {detailStep.summary_text?.trim() ||
                         'No summary has been generated for this step yet.'}
                     </div>
@@ -2009,7 +2041,7 @@ export function WorkflowWindow({
                       <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
                         Agent
                       </div>
-                      <div className="mt-2 text-sm font-semibold text-[#0F172A] dark:text-white">
+                      <div className="mt-2 select-text text-sm font-semibold text-[#0F172A] dark:text-white">
                         {resolveStepAgentName(detailStep)}
                       </div>
                     </div>
@@ -2020,7 +2052,7 @@ export function WorkflowWindow({
                       <div className="mt-2">
                         <span
                           className={cn(
-                            'inline-flex rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]',
+                            'inline-flex select-text rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]',
                             workflowStatusBadgeClass(detailStep.status)
                           )}
                         >
