@@ -1443,6 +1443,7 @@ async fn run_workflow_agent_prompt_inner(
                     failed_by_signal = true;
                 }
             }
+            Ok(Ok(ExecutorExitResult::FailureWithError(_))) => failed_by_signal = true,
             Ok(Err(_)) => {
                 status = Some(wait_for_process_exit(&mut spawned, &agent.name).await?);
             }
