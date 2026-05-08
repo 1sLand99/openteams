@@ -1,23 +1,18 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import ELK from 'elkjs/lib/elk.bundled.js';
 import {
   ArrowClockwiseIcon,
   ArrowsInSimpleIcon,
   ArrowsOutSimpleIcon,
-  MagnifyingGlassMinusIcon,
-  MagnifyingGlassPlusIcon,
 } from '@phosphor-icons/react';
-import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { motion } from 'framer-motion';
 import type { WorkflowCardData, WorkflowCardLoopData } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { isRetryableWorkflowStepStatus } from './workflowControlContract';
 import {
-  workflowLatestReviewFeedback,
-  workflowLatestReviewLabel,
   workflowLoopStatusMeta,
-  workflowReviewPhaseMeta,
-  workflowReviewVerdictMeta,
   workflowStatusLabel,
-  workflowStatusTone,
 } from './workflowStepPresentation';
 
 type WorkflowGraphStep = WorkflowCardData['steps'][number];
@@ -44,372 +39,320 @@ type WorkflowGraphBoardProps = {
   className?: string;
 };
 
-type LayoutNode = WorkflowGraphNode & {
-  step?: WorkflowGraphStep;
-  x: number;
-  y: number;
-  rank: number;
-  order: number;
-};
+const elk = new ELK();
 
-type RenderEdge = {
+interface ElkLayoutNode {
   id: string;
-  sourceId: string;
-  targetId: string;
-  path: string;
-};
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  layoutOptions?: Record<string, string>;
+  children?: ElkLayoutNode[];
+  edges?: ElkLayoutEdge[];
+}
 
-type LoopRegion = {
+interface ElkLayoutEdge {
   id: string;
-  loop: WorkflowGraphLoop | WorkflowGraphPlanLoop;
-  loopKey: string;
-  status: string | null;
-  userReviewRequired: boolean;
-  rejectionReason: string | null;
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-  containsSelectedStep: boolean;
-};
+  sources?: string[];
+  targets?: string[];
+  sections?: Array<{
+    startPoint: { x: number; y: number };
+    endPoint: { x: number; y: number };
+    bendPoints?: Array<{ x: number; y: number }>;
+  }>;
+}
 
-const MIN_NODE_SCALE = 0.82;
-const MAX_NODE_SCALE = 1.36;
-const NODE_SCALE_STEP = 0.09;
+const NODE_WIDTH = 240;
+const NODE_HEIGHT = 110;
 
-function layoutGraph(
+function buildElkGraph(
   nodes: WorkflowGraphNode[],
   edges: WorkflowGraphEdge[],
-  steps: WorkflowGraphStep[],
-  compact: boolean,
-  nodeScale: number
+  loops: WorkflowGraphLoop[],
+  planLoops: WorkflowGraphPlanLoop[],
+  steps: WorkflowGraphStep[]
 ) {
-  if (nodes.length === 0) {
-    return null;
-  }
+  const stepById = new Map(steps.map((s) => [s.id, s]));
 
-  const cardWidth = Math.round((compact ? 198 : 224) * nodeScale);
-  const cardHeight = Math.round((compact ? 156 : 176) * nodeScale);
-  const horizontalGap = Math.round((compact ? 44 : 60) * nodeScale);
-  const verticalGap = Math.round((compact ? 18 : 24) * nodeScale);
-  const paddingX = Math.round((compact ? 24 : 36) * nodeScale);
-  const paddingY = Math.round((compact ? 24 : 36) * nodeScale);
-  const verticalScale = 2;
-
-  const sortedNodes = [...nodes].sort(
-    (left, right) =>
-      left.position.x - right.position.x ||
-      left.position.y - right.position.y ||
-      left.id.localeCompare(right.id)
-  );
-  const originalOrder = new Map(
-    sortedNodes.map((node, index) => [node.id, index])
-  );
-  const stepByKey = new Map(steps.map((step) => [step.step_key, step]));
-  const incoming = new Map<string, string[]>();
-  const outgoing = new Map<string, string[]>();
-  const indegree = new Map<string, number>();
-
-  for (const node of sortedNodes) {
-    incoming.set(node.id, []);
-    outgoing.set(node.id, []);
-    indegree.set(node.id, 0);
-  }
-
-  for (const edge of edges) {
-    if (!indegree.has(edge.source) || !indegree.has(edge.target)) {
-      continue;
-    }
-    outgoing.get(edge.source)?.push(edge.target);
-    incoming.get(edge.target)?.push(edge.source);
-    indegree.set(edge.target, (indegree.get(edge.target) ?? 0) + 1);
-  }
-
-  const queue = sortedNodes
-    .filter((node) => (indegree.get(node.id) ?? 0) === 0)
-    .map((node) => node.id);
-  queue.sort(
-    (left, right) =>
-      (originalOrder.get(left) ?? 0) - (originalOrder.get(right) ?? 0)
-  );
-
-  const topo: string[] = [];
-  while (queue.length > 0) {
-    const currentId = queue.shift();
-    if (!currentId) {
-      continue;
-    }
-    topo.push(currentId);
-    for (const targetId of outgoing.get(currentId) ?? []) {
-      const nextIndegree = (indegree.get(targetId) ?? 0) - 1;
-      indegree.set(targetId, nextIndegree);
-      if (nextIndegree === 0) {
-        queue.push(targetId);
-        queue.sort(
-          (left, right) =>
-            (originalOrder.get(left) ?? 0) - (originalOrder.get(right) ?? 0)
-        );
-      }
-    }
-  }
-
-  for (const node of sortedNodes) {
-    if (!topo.includes(node.id)) {
-      topo.push(node.id);
-    }
-  }
-
-  const rankById = new Map<string, number>();
-  for (const nodeId of topo) {
-    const rank = Math.max(
-      0,
-      ...(incoming.get(nodeId) ?? []).map(
-        (sourceId) => (rankById.get(sourceId) ?? 0) + 1
-      )
-    );
-    rankById.set(nodeId, rank);
-  }
-
-  const groups = new Map<number, string[]>();
-  for (const nodeId of topo) {
-    const rank = rankById.get(nodeId) ?? 0;
-    const group = groups.get(rank) ?? [];
-    group.push(nodeId);
-    groups.set(rank, group);
-  }
-
-  const orderById = new Map<string, number>();
-  const ranks = [...groups.keys()].sort((left, right) => left - right);
-  for (const rank of ranks) {
-    const group = [...(groups.get(rank) ?? [])];
-    group.sort((left, right) => {
-      const leftIncoming = incoming.get(left) ?? [];
-      const rightIncoming = incoming.get(right) ?? [];
-      const leftScore =
-        leftIncoming.length > 0
-          ? leftIncoming.reduce(
-              (sum, item) => sum + (orderById.get(item) ?? 0),
-              0
-            ) / leftIncoming.length
-          : (originalOrder.get(left) ?? 0);
-      const rightScore =
-        rightIncoming.length > 0
-          ? rightIncoming.reduce(
-              (sum, item) => sum + (orderById.get(item) ?? 0),
-              0
-            ) / rightIncoming.length
-          : (originalOrder.get(right) ?? 0);
-
-      return (
-        leftScore - rightScore ||
-        (originalOrder.get(left) ?? 0) - (originalOrder.get(right) ?? 0)
-      );
-    });
-
-    group.forEach((nodeId, index) => {
-      orderById.set(nodeId, index);
-    });
-    groups.set(rank, group);
-  }
-
-  const maxRankSize = Math.max(
-    ...[...groups.values()].map((group) => group.length)
-  );
-  const totalHeight =
-    paddingY * 2 +
-    maxRankSize * cardHeight +
-    Math.max(maxRankSize - 1, 0) * verticalGap;
-
-  const layoutNodes: LayoutNode[] = topo.map((nodeId) => {
-    const node = sortedNodes.find((item) => item.id === nodeId)!;
-    const rank = rankById.get(nodeId) ?? 0;
-    const group = groups.get(rank) ?? [];
-    const order = group.indexOf(nodeId);
-    const groupHeight =
-      group.length * cardHeight + Math.max(group.length - 1, 0) * verticalGap;
-    const topOffset = paddingY + (totalHeight - paddingY * 2 - groupHeight) / 2;
-
-    return {
-      ...node,
-      step: stepByKey.get(node.id),
-      rank,
-      order,
-      x: paddingX + rank * (cardWidth + horizontalGap),
-      y: (topOffset + order * (cardHeight + verticalGap)) * verticalScale,
-    };
-  });
-
-  const maxRank = Math.max(...layoutNodes.map((node) => node.rank));
-  const totalWidth =
-    paddingX * 2 + (maxRank + 1) * cardWidth + maxRank * horizontalGap;
-
-  return {
-    nodes: layoutNodes,
-    width: totalWidth,
-    height: totalHeight * verticalScale,
-    cardWidth,
-    cardHeight,
-  };
-}
-
-function buildSmoothStepPath({
-  x1,
-  y1,
-  x2,
-  y2,
-  laneOffset,
-  compact,
-}: {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-  laneOffset: number;
-  compact: boolean;
-}) {
-  if (Math.abs(y2 - y1) < 1) {
-    return `M ${x1} ${y1} L ${x2} ${y2}`;
-  }
-
-  const turnPadding = compact ? 22 : 28;
-  const controlX = x1 + (x2 - x1) / 2 + laneOffset;
-  const minX = x1 + turnPadding;
-  const maxX = x2 - turnPadding;
-  const midX = Math.min(maxX, Math.max(minX, controlX));
-  const radius = Math.max(
-    0,
-    Math.min(
-      compact ? 10 : 14,
-      Math.abs(y2 - y1) / 2,
-      Math.abs(x2 - x1) / 2 - 4
-    )
-  );
-
-  if (midX <= minX || midX >= maxX || radius <= 0) {
-    const curveOffset = Math.max((x2 - x1) / 2, compact ? 36 : 48);
-    return `M ${x1} ${y1} C ${x1 + curveOffset} ${y1}, ${x2 - curveOffset} ${y2}, ${x2} ${y2}`;
-  }
-
-  const directionY = y2 > y1 ? 1 : -1;
-  return [
-    `M ${x1} ${y1}`,
-    `L ${midX - radius} ${y1}`,
-    `Q ${midX} ${y1} ${midX} ${y1 + directionY * radius}`,
-    `L ${midX} ${y2 - directionY * radius}`,
-    `Q ${midX} ${y2} ${midX + radius} ${y2}`,
-    `L ${x2} ${y2}`,
-  ].join(' ');
-}
-
-function clampNodeScale(value: number) {
-  return Math.min(MAX_NODE_SCALE, Math.max(MIN_NODE_SCALE, value));
-}
-
-function buildLoopRegions({
-  loops,
-  planLoops,
-  steps,
-  layoutNodes,
-  cardWidth,
-  cardHeight,
-  selectedStepId,
-}: {
-  loops: WorkflowGraphLoop[];
-  planLoops: WorkflowGraphPlanLoop[];
-  steps: WorkflowGraphStep[];
-  layoutNodes: LayoutNode[];
-  cardWidth: number;
-  cardHeight: number;
-  selectedStepId?: string | null;
-}): LoopRegion[] {
-  const stepById = new Map(steps.map((step) => [step.id, step]));
-  const layoutNodeById = new Map(layoutNodes.map((node) => [node.id, node]));
-  const runtimeLoopKeys = new Set(loops.map((loop) => loop.loop_key));
-  const loopEntries = [
-    ...loops.map((loop) => ({
-      id: loop.id,
-      loop,
-      loopKey: loop.loop_key,
-      status: loop.status,
-      userReviewRequired: loop.user_review_required,
-      rejectionReason: loop.rejection_reason,
-      memberStepIds: loop.member_step_ids,
-      memberStepKeys: [] as string[],
-      reviewStepId: loop.review_step_id,
-      reviewStepKey: null as string | null,
+  const runtimeLoopKeys = new Set(loops.map((l) => l.loop_key));
+  const allLoops = [
+    ...loops.map((l) => ({
+      loopKey: l.loop_key,
+      memberStepKeys: l.member_step_ids
+        .map((id) => stepById.get(id)?.step_key)
+        .filter((k): k is string => !!k),
+      reviewStepKey: l.review_step_id
+        ? (stepById.get(l.review_step_id)?.step_key ?? null)
+        : null,
+      status: l.status,
+      label: l.loop_key,
     })),
     ...planLoops
-      .filter((loop) => !runtimeLoopKeys.has(loop.loop_key))
-      .map((loop) => ({
-        id: loop.loop_key,
-        loop,
-        loopKey: loop.loop_key,
-        status: null,
-        userReviewRequired: loop.user_review_required,
-        rejectionReason: null,
-        memberStepIds: [] as string[],
-        memberStepKeys: loop.member_step_keys,
-        reviewStepId: null as string | null,
-        reviewStepKey: loop.review_step_key,
+      .filter((l) => !runtimeLoopKeys.has(l.loop_key))
+      .map((l) => ({
+        loopKey: l.loop_key,
+        memberStepKeys: l.member_step_keys,
+        reviewStepKey: l.review_step_key,
+        status: null as string | null,
+        label: l.loop_key,
       })),
   ];
 
-  return loopEntries
-    .map((entry) => {
-      const nodeIdsFromStepIds = [...entry.memberStepIds, entry.reviewStepId]
-        .filter((value): value is string => !!value)
-        .map((stepId) => stepById.get(stepId)?.step_key ?? null)
-        .filter((value): value is string => !!value);
-      const nodeIds = [
-        ...nodeIdsFromStepIds,
-        ...entry.memberStepKeys,
-        entry.reviewStepKey,
-      ]
-        .filter((value): value is string => !!value)
-        .filter((value, index, values) => values.indexOf(value) === index);
+  const nodeToLoop = new Map<string, string>();
+  for (const loop of allLoops) {
+    for (const key of loop.memberStepKeys) {
+      nodeToLoop.set(key, loop.loopKey);
+    }
+    if (loop.reviewStepKey) {
+      nodeToLoop.set(loop.reviewStepKey, loop.loopKey);
+    }
+  }
 
-      const relatedNodes = nodeIds
-        .map((nodeId) => layoutNodeById.get(nodeId) ?? null)
-        .filter((node): node is LayoutNode => !!node);
+  const getPathToRoot = (nodeId: string): string[] => {
+    const loopKey = nodeToLoop.get(nodeId);
+    if (loopKey) {
+      return ['root', loopKey, nodeId];
+    }
+    return ['root', nodeId];
+  };
 
-      if (relatedNodes.length === 0) {
-        return null;
+  const getLCA = (sourceId: string, targetId: string): string => {
+    const path1 = getPathToRoot(sourceId);
+    const path2 = getPathToRoot(targetId);
+    let lca = 'root';
+    for (let i = 0; i < Math.min(path1.length, path2.length); i++) {
+      if (path1[i] === path2[i]) lca = path1[i];
+      else break;
+    }
+    return lca;
+  };
+
+  // Filter edges to only include those referencing existing nodes
+  const allNodeIds = new Set(nodes.map((n) => n.id));
+  const validEdges = edges.filter(
+    (e) => allNodeIds.has(e.source) && allNodeIds.has(e.target)
+  );
+
+  const edgesByParent: Record<string, WorkflowGraphEdge[]> = {};
+  for (const edge of validEdges) {
+    const lca = getLCA(edge.source, edge.target);
+    if (!edgesByParent[lca]) edgesByParent[lca] = [];
+    edgesByParent[lca].push(edge);
+  }
+
+  const rootNodeIds = new Set(nodes.map((n) => n.id));
+  const loopChildIds = new Set<string>();
+  const loopNodes: Array<{
+    loopKey: string;
+    children: WorkflowGraphNode[];
+    edges: WorkflowGraphEdge[];
+    status: string | null;
+    label: string;
+  }> = [];
+
+  for (const loop of allLoops) {
+    const childNodeIds = new Set([
+      ...loop.memberStepKeys,
+      ...(loop.reviewStepKey ? [loop.reviewStepKey] : []),
+    ]);
+    const children = nodes.filter((n) => childNodeIds.has(n.id));
+    children.forEach((n) => {
+      loopChildIds.add(n.id);
+      rootNodeIds.delete(n.id);
+    });
+    loopNodes.push({
+      loopKey: loop.loopKey,
+      children,
+      edges: edgesByParent[loop.loopKey] || [],
+      status: loop.status,
+      label: loop.label,
+    });
+  }
+
+  const rootChildren: ElkLayoutNode[] = [];
+
+  for (const nodeId of rootNodeIds) {
+    const node = nodes.find((n) => n.id === nodeId);
+    if (!node) continue;
+    rootChildren.push({
+      id: node.id,
+      width: NODE_WIDTH,
+      height: NODE_HEIGHT,
+    });
+  }
+
+  for (const loop of loopNodes) {
+    if (loop.children.length === 0) continue;
+    rootChildren.push({
+      id: loop.loopKey,
+      layoutOptions: {
+        'elk.padding': '[top=60,left=30,bottom=30,right=30]',
+        'elk.direction': 'RIGHT',
+        'elk.algorithm': 'layered',
+        'elk.spacing.nodeNode': '60',
+        'elk.layered.spacing.nodeNodeBetweenLayers': '80',
+      },
+      children: loop.children.map((n) => ({
+        id: n.id,
+        width: NODE_WIDTH,
+        height: NODE_HEIGHT,
+      })),
+      edges: loop.edges
+        .filter((e) => {
+          const childIds = new Set(loop.children.map((n) => n.id));
+          return childIds.has(e.source) && childIds.has(e.target);
+        })
+        .map((e) => ({
+          id: e.id,
+          sources: [e.source],
+          targets: [e.target],
+        })),
+    });
+  }
+
+  return {
+    id: 'root',
+    layoutOptions: {
+      'elk.algorithm': 'layered',
+      'elk.direction': 'RIGHT',
+      'elk.spacing.nodeNode': '80',
+      'elk.layered.spacing.nodeNodeBetweenLayers': '100',
+      'elk.edgeRouting': 'POLYLINE',
+      'elk.layered.mergeEdges': 'true',
+      'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
+    },
+    children: rootChildren,
+    edges: (edgesByParent['root'] || []).map((e) => ({
+      id: e.id,
+      sources: [e.source],
+      targets: [e.target],
+    })),
+  };
+}
+
+function buildFallbackLayout(
+  children: ElkLayoutNode[]
+): ElkLayoutNode & { width: number; height: number } {
+  const gap = 40;
+  let x = gap;
+  const y = gap;
+  const laid: ElkLayoutNode[] = [];
+
+  for (const child of children) {
+    const innerChildren = child.children;
+    if (innerChildren && innerChildren.length > 0) {
+      // Loop container: lay out children horizontally inside
+      let innerX = 30;
+      const innerY = 60;
+      const laidInner: ElkLayoutNode[] = [];
+      for (const ic of innerChildren) {
+        laidInner.push({
+          id: ic.id,
+          x: innerX,
+          y: innerY,
+          width: ic.width ?? NODE_WIDTH,
+          height: ic.height ?? NODE_HEIGHT,
+        });
+        innerX += (ic.width ?? NODE_WIDTH) + gap;
       }
+      const loopW = innerX + 30;
+      const loopH = innerY + NODE_HEIGHT + 30;
+      laid.push({
+        id: child.id,
+        x,
+        y,
+        width: loopW,
+        height: loopH,
+        children: laidInner,
+      });
+      x += loopW + gap;
+    } else {
+      laid.push({
+        id: child.id,
+        x,
+        y,
+        width: child.width ?? NODE_WIDTH,
+        height: child.height ?? NODE_HEIGHT,
+      });
+      x += (child.width ?? NODE_WIDTH) + gap;
+    }
+  }
 
-      const minX = Math.min(...relatedNodes.map((node) => node.x));
-      const maxX = Math.max(...relatedNodes.map((node) => node.x + cardWidth));
-      const minY = Math.min(...relatedNodes.map((node) => node.y));
-      const maxY = Math.max(...relatedNodes.map((node) => node.y + cardHeight));
-      const left = Math.max(minX - 16, 8);
-      const top = Math.max(minY - 32, 8);
-      const right = maxX + 16;
-      const bottom = maxY + 16;
-      const selectedStep =
-        selectedStepId != null
-          ? steps.find((step) => step.step_key === selectedStepId)
-          : null;
+  const totalWidth = x;
+  const totalHeight =
+    y +
+    Math.max(
+      ...laid.map(
+        (c) => (c.height ?? NODE_HEIGHT) + gap
+      ),
+      NODE_HEIGHT + gap
+    );
 
-      return {
-        id: entry.id,
-        loop: entry.loop,
-        loopKey: entry.loopKey,
-        status: entry.status,
-        userReviewRequired: entry.userReviewRequired,
-        rejectionReason: entry.rejectionReason,
-        left,
-        top,
-        width: right - left,
-        height: bottom - top,
-        containsSelectedStep:
-          !!selectedStep &&
-          (entry.memberStepIds.includes(selectedStep.id) ||
-            entry.reviewStepId === selectedStep.id ||
-            entry.memberStepKeys.includes(selectedStep.step_key) ||
-            entry.reviewStepKey === selectedStep.step_key),
-      } satisfies LoopRegion;
-    })
-    .filter((loop): loop is LoopRegion => !!loop)
-    .sort((left, right) => right.width * right.height - left.width * left.height);
+  return {
+    id: 'root',
+    children: laid,
+    width: totalWidth,
+    height: totalHeight,
+  };
+}
+
+function flattenEdges(
+  layoutNode: ElkLayoutNode,
+  edges: WorkflowGraphEdge[],
+  hoveredNodeId: string | null,
+  offsetX = 0,
+  offsetY = 0,
+  elements: React.ReactElement[] = []
+) {
+  if (layoutNode.edges) {
+    for (const edge of layoutNode.edges) {
+      const edgeData = edges.find((e) => e.id === edge.id);
+      const isHovered =
+        hoveredNodeId != null &&
+        edgeData &&
+        (edgeData.source === hoveredNodeId || edgeData.target === hoveredNodeId);
+
+      edge.sections?.forEach((section, index) => {
+        let d = `M ${section.startPoint.x} ${section.startPoint.y}`;
+        if (section.bendPoints) {
+          for (const bp of section.bendPoints) {
+            d += ` L ${bp.x} ${bp.y}`;
+          }
+        }
+        d += ` L ${section.endPoint.x} ${section.endPoint.y}`;
+
+        elements.push(
+          <g
+            transform={`translate(${offsetX}, ${offsetY})`}
+            key={`${edge.id}-${index}`}
+          >
+            <path
+              d={d}
+              fill="none"
+              stroke={isHovered ? '#6366f1' : '#cbd5e1'}
+              strokeWidth={isHovered ? 3 : 2}
+              markerEnd={isHovered ? 'url(#arrow-hover)' : 'url(#arrow)'}
+              className="transition-colors duration-300"
+            />
+          </g>
+        );
+      });
+    }
+  }
+  if (layoutNode.children) {
+    for (const child of layoutNode.children) {
+      flattenEdges(
+        child,
+        edges,
+        hoveredNodeId,
+        offsetX + (child.x || 0),
+        offsetY + (child.y || 0),
+        elements
+      );
+    }
+  }
+  return elements;
 }
 
 export function WorkflowGraphBoard({
@@ -423,38 +366,61 @@ export function WorkflowGraphBoard({
   onSelectStep,
   onRetryStep,
   pendingActionId = null,
-  compact = false,
   className,
 }: WorkflowGraphBoardProps) {
   const { t } = useTranslation('chat');
+  const [layout, setLayout] = useState<ElkLayoutNode | null>(null);
+  const [layoutError, setLayoutError] = useState<string | null>(null);
+  const [transform, setTransform] = useState({ x: 0, y: 0, scale: 1 });
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [nodeScale, setNodeScale] = useState(1);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const isDragging = useRef(false);
+  const lastMousePos = useRef({ x: 0, y: 0 });
+  const layoutInputRef = useRef({
+    nodes,
+    edges,
+    loops,
+    planLoops,
+    steps,
+  });
+
   useEffect(() => {
-    if (!isFullscreen) {
-      return;
-    }
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        setIsFullscreen(false);
-      }
+    layoutInputRef.current = {
+      nodes,
+      edges,
+      loops,
+      planLoops,
+      steps,
     };
+  }, [nodes, edges, loops, planLoops, steps]);
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isFullscreen]);
-  const layout = useMemo(
-    () => layoutGraph(nodes, edges, steps, compact, nodeScale),
-    [compact, edges, nodeScale, nodes, steps]
+  const layoutTopologyKey = useMemo(
+    () =>
+      JSON.stringify({
+        nodes: nodes.map((node) => node.id),
+        edges: edges.map((edge) => [edge.id, edge.source, edge.target]),
+        loops: loops.map((loop) => [
+          loop.loop_key,
+          loop.member_step_ids,
+          loop.review_step_id,
+        ]),
+        planLoops: (planLoops ?? []).map((loop) => [
+          loop.loop_key,
+          loop.member_step_keys,
+          loop.review_step_key,
+        ]),
+        steps: steps.map((step) => [step.id, step.step_key]),
+      }),
+    [edges, loops, nodes, planLoops, steps]
   );
-  const nodeById = useMemo(
-    () => new Map((layout?.nodes ?? []).map((node) => [node.id, node])),
-    [layout]
+
+  const stepByKey = useMemo(
+    () => new Map(steps.map((s) => [s.step_key, s])),
+    [steps]
   );
   const agentNameByLookup = useMemo(() => {
     const lookup = new Map<string, string>();
-
     for (const agent of agents) {
       const keys = [
         agent.name,
@@ -462,142 +428,386 @@ export function WorkflowGraphBoard({
         agent.session_agent_id,
         agent.workflow_agent_session_id,
       ];
-
       for (const key of keys) {
-        const normalizedKey = key?.trim();
-        if (!normalizedKey || lookup.has(normalizedKey)) {
-          continue;
-        }
-        lookup.set(normalizedKey, agent.name);
+        const nk = key?.trim();
+        if (nk && !lookup.has(nk)) lookup.set(nk, agent.name);
       }
     }
-
     return lookup;
   }, [agents]);
-  const emphasizedNodeId = hoveredNodeId ?? selectedStepId ?? null;
-  const renderedEdges = useMemo<RenderEdge[]>(() => {
-    if (!layout) {
-      return [];
+
+  useEffect(() => {
+    const { nodes, edges, loops, planLoops, steps } = layoutInputRef.current;
+
+    if (nodes.length === 0) {
+      setLayout(null);
+      setLayoutError(null);
+      return;
     }
 
-    const groupedEdges = new Map<
-      string,
-      Array<{ edge: WorkflowGraphEdge; source: LayoutNode; target: LayoutNode }>
-    >();
+    const graph = buildElkGraph(nodes, edges, loops, planLoops ?? [], steps);
 
-    for (const edge of edges) {
-      const source = nodeById.get(edge.source);
-      const target = nodeById.get(edge.target);
-      if (!source || !target) {
-        continue;
-      }
+    elk
+      .layout(graph as Parameters<typeof elk.layout>[0])
+      .then((laidOut) => {
+        const result = laidOut as unknown as ElkLayoutNode;
+        setLayout(result);
+        setLayoutError(null);
 
-      const groupKey = `${source.rank}-${target.rank}`;
-      const group = groupedEdges.get(groupKey) ?? [];
-      group.push({ edge, source, target });
-      groupedEdges.set(groupKey, group);
-    }
-
-    const next: RenderEdge[] = [];
-    for (const group of groupedEdges.values()) {
-      group.sort(
-        (left, right) =>
-          left.source.order - right.source.order ||
-          left.target.order - right.target.order ||
-          left.edge.id.localeCompare(right.edge.id)
-      );
-
-      group.forEach(({ edge, source, target }, index) => {
-        const x1 = source.x + layout.cardWidth;
-        const y1 = source.y + layout.cardHeight / 2;
-        const x2 = target.x;
-        const y2 = target.y + layout.cardHeight / 2;
-        const laneOffset =
-          (index - (group.length - 1) / 2) * (compact ? 12 : 16);
-
-        next.push({
-          id: edge.id,
-          sourceId: edge.source,
-          targetId: edge.target,
-          path: buildSmoothStepPath({
-            x1,
-            y1,
-            x2,
-            y2,
-            laneOffset,
-            compact,
-          }),
-        });
+        if (
+          result.width &&
+          result.height &&
+          containerRef.current
+        ) {
+          const container = containerRef.current.getBoundingClientRect();
+          const scale = Math.min(
+            1,
+            (container.width - 100) / result.width,
+            (container.height - 100) / result.height
+          );
+          const x = (container.width - result.width * scale) / 2;
+          const y = (container.height - result.height * scale) / 2;
+          setTransform({ x, y, scale });
+        }
+      })
+      .catch((err) => {
+        console.error('ELK Layout error:', err);
+        setLayoutError(String(err?.message ?? err));
+        // Fallback: simple grid layout without ELK
+        const fallbackLayout = buildFallbackLayout(
+          graph.children ?? []
+        );
+        setLayout(fallbackLayout);
+        if (containerRef.current) {
+          const container = containerRef.current.getBoundingClientRect();
+          const fw = fallbackLayout.width ?? 800;
+          const fh = fallbackLayout.height ?? 400;
+          const scale = Math.min(
+            1,
+            (container.width - 100) / fw,
+            (container.height - 100) / fh
+          );
+          const x = (container.width - fw * scale) / 2;
+          const y = (container.height - fh * scale) / 2;
+          setTransform({ x, y, scale });
+        }
       });
+  }, [layoutTopologyKey]);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsFullscreen(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return undefined;
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const rect = container.getBoundingClientRect();
+      const mouseX = event.clientX - rect.left;
+      const mouseY = event.clientY - rect.top;
+      const scaleFactor = event.deltaY < 0 ? 1.1 : 0.9;
+
+      setTransform((current) => {
+        const newScale = Math.min(
+          Math.max(0.1, current.scale * scaleFactor),
+          4
+        );
+        const scaleRatio = newScale / current.scale;
+        return {
+          x: mouseX - (mouseX - current.x) * scaleRatio,
+          y: mouseY - (mouseY - current.y) * scaleRatio,
+          scale: newScale,
+        };
+      });
+    };
+
+    container.addEventListener('wheel', handleWheel, { passive: false });
+    return () => container.removeEventListener('wheel', handleWheel);
+  }, []);
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    if (e.button === 2 || e.button === 1 || (e.button === 0 && e.altKey)) {
+      isDragging.current = true;
+      lastMousePos.current = { x: e.clientX, y: e.clientY };
+      e.currentTarget.setPointerCapture(e.pointerId);
     }
+  };
 
-    return next;
-  }, [compact, edges, layout, nodeById]);
-  const loopRegions = useMemo(() => {
-    if (!layout || (loops.length === 0 && (planLoops?.length ?? 0) === 0)) {
-      return [];
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (isDragging.current) {
+      const dx = e.clientX - lastMousePos.current.x;
+      const dy = e.clientY - lastMousePos.current.y;
+      setTransform((prev) => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+      lastMousePos.current = { x: e.clientX, y: e.clientY };
     }
+  };
 
-    return buildLoopRegions({
-      loops,
-      planLoops: planLoops ?? [],
-      steps,
-      layoutNodes: layout.nodes,
-      cardWidth: layout.cardWidth,
-      cardHeight: layout.cardHeight,
-      selectedStepId,
-    });
-  }, [layout, loops, planLoops, selectedStepId, steps]);
+  const handlePointerUp = (e: React.PointerEvent) => {
+    if (isDragging.current) {
+      isDragging.current = false;
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  };
 
-  if (!layout) {
-    return null;
-  }
+  const handleFitView = () => {
+    if (
+      layout &&
+      layout.width &&
+      layout.height &&
+      containerRef.current
+    ) {
+      const container = containerRef.current.getBoundingClientRect();
+      const w = layout.width;
+      const h = layout.height;
+      const scale = Math.min(1, (container.width - 100) / w, (container.height - 100) / h);
+      const x = (container.width - w * scale) / 2;
+      const y = (container.height - h * scale) / 2;
+      setTransform({ x, y, scale });
+    }
+  };
 
-  const decreaseNodeScale = () =>
-    setNodeScale((value) => clampNodeScale(value - NODE_SCALE_STEP));
-  const increaseNodeScale = () =>
-    setNodeScale((value) => clampNodeScale(value + NODE_SCALE_STEP));
-  const scaleLabel = `${Math.round(nodeScale * 100)}%`;
+  const getStatusNodeStyles = (status?: string | null) => {
+    switch (status) {
+      case 'completed':
+      case 'pre_completed':
+        return 'border-emerald-500 shadow-sm';
+      case 'running':
+      case 'revising':
+        return 'border-indigo-500 ring-4 ring-indigo-500/20';
+      case 'failed':
+      case 'interrupted':
+        return 'border-rose-500 ring-4 ring-rose-500/20';
+      case 'waiting_review':
+      case 'waiting_input':
+        return 'border-amber-500 ring-4 ring-amber-400/40';
+      case 'ready':
+        return 'border-yellow-500 ring-2 ring-yellow-400/30';
+      default:
+        return 'border-slate-300 opacity-80';
+    }
+  };
+
+  const renderLayoutNodes = (
+    layoutNode: ElkLayoutNode,
+    offsetX = 0,
+    offsetY = 0
+  ): React.ReactElement[] => {
+    return (layoutNode.children || [])
+      .map((child) => {
+        const dataNode = nodes.find((n) => n.id === child.id);
+        const isLoop = !dataNode;
+
+        const absX = offsetX + (child.x || 0);
+        const absY = offsetY + (child.y || 0);
+
+        if (isLoop) {
+          const loopData = loops.find((l) => l.loop_key === child.id);
+          const loopStatus = loopData?.status ?? null;
+          const loopTone = workflowLoopStatusMeta(loopStatus);
+
+          return (
+            <div key={child.id}>
+              <div
+                className="absolute border border-dashed rounded-2xl pointer-events-none"
+                style={{
+                  left: absX,
+                  top: absY,
+                  width: child.width,
+                  height: child.height,
+                  borderColor: loopTone.borderColor,
+                  backgroundColor: 'rgba(241,245,249,0.3)',
+                }}
+              >
+                <div className="absolute top-0 left-0 bg-slate-200 text-slate-600 px-3 py-1 rounded-br-2xl rounded-tl-2xl text-[10px] font-bold tracking-widest uppercase shadow-sm flex items-center gap-1.5">
+                  <span>{child.id}</span>
+                  <span
+                    className={cn(
+                      'rounded-full border px-2 py-0.5 text-[9px]',
+                      loopTone.badgeClass
+                    )}
+                  >
+                    {loopTone.label}
+                  </span>
+                  {loopStatus === 'running' && (
+                    <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
+                  )}
+                </div>
+              </div>
+              {renderLayoutNodes(child, absX, absY)}
+            </div>
+          );
+        }
+
+        const step = stepByKey.get(child.id);
+        const status = step?.status ?? dataNode.data.status ?? 'pending';
+        const retryStepId = step?.id ?? null;
+        const canRetryStep =
+          !!onRetryStep &&
+          !!retryStepId &&
+          isRetryableWorkflowStepStatus(step?.status);
+        const isRetryPending =
+          !!retryStepId && pendingActionId === retryStepId;
+        const stepAgentLabel = step?.agent_name?.trim();
+        const agentName =
+          (stepAgentLabel
+            ? (agentNameByLookup.get(stepAgentLabel) ?? stepAgentLabel)
+            : null) ??
+          (dataNode.data.agentId
+            ? (agentNameByLookup.get(dataNode.data.agentId.trim()) ?? null)
+            : null) ??
+          'Lead';
+
+        return (
+          <div
+            key={child.id}
+            className={cn(
+              'absolute bg-white rounded-xl p-4 flex flex-col gap-2',
+              'border-2 shadow-sm cursor-pointer',
+              'transition-all duration-200 hover:-translate-y-1 hover:shadow-md',
+              getStatusNodeStyles(status),
+              selectedStepId === child.id &&
+                'ring-4 ring-blue-500/30 border-blue-500'
+            )}
+            style={{
+              left: absX,
+              top: absY,
+              width: child.width,
+              height: child.height,
+            }}
+            onClick={() => onSelectStep?.(child.id)}
+            onMouseEnter={() => setHoveredNodeId(child.id)}
+            onMouseLeave={() => setHoveredNodeId(null)}
+            role={onSelectStep ? 'button' : undefined}
+            tabIndex={onSelectStep ? 0 : -1}
+            onKeyDown={(e) => {
+              if (
+                onSelectStep &&
+                (e.key === 'Enter' || e.key === ' ')
+              ) {
+                e.preventDefault();
+                onSelectStep(child.id);
+              }
+            }}
+          >
+            <div className="flex items-center justify-between text-[10px] uppercase tracking-wider font-bold">
+              <span className="flex items-center gap-1.5 text-slate-600 truncate max-w-[120px]">
+                {agentName}
+              </span>
+              <span
+                className={cn(
+                  status === 'running' && 'text-indigo-500',
+                  status === 'completed' && 'text-emerald-500',
+                  (status === 'waiting_review' ||
+                    status === 'waiting_input') &&
+                    'text-amber-500',
+                  (status === 'failed' || status === 'interrupted') &&
+                    'text-rose-500',
+                  status === 'pending' && 'text-slate-400'
+                )}
+              >
+                {workflowStatusLabel(status)}
+              </span>
+            </div>
+            <div className="text-sm font-bold text-slate-900 leading-tight mt-1 truncate">
+              {step?.title ?? dataNode.data.title}
+            </div>
+            <p className="text-[11px] text-slate-500 leading-snug line-clamp-2 mt-auto">
+              {step?.summary_text ?? ''}
+            </p>
+
+            {status === 'running' && (
+              <div className="absolute -bottom-1 -left-0.5 -right-0.5 h-1.5 bg-indigo-100 rounded-b-xl overflow-hidden">
+                <motion.div
+                  className="h-full bg-indigo-500 w-1/2"
+                  animate={{ x: ['-100%', '200%'] }}
+                  transition={{
+                    duration: 1.5,
+                    repeat: Infinity,
+                    ease: 'linear',
+                  }}
+                />
+              </div>
+            )}
+
+            {canRetryStep && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (retryStepId) onRetryStep?.(retryStepId);
+                }}
+                disabled={isRetryPending}
+                className="absolute -bottom-3 right-3 inline-flex items-center gap-1 rounded-full bg-rose-600 px-2.5 py-1 text-[10px] font-semibold text-white shadow-sm hover:bg-rose-700 disabled:opacity-60 transition-colors"
+              >
+                <ArrowClockwiseIcon
+                  className={cn(
+                    'size-3',
+                    isRetryPending && 'animate-spin'
+                  )}
+                  weight="bold"
+                />
+                {t('workflow_retry', { defaultValue: '重试' })}
+              </button>
+            )}
+          </div>
+        );
+      })
+      .filter(Boolean) as React.ReactElement[];
+  };
+
+  if (!layout && nodes.length === 0) return null;
 
   return (
     <div
       className={cn(
-        'overflow-auto border border-white/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.95)_0%,rgba(241,245,249,0.92)_100%)] p-4 dark:border-[#243041] dark:bg-[linear-gradient(180deg,rgba(15,23,42,0.88)_0%,rgba(11,16,23,0.94)_100%)]',
+        'relative overflow-hidden',
         isFullscreen
-          ? 'fixed inset-3 z-[80] rounded-[28px] shadow-[0_30px_100px_rgba(15,23,42,0.34)] md:inset-6'
-          : 'relative rounded-[28px]',
+          ? 'fixed inset-3 z-[80] rounded-[28px] shadow-[0_30px_100px_rgba(15,23,42,0.34)] md:inset-6 bg-slate-100'
+          : 'rounded-[28px]',
         className
       )}
+      ref={containerRef}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerLeave={handlePointerUp}
+      onContextMenu={(e) => e.preventDefault()}
+      style={{
+        touchAction: 'none',
+        backgroundImage: `url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCI+CjxjaXJjbGUgY3g9IjEiIGN5PSIxIiByPSIxIiBmaWxsPSIjQ0JENUUxIi8+Cjwvc3ZnPg==')`,
+        minHeight: isFullscreen ? undefined : 480,
+        height: isFullscreen ? '100%' : undefined,
+      }}
     >
-      <div className="sticky left-0 top-0 z-20 mb-3 flex w-fit items-center gap-2 rounded-full border border-[#CBD5E1] bg-white/90 p-1 shadow-sm backdrop-blur dark:border-[#334155] dark:bg-[rgba(15,23,42,0.86)]">
+      <div className="absolute top-4 left-4 pointer-events-none z-10 text-xs text-slate-400 font-medium flex flex-col gap-1">
+        <span>(Tip: 滚轮缩放，右键拖拽平移)</span>
+        {layoutError && (
+          <span className="text-amber-500 font-semibold pointer-events-auto">
+            Layout warning: using fallback layout
+          </span>
+        )}
+      </div>
+
+      <div className="absolute top-4 right-4 z-20 flex items-center gap-2">
         <button
           type="button"
-          onClick={decreaseNodeScale}
-          disabled={nodeScale <= MIN_NODE_SCALE}
-          className="inline-flex size-8 items-center justify-center rounded-full text-[#475569] transition-colors hover:bg-[#F1F5F9] hover:text-[#0F172A] disabled:cursor-not-allowed disabled:text-[#CBD5E1] dark:text-[#CBD5E1] dark:hover:bg-[#1E293B] dark:hover:text-white dark:disabled:text-[#475569]"
-          aria-label="Decrease node size"
-          title="Decrease node size"
+          onClick={handleFitView}
+          className="p-2.5 bg-white text-slate-600 rounded-full shadow-md border border-slate-200 hover:bg-slate-50 hover:text-slate-900 transition-colors"
+          title="适应画布"
         >
-          <MagnifyingGlassMinusIcon className="size-4" weight="bold" />
-        </button>
-        <div className="min-w-[46px] select-none text-center text-xs font-semibold text-[#334155] dark:text-[#CBD5E1]">
-          {scaleLabel}
-        </div>
-        <button
-          type="button"
-          onClick={increaseNodeScale}
-          disabled={nodeScale >= MAX_NODE_SCALE}
-          className="inline-flex size-8 items-center justify-center rounded-full text-[#475569] transition-colors hover:bg-[#F1F5F9] hover:text-[#0F172A] disabled:cursor-not-allowed disabled:text-[#CBD5E1] dark:text-[#CBD5E1] dark:hover:bg-[#1E293B] dark:hover:text-white dark:disabled:text-[#475569]"
-          aria-label="Increase node size"
-          title="Increase node size"
-        >
-          <MagnifyingGlassPlusIcon className="size-4" weight="bold" />
+          <ArrowsInSimpleIcon className="size-4" weight="bold" />
         </button>
         <button
           type="button"
-          onClick={() => setIsFullscreen((value) => !value)}
-          className="inline-flex size-8 items-center justify-center rounded-full text-[#475569] transition-colors hover:bg-[#F1F5F9] hover:text-[#0F172A] dark:text-[#CBD5E1] dark:hover:bg-[#1E293B] dark:hover:text-white"
-          aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+          onClick={() => setIsFullscreen((v) => !v)}
+          className="p-2.5 bg-white text-slate-600 rounded-full shadow-md border border-slate-200 hover:bg-slate-50 hover:text-slate-900 transition-colors"
           title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
         >
           {isFullscreen ? (
@@ -607,277 +817,51 @@ export function WorkflowGraphBoard({
           )}
         </button>
       </div>
+
       <div
-        className="relative"
-        style={{ width: layout.width, height: layout.height }}
+        className="absolute transform-gpu origin-top-left"
+        style={{
+          transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
+        }}
       >
-        {loopRegions.map((region) => {
-          const loopTone = workflowLoopStatusMeta(region.status);
-          const rejectionReason = region.rejectionReason?.trim() || null;
-
-          return (
-            <div
-              key={region.id}
-              className={cn(
-                'pointer-events-none absolute rounded-[26px] border border-dashed backdrop-blur-[1px]',
-                loopTone.surfaceClass,
-                region.containsSelectedStep && 'ring-2 ring-[#60A5FA]/40'
-              )}
+        {layout && (
+          <>
+            <svg
+              className="absolute inset-0 pointer-events-none overflow-visible z-0"
               style={{
-                left: region.left,
-                top: region.top,
-                width: region.width,
-                height: region.height,
-                borderColor: loopTone.borderColor,
+                width: layout.width,
+                height: layout.height,
               }}
             >
-              <div className="flex flex-wrap items-start gap-2 px-3 pb-2 pt-3">
-                <span className="rounded-full border border-white/70 bg-white/90 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-[#0F172A] shadow-sm dark:border-[#1E293B] dark:bg-[rgba(15,23,42,0.92)] dark:text-white">
-                  {region.loopKey}
-                </span>
-                <span
-                  className={cn(
-                    'rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em]',
-                    loopTone.badgeClass
-                  )}
+              <defs>
+                <marker
+                  id="arrow"
+                  viewBox="0 0 10 10"
+                  refX="8"
+                  refY="5"
+                  markerWidth="6"
+                  markerHeight="6"
+                  orient="auto-start-reverse"
                 >
-                  {loopTone.label}
-                </span>
-                {region.userReviewRequired && (
-                  <span className="rounded-full border border-[#DDD6FE] bg-[#F5F3FF] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-[#6D28D9]">
-                    User Review
-                  </span>
-                )}
-              </div>
-              {rejectionReason && (
-                <div
-                  className={cn(
-                    'line-clamp-2 px-3 pb-3 text-[11px] leading-5',
-                    compact ? 'max-w-[220px]' : 'max-w-[360px]',
-                    loopTone.textClass
-                  )}
-                  title={rejectionReason}
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#cbd5e1" />
+                </marker>
+                <marker
+                  id="arrow-hover"
+                  viewBox="0 0 10 10"
+                  refX="8"
+                  refY="5"
+                  markerWidth="6"
+                  markerHeight="6"
+                  orient="auto-start-reverse"
                 >
-                  {rejectionReason}
-                </div>
-              )}
-            </div>
-          );
-        })}
-        <svg
-          className="pointer-events-none absolute inset-0 z-[1]"
-          width={layout.width}
-          height={layout.height}
-          viewBox={`0 0 ${layout.width} ${layout.height}`}
-        >
-          {renderedEdges.map((edge) => {
-            const isHighlighted =
-              !!emphasizedNodeId &&
-              (edge.sourceId === emphasizedNodeId ||
-                edge.targetId === emphasizedNodeId);
-            return (
-              <g key={edge.id}>
-                <path
-                  d={edge.path}
-                  fill="none"
-                  stroke={
-                    isHighlighted
-                      ? 'rgba(37,99,235,0.22)'
-                      : 'rgba(148,163,184,0.14)'
-                  }
-                  strokeWidth={(compact ? 8 : 10) * nodeScale}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-                <path
-                  d={edge.path}
-                  fill="none"
-                  stroke={isHighlighted ? '#2563EB' : '#94A3B8'}
-                  strokeWidth={
-                    (isHighlighted
-                      ? compact
-                        ? 3
-                        : 3.5
-                      : compact
-                        ? 2.25
-                        : 2.75) * nodeScale
-                  }
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  opacity={isHighlighted ? 1 : 0.88}
-                />
-              </g>
-            );
-          })}
-        </svg>
-
-        {layout.nodes.map((node) => {
-          const step = node.step;
-          const retryStepId = step?.id ?? null;
-          const canRetryStep =
-            !!onRetryStep &&
-            !!retryStepId &&
-            isRetryableWorkflowStepStatus(step?.status);
-          const isRetryPending =
-            !!retryStepId && pendingActionId === retryStepId;
-          const tone = workflowStatusTone(
-            step?.status ?? node.data.status,
-            node.id === selectedStepId
-          );
-          const reviewPhase = workflowReviewPhaseMeta(step?.review_phase);
-          const latestReview = step?.latest_review ?? null;
-          const latestReviewTone = workflowReviewVerdictMeta(
-            latestReview?.verdict
-          );
-          const latestReviewLabel = workflowLatestReviewLabel(latestReview);
-          const latestReviewFeedback = workflowLatestReviewFeedback(latestReview);
-          const stepAgentLabel = step?.agent_name?.trim();
-          const agentName =
-            (stepAgentLabel
-              ? (agentNameByLookup.get(stepAgentLabel) ?? stepAgentLabel)
-              : null) ??
-            (node.data.agentId
-              ? (agentNameByLookup.get(node.data.agentId.trim()) ?? null)
-              : null) ??
-            'Lead';
-
-          return (
-            <div
-              key={node.id}
-              role={onSelectStep ? 'button' : undefined}
-              tabIndex={onSelectStep ? 0 : -1}
-              onClick={() => onSelectStep?.(node.id)}
-              onKeyDown={(event) => {
-                if (!onSelectStep) {
-                  return;
-                }
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault();
-                  onSelectStep(node.id);
-                }
-              }}
-              onMouseEnter={() => setHoveredNodeId(node.id)}
-              onMouseLeave={() =>
-                setHoveredNodeId((prev) => (prev === node.id ? null : prev))
-              }
-              onFocus={() => setHoveredNodeId(node.id)}
-              onBlur={() =>
-                setHoveredNodeId((prev) => (prev === node.id ? null : prev))
-              }
-              className={cn(
-                'absolute z-[2] flex flex-col rounded-[26px] border bg-white/92 text-left transition-all duration-200 hover:-translate-y-0.5 hover:bg-white dark:bg-[rgba(15,23,42,0.92)] dark:hover:bg-[rgba(15,23,42,0.98)]',
-                compact ? 'p-3' : 'p-3.5',
-                onSelectStep && 'cursor-pointer',
-                tone.glowClass,
-                (node.id === selectedStepId || node.id === hoveredNodeId) &&
-                  'ring-2 ring-[#60A5FA]/70'
-              )}
-              style={{
-                left: node.x,
-                top: node.y,
-                width: layout.cardWidth,
-                height: layout.cardHeight,
-                borderColor: tone.borderColor,
-                boxShadow: `inset 0 1px 0 rgba(255,255,255,0.7), 0 0 0 1px ${tone.accentColor}`,
-              }}
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0 flex-1">
-                  <div className="line-clamp-2 text-sm font-semibold leading-5 text-[#0F172A] dark:text-white">
-                    {step?.title ?? node.data.title}
-                  </div>
-                </div>
-                <span
-                  className={cn(
-                    'shrink-0 rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-[0.16em]',
-                    tone.badgeClass
-                  )}
-                >
-                  {workflowStatusLabel(step?.status ?? node.data.status)}
-                </span>
-              </div>
-
-              {(reviewPhase || latestReviewLabel) && (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {reviewPhase && (
-                    <span
-                      className={cn(
-                        'rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em]',
-                        reviewPhase.badgeClass
-                      )}
-                    >
-                      {reviewPhase.label}
-                    </span>
-                  )}
-                  {latestReviewLabel && (
-                    <span
-                      className={cn(
-                        'rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em]',
-                        latestReviewTone.badgeClass
-                      )}
-                    >
-                      {latestReviewLabel}
-                    </span>
-                  )}
-                </div>
-              )}
-
-              {latestReviewFeedback && (
-                <div
-                  className={cn(
-                    'mt-2 line-clamp-2 text-[11px] leading-5',
-                    latestReviewTone.textClass
-                  )}
-                  title={latestReviewFeedback}
-                >
-                  {latestReviewFeedback}
-                </div>
-              )}
-
-              <div className="mt-auto flex items-end justify-between gap-2">
-                <div className="min-w-0 flex-1">
-                  <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#94A3B8]">
-                    Agent
-                  </div>
-                  <div className="min-w-0">
-                    <div className="mt-1 truncate text-xs font-semibold text-[#0F172A] dark:text-white">
-                      {agentName}
-                    </div>
-                  </div>
-                </div>
-                {canRetryStep ? (
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      if (retryStepId) {
-                        onRetryStep?.(retryStepId);
-                      }
-                    }}
-                    disabled={isRetryPending}
-                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#DC2626] px-2.5 py-1 text-[10px] font-semibold text-white transition-colors hover:bg-[#B91C1C] disabled:cursor-not-allowed disabled:bg-[#FCA5A5] disabled:text-white/90"
-                    aria-label={t('workflow_retry', {
-                      defaultValue: '重试',
-                    })}
-                  >
-                    <ArrowClockwiseIcon
-                      className={cn(
-                        'size-3.5',
-                        isRetryPending && 'animate-spin'
-                      )}
-                      weight="bold"
-                    />
-                    <span>
-                      {t('workflow_retry', {
-                        defaultValue: '重试',
-                      })}
-                    </span>
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          );
-        })}
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="#6366f1" />
+                </marker>
+              </defs>
+              {flattenEdges(layout, edges, hoveredNodeId)}
+            </svg>
+            {renderLayoutNodes(layout)}
+          </>
+        )}
       </div>
     </div>
   );

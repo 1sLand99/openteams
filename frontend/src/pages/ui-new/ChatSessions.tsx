@@ -1100,6 +1100,8 @@ export function ChatSessions() {
   const [workflowWindowOpen, setWorkflowWindowOpen] = useState(false);
   const [workflowWindowCardMessageId, setWorkflowWindowCardMessageId] =
     useState<string | null>(null);
+  const [workflowWindowFallbackProjection, setWorkflowWindowFallbackProjection] =
+    useState<WorkflowWindowProjection | null>(null);
   const [workflowCardRefreshNonce, setWorkflowCardRefreshNonce] = useState(0);
   const [
     workflowCardProjectionByMessageId,
@@ -1108,6 +1110,7 @@ export function ChatSessions() {
 
   useEffect(() => {
     setWorkflowCardProjectionByMessageId({});
+    setWorkflowWindowFallbackProjection(null);
   }, [activeSessionId]);
 
   const workflowCardMessageIds = useMemo(
@@ -1180,7 +1183,10 @@ export function ChatSessions() {
 
   const workflowWindowProjection =
     useMemo<WorkflowWindowProjection | null>(() => {
-      if (!workflowWindowOpen || !workflowWindowCardMessageId) return null;
+      if (!workflowWindowOpen) return null;
+      if (!workflowWindowCardMessageId) {
+        return workflowWindowFallbackProjection;
+      }
 
       const projectionFromCache =
         workflowCardProjectionByMessageId[workflowWindowCardMessageId];
@@ -1190,15 +1196,19 @@ export function ChatSessions() {
 
       const message = workflowCardMessageById.get(workflowWindowCardMessageId);
       if (!message) {
-        return null;
+        return workflowWindowFallbackProjection;
       }
 
-      return extractWorkflowCardProjection(message.meta);
+      return (
+        extractWorkflowCardProjection(message.meta) ??
+        workflowWindowFallbackProjection
+      );
     }, [
       workflowWindowOpen,
       workflowWindowCardMessageId,
       workflowCardProjectionByMessageId,
       workflowCardMessageById,
+      workflowWindowFallbackProjection,
     ]);
 
   const workflowExecutionId = workflowWindowProjection?.execution_id ?? null;
@@ -1403,17 +1413,30 @@ export function ChatSessions() {
 
   const handleOpenWorkflowWindow = useCallback(
     (projection: WorkflowWindowProjection) => {
-      const cardMsgId =
+      const findCardMessageId = (
+        predicate: (p: WorkflowCardProjection) => boolean
+      ) =>
         messages.find((m) => {
           const p =
             workflowCardProjectionByMessageId[m.id] ??
             extractWorkflowCardProjection(m.meta);
-          return (
-            p &&
-            p.execution_id === projection.execution_id &&
-            p.plan_id === projection.plan_id
-          );
+          return !!p && predicate(p);
         })?.id ?? null;
+      const cardMsgId =
+        (projection.execution_id && projection.plan_id
+          ? findCardMessageId(
+              (p) =>
+                p.execution_id === projection.execution_id &&
+                p.plan_id === projection.plan_id
+            )
+          : null) ??
+        (projection.execution_id
+          ? findCardMessageId((p) => p.execution_id === projection.execution_id)
+          : null) ??
+        (projection.plan_id
+          ? findCardMessageId((p) => p.plan_id === projection.plan_id)
+          : null);
+      setWorkflowWindowFallbackProjection(projection);
       setWorkflowWindowCardMessageId(cardMsgId);
       setWorkflowWindowOpen(true);
     },
@@ -1502,13 +1525,21 @@ export function ChatSessions() {
       return;
     }
 
+    if (workflowWindowOpen && workflowExecutionId === pendingExecutionId) {
+      autoOpenedWorkflowExecutionIdRef.current = pendingExecutionId;
+      return;
+    }
+
     autoOpenedWorkflowExecutionIdRef.current = pendingExecutionId;
+    setWorkflowWindowFallbackProjection(pendingProjection);
     setWorkflowWindowCardMessageId(pendingWorkflowCard.id);
     setWorkflowWindowOpen(true);
   }, [
     messages,
     pendingFinalReviewByExecutionId,
     workflowCardProjectionByMessageId,
+    workflowExecutionId,
+    workflowWindowOpen,
   ]);
 
   const pendingWorkflowActionId = useMemo(() => {
@@ -5469,12 +5500,6 @@ export function ChatSessions() {
       {/* Workflow Window */}
       {workflowWindowOpen && workflowWindowProjection && (
         <WorkflowWindow
-          key={
-            workflowWindowCardMessageId ??
-            workflowWindowProjection.execution_id ??
-            workflowWindowProjection.plan_id ??
-            'workflow-window'
-          }
           sessionId={activeSessionId}
           projection={workflowWindowProjection}
           transcript={workflowTranscriptEntries}
@@ -5483,6 +5508,7 @@ export function ChatSessions() {
           onClose={() => {
             setWorkflowWindowOpen(false);
             setWorkflowWindowCardMessageId(null);
+            setWorkflowWindowFallbackProjection(null);
           }}
           onExecute={handleExecutePlan}
           onPauseAll={handlePauseAll}

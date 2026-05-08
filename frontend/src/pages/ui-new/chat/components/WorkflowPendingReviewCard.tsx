@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { AlertCircle } from 'lucide-react';
 import type { WorkflowPendingReviewData } from '@/lib/api';
 
 type WorkflowPendingReviewCardProps = {
@@ -60,67 +61,76 @@ export function WorkflowPendingReviewCard({
   };
 
   return (
-    <div className="rounded-[24px] border border-[#FCD34D] bg-[#FFFBEB] p-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="rounded-full bg-white/80 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-[#92400E]">
-          Pending Review
-        </span>
-        <span className="rounded-full border border-[#FDE68A] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-[#B45309]">
+    <div className="bg-white border-2 border-amber-400 p-4 rounded-xl shadow-lg">
+      <div className="text-xs font-bold text-amber-800 flex items-center gap-2 mb-2">
+        <AlertCircle className="w-4 h-4" /> Pending Review
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <span className="rounded-full bg-amber-50 border border-amber-200 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-amber-700">
           {getReviewTypeLabel(pendingReview.review_type)}
         </span>
-        <span className="rounded-full border border-[#FDE68A] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-[#92400E]">
+        <span className="rounded-full bg-slate-50 border border-slate-200 px-2.5 py-1 text-[10px] font-bold uppercase tracking-widest text-slate-600">
           {pendingReview.target_title}
         </span>
       </div>
 
-      <div className="mt-3 text-sm font-semibold text-[#0F172A]">
+      <p className="text-[11px] text-slate-600 mb-3 leading-relaxed font-medium">
         {pendingReview.prompt_template.message || '请审核当前结果。'}
-      </div>
+      </p>
 
-      <div className="mt-3 rounded-[18px] border border-[#FDE68A] bg-white/80 p-3">
-        <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#92400E]">
-          Context Summary
+      {pendingReview.context_summary && (
+        <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 mb-3">
+          <div className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-1">
+            Context
+          </div>
+          <div className="text-[11px] text-slate-600 leading-relaxed whitespace-pre-wrap">
+            {pendingReview.context_summary}
+          </div>
         </div>
-        <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-[#475569]">
-          {pendingReview.context_summary}
-        </div>
-      </div>
+      )}
 
       {expandedReject && (
-        <div className="mt-3">
-          <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#991B1B]">
+        <div className="mb-3">
+          <div className="text-[10px] font-bold uppercase tracking-widest text-rose-700 mb-1">
             {feedbackField?.label ?? 'Feedback'}
           </div>
           <textarea
             value={feedback}
             onChange={(event) => setFeedback(event.target.value)}
-            rows={4}
+            rows={3}
             disabled={disabled}
             placeholder={feedbackField?.placeholder ?? '请填写具体修改意见'}
-            className="mt-2 w-full resize-y rounded-[18px] border border-[#FCA5A5] bg-white px-3 py-2 text-sm text-[#0F172A] outline-none transition-colors placeholder:text-[#94A3B8] focus:border-[#DC2626] disabled:cursor-not-allowed disabled:opacity-60"
+            className="w-full rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none transition-colors placeholder:text-slate-400 focus:border-rose-400 focus:ring-2 focus:ring-rose-400/20 disabled:cursor-not-allowed disabled:opacity-60"
           />
           {validationError && (
-            <div className="mt-2 text-xs text-[#991B1B]">{validationError}</div>
+            <div className="mt-1 text-[10px] text-rose-600">
+              {validationError}
+            </div>
           )}
         </div>
       )}
 
-      <div className="mt-4 flex flex-wrap gap-2">
+      <div className="flex gap-2">
         <button
           type="button"
           onClick={handleApprove}
           disabled={disabled || !onSubmit}
-          className="rounded-full bg-[#16A34A] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#15803D] disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex-1 py-1.5 bg-emerald-600 text-white rounded text-[10px] font-bold hover:bg-emerald-700 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          Approve
+          APPROVE
         </button>
         <button
           type="button"
           onClick={handleReject}
           disabled={disabled || !onSubmit}
-          className="rounded-full border border-[#FCA5A5] bg-white px-3 py-1.5 text-xs font-semibold text-[#991B1B] transition-colors hover:bg-[#FEF2F2] disabled:cursor-not-allowed disabled:opacity-50"
+          className={`flex-1 py-1.5 rounded text-[10px] font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+            expandedReject
+              ? 'bg-rose-50 border border-rose-200 text-rose-700'
+              : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
+          }`}
         >
-          {expandedReject ? 'Submit Reject' : 'Reject'}
+          {expandedReject ? 'SUBMIT REJECT' : 'REJECT'}
         </button>
       </div>
     </div>

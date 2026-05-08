@@ -1,3 +1,5 @@
+import { AlertCircle } from 'lucide-react';
+
 type FinalReviewTranscriptLike = {
   id: string;
   entry_type: string;
@@ -86,32 +88,34 @@ export function WorkflowFinalReviewCard({
   disabled,
 }: WorkflowFinalReviewCardProps) {
   return (
-    <div className="rounded-[24px] border border-[#FDE68A] bg-[#FFFBEB] p-4">
-      <div className="text-xs font-bold uppercase tracking-[0.16em] text-[#92400E]">
-        Final Review
+    <div className="bg-white border-2 border-amber-400 p-4 rounded-xl shadow-lg animate-in fade-in slide-in-from-bottom-4">
+      <div className="text-xs font-bold text-amber-800 flex items-center gap-2 mb-2">
+        <AlertCircle className="w-4 h-4" /> Final Review
       </div>
-      <div className="mt-2 text-sm font-semibold text-[#0F172A]">{message}</div>
+      <p className="text-[11px] text-slate-600 mb-3 leading-relaxed font-medium">
+        {message}
+      </p>
       {description && (
-        <div className="mt-1 text-xs leading-5 text-[#475569]">
+        <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">
           {description}
-        </div>
+        </p>
       )}
-      <div className="mt-3 flex flex-wrap gap-2">
+      <div className="flex gap-2">
         <button
           type="button"
           onClick={onAccept}
           disabled={disabled}
-          className="rounded-full bg-[#16A34A] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#15803D] disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex-1 py-1.5 bg-emerald-600 text-white rounded text-[10px] font-bold hover:bg-emerald-700 transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          接受
+          ACCEPT
         </button>
         <button
           type="button"
           onClick={onReject}
           disabled={disabled}
-          className="rounded-full border border-[#FCA5A5] bg-white px-3 py-1.5 text-xs font-semibold text-[#991B1B] transition-colors hover:bg-[#FEF2F2] disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex-1 py-1.5 bg-white border border-slate-300 text-slate-700 rounded text-[10px] font-bold hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          拒绝
+          REJECT
         </button>
       </div>
     </div>

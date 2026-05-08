@@ -1,29 +1,36 @@
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
-  ArrowClockwiseIcon,
-  ArrowUpIcon,
-  CaretDownIcon,
-  FunnelIcon,
-  PlayIcon,
-  PauseIcon,
-  StopIcon,
-} from '@phosphor-icons/react';
+  ChevronLeft,
+  Play,
+  Pause,
+  Square,
+  Bell,
+  X,
+  Send,
+  AlertCircle,
+  Loader2,
+  MessageSquare,
+  FileText,
+  Activity,
+  Bot,
+  RotateCcw,
+  Ban,
+} from 'lucide-react';
 import type { WorkflowCardData } from '@/lib/api';
 import { chatApi } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { ChatMarkdown } from '@/components/ui-new/primitives/conversation/ChatMarkdown';
 import { WorkflowIterationFeedbackCard } from './WorkflowIterationFeedbackCard';
-import { WorkflowPendingReviewCard } from './WorkflowPendingReviewCard';
 import { WorkflowGraphBoard } from './WorkflowGraphBoard';
 import {
   workflowLatestReviewFeedback,
   workflowLatestReviewLabel,
   workflowLoopStatusMeta,
   workflowReviewPhaseMeta,
-  workflowReviewVerdictMeta,
-  workflowStatusBadgeClass,
   workflowStatusLabel,
 } from './workflowStepPresentation';
 import {
@@ -38,7 +45,6 @@ import {
 } from './workflowControlContract';
 
 type WorkflowCardStep = WorkflowCardData['steps'][number];
-type WorkflowCardAgent = NonNullable<WorkflowCardData['agents']>[number];
 
 export type WorkflowWindowProjection = WorkflowCardData;
 
@@ -165,91 +171,6 @@ function getTranscriptMarkdown(entry: WorkflowTranscriptEntry): string | null {
   return null;
 }
 
-type WorkflowTranscriptRenderItem =
-  | {
-      kind: 'entry';
-      id: string;
-      entry: WorkflowTranscriptEntry;
-    }
-  | {
-      kind: 'thinking_group';
-      id: string;
-      entries: WorkflowTranscriptEntry[];
-      workflowAgentSessionId?: string | null;
-      stepId?: string | null;
-      agentName?: string | null;
-      createdAt: string;
-      content: string;
-    };
-
-function buildWorkflowTranscriptRenderItems(
-  entries: WorkflowTranscriptEntry[]
-): WorkflowTranscriptRenderItem[] {
-  const items: WorkflowTranscriptRenderItem[] = [];
-
-  for (let index = 0; index < entries.length; index += 1) {
-    const entry = entries[index];
-    if (entry.entry_type !== 'thinking') {
-      items.push({
-        kind: 'entry',
-        id: entry.id,
-        entry,
-      });
-      continue;
-    }
-
-    const groupedEntries = [entry];
-    let cursor = index + 1;
-
-    while (cursor < entries.length) {
-      const candidate = entries[cursor];
-      if (
-        candidate.entry_type !== 'thinking' ||
-        candidate.workflow_agent_session_id !==
-          entry.workflow_agent_session_id ||
-        candidate.step_id !== entry.step_id ||
-        candidate.agent_name !== entry.agent_name
-      ) {
-        break;
-      }
-
-      groupedEntries.push(candidate);
-      cursor += 1;
-    }
-
-    items.push({
-      kind: 'thinking_group',
-      id: `thinking-group-${groupedEntries[0].id}`,
-      entries: groupedEntries,
-      workflowAgentSessionId: entry.workflow_agent_session_id,
-      stepId: entry.step_id,
-      agentName: entry.agent_name,
-      createdAt: groupedEntries[0].created_at,
-      content: groupedEntries.map((item) => item.content).join('\n'),
-    });
-
-    index = cursor - 1;
-  }
-
-  return items;
-}
-
-function resolveWorkflowTranscriptStepTitle(
-  entry: Pick<WorkflowTranscriptEntry, 'step_id' | 'step_key'>,
-  stepById: Map<string, WorkflowCardStep>,
-  stepByKey: Map<string, WorkflowCardStep>
-): string | null {
-  const titleFromId = entry.step_id ? stepById.get(entry.step_id)?.title : null;
-  if (titleFromId?.trim()) {
-    return titleFromId.trim();
-  }
-
-  const titleFromKey = entry.step_key
-    ? stepByKey.get(entry.step_key)?.title
-    : null;
-  return titleFromKey?.trim() || null;
-}
-
 function hasAgentTranscriptMessageForStep(
   entries: WorkflowTranscriptEntry[],
   stepId?: string | null,
@@ -322,69 +243,6 @@ function buildStepContentTranscriptEntries(
     });
 }
 
-function workflowMessageTone(
-  messageType: WorkflowTranscriptEntry['message_type'],
-  entryType: string
-) {
-  if (entryType === 'approval_request') {
-    return {
-      rail: 'bg-[#F59E0B]',
-      badge: 'bg-[#FFFBEB] text-[#92400E]',
-      label: 'text-[#B45309]',
-    };
-  }
-  if (entryType === 'permission_request') {
-    return {
-      rail: 'bg-[#2563EB]',
-      badge: 'bg-[#EFF6FF] text-[#1D4ED8]',
-      label: 'text-[#1D4ED8]',
-    };
-  }
-  if (entryType === 'continue_confirmation') {
-    return {
-      rail: 'bg-[#16A34A]',
-      badge: 'bg-[#ECFDF5] text-[#166534]',
-      label: 'text-[#15803D]',
-    };
-  }
-  if (entryType === 'input_request') {
-    return {
-      rail: 'bg-[#4F46E5]',
-      badge: 'bg-[#EEF2FF] text-[#3730A3]',
-      label: 'text-[#4338CA]',
-    };
-  }
-  switch (messageType) {
-    case 'agent':
-      return {
-        rail: 'bg-[#2563EB]',
-        badge: 'bg-[#EFF6FF] text-[#1D4ED8]',
-        label: 'text-[#1E3A8A]',
-      };
-    case 'user':
-      return {
-        rail: 'bg-[#16A34A]',
-        badge: 'bg-[#F0FDF4] text-[#166534]',
-        label: 'text-[#166534]',
-      };
-    case 'control':
-      return {
-        rail: 'bg-[#D97706]',
-        badge: 'bg-[#FFF7ED] text-[#9A3412]',
-        label: 'text-[#B45309]',
-      };
-    default:
-      return {
-        rail: 'bg-[#94A3B8]',
-        badge: 'bg-[#F8FAFC] text-[#475569]',
-        label: 'text-[#475569]',
-      };
-  }
-}
-
-const WORKFLOW_COMPOSER_MIN_HEIGHT = 104;
-const WORKFLOW_COMPOSER_MAX_HEIGHT = 192;
-
 // -----------------------------------------------------------------------
 // Props
 // -----------------------------------------------------------------------
@@ -431,67 +289,6 @@ export type WorkflowWindowProps = {
   }) => void;
   pendingActionId?: string | null;
 };
-
-function AgentSelector({
-  agents,
-  selectedAgentId,
-  onSelect,
-}: {
-  agents: WorkflowCardAgent[];
-  selectedAgentId: string | null;
-  onSelect: (id: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const selected =
-    agents.find(
-      (agent) =>
-        (agent.workflow_agent_session_id ?? agent.session_agent_id) ===
-        selectedAgentId
-    ) ?? agents[0];
-
-  if (agents.length === 0 || !selected) {
-    return null;
-  }
-
-  return (
-    <div className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((prev) => !prev)}
-        className="flex items-center gap-1.5 rounded-lg border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#334155] transition-colors hover:bg-[#F8FAFC]"
-      >
-        <FunnelIcon className="size-3.5" weight="bold" />
-        {selected.name}
-        <CaretDownIcon className="size-3" weight="bold" />
-      </button>
-      {open && (
-        <div className="absolute left-0 top-full z-10 mt-1 min-w-[180px] rounded-lg border border-[#E2E8F0] bg-white py-1 shadow-lg">
-          {agents.map((agent) => {
-            const agentSessionId =
-              agent.workflow_agent_session_id ?? agent.session_agent_id;
-            return (
-              <button
-                type="button"
-                key={agent.session_agent_id}
-                onClick={() => {
-                  onSelect(agentSessionId);
-                  setOpen(false);
-                }}
-                className={cn(
-                  'block w-full px-3 py-1.5 text-left text-xs transition-colors hover:bg-[#F1F5F9]',
-                  selectedAgentId === agentSessionId &&
-                    'font-bold text-[#1D4ED8]'
-                )}
-              >
-                {agent.name}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // -----------------------------------------------------------------------
 // Approval Card
@@ -690,18 +487,465 @@ export function InputRequestCard({
   );
 }
 
-function WorkflowTranscriptFeed({
-  steps,
+// -----------------------------------------------------------------------
+// Inspector Card (side drawer)
+// -----------------------------------------------------------------------
+
+function InspectorCard({
+  step,
+  planNode,
+  agentName,
+  loop,
+  reviewPhase,
+  latestReviewLabel,
+  latestReviewFeedback,
+  loopTone,
+  onClose,
+  onOpenChat,
+  isChatVisible,
+  onInterruptStep,
+  onStopStep,
+  onRetryStep,
+  pendingActionId,
+  transcriptEntries,
+  isLoadingTranscript,
+}: {
+  step: WorkflowCardStep;
+  planNode: WorkflowCardData['plan']['nodes'][number] | null;
+  agentName: string;
+  loop: NonNullable<WorkflowCardData['loops']>[number] | null;
+  reviewPhase: ReturnType<typeof workflowReviewPhaseMeta>;
+  latestReviewLabel: string | null;
+  latestReviewFeedback: string | null;
+  loopTone: ReturnType<typeof workflowLoopStatusMeta>;
+  onClose: () => void;
+  onOpenChat: () => void;
+  isChatVisible: boolean;
+  onInterruptStep?: (stepId: string) => void;
+  onStopStep?: (stepId: string) => void;
+  onRetryStep?: (stepId: string) => void;
+  pendingActionId?: string | null;
+  transcriptEntries: WorkflowTranscriptEntry[];
+  isLoadingTranscript: boolean;
+}) {
+  const { t } = useTranslation('chat');
+  const [activeTab, setActiveTab] = useState<'STREAM' | 'OUTPUT'>('STREAM');
+
+  const statusColors: Record<string, string> = {
+    failed: 'bg-rose-50 text-rose-600 border-rose-200',
+    completed: 'bg-emerald-50 text-emerald-600 border-emerald-200',
+    waiting_review: 'bg-amber-50 text-amber-600 border-amber-200',
+    pre_completed: 'bg-amber-50 text-amber-600 border-amber-200',
+    running: 'bg-blue-50 text-blue-600 border-blue-200',
+    revising: 'bg-blue-50 text-blue-600 border-blue-200',
+    waiting_input: 'bg-indigo-50 text-indigo-600 border-indigo-200',
+    ready: 'bg-slate-50 text-slate-600 border-slate-200',
+    pending: 'bg-slate-50 text-slate-600 border-slate-200',
+  };
+
+  const instruction =
+    planNode?.data.instructions?.trim() ||
+    'No task instructions were provided for this step.';
+  const summaryText =
+    step.summary_text?.trim() ||
+    'No summary has been generated for this step yet.';
+  const isFailed = WORKFLOW_FAILURE_STEP_STATUSES.has(step.status);
+  const isCompleted = step.status === 'completed';
+  const hasFooterActions =
+    step.status === 'running' ||
+    step.status === 'waiting_review' ||
+    step.status === 'pre_completed' ||
+    isFailed;
+
+  const streamEntries = useMemo(
+    () =>
+      transcriptEntries.filter(
+        (e) =>
+          e.entry_type === 'message' ||
+          e.entry_type === 'error' ||
+          e.entry_type === 'thinking'
+      ),
+    [transcriptEntries]
+  );
+  const outputEntries = useMemo(
+    () =>
+      transcriptEntries.filter(
+        (e) =>
+          e.entry_type === 'summary' ||
+          e.entry_type === 'output' ||
+          e.entry_type === 'final_review'
+      ),
+    [transcriptEntries]
+  );
+
+  return (
+    <motion.div
+      initial={{ x: 60, opacity: 0 }}
+      animate={{ x: 0, opacity: 1 }}
+      exit={{ x: 60, opacity: 0 }}
+      transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+      className="w-[500px] h-[calc(100vh-40px)] max-h-[900px] mr-5 bg-white shadow-2xl rounded-3xl border border-slate-200 flex flex-col relative overflow-hidden"
+    >
+      <button
+        type="button"
+        onClick={onClose}
+        className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors z-20"
+      >
+        <X className="w-5 h-5" />
+      </button>
+
+      {/* Header */}
+      <header className="px-6 pt-5 pb-4 shrink-0 bg-white border-b border-slate-100 z-10 relative">
+        <div className="flex items-center gap-3 pr-8">
+          <h1 className="text-lg font-bold text-slate-800 m-0 leading-snug truncate">
+            {step.title}
+          </h1>
+          <span
+            className={cn(
+              'shrink-0 px-2 py-0.5 rounded flex items-center justify-center text-[10px] font-bold tracking-wider uppercase border',
+              statusColors[step.status] ?? statusColors.pending
+            )}
+          >
+            {workflowStatusLabel(step.status)}
+          </span>
+        </div>
+        <div className="mt-1.5 flex items-center gap-1.5 text-xs text-slate-500">
+          <Bot className="w-3.5 h-3.5 text-slate-400" />
+          <span>
+            {step.step_type} |{' '}
+            <span className="font-semibold text-slate-700">{agentName}</span>
+          </span>
+        </div>
+        {reviewPhase && (
+          <span
+            className={cn(
+              'mt-2 inline-flex rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider',
+              reviewPhase.badgeClass
+            )}
+          >
+            {reviewPhase.label}
+          </span>
+        )}
+      </header>
+
+      {/* Body */}
+      <div className="flex-1 overflow-y-auto p-6 bg-slate-50/50 flex flex-col gap-6">
+        {/* Task Instruction */}
+        <section>
+          <div className="flex items-center gap-2 mb-2">
+            <FileText className="w-4 h-4 text-slate-400" />
+            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+              Instruction
+            </h3>
+          </div>
+          <div className="p-4 rounded-xl text-sm leading-relaxed bg-white border border-slate-200 text-slate-700 shadow-sm whitespace-pre-wrap">
+            {instruction}
+          </div>
+        </section>
+
+        {/* Summary & Feedback */}
+        {(isFailed || isCompleted || latestReviewFeedback) && (
+          <section>
+            <div className="flex items-center gap-2 mb-2">
+              <AlertCircle className="w-4 h-4 text-slate-400" />
+              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                Summary & Feedback
+              </h3>
+            </div>
+            <div className="flex flex-col gap-3">
+              {isFailed && (
+                <div className="p-4 rounded-xl text-sm font-medium bg-rose-50 border border-rose-100 text-rose-700 shadow-sm whitespace-pre-wrap">
+                  {summaryText}
+                </div>
+              )}
+              {isCompleted && (
+                <div className="p-4 rounded-xl text-sm font-medium bg-emerald-50 border border-emerald-100 text-emerald-700 shadow-sm whitespace-pre-wrap">
+                  {summaryText}
+                </div>
+              )}
+              {latestReviewLabel && (
+                <div className="p-4 rounded-xl text-sm bg-amber-50/80 border border-amber-200 text-amber-800 shadow-sm">
+                  <strong className="block mb-1 font-semibold">
+                    {latestReviewLabel}
+                  </strong>
+                  {latestReviewFeedback && (
+                    <span className="whitespace-pre-wrap">
+                      {latestReviewFeedback}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
+
+        {/* Loop Context */}
+        {loop && (
+          <section>
+            <div className="flex items-center gap-2 mb-2">
+              <Activity className="w-4 h-4 text-slate-400" />
+              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                Loop Context
+              </h3>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-700">
+                {loop.loop_key}
+              </span>
+              <span
+                className={cn(
+                  'rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider',
+                  loopTone.badgeClass
+                )}
+              >
+                {loopTone.label}
+              </span>
+            </div>
+            {loop.rejection_reason?.trim() && (
+              <div
+                className={cn(
+                  'mt-2 text-xs leading-5 whitespace-pre-wrap',
+                  loopTone.textClass
+                )}
+              >
+                {loop.rejection_reason.trim()}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Execution Record */}
+        <section className="flex-1 flex flex-col min-h-[250px]">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Activity className="w-4 h-4 text-slate-400" />
+              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                Execution Record
+              </h3>
+            </div>
+            <div className="flex bg-slate-200/60 p-0.5 rounded-lg border border-slate-200/60 shadow-inner">
+              <button
+                type="button"
+                onClick={() => setActiveTab('STREAM')}
+                className={cn(
+                  'px-3 py-1.5 text-[10px] uppercase tracking-[1px] font-bold rounded-md transition-all',
+                  activeTab === 'STREAM'
+                    ? 'bg-white text-slate-700 shadow-sm'
+                    : 'text-slate-500 hover:text-slate-700'
+                )}
+              >
+                Stream
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('OUTPUT')}
+                className={cn(
+                  'px-3 py-1.5 text-[10px] uppercase tracking-[1px] font-bold rounded-md transition-all',
+                  activeTab === 'OUTPUT'
+                    ? 'bg-white text-slate-700 shadow-sm'
+                    : 'text-slate-500 hover:text-slate-700'
+                )}
+              >
+                Output
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 bg-white border border-slate-200 rounded-xl p-4 shadow-sm overflow-y-auto flex flex-col">
+            {isLoadingTranscript ? (
+              <div className="flex items-center justify-center gap-2 py-8 text-xs text-slate-400">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Loading transcript...
+              </div>
+            ) : activeTab === 'STREAM' ? (
+              streamEntries.length > 0 ? (
+                <div className="flex flex-col gap-4">
+                  {streamEntries.map((entry) => {
+                    const markdownContent = getTranscriptMarkdown(entry);
+                    const isError = entry.entry_type === 'error';
+                    return (
+                      <div key={entry.id} className="flex gap-3 items-start">
+                        <div
+                          className={cn(
+                            'w-7 h-7 shrink-0 rounded-lg flex items-center justify-center text-[11px] font-bold',
+                            entry.message_type === 'agent'
+                              ? 'bg-slate-800 text-white'
+                              : isError
+                                ? 'bg-rose-50 border border-rose-100 text-rose-600'
+                                : 'bg-indigo-50 border border-indigo-100 text-indigo-600'
+                          )}
+                        >
+                          {entry.message_type === 'agent'
+                            ? 'A'
+                            : isError
+                              ? '!'
+                              : 'S'}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span
+                              className={cn(
+                                'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded',
+                                isError
+                                  ? 'text-rose-600 bg-rose-50'
+                                  : entry.message_type === 'agent'
+                                    ? 'text-slate-600 bg-slate-100'
+                                    : 'text-indigo-600 bg-indigo-50'
+                              )}
+                            >
+                              {entry.agent_name ?? entry.message_type}
+                            </span>
+                          </div>
+                          {markdownContent ? (
+                            <ChatMarkdown
+                              content={markdownContent}
+                              maxWidth="100%"
+                              hideCopyButton
+                              textClassName={cn(
+                                'text-[13px] leading-relaxed',
+                                isError
+                                  ? 'text-rose-600'
+                                  : 'text-slate-700'
+                              )}
+                              className="w-full select-text"
+                            />
+                          ) : (
+                            <div
+                              className={cn(
+                                'text-[13px] leading-relaxed whitespace-pre-wrap select-text',
+                                isError ? 'text-rose-600' : 'text-slate-700'
+                              )}
+                            >
+                              {entry.content}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {step.status === 'running' && (
+                    <div className="flex items-center gap-2 text-slate-400 text-xs font-medium pl-10 animate-pulse py-2">
+                      Waiting for agent response...
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center justify-center py-8 text-xs text-slate-400">
+                  No stream messages for this step yet.
+                </div>
+              )
+            ) : outputEntries.length > 0 ? (
+              <div className="flex flex-col gap-6">
+                {outputEntries.map((entry) => {
+                  const markdownContent = getTranscriptMarkdown(entry);
+                  return (
+                    <div key={entry.id}>
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="w-1.5 h-6 bg-blue-500 rounded-full shrink-0" />
+                        <div className="bg-blue-50 text-blue-600 px-3 py-1.5 rounded-full text-xs font-bold tracking-wider uppercase">
+                          {entry.entry_type}
+                        </div>
+                      </div>
+                      {markdownContent ? (
+                        <div className="pl-4">
+                          <ChatMarkdown
+                            content={markdownContent}
+                            maxWidth="100%"
+                            hideCopyButton
+                            textClassName="text-[13px] text-slate-700 leading-relaxed"
+                            className="w-full select-text"
+                          />
+                        </div>
+                      ) : (
+                        <div className="pl-4 text-[13px] text-slate-700 leading-relaxed whitespace-pre-wrap select-text">
+                          {entry.content}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="flex items-center justify-center py-8 text-xs text-slate-400">
+                No output entries for this step yet.
+              </div>
+            )}
+          </div>
+        </section>
+      </div>
+
+      {/* Footer */}
+      {hasFooterActions && (
+        <footer className="p-4 shrink-0 bg-white border-t border-slate-100 flex gap-3 relative z-10">
+          <button
+            type="button"
+            onClick={onOpenChat}
+            className={cn(
+              'flex-1 py-3 px-4 rounded-xl font-semibold text-sm cursor-pointer transition-all flex items-center justify-center gap-2',
+              isChatVisible
+                ? 'bg-indigo-100 text-indigo-700'
+                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+            )}
+          >
+            <MessageSquare className="w-4 h-4" />
+            {isChatVisible ? 'Close Chat' : 'Open Chat'}
+          </button>
+
+          {step.status === 'running' && (onInterruptStep || onStopStep) && (
+            <button
+              type="button"
+              onClick={() => {
+                if (onInterruptStep) {
+                  onInterruptStep(step.id);
+                  return;
+                }
+                onStopStep?.(step.id);
+              }}
+              className="flex-1 py-3 px-4 rounded-xl font-semibold text-sm cursor-pointer transition-all flex items-center justify-center gap-2 bg-rose-50 text-rose-600 hover:bg-rose-100"
+            >
+              <Ban className="w-4 h-4" />
+              Terminate
+            </button>
+          )}
+          {isRetryableWorkflowStepStatus(step.status) && onRetryStep && (
+            <button
+              type="button"
+              onClick={() => onRetryStep(step.id)}
+              disabled={pendingActionId === step.id}
+              className="flex-1 py-3 px-4 rounded-xl font-semibold text-sm cursor-pointer transition-all flex items-center justify-center gap-2 bg-slate-900 text-white hover:bg-slate-800 shadow-md disabled:opacity-50"
+            >
+              <RotateCcw
+                className={cn(
+                  'w-4 h-4',
+                  pendingActionId === step.id && 'animate-spin'
+                )}
+              />
+              {t('workflow_retry', { defaultValue: 'Retry' })}
+            </button>
+          )}
+        </footer>
+      )}
+    </motion.div>
+  );
+}
+
+// -----------------------------------------------------------------------
+// Chat Panel (side panel alongside inspector)
+// -----------------------------------------------------------------------
+
+function ChatPanel({
+  step,
+  agentName,
   entries,
-  isLoading,
-  emptyMessage,
   pendingActionId,
   onApproval,
+  onClose,
+  onSendInput,
+  canSendInput,
 }: {
-  steps: WorkflowCardStep[];
+  step: WorkflowCardStep;
+  agentName: string;
   entries: WorkflowTranscriptEntry[];
-  isLoading?: boolean;
-  emptyMessage: string;
   pendingActionId?: string | null;
   onApproval?: (
     stepId: string,
@@ -709,288 +953,204 @@ function WorkflowTranscriptFeed({
     transcriptId: string,
     inputText?: string
   ) => void;
+  onClose: () => void;
+  onSendInput?: (stepId: string, inputText: string) => void;
+  canSendInput: boolean;
 }) {
-  const renderItems = useMemo(
-    () => buildWorkflowTranscriptRenderItems(entries),
-    [entries]
-  );
-  const stepById = useMemo(
-    () => new Map(steps.map((step) => [step.id, step])),
-    [steps]
-  );
-  const stepByKey = useMemo(
-    () => new Map(steps.map((step) => [step.step_key, step])),
-    [steps]
-  );
-  const [collapsedThinkingGroups, setCollapsedThinkingGroups] = useState<
-    Record<string, boolean>
-  >({});
+  const [inputText, setInputText] = useState('');
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-  if (entries.length === 0) {
-    return (
-      <div className="flex h-full min-h-[240px] items-center justify-center rounded-[24px] border border-dashed border-[#CBD5E1] bg-[#F8FAFC] px-5 text-center text-sm text-[#94A3B8] dark:border-[#334155] dark:bg-[rgba(15,23,42,0.45)]">
-        {isLoading ? 'Loading step transcript...' : emptyMessage}
-      </div>
-    );
-  }
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [entries.length]);
+
+  const handleSend = () => {
+    const trimmed = inputText.trim();
+    if (!trimmed || !onSendInput) return;
+    onSendInput(step.id, trimmed);
+    setInputText('');
+  };
 
   return (
-    <div className="divide-y divide-[#CBD5E1] dark:divide-[#334155]">
-      {renderItems.map((item) => {
-        if (item.kind === 'thinking_group') {
-          const tone = workflowMessageTone('agent', 'thinking');
-          const collapsed = collapsedThinkingGroups[item.id] ?? true;
-          const stepTitle = resolveWorkflowTranscriptStepTitle(
-            item.entries[0],
-            stepById,
-            stepByKey
-          );
-          const agentLabel = stepTitle ?? item.agentName ?? 'agent';
+    <div className="w-[320px] bg-[#F8FAFC] h-full border-l border-slate-200 flex flex-col shadow-2xl">
+      <div className="p-4 border-b border-slate-200 bg-white flex items-center gap-3 shrink-0">
+        <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-white text-xs font-bold shadow-sm">
+          {agentName.substring(0, 2).toUpperCase()}
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="font-semibold text-slate-800 text-xs truncate">
+            Agent Conversation
+          </h2>
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-500" />
+            <span className="text-[10px] text-slate-500 font-medium">
+              {agentName}
+            </span>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-slate-400 hover:text-slate-600 transition-colors"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
 
-          return (
-            <div key={item.id} className="py-5 first:pt-0 last:pb-0">
-              <div className="flex gap-3">
-                <div
-                  className={cn(
-                    'mt-1 h-4 w-1 shrink-0 rounded-full',
-                    tone.rail
-                  )}
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-3 text-[11px]">
-                    <span
-                      className={cn(
-                        'rounded-full px-2 py-0.5 font-semibold uppercase tracking-[0.14em]',
-                        tone.badge
-                      )}
-                    >
-                      {agentLabel}
-                    </span>
+      <div
+        ref={scrollRef}
+        className="flex-1 p-4 space-y-4 overflow-y-auto flex flex-col py-6"
+      >
+        {entries.map((entry) => {
+          const isUser = entry.message_type === 'user';
+          const markdownContent = getTranscriptMarkdown(entry);
+
+          if (
+            entry.entry_type === 'approval_request' ||
+            entry.entry_type === 'permission_request' ||
+            entry.entry_type === 'continue_confirmation'
+          ) {
+            const meta = parseWorkflowTranscriptMeta(entry.meta_json);
+            const resolved = meta?.resolved === true;
+            return (
+              <div
+                key={entry.id}
+                className="bg-white border-2 border-amber-400 p-4 rounded-xl shadow-lg"
+              >
+                <div className="text-xs font-bold text-amber-800 flex items-center gap-2 mb-2">
+                  <AlertCircle className="w-4 h-4" />{' '}
+                  {entry.entry_type === 'approval_request'
+                    ? 'Approval Required'
+                    : entry.entry_type === 'permission_request'
+                      ? 'Permission Request'
+                      : 'Continue?'}
+                </div>
+                <p className="text-[11px] text-slate-600 mb-3 leading-relaxed font-medium">
+                  {entry.content}
+                </p>
+                {!resolved && entry.step_id && onApproval && (
+                  <div className="flex gap-2">
                     <button
                       type="button"
                       onClick={() =>
-                        setCollapsedThinkingGroups((previous) => ({
-                          ...previous,
-                          [item.id]: !collapsed,
-                        }))
+                        onApproval(
+                          entry.step_id!,
+                          entry.entry_type === 'approval_request'
+                            ? 'approved'
+                            : entry.entry_type === 'permission_request'
+                              ? 'granted'
+                              : 'continued',
+                          entry.id
+                        )
                       }
-                      className="shrink-0 rounded-full border border-[#CBD5E1] bg-white px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-[#64748B] transition-colors hover:bg-[#F8FAFC] dark:border-[#334155] dark:bg-transparent dark:text-[#CBD5E1]"
+                      disabled={pendingActionId === entry.id}
+                      className="flex-1 py-1.5 bg-emerald-600 text-white rounded text-[10px] font-bold hover:bg-emerald-700 transition-colors shadow-sm disabled:opacity-50"
                     >
-                      {collapsed
-                        ? `Show ${item.entries.length} line${
-                            item.entries.length === 1 ? '' : 's'
-                          }`
-                        : 'Hide details'}
+                      {entry.entry_type === 'continue_confirmation'
+                        ? 'CONTINUE'
+                        : 'APPROVE'}
                     </button>
-                  </div>
-
-                  {!collapsed && (
-                    <div
-                      className="mt-2 space-y-1 overflow-auto select-text"
-                      style={{ maxHeight: WORKFLOW_COMPOSER_MAX_HEIGHT }}
-                    >
-                      {item.entries.map((thinkingEntry) => (
-                        <div
-                          key={thinkingEntry.id}
-                          className="truncate select-text text-[12px] leading-6 text-[#334155] dark:text-[#CBD5E1]"
-                          title={thinkingEntry.content}
-                        >
-                          {thinkingEntry.content}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          );
-        }
-
-        const { entry } = item;
-        const meta = parseWorkflowTranscriptMeta(entry.meta_json);
-        const tone = workflowMessageTone(entry.message_type, entry.entry_type);
-        const stepTitle = resolveWorkflowTranscriptStepTitle(
-          entry,
-          stepById,
-          stepByKey
-        );
-        const headerLabel = stepTitle ?? entry.agent_name ?? entry.message_type;
-        const secondaryLabel = stepTitle
-          ? entry.agent_name && entry.agent_name !== 'BACKEND'
-            ? entry.agent_name
-            : null
-          : entry.entry_type;
-        const resolved = meta?.resolved === true;
-        const markdownContent = getTranscriptMarkdown(entry);
-        const descriptionText =
-          typeof meta?.description === 'string' ? meta.description : null;
-        const markdownTextClassName =
-          entry.entry_type === 'error'
-            ? 'text-[13px] leading-6 text-[#991B1B] dark:text-[#FECACA]'
-            : 'text-[13px] leading-6 text-[#0F172A] dark:text-white';
-
-        return (
-          <div key={entry.id} className="py-5 first:pt-0 last:pb-0">
-            <div className="flex gap-3">
-              <div
-                className={cn('mt-1 h-4 w-1 shrink-0 rounded-full', tone.rail)}
-              />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 text-[11px]">
-                  <span
-                    className={cn(
-                      'rounded-full px-2 py-0.5 font-semibold uppercase tracking-[0.14em]',
-                      tone.badge
+                    {entry.entry_type !== 'continue_confirmation' && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onApproval(
+                            entry.step_id!,
+                            entry.entry_type === 'approval_request'
+                              ? 'rejected'
+                              : 'denied',
+                            entry.id
+                          )
+                        }
+                        disabled={pendingActionId === entry.id}
+                        className="flex-1 py-1.5 bg-white border border-slate-300 text-slate-700 rounded text-[10px] font-bold hover:bg-slate-50 transition-colors disabled:opacity-50"
+                      >
+                        REJECT
+                      </button>
                     )}
-                  >
-                    {headerLabel}
-                  </span>
-                  {secondaryLabel ? (
-                    <span
-                      className={cn(
-                        'font-medium uppercase tracking-[0.14em]',
-                        tone.label
-                      )}
-                    >
-                      {secondaryLabel}
-                    </span>
-                  ) : null}
-                </div>
-                {markdownContent ? (
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          return (
+            <div
+              key={entry.id}
+              className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
+            >
+              <div
+                className={cn(
+                  'text-xs leading-relaxed',
+                  isUser
+                    ? 'max-w-[85%] p-3 bg-indigo-500 text-white rounded-2xl rounded-tr-none shadow-sm'
+                    : 'w-full py-2 bg-transparent text-slate-800'
+                )}
+              >
+                {isUser ? (
+                  entry.content
+                ) : markdownContent ? (
                   <ChatMarkdown
                     content={markdownContent}
                     maxWidth="100%"
                     hideCopyButton
-                    textClassName={markdownTextClassName}
-                    className="mt-2 w-full select-text"
+                    textClassName="text-[13px]"
+                    className="w-full select-text"
                   />
                 ) : (
-                  <div className="mt-2 whitespace-pre-wrap select-text text-[13px] leading-6 text-[#0F172A] dark:text-white">
-                    {entry.content}
-                    {entry.entry_type === 'input_request' && descriptionText
-                      ? `\n\n${descriptionText}`
-                      : ''}
-                  </div>
+                  <span className="text-[13px]">{entry.content}</span>
                 )}
-
-                {entry.entry_type !== 'input_request' && descriptionText ? (
-                  <div className="mt-1 whitespace-pre-wrap select-text text-[13px] leading-6 text-[#64748B] dark:text-[#94A3B8]">
-                    {descriptionText}
-                  </div>
-                ) : null}
-
-                {entry.entry_type === 'approval_request' ? (
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        entry.step_id &&
-                        onApproval?.(entry.step_id, 'approved', entry.id)
-                      }
-                      disabled={
-                        !entry.step_id ||
-                        resolved ||
-                        !onApproval ||
-                        pendingActionId === entry.id
-                      }
-                      className="rounded-full bg-[#16A34A] px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-[#15803D] disabled:opacity-50"
-                    >
-                      Approve
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        entry.step_id &&
-                        onApproval?.(entry.step_id, 'rejected', entry.id)
-                      }
-                      disabled={
-                        !entry.step_id ||
-                        resolved ||
-                        !onApproval ||
-                        pendingActionId === entry.id
-                      }
-                      className="rounded-full border border-[#CBD5E1] bg-white px-3 py-1 text-xs font-semibold text-[#475569] transition-colors hover:bg-[#F8FAFC] disabled:opacity-50 dark:border-[#334155] dark:bg-transparent dark:text-[#CBD5E1]"
-                    >
-                      Reject
-                    </button>
-                  </div>
-                ) : null}
-
-                {entry.entry_type === 'permission_request' ? (
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        entry.step_id &&
-                        onApproval?.(entry.step_id, 'granted', entry.id)
-                      }
-                      disabled={
-                        !entry.step_id ||
-                        resolved ||
-                        !onApproval ||
-                        pendingActionId === entry.id
-                      }
-                      className="rounded-full bg-[#2563EB] px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-[#1D4ED8] disabled:opacity-50"
-                    >
-                      Grant
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        entry.step_id &&
-                        onApproval?.(entry.step_id, 'denied', entry.id)
-                      }
-                      disabled={
-                        !entry.step_id ||
-                        resolved ||
-                        !onApproval ||
-                        pendingActionId === entry.id
-                      }
-                      className="rounded-full border border-[#CBD5E1] bg-white px-3 py-1 text-xs font-semibold text-[#475569] transition-colors hover:bg-[#F8FAFC] disabled:opacity-50 dark:border-[#334155] dark:bg-transparent dark:text-[#CBD5E1]"
-                    >
-                      Deny
-                    </button>
-                  </div>
-                ) : null}
-
-                {entry.entry_type === 'continue_confirmation' ? (
-                  <div className="mt-3">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        entry.step_id &&
-                        onApproval?.(entry.step_id, 'continued', entry.id)
-                      }
-                      disabled={
-                        !entry.step_id ||
-                        resolved ||
-                        !onApproval ||
-                        pendingActionId === entry.id
-                      }
-                      className="rounded-full bg-[#16A34A] px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-[#15803D] disabled:opacity-50"
-                    >
-                      Continue
-                    </button>
-                  </div>
-                ) : null}
               </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
+
+      <div className="p-4 bg-white border-t border-slate-200 shrink-0">
+        <div className="relative">
+          <input
+            type="text"
+            value={inputText}
+            onChange={(e) => setInputText(e.target.value)}
+            placeholder="Reply to agent..."
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            disabled={!canSendInput}
+            className="w-full pl-4 pr-10 py-3 bg-slate-100 border-none rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-shadow disabled:opacity-60 disabled:cursor-not-allowed"
+          />
+          <button
+            type="button"
+            onClick={handleSend}
+            disabled={!inputText.trim() || !canSendInput}
+            className={cn(
+              'absolute right-3 top-2.5 w-6 h-6 flex items-center justify-center transition-colors',
+              inputText.trim() && canSendInput
+                ? 'text-indigo-600 hover:text-indigo-700'
+                : 'text-slate-400'
+            )}
+          >
+            <Send className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
 
 // -----------------------------------------------------------------------
-// Workflow Window
+// Workflow Window (Full-Page Layout)
 // -----------------------------------------------------------------------
 
 export function WorkflowWindow({
   sessionId,
   projection,
   transcript = [],
-  runtimeMessages = [],
   isOpen,
   onClose,
   onExecute,
@@ -1006,17 +1166,13 @@ export function WorkflowWindow({
   onSubmitIterationFeedback,
   pendingActionId,
 }: WorkflowWindowProps) {
-  const { t } = useTranslation('chat');
-  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-  const [detailStepId, setDetailStepId] = useState<string | null>(null);
-  const [composerValue, setComposerValue] = useState('');
+  const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
+  const [isChatVisible, setIsChatVisible] = useState(false);
   const [runtimeInputTranscripts, setRuntimeInputTranscripts] = useState<
     WorkflowTranscriptEntry[]
   >([]);
   const initializedWorkflowKeyRef = useRef<string | null>(null);
   const previousExecutionIdRef = useRef<string | null>(null);
-  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const isPreview =
     projection.state === 'preview_ready' ||
@@ -1050,7 +1206,6 @@ export function WorkflowWindow({
   const leadAgentName = agents[0]?.name ?? 'Lead';
   const agentSessionIdByLookup = useMemo(() => {
     const lookup = new Map<string, string>();
-
     for (const agent of agents) {
       const agentSessionId =
         agent.workflow_agent_session_id ?? agent.session_agent_id;
@@ -1060,21 +1215,16 @@ export function WorkflowWindow({
         agent.session_agent_id,
         agent.workflow_agent_session_id,
       ];
-
       for (const key of keys) {
         const normalizedKey = key?.trim();
-        if (!normalizedKey || lookup.has(normalizedKey)) {
-          continue;
-        }
+        if (!normalizedKey || lookup.has(normalizedKey)) continue;
         lookup.set(normalizedKey, agentSessionId);
       }
     }
-
     return lookup;
   }, [agents]);
   const agentNameByLookup = useMemo(() => {
     const lookup = new Map<string, string>();
-
     for (const agent of agents) {
       const keys = [
         agent.name,
@@ -1082,16 +1232,12 @@ export function WorkflowWindow({
         agent.session_agent_id,
         agent.workflow_agent_session_id,
       ];
-
       for (const key of keys) {
         const normalizedKey = key?.trim();
-        if (!normalizedKey || lookup.has(normalizedKey)) {
-          continue;
-        }
+        if (!normalizedKey || lookup.has(normalizedKey)) continue;
         lookup.set(normalizedKey, agent.name);
       }
     }
-
     return lookup;
   }, [agents]);
   const stepByKey = useMemo(
@@ -1102,36 +1248,12 @@ export function WorkflowWindow({
     () => new Map(projection.plan.nodes.map((node) => [node.id, node])),
     [projection.plan.nodes]
   );
-  const workflowLoops = projection.loops ?? [];
+  const workflowLoops = useMemo(() => projection.loops ?? [], [
+    projection.loops,
+  ]);
   const loopByKey = useMemo(
     () => new Map(workflowLoops.map((loop) => [loop.loop_key, loop])),
     [workflowLoops]
-  );
-  const orderedActionableSteps = useMemo(
-    () =>
-      [...projection.steps].sort((left, right) => {
-        const priority = (status: string) => {
-          switch (status) {
-            case 'running':
-              return 0;
-            case 'revising':
-              return 1;
-            case 'waiting_input':
-            case 'waiting_review':
-            case 'pre_completed':
-              return 2;
-            case 'failed':
-              return 3;
-            case 'ready':
-              return 4;
-            default:
-              return 10;
-          }
-        };
-
-        return priority(left.status) - priority(right.status);
-      }),
-    [projection.steps]
   );
   const workflowInstanceKey = useMemo(
     () => `${projection.execution_id ?? ''}::${projection.plan_id ?? ''}`,
@@ -1140,348 +1262,155 @@ export function WorkflowWindow({
   const resolveStepAgentName = useCallback(
     (step?: WorkflowCardStep | null) => {
       const rawAgent = step?.agent_name?.trim();
-      if (!rawAgent) {
-        return leadAgentName;
-      }
+      if (!rawAgent) return leadAgentName;
       return agentNameByLookup.get(rawAgent) ?? rawAgent;
     },
     [agentNameByLookup, leadAgentName]
   );
   const resolveStepAgentId = useCallback(
     (step?: WorkflowCardStep | null) => {
-      if (!step) {
-        return leadAgentId;
-      }
+      if (!step) return leadAgentId;
       const rawAgent = step.agent_name?.trim();
-      if (!rawAgent) {
-        return leadAgentId;
-      }
+      if (!rawAgent) return leadAgentId;
       return agentSessionIdByLookup.get(rawAgent) ?? leadAgentId;
     },
     [agentSessionIdByLookup, leadAgentId]
   );
-  const findPreferredStepForAgent = useCallback(
-    (agentId: string | null) => {
-      if (!agentId) {
-        return orderedActionableSteps[0] ?? projection.steps[0] ?? null;
-      }
-      return (
-        orderedActionableSteps.find(
-          (step) => resolveStepAgentId(step) === agentId
-        ) ??
-        projection.steps.find((step) => resolveStepAgentId(step) === agentId) ??
-        null
-      );
-    },
-    [orderedActionableSteps, projection.steps, resolveStepAgentId]
-  );
 
+  const progressPercent = useMemo(() => {
+    if (projection.total_step_count === 0) return 0;
+    return Math.round(
+      (projection.completed_step_count / projection.total_step_count) * 100
+    );
+  }, [projection.completed_step_count, projection.total_step_count]);
+
+  const isRunning =
+    projection.execution_status === 'running' || canPauseExecution;
+
+  // Reset state on workflow instance change
   useEffect(() => {
-    if (!isOpen) {
-      return;
-    }
-
-    const initialStep =
-      orderedActionableSteps[0] ?? projection.steps[0] ?? null;
-    const initialStepKey = initialStep?.step_key ?? null;
-    const initialAgentId = resolveStepAgentId(initialStep);
-
+    if (!isOpen) return;
     if (initializedWorkflowKeyRef.current !== workflowInstanceKey) {
       initializedWorkflowKeyRef.current = workflowInstanceKey;
-      setSelectedStepId(initialStepKey);
-      setSelectedAgentId(initialAgentId);
-      setDetailStepId(null);
-      setComposerValue('');
-      return;
+      setActiveNodeId(null);
+      setIsChatVisible(false);
     }
-
-    setSelectedStepId((prev) => {
-      if (!prev) {
-        return initialStepKey;
-      }
-      return stepByKey.has(prev) ? prev : initialStepKey;
-    });
-
-    setSelectedAgentId((prev) => {
-      if (
-        prev &&
-        agents.some(
-          (agent) =>
-            (agent.workflow_agent_session_id ?? agent.session_agent_id) === prev
-        )
-      ) {
-        return prev;
-      }
-      return initialAgentId;
-    });
-
-    setDetailStepId((prev) => (prev && stepByKey.has(prev) ? prev : null));
-  }, [
-    agents,
-    isOpen,
-    orderedActionableSteps,
-    projection.steps,
-    resolveStepAgentId,
-    stepByKey,
-    workflowInstanceKey,
-  ]);
+  }, [isOpen, workflowInstanceKey]);
 
   useEffect(() => {
-    if (!isOpen || typeof document === 'undefined') {
-      return undefined;
-    }
-
-    const previousOverflow = document.body.style.overflow;
+    if (!isOpen || typeof document === 'undefined') return undefined;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        if (detailStepId) {
-          setDetailStepId(null);
+        if (isChatVisible) {
+          setIsChatVisible(false);
+          return;
+        }
+        if (activeNodeId) {
+          setActiveNodeId(null);
           return;
         }
         onClose();
       }
     };
-
+    const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     window.addEventListener('keydown', handleKeyDown);
-
     return () => {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [detailStepId, isOpen, onClose]);
+  }, [activeNodeId, isChatVisible, isOpen, onClose]);
 
   useEffect(() => {
     if (!isOpen) {
-      setDetailStepId(null);
+      setActiveNodeId(null);
+      setIsChatVisible(false);
     }
   }, [isOpen]);
 
   useEffect(() => {
-    const textarea = composerTextareaRef.current;
-    if (!textarea) {
+    if (!isOpen || !projection.execution_id) {
+      setRuntimeInputTranscripts([]);
       return;
     }
+    if (previousExecutionIdRef.current !== projection.execution_id) {
+      previousExecutionIdRef.current = projection.execution_id;
+      setRuntimeInputTranscripts([]);
+    }
+  }, [isOpen, projection.execution_id]);
 
-    textarea.style.height = `${WORKFLOW_COMPOSER_MIN_HEIGHT}px`;
-    const fullHeight = textarea.scrollHeight;
-    const shouldEnableScroll = fullHeight > WORKFLOW_COMPOSER_MAX_HEIGHT;
-    const nextHeight = Math.min(fullHeight, WORKFLOW_COMPOSER_MAX_HEIGHT);
-    textarea.style.height = `${Math.max(
-      nextHeight,
-      WORKFLOW_COMPOSER_MIN_HEIGHT
-    )}px`;
-    textarea.style.overflowY = shouldEnableScroll ? 'auto' : 'hidden';
-  }, [composerValue, isOpen]);
-
-  const selectedStep = projection.steps.find(
-    (s) => s.step_key === selectedStepId
+  // Derived data for active step
+  const activeStep = useMemo(
+    () =>
+      activeNodeId
+        ? projection.steps.find((s) => s.step_key === activeNodeId) ?? null
+        : null,
+    [activeNodeId, projection.steps]
   );
-  const selectedAgent =
-    agents.find(
-      (agent) =>
-        (agent.workflow_agent_session_id ?? agent.session_agent_id) ===
-        selectedAgentId
-    ) ??
-    agents[0] ??
-    null;
-  const selectedWorkflowAgentSessionId = selectedAgent
-    ? (selectedAgent.workflow_agent_session_id ??
-      selectedAgent.session_agent_id)
+  const activePlanNode = activeNodeId ? planNodeById.get(activeNodeId) ?? null : null;
+  const activeStepLoop = activeStep?.loop_key
+    ? (loopByKey.get(activeStep.loop_key) ?? null)
     : null;
-  const selectedStepInputRequest = useMemo(() => {
-    if (!selectedStep || selectedStep.status !== 'waiting_input') {
-      return null;
-    }
-
-    for (let index = transcript.length - 1; index >= 0; index -= 1) {
-      const entry = transcript[index];
-      if (
-        entry.entry_type !== 'input_request' ||
-        (entry.step_id !== selectedStep.id &&
-          entry.step_key !== selectedStep.step_key)
-      ) {
-        continue;
-      }
-
-      const meta = parseWorkflowTranscriptMeta(entry.meta_json);
-      if (meta?.resolved === true) {
-        continue;
-      }
-
-      return {
-        prompt: entry.content,
-        description:
-          typeof meta?.description === 'string' ? meta.description : undefined,
-        placeholder:
-          typeof meta?.placeholder === 'string' ? meta.placeholder : undefined,
-      };
-    }
-
-    return null;
-  }, [selectedStep, transcript]);
-  const composerPlaceholder = useMemo(() => {
-    if (selectedStepInputRequest?.placeholder?.trim()) {
-      return selectedStepInputRequest.placeholder.trim();
-    }
-    if (selectedStepInputRequest?.prompt?.trim()) {
-      return selectedStepInputRequest.prompt.trim();
-    }
-    if (selectedStep) {
-      return `Send input to ${selectedAgent?.name ?? 'selected agent'}`;
-    }
-    if (selectedAgent) {
-      return 'No step available for the selected agent';
-    }
-    return 'Pick a node before sending input';
-  }, [selectedAgent, selectedStep, selectedStepInputRequest]);
-  const detailStep = projection.steps.find((s) => s.step_key === detailStepId);
-  const detailStepNode = detailStepId ? planNodeById.get(detailStepId) : null;
-  const detailStepLoop = detailStep?.loop_key
-    ? (loopByKey.get(detailStep.loop_key) ?? null)
-    : null;
-  const detailStepLoopTone = workflowLoopStatusMeta(detailStepLoop?.status);
-  const detailStepReviewPhase = workflowReviewPhaseMeta(detailStep?.review_phase);
-  const detailStepLatestReview = detailStep?.latest_review ?? null;
-  const detailStepLatestReviewTone = workflowReviewVerdictMeta(
-    detailStepLatestReview?.verdict
+  const activeStepLoopTone = workflowLoopStatusMeta(activeStepLoop?.status);
+  const activeStepReviewPhase = workflowReviewPhaseMeta(
+    activeStep?.review_phase
   );
-  const detailStepLatestReviewLabel = workflowLatestReviewLabel(
-    detailStepLatestReview
+  const activeStepLatestReview = activeStep?.latest_review ?? null;
+  const activeStepLatestReviewLabel = workflowLatestReviewLabel(
+    activeStepLatestReview
   );
-  const detailStepLatestReviewFeedback = workflowLatestReviewFeedback(
-    detailStepLatestReview
+  const activeStepLatestReviewFeedback = workflowLatestReviewFeedback(
+    activeStepLatestReview
   );
-  const detailAgentSessionId = detailStep?.agent_name
-    ? (agentSessionIdByLookup.get(detailStep.agent_name.trim()) ?? leadAgentId)
+  const activeAgentSessionId = activeStep?.agent_name
+    ? (agentSessionIdByLookup.get(activeStep.agent_name.trim()) ?? leadAgentId)
     : leadAgentId;
-  const liveThinkingTranscriptEntries = useMemo(() => {
-    const persistedThinkingKeys = new Set(
-      transcript
-        .filter((entry) => entry.entry_type === 'thinking')
-        .map(
-          (entry) =>
-            `${entry.workflow_agent_session_id ?? ''}::${entry.step_id ?? ''}::${entry.content}`
-        )
-    );
 
-    return runtimeMessages
-      .filter((entry) => entry.streamType === 'thinking')
-      .map((entry) => ({
-        id: entry.id,
-        step_id: entry.stepId,
-        step_key: entry.stepKey,
-        workflow_agent_session_id: entry.workflowAgentSessionId,
-        agent_name: entry.agentName,
-        message_type: 'agent' as const,
-        entry_type: 'thinking',
-        content: entry.content,
-        meta_json: JSON.stringify({ source: 'workflow_runtime_line' }),
-        created_at: entry.createdAt,
-      }))
-      .filter(
-        (entry) =>
-          !persistedThinkingKeys.has(
-            `${entry.workflow_agent_session_id ?? ''}::${entry.step_id ?? ''}::${entry.content}`
-          )
-      );
-  }, [runtimeMessages, transcript]);
-  const selectedRuntimeTranscript = useMemo(() => {
-    let entries = transcript;
-    if (selectedWorkflowAgentSessionId) {
-      entries = entries.filter(
-        (entry) =>
-          entry.workflow_agent_session_id === selectedWorkflowAgentSessionId
-      );
-    }
-    const liveThinkingEntries = liveThinkingTranscriptEntries.filter(
-      (entry) => {
-        if (!selectedWorkflowAgentSessionId) {
-          return true;
-        }
-        return (
-          entry.workflow_agent_session_id === selectedWorkflowAgentSessionId
-        );
-      }
-    );
-    const stepContentEntries = buildStepContentTranscriptEntries(
-      projection.steps,
-      entries,
-      resolveStepAgentId,
-      selectedWorkflowAgentSessionId
-    );
-    const localEntries = runtimeInputTranscripts.filter((entry) => {
-      if (!selectedWorkflowAgentSessionId) {
-        return true;
-      }
-      return entry.workflow_agent_session_id === selectedWorkflowAgentSessionId;
-    });
-
-    return mergeAndSortTranscriptEntries(
-      mergeAndSortTranscriptEntries(
-        mergeAndSortTranscriptEntries(entries, liveThinkingEntries),
-        stepContentEntries
-      ),
-      localEntries
-    );
-  }, [
-    projection.steps,
-    liveThinkingTranscriptEntries,
-    runtimeInputTranscripts,
-    resolveStepAgentId,
-    transcript,
-    selectedWorkflowAgentSessionId,
-  ]);
   const transcriptWithLocalInputs = useMemo(
     () => mergeAndSortTranscriptEntries(transcript, runtimeInputTranscripts),
     [runtimeInputTranscripts, transcript]
   );
 
+  // Transcript for inspector card
   const {
-    data: detailStepTranscriptData,
-    isFetching: isFetchingDetailStepTranscript,
+    data: activeStepTranscriptData,
+    isFetching: isFetchingActiveStepTranscript,
   } = useQuery({
     queryKey: [
       'workflowStepTranscripts',
       sessionId,
-      detailStep?.id,
-      detailAgentSessionId,
+      activeStep?.id,
+      activeAgentSessionId,
     ],
     queryFn: () => {
-      if (!sessionId || !detailStep?.id) {
-        return [];
-      }
-
-      return chatApi.getWorkflowStepTranscripts(sessionId, detailStep.id, {
-        stepKey: detailStep.step_key,
-        workflowAgentSessionId: detailAgentSessionId,
+      if (!sessionId || !activeStep?.id) return [];
+      return chatApi.getWorkflowStepTranscripts(sessionId, activeStep.id, {
+        stepKey: activeStep.step_key,
+        workflowAgentSessionId: activeAgentSessionId,
       });
     },
-    enabled: !!sessionId && !!detailStep?.id && !isPreview && isOpen,
+    enabled: !!sessionId && !!activeStep?.id && !isPreview && isOpen,
     refetchInterval:
-      isOpen && !isPreview && !!sessionId && !!detailStep?.id ? 5000 : false,
+      isOpen && !isPreview && !!sessionId && !!activeStep?.id ? 5000 : false,
   });
 
-  const detailFallbackTranscript = useMemo(() => {
-    if (!detailStep) {
-      return [];
-    }
-
+  const activeStepFallbackTranscript = useMemo(() => {
+    if (!activeStep) return [];
     let entries = transcriptWithLocalInputs.filter(
       (entry) =>
-        entry.step_id === detailStep.id ||
-        entry.step_key === detailStep.step_key
+        entry.step_id === activeStep.id ||
+        entry.step_key === activeStep.step_key
     );
-    if (detailAgentSessionId) {
+    if (activeAgentSessionId) {
       entries = entries.filter(
-        (entry) => entry.workflow_agent_session_id === detailAgentSessionId
+        (entry) => entry.workflow_agent_session_id === activeAgentSessionId
       );
     }
     return entries;
-  }, [detailAgentSessionId, detailStep, transcriptWithLocalInputs]);
+  }, [activeAgentSessionId, activeStep, transcriptWithLocalInputs]);
 
-  const detailStepScopedTranscript = useMemo(() => {
-    const entries = detailStepTranscriptData ?? [];
+  const activeStepScopedTranscript = useMemo(() => {
+    const entries = activeStepTranscriptData ?? [];
     const remoteEntries = entries.map((entry) => ({
       id: entry.id,
       round_id: entry.round_id,
@@ -1501,776 +1430,445 @@ export function WorkflowWindow({
     }));
     const localEntries = transcriptWithLocalInputs.filter(
       (entry) =>
-        entry.step_id === detailStep?.id ||
-        entry.step_key === detailStep?.step_key
+        entry.step_id === activeStep?.id ||
+        entry.step_key === activeStep?.step_key
     );
     const mergedEntries = mergeAndSortTranscriptEntries(
       remoteEntries,
       localEntries
     );
-    const stepContentEntries = detailStep
+    const stepContentEntries = activeStep
       ? buildStepContentTranscriptEntries(
-          [detailStep],
+          [activeStep],
           mergedEntries,
           resolveStepAgentId,
-          detailAgentSessionId
+          activeAgentSessionId
         )
       : [];
     return mergeAndSortTranscriptEntries(mergedEntries, stepContentEntries);
   }, [
-    detailAgentSessionId,
-    detailStep,
-    detailStepTranscriptData,
+    activeAgentSessionId,
+    activeStep,
+    activeStepTranscriptData,
     resolveStepAgentId,
     transcriptWithLocalInputs,
   ]);
 
-  const visibleDetailTranscript =
-    detailStepScopedTranscript.length > 0
-      ? detailStepScopedTranscript
-      : detailFallbackTranscript;
+  const visibleActiveTranscript =
+    activeStepScopedTranscript.length > 0
+      ? activeStepScopedTranscript
+      : activeStepFallbackTranscript;
+
+  // Final review & iteration
   const workflowFinalReviewAction = useMemo(
     () => toWorkflowFinalReviewAction(projection.execution_id, transcript),
     [projection.execution_id, transcript]
   );
   const allStepViewsCompleted =
     projection.steps.length > 0 &&
-    projection.steps.every((step) => REVIEW_READY_STEP_STATUSES.has(step.status));
+    projection.steps.every((step) =>
+      REVIEW_READY_STEP_STATUSES.has(step.status)
+    );
   const canReviewCurrentRound =
     !!workflowFinalReviewAction ||
     (allStepViewsCompleted &&
       (projection.state === 'waiting' ||
         projection.execution_status === 'waiting'));
-  const handleSelectStep = useCallback(
+
+  // Notification items from pending reviews
+  const notifications = useMemo(() => {
+    const items: Array<{
+      id: string;
+      type: string;
+      title: string;
+      message: string;
+      nodeId?: string;
+    }> = [];
+
+    if (projection.pending_review) {
+      items.push({
+        id: projection.pending_review.review_id,
+        type: projection.pending_review.review_type,
+        title: projection.pending_review.target_title,
+        message:
+          projection.pending_review.prompt_template.message ||
+          'Review required',
+      });
+    }
+
+    if (workflowFinalReviewAction) {
+      items.push({
+        id: workflowFinalReviewAction.transcriptId,
+        type: 'final_review',
+        title: 'Final Review',
+        message: workflowFinalReviewAction.message,
+      });
+    }
+
+    return items;
+  }, [projection.pending_review, workflowFinalReviewAction]);
+
+  const handleNodeClick = useCallback(
     (id: string) => {
-      const nextStep = stepByKey.get(id);
-      if (!nextStep) {
-        return;
-      }
-      setSelectedStepId(id);
-      setSelectedAgentId(resolveStepAgentId(nextStep));
-      setDetailStepId(id);
+      if (!stepByKey.has(id)) return;
+      setActiveNodeId(id);
     },
-    [resolveStepAgentId, stepByKey]
+    [stepByKey]
   );
-  const handleSelectAgent = useCallback(
-    (agentId: string) => {
-      setSelectedAgentId(agentId);
-      const nextStep = findPreferredStepForAgent(agentId);
-      setSelectedStepId(nextStep?.step_key ?? null);
-      setDetailStepId(null);
+
+  const handleSendStepInput = useCallback(
+    (stepId: string, inputText: string) => {
+      if (!onSubmitStepInput) return;
+      const step = projection.steps.find((s) => s.id === stepId);
+      if (!step) return;
+      onSubmitStepInput(stepId, inputText);
+      setRuntimeInputTranscripts((prev) => [
+        ...prev,
+        {
+          id: `runtime-user-${Date.now()}-${Math.floor(Math.random() * 99999)}`,
+          step_id: stepId,
+          step_key: step.step_key,
+          workflow_agent_session_id: resolveStepAgentId(step),
+          agent_name: 'You',
+          message_type: 'user',
+          entry_type: 'message',
+          content: inputText,
+          meta_json: JSON.stringify({ source: 'workflow_window_input' }),
+          created_at: new Date().toISOString(),
+        },
+      ]);
     },
-    [findPreferredStepForAgent]
+    [onSubmitStepInput, projection.steps, resolveStepAgentId]
   );
-  const handleSendStepInput = useCallback(() => {
-    if (!selectedStep || !onSubmitStepInput) {
-      return;
-    }
-    const nextValue = composerValue.trim();
-    if (!nextValue) {
-      return;
-    }
-
-    onSubmitStepInput(selectedStep.id, nextValue);
-
-    setRuntimeInputTranscripts((previous) => [
-      ...previous,
-      {
-        id: `runtime-user-${Date.now()}-${Math.floor(Math.random() * 99999)}`,
-        step_id: selectedStep.id,
-        step_key: selectedStep.step_key,
-        workflow_agent_session_id: selectedWorkflowAgentSessionId,
-        agent_name: 'You',
-        message_type: 'user',
-        entry_type: 'message',
-        content: nextValue,
-        meta_json: JSON.stringify({ source: 'workflow_window_input' }),
-        created_at: new Date().toISOString(),
-      },
-    ]);
-    setComposerValue('');
-  }, [
-    composerValue,
-    onSubmitStepInput,
-    selectedStep,
-    selectedWorkflowAgentSessionId,
-  ]);
-
-  useEffect(() => {
-    if (!isOpen || !projection.execution_id) {
-      setRuntimeInputTranscripts([]);
-      return;
-    }
-
-    if (previousExecutionIdRef.current !== projection.execution_id) {
-      previousExecutionIdRef.current = projection.execution_id;
-      setRuntimeInputTranscripts([]);
-    }
-  }, [isOpen, projection.execution_id]);
 
   if (!isOpen) return null;
 
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/42 p-3 backdrop-blur-sm md:p-6"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label={`Workflow window: ${projection.title}`}
-    >
-      <div
-        className="relative flex h-[min(92vh,880px)] w-full max-w-[1360px] flex-col overflow-hidden rounded-[28px] border border-white/70 bg-[linear-gradient(180deg,rgba(255,255,255,0.95)_0%,rgba(248,250,252,0.98)_100%)] shadow-[0_30px_100px_rgba(15,23,42,0.28)] backdrop-blur-xl dark:border-[#243041] dark:bg-[linear-gradient(180deg,rgba(11,16,23,0.96)_0%,rgba(15,23,42,0.94)_100%)] dark:shadow-[0_28px_100px_rgba(0,0,0,0.5)]"
-        onClick={(event) => event.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="flex items-start justify-between gap-4 border-b border-[#E2E8F0] px-5 py-4 md:px-6">
-          <div className="min-w-0">
-            <div className="text-[11px] font-bold uppercase tracking-[0.24em] text-[#64748B]">
-              Workflow Window
-            </div>
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <div className="truncate text-lg font-semibold text-[#0F172A] dark:text-white">
-                {projection.title}
-              </div>
-              <div className="rounded-full bg-[#EEF4FF] px-3 py-1 text-[11px] font-semibold text-[#1D4ED8]">
-                {projection.completed_step_count}/{projection.total_step_count}
-              </div>
-            </div>
-            <div className="mt-2 max-w-3xl select-text text-sm leading-6 text-[#475569] dark:text-[#94A3B8]">
-              {projection.goal}
-            </div>
-          </div>
+  const windowContent = (
+    <div className="fixed inset-0 z-[1000] flex h-dvh min-h-dvh w-dvw flex-col overflow-hidden bg-slate-100 font-sans text-slate-900">
+      {/* Header */}
+      <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 shrink-0 z-20">
+        <div className="flex items-center gap-4">
           <button
             type="button"
             onClick={onClose}
-            className="inline-flex size-10 shrink-0 items-center justify-center rounded-2xl border border-white/70 bg-white/75 text-[#64748B] shadow-sm transition-colors hover:bg-white hover:text-[#0F172A] dark:border-[#2A3445] dark:bg-[rgba(25,34,51,0.82)] dark:text-[#94A3B8] dark:hover:text-white"
-            aria-label="Close workflow window"
+            className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 transition-colors"
           >
-            <svg
-              className="size-5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M6 18L18 6M6 6l12 12"
-              />
-            </svg>
+            <ChevronLeft className="w-5 h-5" />
           </button>
+          <div className="min-w-0">
+            <h1 className="text-lg font-semibold text-slate-900 tracking-tight truncate">
+              {projection.title}
+            </h1>
+            <p className="text-xs text-slate-500 flex items-center gap-1.5">
+              {isRunning && (
+                <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
+              )}
+              {isExecutionRecompiling
+                ? 'Recompiling plan...'
+                : hasWorkflowCompleted
+                  ? `Completed - ${normalizedResultSummary || 'All steps finished'}`
+                  : hasWorkflowFailed
+                    ? `Failed - ${normalizedErrorMessage || 'Execution error'}`
+                    : `Progress ${progressPercent}% · ${projection.completed_step_count}/${projection.total_step_count} steps`}
+            </p>
+          </div>
         </div>
 
-        {/* Two-pane body */}
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
-          {/* Left pane: Graph */}
-          <div className="w-full shrink-0 overflow-auto border-b border-[#E2E8F0] bg-[radial-gradient(circle_at_top_left,rgba(191,219,254,0.45),rgba(248,250,252,0.8)_34%,rgba(248,250,252,1)_72%)] p-4 lg:basis-3/4 lg:border-b-0 lg:border-r lg:p-5 dark:border-[#243041] dark:bg-[radial-gradient(circle_at_top_left,rgba(37,99,235,0.18),rgba(15,23,42,0.92)_38%,rgba(11,16,23,0.98)_78%)]">
-            <div className="mb-3 text-[10px] font-bold uppercase tracking-[0.2em] text-[#64748B]">
-              Plan Graph
-            </div>
-            <WorkflowGraphBoard
-              nodes={projection.plan.nodes}
-              edges={projection.plan.edges}
-              steps={projection.steps}
-              loops={workflowLoops}
-              planLoops={projection.plan.loops}
-              agents={agents}
-              selectedStepId={selectedStepId}
-              onSelectStep={handleSelectStep}
-              onRetryStep={onRetryStep}
-              pendingActionId={pendingActionId}
-            />
-
-            <div className="mt-4 flex items-center justify-between gap-3 rounded-[22px] border border-white/70 bg-white/80 px-4 py-3 text-xs text-[#475569] shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] dark:border-[#243041] dark:bg-[rgba(15,23,42,0.78)] dark:text-[#CBD5E1]">
-              <div className="min-w-0 flex-1">
-                <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
-                  Step Inspector
-                </div>
-                <div className="mt-1 select-text text-xs leading-5 text-[#475569] dark:text-[#CBD5E1]">
-                  Click a step node to open its detail card with task
-                  instructions, agent, status and transcript.
-                </div>
-                <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px]">
-                  <span className="rounded-full bg-[#EEF4FF] px-2.5 py-1 font-semibold text-[#1D4ED8] dark:bg-[rgba(37,99,235,0.18)] dark:text-[#BFDBFE]">
-                    {projection.completed_step_count}/
-                    {projection.total_step_count} steps completed
-                  </span>
-                  {hasWorkflowCompleted && normalizedResultSummary && (
-                    <span className="select-text rounded-[10px] border border-[#16A34A] px-2.5 py-1 font-semibold text-[#166534] dark:border-[#22C55E] dark:text-[#BBF7D0]">
-                      {normalizedResultSummary}
-                    </span>
-                  )}
-                  {isExecutionRecompiling && (
-                    <span className="rounded-[10px] border border-[#14B8A6] px-2.5 py-1 font-semibold text-[#0F766E] dark:border-[#2DD4BF] dark:text-[#99F6E4]">
-                      Recompiling plan
-                    </span>
-                  )}
-                  {hasWorkflowFailed && normalizedErrorMessage && (
-                    <span className="select-text rounded-[10px] border border-[#DC2626] px-2.5 py-1 font-semibold text-[#991B1B] dark:border-[#F87171] dark:text-[#FECACA]">
-                      {normalizedErrorMessage}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-                {projection.state === 'preview_ready' &&
-                  projection.plan_id &&
-                  onExecute && (
-                    <button
-                      type="button"
-                      onClick={() => onExecute(projection.plan_id!)}
-                      className="flex items-center gap-2 rounded-full bg-[#2563EB] px-4 py-2 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-[#1D4ED8]"
-                    >
-                      <PlayIcon className="size-3.5" weight="bold" />
-                      Execute Plan
-                    </button>
-                  )}
-                {canPauseExecution && projection.execution_id && onPauseAll && (
-                  <button
-                    type="button"
-                    onClick={() => onPauseAll(projection.execution_id!)}
-                    className="flex items-center gap-1 rounded-full bg-[#D97706] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#B45309]"
-                  >
-                    <PauseIcon className="size-3.5" weight="bold" />
-                    Pause All
-                  </button>
-                )}
-                {canResumeExecution && projection.execution_id && onResume && (
-                  <button
-                    type="button"
-                    onClick={() => onResume(projection.execution_id!)}
-                    className="flex items-center gap-1 rounded-full bg-[#2563EB] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#1D4ED8]"
-                  >
-                    <PlayIcon className="size-3.5" weight="bold" />
-                    Resume
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {workflowLoops.length > 0 && (
-              <div className="mt-4 rounded-[22px] border border-white/70 bg-white/80 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] dark:border-[#243041] dark:bg-[rgba(15,23,42,0.78)]">
-                <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
-                  Loop Overview
-                </div>
-                <div className="mt-3 grid gap-3 xl:grid-cols-2">
-                  {workflowLoops.map((loop) => {
-                    const loopTone = workflowLoopStatusMeta(loop.status);
-                    const rejectionReason = loop.rejection_reason?.trim() || null;
-
-                    return (
-                      <div
-                        key={loop.id}
-                        className="rounded-[18px] border p-3"
-                        style={{ borderColor: loopTone.borderColor }}
-                      >
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="rounded-full border border-[#CBD5E1] bg-white px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-[#0F172A] dark:border-[#334155] dark:bg-[rgba(15,23,42,0.86)] dark:text-white">
-                            {loop.loop_key}
-                          </span>
-                          <span
-                            className={cn(
-                              'rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em]',
-                              loopTone.badgeClass
-                            )}
-                          >
-                            {loopTone.label}
-                          </span>
-                        </div>
-                        {rejectionReason && (
-                          <div className={cn('mt-2 text-xs leading-5', loopTone.textClass)}>
-                            {rejectionReason}
-                          </div>
-                        )}
-                      </div>
+        <div className="flex items-center gap-3">
+          {/* Control buttons */}
+          <div className="flex items-center bg-slate-50 rounded-lg p-1 border border-slate-200">
+            {isPreview && projection.plan_id && onExecute && (
+              <button
+                type="button"
+                onClick={() => onExecute(projection.plan_id!)}
+                className="p-1.5 bg-white shadow-sm rounded-md transition-all text-indigo-600 hover:bg-indigo-50"
+                title="Execute Plan"
+              >
+                <Play className="w-4 h-4 fill-current" />
+              </button>
+            )}
+            {canResumeExecution && projection.execution_id && onResume && (
+              <button
+                type="button"
+                onClick={() => onResume(projection.execution_id!)}
+                className="p-1.5 bg-white shadow-sm rounded-md transition-all text-indigo-600 hover:bg-indigo-50"
+                title="Resume"
+              >
+                <Play className="w-4 h-4 fill-current" />
+              </button>
+            )}
+            {canPauseExecution && projection.execution_id && onPauseAll && (
+              <button
+                type="button"
+                onClick={() => onPauseAll(projection.execution_id!)}
+                className="p-1.5 hover:bg-white hover:shadow-sm rounded-md transition-all text-slate-500"
+                title="Pause All"
+              >
+                <Pause className="w-4 h-4" />
+              </button>
+            )}
+            {projection.execution_id &&
+              (onInterruptStep || onStopStep) &&
+              isRunning && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const runningStep = projection.steps.find(
+                      (s) => s.status === 'running'
                     );
-                  })}
-                </div>
-              </div>
-            )}
+                    if (runningStep) {
+                      if (onInterruptStep) onInterruptStep(runningStep.id);
+                      else onStopStep?.(runningStep.id);
+                    }
+                  }}
+                  className="p-1.5 hover:bg-white hover:shadow-sm rounded-md transition-all text-slate-500"
+                  title="Stop"
+                >
+                  <Square className="w-4 h-4" />
+                </button>
+              )}
           </div>
+        </div>
+      </header>
 
-          {/* Right pane: Panel */}
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-white/70 lg:basis-1/4 dark:bg-transparent">
-            {/* Preview mode */}
-            {isPreview && (
-              <div className="flex-1 overflow-auto p-5 md:p-6">
-                <div className="max-w-3xl rounded-[24px] border border-white/70 bg-white/82 p-5 shadow-[0_18px_42px_rgba(148,163,184,0.16)] dark:border-[#2A3445] dark:bg-[rgba(15,23,42,0.78)] dark:shadow-none">
-                  <div className="text-sm font-semibold text-[#0F172A] dark:text-white">
-                    Plan Summary
-                  </div>
-                  <div className="mt-2 select-text text-sm leading-6 text-[#475569] dark:text-[#94A3B8]">
-                    {projection.goal}
-                  </div>
+      {/* Main Content Area */}
+      <div className="relative flex-1 overflow-hidden flex">
+        {/* Workflow Canvas */}
+        <WorkflowGraphBoard
+          nodes={projection.plan.nodes}
+          edges={projection.plan.edges}
+          steps={projection.steps}
+          loops={workflowLoops}
+          planLoops={projection.plan.loops}
+          agents={agents}
+          selectedStepId={activeNodeId}
+          onSelectStep={handleNodeClick}
+          onRetryStep={onRetryStep}
+          pendingActionId={pendingActionId}
+          className="flex-1 w-full h-full"
+        />
 
-                  {projection.validation_errors && (
-                    <div className="mt-4 rounded-2xl border border-[#FECACA] bg-[#FEF2F2] p-3 dark:border-[#7F1D1D] dark:bg-[rgba(127,29,29,0.18)]">
-                      <div className="text-xs font-bold uppercase tracking-wider text-[#991B1B] dark:text-[#FCA5A5]">
-                        Validation Errors
-                      </div>
-                      <div className="mt-1 select-text text-sm text-[#991B1B] dark:text-[#FECACA]">
-                        {projection.validation_errors}
-                      </div>
-                    </div>
-                  )}
+        {/* Notifications Overlay */}
+        <div className="absolute top-6 right-6 flex flex-col gap-4 z-50 pointer-events-none">
+          <AnimatePresence>
+            {notifications.map((notif) => (
+              <motion.div
+                key={notif.id}
+                initial={{ opacity: 0, x: 100, scale: 0.95 }}
+                animate={{ opacity: 1, x: 0, scale: 1 }}
+                exit={{ opacity: 0, x: 100, scale: 0.95 }}
+                className="w-72 bg-white rounded-xl shadow-2xl border border-slate-200 overflow-hidden ring-4 ring-indigo-500/10 pointer-events-auto"
+              >
+                <div className="bg-indigo-600 p-2.5 flex items-center justify-between text-white">
+                  <span className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5">
+                    <Bell className="w-3.5 h-3.5" /> Pending Review
+                  </span>
+                  <span className="text-[10px] bg-indigo-400/50 px-1.5 py-0.5 rounded">
+                    {notif.type === 'final_review' ? 'Final' : 'Step'}
+                  </span>
                 </div>
-              </div>
-            )}
-
-            {/* Execution mode */}
-            {!isPreview && (
-              <>
-                {agents.length > 0 && (
-                  <div className="border-b border-[#E2E8F0] px-5 py-3 dark:border-[#243041] md:px-6">
-                    <AgentSelector
-                      agents={agents}
-                      selectedAgentId={
-                        selectedAgent
-                          ? (selectedAgent.workflow_agent_session_id ??
-                            selectedAgent.session_agent_id)
-                          : selectedAgentId
-                      }
-                      onSelect={handleSelectAgent}
-                    />
+                <div className="p-4 space-y-3">
+                  <div className="flex gap-3">
+                    <div className="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center shrink-0">
+                      <AlertCircle className="w-5 h-5 text-amber-600" />
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-slate-900 truncate">
+                        {notif.title}
+                      </p>
+                      <p className="text-[11px] text-slate-500 mt-0.5 leading-snug line-clamp-2">
+                        {notif.message}
+                      </p>
+                    </div>
                   </div>
-                )}
-                <div className="flex min-h-0 flex-1 flex-col">
-                  <div className="min-h-0 flex-1 overflow-auto px-5 pt-4 md:px-6">
-                    {projection.pending_review && (
-                      <div className="mb-5">
-                        <WorkflowPendingReviewCard
-                          pendingReview={projection.pending_review}
-                          pendingActionId={pendingActionId}
-                          onSubmit={(action, feedback) =>
-                            onRespondPendingReview?.(
-                              projection.pending_review!.review_id,
-                              action,
-                              feedback
+                  <div className="flex gap-2 mt-2">
+                    {notif.type === 'final_review' &&
+                    workflowFinalReviewAction &&
+                    onResolveFinalReview ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onResolveFinalReview(
+                              workflowFinalReviewAction.executionId,
+                              workflowFinalReviewAction.transcriptId,
+                              'accepted'
                             )
                           }
-                        />
-                      </div>
-                    )}
-                    {workflowFinalReviewAction && onResolveFinalReview && (
-                      <div className="mb-5 flex gap-3">
-                        <div className="mt-1 h-4 w-1 shrink-0 rounded-full bg-[#7C3AED]" />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 text-[11px]">
-                            <span className="rounded-full bg-[#F3E8FF] px-2 py-0.5 font-semibold uppercase tracking-[0.14em] text-[#7C3AED]">
-                              workflow
-                            </span>
-                            <span className="font-medium uppercase tracking-[0.14em] text-[#7C3AED]">
-                              final review
-                            </span>
-                          </div>
-                          <div className="mt-2 whitespace-pre-wrap select-text text-[13px] leading-6 text-[#0F172A] dark:text-white">
-                            {workflowFinalReviewAction.message}
-                          </div>
-                          {workflowFinalReviewAction.description ? (
-                            <div className="mt-1 whitespace-pre-wrap select-text text-[13px] leading-6 text-[#64748B] dark:text-[#94A3B8]">
-                              {workflowFinalReviewAction.description}
-                            </div>
-                          ) : null}
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                onResolveFinalReview(
-                                  workflowFinalReviewAction.executionId,
-                                  workflowFinalReviewAction.transcriptId,
-                                  'accepted'
-                                )
-                              }
-                              disabled={
-                                pendingActionId ===
-                                workflowFinalReviewAction.transcriptId
-                              }
-                              className="rounded-full bg-[#16A34A] px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-[#15803D] disabled:opacity-50"
-                            >
-                              Accept
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                onResolveFinalReview(
-                                  workflowFinalReviewAction.executionId,
-                                  workflowFinalReviewAction.transcriptId,
-                                  'rejected'
-                                )
-                              }
-                              disabled={
-                                pendingActionId ===
-                                workflowFinalReviewAction.transcriptId
-                              }
-                              className="rounded-full border border-[#CBD5E1] bg-white px-3 py-1 text-xs font-semibold text-[#475569] transition-colors hover:bg-[#F8FAFC] disabled:opacity-50 dark:border-[#334155] dark:bg-transparent dark:text-[#CBD5E1]"
-                            >
-                              Reject
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                    {!projection.pending_review &&
-                      (projection.iteration_history.length > 0 ||
-                        workflowFinalReviewAction) && (
-                      <div className="mb-5">
-                        <WorkflowIterationFeedbackCard
-                          currentRound={projection.current_round}
-                          iterationHistory={projection.iteration_history}
-                          canReviewCurrentRound={canReviewCurrentRound}
-                          pendingActionId={pendingActionId}
-                          onSubmit={(payload) => {
-                            if (
-                              !projection.execution_id ||
-                              !onSubmitIterationFeedback
-                            ) {
-                              return;
-                            }
-
-                            onSubmitIterationFeedback({
-                              executionId: projection.execution_id,
-                              action: payload.action,
-                              feedback: payload.feedback,
-                            });
-                          }}
-                        />
-                      </div>
-                    )}
-                    <WorkflowTranscriptFeed
-                      steps={projection.steps}
-                      entries={selectedRuntimeTranscript}
-                      isLoading={false}
-                      emptyMessage={
-                        canPauseExecution
-                          ? 'Execution has not produced runtime messages yet.'
-                          : 'No runtime messages for this agent yet.'
-                      }
-                    />
-                  </div>
-
-                  <div className="border-t border-white bg-white px-5 pb-3 pt-3 dark:border-white dark:bg-white md:px-6">
-                    <div className="relative">
-                      {selectedStepInputRequest && (
-                        <div className="mb-2 rounded-2xl border border-[#C7D2FE] bg-[#EEF2FF] px-4 py-3 text-xs text-[#3730A3] dark:border-[#312E81] dark:bg-[rgba(49,46,129,0.24)] dark:text-[#C7D2FE]">
-                          <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#4338CA] dark:text-[#A5B4FC]">
-                            Input Prompt
-                          </div>
-                          <div className="mt-1 whitespace-pre-wrap select-text text-xs leading-5 text-[#312E81] dark:text-[#E0E7FF]">
-                            {selectedStepInputRequest.prompt}
-                          </div>
-                          {selectedStepInputRequest.description && (
-                            <div className="mt-1 whitespace-pre-wrap select-text text-xs leading-5 text-[#4338CA]/90 dark:text-[#C7D2FE]/90">
-                              {selectedStepInputRequest.description}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      <textarea
-                        ref={composerTextareaRef}
-                        value={composerValue}
-                        onChange={(event) =>
-                          setComposerValue(event.target.value)
-                        }
-                        placeholder={composerPlaceholder}
-                        rows={4}
-                        disabled={!selectedStep || !onSubmitStepInput}
-                        className="w-full resize-none overflow-y-hidden rounded-[24px] border border-[#CBD5E1] bg-white/96 px-4 py-3 pb-12 pr-12 text-[14px] leading-5 text-[#0F172A] shadow-[0_16px_34px_rgba(15,23,42,0.12)] outline-none transition-colors placeholder:text-[#94A3B8] focus:border-[#60A5FA] disabled:cursor-not-allowed disabled:bg-[#F8FAFC] disabled:text-[#94A3B8] dark:border-[#243041] dark:bg-[rgba(15,23,42,0.92)] dark:text-white dark:shadow-[0_18px_36px_rgba(0,0,0,0.28)]"
-                        style={{
-                          height: WORKFLOW_COMPOSER_MIN_HEIGHT,
-                          maxHeight: WORKFLOW_COMPOSER_MAX_HEIGHT,
-                        }}
-                      />
-                      <button
-                        type="button"
-                        onClick={handleSendStepInput}
-                        disabled={
-                          !selectedStep ||
-                          !onSubmitStepInput ||
-                          composerValue.trim().length === 0
-                        }
-                        className="absolute bottom-3 right-3 inline-flex size-8 items-center justify-center rounded-full bg-[#0F172A] text-white transition-colors hover:bg-[#1E293B] disabled:opacity-40"
-                        aria-label="Send step input"
-                      >
-                        <ArrowUpIcon className="size-3" weight="bold" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-
-        {detailStep && (
-          <div
-            className="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/24 p-4 md:p-6"
-            onClick={() => setDetailStepId(null)}
-          >
-            <div
-              className="flex max-h-full w-full max-w-[980px] flex-col overflow-hidden rounded-[28px] border border-white/75 bg-[linear-gradient(180deg,rgba(255,255,255,0.98)_0%,rgba(248,250,252,0.98)_100%)] shadow-[0_28px_90px_rgba(15,23,42,0.28)] dark:border-[#243041] dark:bg-[linear-gradient(180deg,rgba(11,16,23,0.98)_0%,rgba(15,23,42,0.96)_100%)] dark:shadow-[0_28px_100px_rgba(0,0,0,0.55)]"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <div className="flex items-start justify-between gap-4 border-b border-[#E2E8F0] px-5 py-4 dark:border-[#243041] md:px-6">
-                <div className="min-w-0">
-                  <div className="text-[11px] font-bold uppercase tracking-[0.22em] text-[#64748B]">
-                    Step Details
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <div className="truncate select-text text-lg font-semibold text-[#0F172A] dark:text-white">
-                      {detailStep.title}
-                    </div>
-                    <span
-                      className={cn(
-                          'select-text rounded-full border px-3 py-1 text-[10px] font-bold uppercase tracking-[0.16em]',
-                          workflowStatusBadgeClass(detailStep.status)
-                        )}
-                    >
-                      {workflowStatusLabel(detailStep.status)}
-                    </span>
-                    {detailStepReviewPhase && (
-                      <span
-                        className={cn(
-                          'select-text rounded-full border px-3 py-1 text-[10px] font-bold uppercase tracking-[0.16em]',
-                          detailStepReviewPhase.badgeClass
-                        )}
-                      >
-                        {detailStepReviewPhase.label}
-                      </span>
-                    )}
-                    {detailStep.status === 'running' &&
-                      (onInterruptStep || onStopStep) && (
+                          disabled={
+                            pendingActionId ===
+                            workflowFinalReviewAction.transcriptId
+                          }
+                          className="flex-1 py-1.5 bg-indigo-600 text-white rounded-md text-[10px] font-bold shadow-sm hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                        >
+                          ACCEPT
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onResolveFinalReview(
+                              workflowFinalReviewAction.executionId,
+                              workflowFinalReviewAction.transcriptId,
+                              'rejected'
+                            )
+                          }
+                          disabled={
+                            pendingActionId ===
+                            workflowFinalReviewAction.transcriptId
+                          }
+                          className="flex-1 py-1.5 bg-slate-100 text-slate-700 rounded-md text-[10px] font-bold hover:bg-slate-200 transition-colors disabled:opacity-50"
+                        >
+                          REJECT
+                        </button>
+                      </>
+                    ) : projection.pending_review && onRespondPendingReview ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onRespondPendingReview(
+                              projection.pending_review!.review_id,
+                              'approve'
+                            )
+                          }
+                          disabled={
+                            pendingActionId ===
+                            projection.pending_review.review_id
+                          }
+                          className="flex-1 py-1.5 bg-indigo-600 text-white rounded-md text-[10px] font-bold shadow-sm hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                        >
+                          APPROVE
+                        </button>
                         <button
                           type="button"
                           onClick={() => {
-                            if (onInterruptStep) {
-                              onInterruptStep(detailStep.id);
-                              return;
+                            if (notif.nodeId) {
+                              setActiveNodeId(notif.nodeId);
+                              setIsChatVisible(true);
                             }
-                            onStopStep?.(detailStep.id);
                           }}
-                          className="inline-flex items-center gap-1 rounded-full bg-[#991B1B] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#7F1D1D]"
+                          className="flex-1 py-1.5 bg-slate-100 text-slate-700 rounded-md text-[10px] font-bold hover:bg-slate-200 transition-colors"
                         >
-                          <StopIcon className="size-3.5" weight="bold" />
-                          Terminate
+                          VIEW DETAILS
                         </button>
-                      )}
-                    {isRetryableWorkflowStepStatus(detailStep.status) &&
-                      onRetryStep && (
-                        <button
-                          type="button"
-                          onClick={() => onRetryStep(detailStep.id)}
-                          disabled={pendingActionId === detailStep.id}
-                          className="inline-flex items-center gap-1 rounded-full bg-[#DC2626] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[#B91C1C] disabled:cursor-not-allowed disabled:bg-[#FCA5A5] disabled:text-white/90"
-                        >
-                          <ArrowClockwiseIcon
-                            className={cn(
-                              'size-3.5',
-                              pendingActionId === detailStep.id &&
-                                'animate-spin'
-                            )}
-                            weight="bold"
-                          />
-                          {t('workflow_retry', {
-                            defaultValue: '重试',
-                          })}
-                        </button>
-                      )}
-                  </div>
-                  <div className="mt-2 select-text text-xs text-[#64748B] dark:text-[#94A3B8]">
-                    {detailStep.step_type}
-                    {detailStep.agent_name
-                      ? ` · ${resolveStepAgentName(detailStep)}`
-                      : ''}
+                      </>
+                    ) : null}
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setDetailStepId(null)}
-                    className="inline-flex size-10 items-center justify-center rounded-2xl border border-white/70 bg-white/75 text-[#64748B] shadow-sm transition-colors hover:bg-white hover:text-[#0F172A] dark:border-[#2A3445] dark:bg-[rgba(25,34,51,0.82)] dark:text-[#94A3B8] dark:hover:text-white"
-                    aria-label="Close step details"
-                  >
-                    <svg
-                      className="size-5"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                    >
-                      <path
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        strokeWidth={2}
-                        d="M6 18L18 6M6 6l12 12"
-                      />
-                    </svg>
-                  </button>
-                </div>
-              </div>
+              </motion.div>
+            ))}
+          </AnimatePresence>
+        </div>
 
-              <div className="grid min-h-0 flex-1 gap-4 overflow-hidden p-5 md:grid-cols-[minmax(0,0.9fr)_minmax(0,1.35fr)] md:p-6">
-                <div className="min-h-0 space-y-4 overflow-auto pr-1">
-                  <div className="rounded-[22px] border border-white/70 bg-white/82 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.68)] dark:border-[#243041] dark:bg-[rgba(15,23,42,0.72)]">
-                    <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
-                      Task Instruction
-                    </div>
-                    <div className="mt-2 whitespace-pre-wrap select-text text-sm leading-6 text-[#334155] dark:text-[#CBD5E1]">
-                      {detailStepNode?.data.instructions?.trim() ||
-                        'No task instructions were provided for this step.'}
-                    </div>
-                  </div>
-
-                  <div className="rounded-[22px] border border-white/70 bg-white/82 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.68)] dark:border-[#243041] dark:bg-[rgba(15,23,42,0.72)]">
-                    <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
-                      Task Summary
-                    </div>
-                    <div className="mt-2 whitespace-pre-wrap select-text text-sm leading-6 text-[#334155] dark:text-[#CBD5E1]">
-                      {detailStep.summary_text?.trim() ||
-                        'No summary has been generated for this step yet.'}
-                    </div>
-                  </div>
-
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="rounded-[22px] border border-white/70 bg-white/82 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.68)] dark:border-[#243041] dark:bg-[rgba(15,23,42,0.72)]">
-                      <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
-                        Agent
-                      </div>
-                      <div className="mt-2 select-text text-sm font-semibold text-[#0F172A] dark:text-white">
-                        {resolveStepAgentName(detailStep)}
-                      </div>
-                    </div>
-                    <div className="rounded-[22px] border border-white/70 bg-white/82 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.68)] dark:border-[#243041] dark:bg-[rgba(15,23,42,0.72)]">
-                      <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
-                        Current Status
-                      </div>
-                      <div className="mt-2">
-                        <span
-                          className={cn(
-                            'inline-flex select-text rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]',
-                            workflowStatusBadgeClass(detailStep.status)
-                          )}
-                        >
-                          {workflowStatusLabel(detailStep.status)}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="rounded-[22px] border border-white/70 bg-white/82 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.68)] dark:border-[#243041] dark:bg-[rgba(15,23,42,0.72)]">
-                      <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
-                        Review Phase
-                      </div>
-                      <div className="mt-2">
-                        {detailStepReviewPhase ? (
-                          <span
-                            className={cn(
-                              'inline-flex select-text rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]',
-                              detailStepReviewPhase.badgeClass
-                            )}
-                          >
-                            {detailStepReviewPhase.label}
-                          </span>
-                        ) : (
-                          <span className="select-text text-sm text-[#64748B] dark:text-[#94A3B8]">
-                            No active review phase
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="rounded-[22px] border border-white/70 bg-white/82 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.68)] dark:border-[#243041] dark:bg-[rgba(15,23,42,0.72)]">
-                      <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
-                        Latest Review
-                      </div>
-                      {detailStepLatestReviewLabel ? (
-                        <>
-                          <div className="mt-2">
-                            <span
-                              className={cn(
-                                'inline-flex select-text rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]',
-                                detailStepLatestReviewTone.badgeClass
-                              )}
-                            >
-                              {detailStepLatestReviewLabel}
-                            </span>
-                          </div>
-                          {detailStepLatestReviewFeedback && (
-                            <div
-                              className={cn(
-                                'mt-2 whitespace-pre-wrap select-text text-sm leading-6',
-                                detailStepLatestReviewTone.textClass
-                              )}
-                            >
-                              {detailStepLatestReviewFeedback}
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        <div className="mt-2 select-text text-sm text-[#64748B] dark:text-[#94A3B8]">
-                          No review recorded yet.
-                        </div>
-                      )}
-                    </div>
-                    <div className="rounded-[22px] border border-white/70 bg-white/82 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.68)] dark:border-[#243041] dark:bg-[rgba(15,23,42,0.72)]">
-                      <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
-                        Loop Context
-                      </div>
-                      {detailStepLoop ? (
-                        <>
-                          <div className="mt-2 flex flex-wrap items-center gap-2">
-                            <span className="inline-flex select-text rounded-full border border-[#CBD5E1] bg-white px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-[#0F172A] dark:border-[#334155] dark:bg-[rgba(15,23,42,0.88)] dark:text-white">
-                              {detailStepLoop.loop_key}
-                            </span>
-                            <span
-                              className={cn(
-                                'inline-flex select-text rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em]',
-                                detailStepLoopTone.badgeClass
-                              )}
-                            >
-                              {detailStepLoopTone.label}
-                            </span>
-                          </div>
-                          {detailStepLoop.rejection_reason?.trim() && (
-                            <div
-                              className={cn(
-                                'mt-2 whitespace-pre-wrap select-text text-sm leading-6',
-                                detailStepLoopTone.textClass
-                              )}
-                            >
-                              {detailStepLoop.rejection_reason.trim()}
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        <div className="mt-2 select-text text-sm text-[#64748B] dark:text-[#94A3B8]">
-                          This step is not currently assigned to a loop.
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex min-h-0 flex-col rounded-[24px] border border-white/70 bg-white/82 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.68)] dark:border-[#243041] dark:bg-[rgba(15,23,42,0.72)]">
-                  <div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#94A3B8]">
-                    Transcript
-                  </div>
-                  <div className="mt-3 min-h-0 flex-1 overflow-auto pr-1">
-                    <WorkflowTranscriptFeed
-                      steps={projection.steps}
-                      entries={visibleDetailTranscript}
-                      isLoading={isFetchingDetailStepTranscript}
-                      emptyMessage={
-                        isPreview
-                          ? 'Preview mode does not have transcript messages yet.'
-                          : 'No transcript messages for this step yet.'
-                      }
-                      pendingActionId={pendingActionId}
-                      onApproval={onApproval}
-                    />
-                  </div>
-                </div>
-              </div>
+        {/* Iteration feedback card overlay (bottom-left) */}
+        {!isPreview &&
+          (projection.iteration_history.length > 0 ||
+            workflowFinalReviewAction) && (
+            <div className="absolute bottom-6 left-6 z-40 w-80">
+              <WorkflowIterationFeedbackCard
+                currentRound={projection.current_round}
+                iterationHistory={projection.iteration_history}
+                canReviewCurrentRound={canReviewCurrentRound}
+                pendingActionId={pendingActionId}
+                onSubmit={(payload) => {
+                  if (
+                    !projection.execution_id ||
+                    !onSubmitIterationFeedback
+                  )
+                    return;
+                  onSubmitIterationFeedback({
+                    executionId: projection.execution_id,
+                    action: payload.action,
+                    feedback: payload.feedback,
+                  });
+                }}
+              />
             </div>
-          </div>
-        )}
+          )}
+
+        {/* Side Panels */}
+        <div className="absolute top-0 right-0 bottom-0 pointer-events-none flex items-stretch justify-end z-40 overflow-hidden">
+          {/* Inspector Panel */}
+          <AnimatePresence>
+            {activeNodeId && activeStep && (
+              <motion.aside
+                key="inspector"
+                initial={{ x: 300, opacity: 1 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: 300, opacity: 1 }}
+                transition={{
+                  type: 'tween',
+                  duration: 0.3,
+                  ease: 'easeInOut',
+                }}
+                className="pointer-events-auto h-full flex items-center shrink-0 z-30"
+              >
+                <InspectorCard
+                  step={activeStep}
+                  planNode={activePlanNode}
+                  agentName={resolveStepAgentName(activeStep)}
+                  loop={activeStepLoop}
+                  reviewPhase={activeStepReviewPhase}
+                  latestReviewLabel={activeStepLatestReviewLabel}
+                  latestReviewFeedback={activeStepLatestReviewFeedback}
+                  loopTone={activeStepLoopTone}
+                  onClose={() => {
+                    setActiveNodeId(null);
+                    setIsChatVisible(false);
+                  }}
+                  onOpenChat={() => setIsChatVisible(!isChatVisible)}
+                  isChatVisible={isChatVisible}
+                  onInterruptStep={onInterruptStep}
+                  onStopStep={onStopStep}
+                  onRetryStep={onRetryStep}
+                  pendingActionId={pendingActionId}
+                  transcriptEntries={visibleActiveTranscript}
+                  isLoadingTranscript={isFetchingActiveStepTranscript}
+                />
+              </motion.aside>
+            )}
+          </AnimatePresence>
+
+          {/* Chat Panel */}
+          <AnimatePresence>
+            {activeNodeId && activeStep && isChatVisible && (
+              <motion.aside
+                key="chat"
+                initial={{ x: 340, opacity: 1 }}
+                animate={{ x: 0, opacity: 1 }}
+                exit={{ x: 340, opacity: 1 }}
+                transition={{
+                  type: 'tween',
+                  duration: 0.3,
+                  ease: 'easeInOut',
+                }}
+                className="pointer-events-auto h-full shrink-0 z-20"
+              >
+                <ChatPanel
+                  step={activeStep}
+                  agentName={resolveStepAgentName(activeStep)}
+                  entries={visibleActiveTranscript}
+                  pendingActionId={pendingActionId}
+                  onApproval={onApproval}
+                  onClose={() => setIsChatVisible(false)}
+                  onSendInput={handleSendStepInput}
+                  canSendInput={
+                    !!onSubmitStepInput &&
+                    activeStep.status === 'waiting_input'
+                  }
+                />
+              </motion.aside>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
     </div>
   );
+
+  return typeof document === 'undefined'
+    ? windowContent
+    : createPortal(
+        <div className="new-design">{windowContent}</div>,
+        document.body
+      );
 }
