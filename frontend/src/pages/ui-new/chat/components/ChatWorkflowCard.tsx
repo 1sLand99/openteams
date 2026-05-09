@@ -7,6 +7,7 @@ import {
   WarningCircleIcon,
   PauseIcon,
 } from '@phosphor-icons/react';
+import { motion } from 'framer-motion';
 import type { WorkflowCardData } from '@/lib/api';
 import { ChatMarkdown } from '@/components/ui-new/primitives/conversation/ChatMarkdown';
 import { WorkflowIterationFeedbackCard } from './WorkflowIterationFeedbackCard';
@@ -44,6 +45,129 @@ const REVIEW_READY_STEP_STATUSES = new Set([
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
+
+function GeneratingPlanAnimation() {
+  const nodes = [
+    { label: 'Goal', x: 28, y: 56 },
+    { label: 'Steps', x: 138, y: 30 },
+    { label: 'Agents', x: 248, y: 56 },
+    { label: 'Review', x: 338, y: 36 },
+  ];
+
+  const paths = [
+    'M56 56 C88 28 108 28 138 36',
+    'M162 36 C192 44 218 52 248 56',
+    'M272 56 C296 48 316 40 338 40',
+  ];
+
+  return (
+    <div className="flex flex-col items-center py-2">
+      <div className="relative h-28 w-full max-w-[380px]">
+        <svg
+          className="absolute inset-0 h-full w-full overflow-visible"
+          viewBox="0 0 380 100"
+          aria-hidden="true"
+        >
+          {/* Static path lines */}
+          {paths.map((d) => (
+            <path
+              key={d}
+              d={d}
+              fill="none"
+              stroke="#DBEAFE"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            />
+          ))}
+          {/* Animated path draw overlay */}
+          {paths.map((d, i) => (
+            <motion.path
+              key={`anim-${d}`}
+              d={d}
+              fill="none"
+              stroke="#93C5FD"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              initial={{ pathLength: 0, opacity: 0 }}
+              animate={{ pathLength: [0, 1, 1, 0], opacity: [0, 0.8, 0.8, 0] }}
+              transition={{
+                duration: 4,
+                repeat: Infinity,
+                ease: 'easeInOut',
+                delay: i * 0.8,
+                times: [0, 0.4, 0.7, 1],
+              }}
+            />
+          ))}
+        </svg>
+
+        {/* Nodes */}
+        {nodes.map((node, i) => (
+          <div
+            key={node.label}
+            className="absolute flex flex-col items-center"
+            style={{ left: node.x - 18, top: node.y - 18 }}
+          >
+            <motion.div
+              className="h-9 w-9 rounded-xl border border-blue-200 bg-white flex items-center justify-center"
+              animate={{ borderColor: ['#BFDBFE', '#60A5FA', '#BFDBFE'] }}
+              transition={{
+                duration: 4,
+                repeat: Infinity,
+                ease: 'easeInOut',
+                delay: i * 0.8,
+              }}
+            >
+              <motion.div
+                className="h-2 w-2 rounded-full bg-blue-400"
+                animate={{ opacity: [0.3, 1, 0.3] }}
+                transition={{
+                  duration: 4,
+                  repeat: Infinity,
+                  ease: 'easeInOut',
+                  delay: i * 0.8,
+                }}
+              />
+            </motion.div>
+            <span className="mt-1 text-[10px] font-medium text-blue-400 select-none whitespace-nowrap">
+              {node.label}
+            </span>
+          </div>
+        ))}
+
+        {/* Traveling dot */}
+        <svg
+          className="absolute inset-0 h-full w-full overflow-visible pointer-events-none"
+          viewBox="0 0 380 100"
+          aria-hidden="true"
+        >
+          <motion.circle
+            r="3"
+            fill="#60A5FA"
+            animate={{
+              cx: [56, 138, 248, 338],
+              cy: [56, 36, 56, 40],
+              opacity: [0, 0.8, 0.8, 0],
+            }}
+            transition={{
+              duration: 4,
+              repeat: Infinity,
+              ease: 'easeInOut',
+              times: [0, 0.3, 0.65, 1],
+            }}
+          />
+        </svg>
+      </div>
+
+      <div className="text-[13px] font-medium text-blue-400">
+        Generating workflow plan<motion.span
+          animate={{ opacity: [0, 1, 0] }}
+          transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
+        >...</motion.span>
+      </div>
+    </div>
+  );
+}
 
 const extractWorkflowCardType = (meta: unknown): WorkflowCardType | null => {
   if (!isRecord(meta)) return null;
@@ -176,7 +300,9 @@ export function ChatWorkflowCard({
   const canResumeExecution = canResumeWorkflowExecution(projection);
   const allStepViewsCompleted =
     projection.steps.length > 0 &&
-    projection.steps.every((step) => REVIEW_READY_STEP_STATUSES.has(step.status));
+    projection.steps.every((step) =>
+      REVIEW_READY_STEP_STATUSES.has(step.status)
+    );
   const canReviewCurrentRound =
     !!finalReviewAction ||
     (allStepViewsCompleted &&
@@ -230,7 +356,7 @@ export function ChatWorkflowCard({
                       : 'Workflow Running';
 
   return (
-    <div className="w-full max-w-[760px] rounded-[28px] border border-[#D8E2F0] bg-white p-4 shadow-sm">
+    <div className="w-full max-w-[640px] rounded-[24px] border border-[#D8E2F0] bg-white p-4 shadow-sm flex flex-col">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.16em] text-[#64748B]">
@@ -303,8 +429,16 @@ export function ChatWorkflowCard({
             compact
           />
         </div>
+      ) : isPlanGenerationPending ? (
+        <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/30 px-6 py-8 text-center">
+          <GeneratingPlanAnimation />
+        </div>
       ) : (
-        <div className="mt-4 rounded-[24px] border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-4 text-sm leading-6 text-[#475569]">
+        <div
+          className={`mt-4 flex flex-col items-center justify-center rounded-[16px] border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-6 text-center ${
+            isPlanGenerationCard ? 'py-10' : 'h-[320px]'
+          }`}
+        >
           <div className="text-xs font-bold uppercase tracking-[0.16em] text-[#64748B]">
             {isPlanGenerationCard ? 'Plan Draft' : 'Workflow'}
           </div>
@@ -313,18 +447,50 @@ export function ChatWorkflowCard({
               content={emptyGraphDescription}
               maxWidth="100%"
               hideCopyButton
-              className="mt-2"
+              className="mt-2 text-center"
               textClassName="text-sm leading-6 text-[#475569]"
             />
           ) : (
-            <div className="mt-2">{emptyGraphDescription}</div>
+            <div className="mt-2 text-sm leading-6 text-[#475569]">
+              {emptyGraphDescription}
+            </div>
           )}
         </div>
       )}
 
+      {!projection.pending_review &&
+        projection.execution_id &&
+        (projection.iteration_history.length > 0 || finalReviewAction) && (
+          <div className="mt-4">
+            <WorkflowIterationFeedbackCard
+              currentRound={projection.current_round}
+              completedSteps={projection.completed_step_count}
+              totalSteps={projection.total_step_count}
+              runningStepTitle={
+                projection.steps.find(
+                  (s) => s.status === 'running' || s.status === 'failed'
+                )?.title ?? null
+              }
+              iterationHistory={projection.iteration_history}
+              canReviewCurrentRound={canReviewCurrentRound}
+              pendingActionId={pendingActionId}
+              onSubmit={(payload) => {
+                if (!onSubmitIterationFeedback || !projection.execution_id) {
+                  return;
+                }
+                onSubmitIterationFeedback({
+                  executionId: projection.execution_id,
+                  action: payload.action,
+                  feedback: payload.feedback,
+                });
+              }}
+            />
+          </div>
+        )}
+
       {/* Validation errors (preview_invalid) */}
       {isInvalid && projection.validation_errors && (
-        <div className="mt-4 rounded-[24px] border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm leading-6 text-[#991B1B]">
+        <div className="mt-4 rounded-[16px] border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm leading-6 text-[#991B1B]">
           <div className="text-xs font-bold uppercase tracking-[0.16em]">
             Validation Errors
           </div>
@@ -434,37 +600,8 @@ export function ChatWorkflowCard({
         </div>
       )}
 
-      {!projection.pending_review &&
-        projection.execution_id &&
-        (projection.iteration_history.length > 0 || finalReviewAction) && (
-        <div className="mt-4">
-          <WorkflowIterationFeedbackCard
-            currentRound={projection.current_round}
-            completedSteps={projection.completed_step_count}
-            totalSteps={projection.total_step_count}
-            runningStepTitle={projection.steps.find((s) => s.status === 'running' || s.status === 'failed')?.title ?? null}
-            iterationHistory={projection.iteration_history}
-            canReviewCurrentRound={canReviewCurrentRound}
-            pendingActionId={pendingActionId}
-            onSubmit={(payload) => {
-              if (
-                !onSubmitIterationFeedback ||
-                !projection.execution_id
-              ) {
-                return;
-              }
-              onSubmitIterationFeedback({
-                executionId: projection.execution_id,
-                action: payload.action,
-                feedback: payload.feedback,
-              });
-            }}
-          />
-        </div>
-      )}
-
       {isPlanGenerationFailed && generationErrorMessage && (
-        <div className="mt-4 rounded-[24px] border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm leading-6 text-[#991B1B]">
+        <div className="mt-4 rounded-[16px] border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm leading-6 text-[#991B1B]">
           <div className="text-xs font-bold uppercase tracking-[0.16em]">
             Generation Error
           </div>
@@ -479,7 +616,7 @@ export function ChatWorkflowCard({
       )}
 
       {isPlanGenerationCard && retryPlanGenerationError && (
-        <div className="mt-4 rounded-[24px] border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm leading-6 text-[#991B1B]">
+        <div className="mt-4 rounded-[16px] border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm leading-6 text-[#991B1B]">
           <div className="text-xs font-bold uppercase tracking-[0.16em]">
             Retry Request Failed
           </div>
@@ -488,7 +625,7 @@ export function ChatWorkflowCard({
       )}
 
       {projection.state === 'completed' && (
-        <div className="mt-4 rounded-[24px] border border-[#D1FAE5] bg-[#ECFDF5] p-4">
+        <div className="mt-4 rounded-[16px] border border-[#D1FAE5] bg-[#ECFDF5] p-4">
           <div className="text-xs font-bold uppercase tracking-[0.16em] text-[#15803D]">
             Final Delivery
           </div>
@@ -515,7 +652,7 @@ export function ChatWorkflowCard({
       {!isPlanGenerationCard &&
         projection.state === 'failed' &&
         projection.error_message && (
-          <div className="mt-4 rounded-[24px] border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm leading-6 text-[#991B1B]">
+          <div className="mt-4 rounded-[16px] border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm leading-6 text-[#991B1B]">
             {projection.error_message}
           </div>
         )}

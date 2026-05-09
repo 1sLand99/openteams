@@ -164,7 +164,8 @@ function getTranscriptMarkdown(entry: WorkflowTranscriptEntry): string | null {
 
   if (
     (entry.entry_type === 'message' && entry.message_type === 'agent') ||
-    entry.entry_type === 'error'
+    entry.entry_type === 'error' ||
+    entry.entry_type === 'lead_review'
   ) {
     const content = entry.content.trim();
     return content.length > 0 ? content : null;
@@ -638,13 +639,7 @@ function InspectorCard({
   const isFailed = WORKFLOW_FAILURE_STEP_STATUSES.has(step.status);
   const isCompleted = step.status === 'completed';
   const hasError = isFailed || loopRejectionReason.length > 0;
-  const stepMetaItems = [
-    `Agent:${agentName}`,
-    `Node Type:${step.step_type}`,
-    loopName ? `Loop ID:${loopName}` : null,
-    reviewPhase ? `Review:${reviewPhase.label}` : null,
-  ].filter((item): item is string => Boolean(item));
-  const hasFooterActions =
+const hasFooterActions =
     step.status === 'running' ||
     step.status === 'waiting_review' ||
     step.status === 'pre_completed' ||
@@ -657,13 +652,12 @@ function InspectorCard({
   );
   const formatLogTimestamp = (createdAt: string) => {
     const date = new Date(createdAt);
-    if (Number.isNaN(date.getTime())) return '--:--:--.---';
+    if (Number.isNaN(date.getTime())) return '--:--:--';
     return date.toLocaleTimeString('en-US', {
       hour12: false,
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
-      fractionalSecondDigits: 3,
     });
   };
   const agentLogGroups = useMemo(
@@ -740,25 +734,25 @@ function InspectorCard({
       animate={{ x: 0, opacity: 1 }}
       exit={{ x: 60, opacity: 0 }}
       transition={{ type: 'spring', stiffness: 300, damping: 30 }}
-      className="w-[28vw] min-w-[420px] max-w-[720px] h-[92vh] max-h-[960px] mr-5 bg-white shadow-2xl rounded-none border border-gray-300 flex flex-col relative overflow-hidden"
+      className="w-[28vw] min-w-[420px] max-w-[720px] h-[calc(100vh-80px)] max-h-none mr-1 bg-white shadow-2xl rounded-none border border-slate-200 flex flex-col relative overflow-hidden"
     >
       <button
         type="button"
         onClick={onClose}
-        className="absolute top-2.5 right-3 p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors z-20"
+        className="absolute top-3 right-3 p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors z-20"
       >
         <X className="w-5 h-5" />
       </button>
 
-      <div className="flex items-center border-b border-gray-200 bg-gray-50 p-0 select-none shrink-0">
+      <div className="flex items-center border-b border-slate-100 bg-white select-none shrink-0 pt-2 px-6 gap-6 relative z-10">
         <button
           type="button"
           onClick={() => onActiveTabChange('DETAILS')}
           className={cn(
-            'inline-flex items-center gap-2 px-4 py-2 text-sm font-medium border-r border-gray-200 border-t-2 transition-colors',
+            'inline-flex items-center gap-2 py-3 text-sm font-semibold transition-colors border-b-2 -mb-[1px]',
             activeTab === 'DETAILS'
-              ? 'bg-white text-gray-900 border-b-0 border-t-slate-800'
-              : 'text-gray-500 bg-gray-50 hover:bg-gray-100 border-b border-b-gray-200 border-t-transparent'
+              ? 'text-indigo-600 border-indigo-600'
+              : 'text-slate-500 border-transparent hover:text-slate-700 hover:border-slate-300'
           )}
         >
           <FileText className="h-4 w-4" />
@@ -768,22 +762,22 @@ function InspectorCard({
           type="button"
           onClick={() => onActiveTabChange('LOGS')}
           className={cn(
-            'inline-flex items-center gap-2 px-4 py-2 text-sm font-medium border-r border-gray-200 border-t-2 transition-colors',
+            'inline-flex items-center gap-2 py-3 text-sm font-semibold transition-colors border-b-2 -mb-[1px]',
             activeTab === 'LOGS'
-              ? 'bg-white text-gray-900 border-b-0 border-t-slate-800'
-              : 'text-gray-500 bg-gray-50 hover:bg-gray-100 border-b border-b-gray-200 border-t-transparent'
+              ? 'text-indigo-600 border-indigo-600'
+              : 'text-slate-500 border-transparent hover:text-slate-700 hover:border-slate-300'
           )}
         >
           <ScrollText className="h-4 w-4" />
           Logs
         </button>
-        <div className="flex-grow flex justify-end pr-14 border-b border-gray-200 h-full py-2">
+        <div className="flex-grow flex justify-end pb-1 h-full py-2 pr-6">
           <span
             className={cn(
-              'inline-flex items-center px-2.5 py-0.5 text-xs font-semibold border uppercase tracking-wide',
+              'inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-bold uppercase tracking-wider',
               hasError
-                ? 'bg-red-50 text-red-700 border-red-200'
-                : statusColors[step.status] ?? statusColors.pending
+                ? 'bg-rose-50 text-rose-600'
+                : statusColors[step.status]?.replace(/border-[a-z]+-\d+/g, '').trim() || 'bg-slate-50 text-slate-500'
             )}
           >
             {workflowStatusLabel(step.status)}
@@ -794,74 +788,109 @@ function InspectorCard({
       <div className="flex-1 overflow-hidden relative">
         {activeTab === 'DETAILS' ? (
           <div className="absolute inset-0 p-8 overflow-y-auto bg-white">
-            <h2 className="text-xl font-semibold mb-3 pb-1 border-b border-gray-200 text-gray-900">
+            <h2 className="text-xl font-bold mb-4 text-slate-900 tracking-tight">
               {step.title}
             </h2>
 
-            <div className="mb-6 mt-3 overflow-hidden text-ellipsis whitespace-nowrap bg-slate-50 p-3 font-mono text-xs text-slate-800 border border-slate-200">
-              {stepMetaItems.map((item, index) => (
-                <span key={item}>
-                  {index > 0 && (
-                    <span className="mx-2 text-slate-400">&middot;</span>
-                  )}
-                  {item}
-                </span>
-              ))}
+            <div className="mb-6 flex flex-wrap items-center gap-3 text-[11px] text-slate-400 font-medium">
+              <span className="flex items-center gap-1"><Bot className="w-3.5 h-3.5" /> {agentName}</span>
+              <span className="w-1 h-1 rounded-full bg-slate-300"></span>
+              <span>{step.step_type}</span>
+              {loopName && (
+                <>
+                  <span className="w-1 h-1 rounded-full bg-slate-300"></span>
+                  <span>Loop: {loopName}</span>
+                </>
+              )}
+              {reviewPhase && (
+                <>
+                  <span className="w-1 h-1 rounded-full bg-slate-300"></span>
+                  <span>Review: {reviewPhase.label}</span>
+                </>
+              )}
             </div>
 
-            <h3 className="text-base font-semibold mb-2 mt-5 text-gray-700">
-              Instruction
-            </h3>
-            <blockquote className="border-l-4 border-slate-300 bg-slate-50 px-4 py-2 text-sm leading-relaxed text-slate-600 mb-5 whitespace-pre-wrap">
-              {instruction}
-            </blockquote>
+            <div className="mb-6">
+              <h3 className="text-base font-bold text-slate-800 mb-3 pl-3 border-l-4 border-indigo-500 capitalize">
+                Instruction
+              </h3>
+              <div className="bg-slate-50/80 border border-slate-100 rounded-xl p-4 text-[13px] leading-relaxed text-slate-700 whitespace-pre-wrap">
+                {instruction}
+              </div>
+            </div>
 
-            <h3 className="text-base font-semibold mb-2 mt-5 text-gray-700">
-              Execution Record Output
-            </h3>
-            <div className="mb-5 text-sm text-slate-600 leading-6">
+            {(isFailed || isCompleted) && (
+              <div className="mb-6">
+                <h3 className="text-base font-bold text-slate-800 mb-3 pl-3 border-l-4 border-indigo-500 capitalize">
+                  Summary
+                </h3>
+                <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+                    <ChatMarkdown
+                      content={summaryText}
+                      maxWidth="100%"
+                      textClassName="text-[13px] text-slate-700 leading-relaxed [&_:not(pre)>code]:bg-slate-100 [&_:not(pre)>code]:text-slate-800 [&_:not(pre)>code]:px-1.5 [&_:not(pre)>code]:py-0.5 [&_:not(pre)>code]:rounded-md"
+                      className="w-full select-text"
+                    />
+                </div>
+              </div>
+            )}
+
+            {latestReviewLabel && (
+              <div className="mb-6">
+                <h3 className="text-base font-bold text-slate-800 mb-3 pl-3 border-l-4 border-indigo-500 capitalize">
+                  Feedback
+                </h3>
+                <div className="bg-[#F8FAFC] border border-[#E2E8F0] rounded-xl p-4">
+                  <ChatMarkdown
+                    content={latestReviewFeedback || latestReviewLabel}
+                    maxWidth="100%"
+                    textClassName="text-[13px] text-slate-700 leading-relaxed [&_:not(pre)>code]:bg-slate-100 [&_:not(pre)>code]:text-slate-800 [&_:not(pre)>code]:px-1.5 [&_:not(pre)>code]:py-0.5 [&_:not(pre)>code]:rounded-md"
+                    className="w-full select-text"
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="mb-6">
+              <h3 className="text-base font-bold text-slate-800 mb-3 pl-3 border-l-4 border-indigo-500 capitalize">
+                Execution Record Output
+              </h3>
+              <div className="text-[13px] text-slate-600 leading-relaxed">
               {isLoadingTranscript ? (
                 <div className="flex items-center gap-2 text-xs text-slate-400">
                   <Loader2 className="w-4 h-4 animate-spin" />
                   Loading transcript...
                 </div>
               ) : outputEntries.length > 0 ? (
-                <div className="space-y-5">
+                <div className="space-y-4">
                   {outputEntries.map((entry) => {
                     const markdownContent = getTranscriptMarkdown(entry);
                     const OutputIcon = getWorkflowOutputEntryIcon(entry);
                     const outputAgentName =
-                      entry.entry_type === 'message'
-                        ? entry.agent_name?.trim()
+                      entry.entry_type === 'message' || entry.entry_type === 'lead_review'
+                        ? entry.agent_name?.trim() || (entry.entry_type === 'lead_review' ? 'Lead' : undefined)
                         : null;
                     const outputLabel =
                       outputAgentName || getWorkflowOutputEntryLabel(entry);
                     return (
-                      <div key={entry.id}>
-                        <div className="mb-2 inline-flex items-center gap-2 text-xs font-semibold text-slate-500">
+                      <div key={entry.id} className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+                        <div className="mb-3 inline-flex items-center gap-2 text-sm font-bold text-slate-600">
                           <span
                             className={cn(
-                              'inline-flex h-6 w-6 items-center justify-center border',
+                              'inline-flex h-7 w-7 items-center justify-center rounded-lg border',
                               getWorkflowOutputEntryIconClass(entry)
                             )}
                           >
-                            <OutputIcon className="h-3.5 w-3.5" />
+                            <OutputIcon className="h-4 w-4" />
                           </span>
                           {outputLabel}
                         </div>
-                        {markdownContent ? (
-                          <ChatMarkdown
-                            content={markdownContent}
-                            maxWidth="100%"
-                            hideCopyButton
-                            textClassName="text-[13px] text-slate-700 leading-relaxed"
-                            className="w-full select-text"
-                          />
-                        ) : (
-                          <pre className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-slate-700 select-text">
-                            {entry.content}
-                          </pre>
-                        )}
+                        <ChatMarkdown
+                          content={markdownContent || entry.content}
+                          maxWidth="100%"
+                          textClassName="text-[13px] text-slate-700 leading-relaxed [&_:not(pre)>code]:bg-slate-100 [&_:not(pre)>code]:text-slate-800 [&_:not(pre)>code]:px-1.5 [&_:not(pre)>code]:py-0.5 [&_:not(pre)>code]:rounded-md"
+                          className="w-full select-text"
+                        />
                       </div>
                     );
                   })}
@@ -871,47 +900,19 @@ function InspectorCard({
                   No output entries for this step yet.
                 </div>
               )}
+              </div>
             </div>
 
             {hasError && (
-              <>
-                <h3 className="text-base font-semibold mb-2 mt-5 text-red-600">
+              <div className="mb-6">
+                <h3 className="text-base font-bold text-rose-600 mb-3 pl-3 border-l-4 border-rose-500 capitalize flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4" />
                   Error
                 </h3>
-                <pre className="border border-red-300 bg-red-50 p-4 mb-5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-red-700">
+                <div className="bg-rose-50/50 border border-rose-100 rounded-xl p-4 max-h-40 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-rose-700">
                   {loopRejectionReason || summaryText}
-                </pre>
-              </>
-            )}
-
-            {(isFailed || isCompleted) && (
-              <>
-                <h3 className="text-base font-semibold mb-2 mt-5 text-gray-700">
-                  Summary
-                </h3>
-                <ChatMarkdown
-                  content={summaryText}
-                  maxWidth="100%"
-                  hideCopyButton
-                  textClassName="text-[13px] text-slate-700 leading-relaxed"
-                  className="mb-5 w-full select-text"
-                />
-              </>
-            )}
-
-            {latestReviewLabel && (
-              <>
-                <h3 className="text-base font-semibold mb-2 mt-5 text-gray-700">
-                  Feedback
-                </h3>
-                <ChatMarkdown
-                  content={latestReviewFeedback || latestReviewLabel}
-                  maxWidth="100%"
-                  hideCopyButton
-                  textClassName="text-[13px] text-slate-700 leading-relaxed"
-                  className="mb-5 w-full select-text"
-                />
-              </>
+                </div>
+              </div>
             )}
           </div>
         ) : (
@@ -932,7 +933,7 @@ function InspectorCard({
                   <div
                     key={group.key}
                     className={cn(
-                      'overflow-y-auto flex flex-col',
+                      'overflow-hidden flex flex-col',
                       isGroupCollapsed
                         ? 'shrink-0'
                         : 'flex-1 min-h-[50%]',
@@ -940,7 +941,7 @@ function InspectorCard({
                         'border-b border-slate-700'
                     )}
                   >
-                    <div className="sticky top-0 bg-slate-900/95 backdrop-blur-sm border-b border-slate-800 p-3 px-5 text-xs text-slate-500 font-mono flex justify-between items-center z-10">
+                    <div className="bg-slate-900 border-b border-slate-800 p-2 px-5 text-xs text-slate-500 font-mono flex justify-between items-center z-10 shrink-0">
                       <span className="inline-flex min-w-0 items-center gap-2">
                         <Bot className="h-4 w-4 shrink-0 text-slate-400" />
                         <span className="truncate">
@@ -949,18 +950,18 @@ function InspectorCard({
                       </span>
                       <button
                         type="button"
-                        className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors"
+                        className="px-2 py-0.5 text-[10px] rounded-sm bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors"
                         onClick={() =>
                           toggleLogGroupVisibility(group.key, groupLineKeys)
                         }
                       >
                         {isGroupCollapsed || !allExpanded
-                          ? 'Expand All'
-                          : 'Collapse All'}
+                          ? 'Expand'
+                          : 'Collapse'}
                       </button>
                     </div>
                     {!isGroupCollapsed && (
-                      <div className="flex flex-col font-mono p-4 pb-8">
+                      <div className="flex-1 overflow-y-auto flex flex-col font-mono p-4 pb-8 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-slate-700 [&::-webkit-scrollbar-thumb]:rounded-full hover:[&::-webkit-scrollbar-thumb]:bg-slate-600">
                         {group.lines.map((line) => {
                           const expanded = expandedLogLines.has(line.key);
                           return (
@@ -993,7 +994,7 @@ function InspectorCard({
                   </div>
                 );
               })
-            ) : (
+              ) : (
               <div className="flex items-center justify-center py-8 text-xs text-slate-500">
                 No logs for this step yet.
               </div>
@@ -1002,17 +1003,16 @@ function InspectorCard({
         )}
       </div>
 
-      {/* Footer */}
       {hasFooterActions && (
-        <footer className="p-4 shrink-0 bg-white border-t border-slate-100 flex gap-3 relative z-10">
+        <footer className="p-4 shrink-0 bg-slate-50/80 border-t border-slate-100 flex gap-3 relative z-10">
           <button
             type="button"
             onClick={onOpenChat}
             className={cn(
-              'flex-1 py-3 px-4 rounded-xl font-semibold text-sm cursor-pointer transition-all flex items-center justify-center gap-2',
+              'flex-1 py-2.5 px-4 rounded-xl font-semibold text-sm cursor-pointer transition-all flex items-center justify-center gap-2 shadow-sm',
               isChatVisible
-                ? 'bg-indigo-100 text-indigo-700'
-                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200'
+                : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 hover:text-indigo-600'
             )}
           >
             <MessageSquare className="w-4 h-4" />
@@ -1029,7 +1029,7 @@ function InspectorCard({
                 }
                 onStopStep?.(step.id);
               }}
-              className="flex-1 py-3 px-4 rounded-xl font-semibold text-sm cursor-pointer transition-all flex items-center justify-center gap-2 bg-rose-50 text-rose-600 hover:bg-rose-100"
+              className="flex-1 py-2.5 px-4 rounded-xl font-semibold text-sm cursor-pointer transition-all flex items-center justify-center gap-2 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300 shadow-sm"
             >
               <Ban className="w-4 h-4" />
               Terminate
@@ -1040,7 +1040,7 @@ function InspectorCard({
               type="button"
               onClick={() => onRetryStep(step.id)}
               disabled={pendingActionId === step.id}
-              className="flex-1 py-3 px-4 rounded-xl font-semibold text-sm cursor-pointer transition-all flex items-center justify-center gap-2 bg-slate-900 text-white hover:bg-slate-800 shadow-md disabled:opacity-50"
+              className="flex-1 py-2.5 px-4 rounded-xl font-semibold text-sm cursor-pointer transition-all flex items-center justify-center gap-2 bg-slate-800 text-white hover:bg-slate-900 shadow-sm shadow-slate-300 disabled:opacity-50 border border-slate-900"
             >
               <RotateCcw
                 className={cn(
@@ -1107,7 +1107,7 @@ function ChatPanel({
   };
 
   return (
-    <div className="w-[24vw] min-w-[320px] max-w-[480px] bg-[#F8FAFC] h-[92vh] max-h-[960px] border-l border-slate-200 flex flex-col shadow-2xl">
+    <div className="w-[24vw] min-w-[320px] max-w-[480px] bg-[#F8FAFC] h-[calc(100vh-80px)] max-h-none border-l border-slate-200 flex flex-col shadow-2xl">
       <div className="p-4 border-b border-slate-200 bg-white flex items-center gap-3 shrink-0">
         <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-white text-xs font-bold shadow-sm">
           {agentName.substring(0, 2).toUpperCase()}
@@ -1137,12 +1137,12 @@ function ChatPanel({
         className="flex-1 p-4 space-y-4 overflow-y-auto flex flex-col py-6"
       >
         {outputEntries.map((entry) => {
-          const isUser = entry.message_type === 'user';
+          const isUser = entry.message_type === 'user' && entry.entry_type !== 'lead_review';
           const markdownContent = getTranscriptMarkdown(entry);
           const entryAgentName =
             !isUser && entry.agent_name?.trim()
               ? entry.agent_name.trim()
-              : null;
+              : (entry.entry_type === 'lead_review' ? 'Lead' : null);
 
           if (
             entry.entry_type === 'approval_request' ||
@@ -1242,8 +1242,7 @@ function ChatPanel({
                   <ChatMarkdown
                     content={markdownContent}
                     maxWidth="100%"
-                    hideCopyButton
-                    textClassName="text-[13px]"
+                    textClassName="text-[13px] [&_:not(pre)>code]:bg-slate-100 [&_:not(pre)>code]:text-slate-800 [&_:not(pre)>code]:px-1.5 [&_:not(pre)>code]:py-0.5 [&_:not(pre)>code]:rounded-md"
                     className="w-full select-text"
                   />
                 ) : (
@@ -1999,7 +1998,7 @@ export function WorkflowWindow({
                   duration: 0.3,
                   ease: 'easeInOut',
                 }}
-                className="pointer-events-auto h-full flex items-center shrink-0 z-30 py-5"
+                className="pointer-events-auto h-full flex items-center shrink-0 z-30 py-2"
               >
                 <InspectorCard
                   step={activeStep}
@@ -2044,7 +2043,7 @@ export function WorkflowWindow({
                   duration: 0.3,
                   ease: 'easeInOut',
                 }}
-                className="pointer-events-auto h-full flex items-center shrink-0 z-20 mr-5 py-5"
+                className="pointer-events-auto h-full flex items-center shrink-0 z-20 mr-5 py-2"
               >
                 <ChatPanel
                   step={activeStep}

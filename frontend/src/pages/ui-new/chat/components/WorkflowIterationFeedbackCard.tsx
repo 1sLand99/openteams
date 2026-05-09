@@ -121,7 +121,7 @@ export function WorkflowIterationFeedbackCard({
   }
 
   return (
-    <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden transition-all duration-300 hover:border-blue-200 max-w-md w-full">
+    <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden transition-all duration-300 hover:border-blue-200 w-full">
       {/* Header/Expandable Area */}
       <button
         type="button"

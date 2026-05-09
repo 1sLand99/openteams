@@ -180,7 +180,6 @@ export function MessageInputArea({
   canSend,
   isSending,
   onSend,
-  chatInputMode,
   onToggleChatInputMode,
   isWorkflowMode,
   leadAgentName,
@@ -209,12 +208,6 @@ export function MessageInputArea({
       agent,
     })),
   ];
-  const modeToggleLabel = isWorkflowMode
-    ? t('input.switchToFreeMode')
-    : t('input.switchToWorkflowMode');
-  const modeToggleDescription = isWorkflowMode
-    ? t('input.workflowModeDescription', { agent: leadAgentName ?? '' })
-    : t('input.freeModeDescription');
   const handlePaste = (event: ReactClipboardEvent<HTMLTextAreaElement>) => {
     if (isArchived || !activeSessionId || isUploadingAttachments) return;
 
@@ -226,10 +219,47 @@ export function MessageInputArea({
   };
 
   return (
-    <div className="chat-session-input-area shrink-0">
-      <div className="chat-session-input-shell">
-        {replyToMessage && (
-          <div className="chat-session-reply-card" title={replySummaryText}>
+    <div className="chat-session-input-area shrink-0 relative flex flex-col">
+      {/* SEAMLESS FOLDER TABS */}
+      <div className="flex items-end pl-6 gap-1 z-10 relative pointer-events-auto">
+        <button
+          type="button"
+          onClick={() => { if (!isWorkflowMode && !isArchived && activeSessionId) onToggleChatInputMode(); }}
+          disabled={isArchived || !activeSessionId}
+          className={cn(
+            "group flex items-center gap-1.5 px-4 py-2 rounded-t-xl text-[13px] font-semibold transition-all duration-200 select-none border relative",
+            isWorkflowMode
+              ? "bg-white dark:bg-[#0a0a0a] border-slate-200 dark:border-slate-800 border-b-transparent dark:border-b-transparent text-blue-600 dark:text-blue-400 z-20 pb-2.5 -mb-[1px] shadow-[0_-2px_10px_rgba(0,0,0,0.02)]"
+              : "bg-transparent border-transparent text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300 pb-2"
+          )}
+        >
+          <GitBranchIcon weight={isWorkflowMode ? "bold" : "regular"} className={cn("size-4 transition-colors", isWorkflowMode ? "text-blue-500" : "text-slate-400 group-hover:text-slate-500 dark:text-slate-500 dark:group-hover:text-slate-400")} />
+          Workflow
+          {isWorkflowMode && <div className="absolute -bottom-[2px] left-0 right-0 h-[3px] bg-white dark:bg-[#0a0a0a]" />}
+        </button>
+        <button
+          type="button"
+          onClick={() => { if (isWorkflowMode && !isArchived && activeSessionId) onToggleChatInputMode(); }}
+          disabled={isArchived || !activeSessionId}
+          className={cn(
+            "group flex items-center gap-1.5 px-4 py-2 rounded-t-xl text-[13px] font-semibold transition-all duration-200 select-none border relative",
+            !isWorkflowMode
+              ? "bg-white dark:bg-[#0a0a0a] border-slate-200 dark:border-slate-800 border-b-transparent dark:border-b-transparent text-slate-800 dark:text-slate-200 z-20 pb-2.5 -mb-[1px] shadow-[0_-2px_10px_rgba(0,0,0,0.02)]"
+              : "bg-transparent border-transparent text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-300 pb-2"
+          )}
+        >
+          <ChatCircleDotsIcon weight={!isWorkflowMode ? "bold" : "regular"} className={cn("size-4 transition-colors", !isWorkflowMode ? "text-slate-700 dark:text-slate-300" : "text-slate-400 group-hover:text-slate-500 dark:text-slate-500 dark:group-hover:text-slate-400")} />
+          Chat
+          {!isWorkflowMode && <div className="absolute -bottom-[2px] left-0 right-0 h-[3px] bg-white dark:bg-[#0a0a0a]" />}
+        </button>
+      </div>
+
+      <div className={cn(
+        "chat-session-input-shell flex flex-col transition-all duration-300 overflow-hidden relative z-0",
+        "bg-white dark:bg-[#0a0a0a] border border-slate-200 dark:border-slate-800 shadow-sm",
+        isWorkflowMode ? "rounded-b-2xl rounded-tr-2xl rounded-tl-sm ring-1 ring-blue-500/10" : "rounded-2xl"
+      )}>
+        {replyToMessage && (          <div className="chat-session-reply-card" title={replySummaryText}>
             <div className="chat-session-reply-main">
               <QuotesIcon className="chat-session-reply-quote" weight="fill" />
               <div className="chat-session-reply-content">
@@ -296,11 +326,6 @@ export function MessageInputArea({
         )}
 
         <div className="chat-session-input-editor relative">
-          {isWorkflowMode && (
-            <div className="chat-session-workflow-mode-label">
-              {t('input.workflowModeLabel')}
-            </div>
-          )}
           <textarea
             ref={inputRef}
             value={draft}
@@ -424,27 +449,6 @@ export function MessageInputArea({
                   aria-label={t('input.addAttachment')}
                 >
                   <PaperclipIcon className="size-icon-xs" />
-                </button>
-              </span>
-            </Tooltip>
-            <Tooltip content={modeToggleDescription} side="top">
-              <span className="inline-flex">
-                <button
-                  type="button"
-                  className={cn(
-                    'chat-session-input-icon-btn',
-                    isWorkflowMode && 'chat-session-input-icon-btn-active'
-                  )}
-                  onClick={onToggleChatInputMode}
-                  disabled={!activeSessionId || isArchived}
-                  aria-label={modeToggleLabel}
-                  aria-pressed={chatInputMode === 'workflow'}
-                >
-                  {isWorkflowMode ? (
-                    <GitBranchIcon className="size-icon-xs" />
-                  ) : (
-                    <ChatCircleDotsIcon className="size-icon-xs" />
-                  )}
                 </button>
               </span>
             </Tooltip>

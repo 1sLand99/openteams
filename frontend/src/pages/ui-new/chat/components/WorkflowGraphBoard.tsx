@@ -366,6 +366,7 @@ export function WorkflowGraphBoard({
   onSelectStep,
   onRetryStep,
   pendingActionId = null,
+  compact = false,
   className,
 }: WorkflowGraphBoardProps) {
   const { t } = useTranslation('chat');
@@ -725,7 +726,10 @@ export function WorkflowGraphBoard({
                 {workflowStatusLabel(status)}
               </span>
             </div>
-            <div className="text-sm font-bold text-slate-900 leading-tight mt-1 truncate">
+            <div
+              className="mt-1 line-clamp-2 text-sm font-bold leading-tight text-slate-900 break-words"
+              title={step?.title ?? dataNode.data.title}
+            >
               {step?.title ?? dataNode.data.title}
             </div>
 
@@ -777,7 +781,7 @@ export function WorkflowGraphBoard({
     <div
       className={cn(
         'relative overflow-hidden',
-        'rounded-[28px]',
+        'rounded-[16px]',
         className
       )}
       ref={containerRef}
@@ -789,7 +793,8 @@ export function WorkflowGraphBoard({
       style={{
         touchAction: 'none',
         backgroundColor: '#F1F5F9',
-        minHeight: 480,
+        height: compact ? 320 : '100%',
+        minHeight: compact ? 320 : 0,
       }}
     >
       <div className="absolute top-4 left-4 pointer-events-none z-10 text-xs text-slate-600 font-medium flex flex-col gap-1">
