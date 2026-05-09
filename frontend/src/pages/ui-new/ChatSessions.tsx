@@ -918,15 +918,6 @@ export function ChatSessions() {
     }
   );
 
-  const generatePlanAndRun = useMutation({
-    mutationFn: async (sessionId: string) =>
-      chatApi.generatePlanAndRun(sessionId),
-    onSuccess: ({ workflow_card_message }) => {
-      upsertMessage(workflow_card_message);
-      queryClient.invalidateQueries({ queryKey: ['chatSessions'] });
-    },
-  });
-
   const executePlanMutation = useMutation({
     mutationFn: async (planId: string) => {
       if (!activeSessionId) throw new Error('No active session');
@@ -2065,15 +2056,6 @@ export function ChatSessions() {
           new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
       ),
     [messages]
-  );
-  const hasWorkflowGoal = useMemo(
-    () =>
-      messageList.some(
-        (message) =>
-          message.sender_type === ChatSenderType.user &&
-          message.content.trim().length > 0
-      ),
-    [messageList]
   );
   const messageIdsByRunId = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -4495,41 +4477,6 @@ export function ChatSessions() {
     }
   };
 
-  const handleGenerateWorkflow = useCallback(async () => {
-    if (!activeSessionId) return;
-
-    try {
-      // Send a user message that instructs the session agent to emit workflow_generate.
-      await generatePlanAndRun.mutateAsync(activeSessionId);
-      // The agent's structured output triggers the plan generation pipeline automatically.
-      // await sendMessage.mutateAsync({
-      //   sessionId: activeSessionId,
-      //   content: 'Please generate a workflow plan for the current task.',
-      //   meta: { intent: 'workflow_generate' },
-      // });
-    } catch (error) {
-      const message =
-        error instanceof ApiError
-          ? error.message
-          : t('workflow.runNowFailed', {
-              defaultValue: 'Workflow generation failed.',
-            });
-
-      setConfirmModal({
-        title: t('workflow.runNowFailedTitle', {
-          defaultValue: '执行失败',
-        }),
-        message,
-        mode: 'alert',
-        tone: 'destructive',
-        confirmText: t('common:ok'),
-        onConfirm: () => {
-          setConfirmModal(null);
-        },
-      });
-    }
-  }, [activeSessionId, generatePlanAndRun, t]);
-
   const handleCancelTitleEdit = () => {
     setTitleDraft(activeSession?.title ?? '');
     setIsEditingTitle(false);
@@ -4881,15 +4828,6 @@ export function ChatSessions() {
                 : undefined
             }
             onOpenWorkspaceChanges={() => handleOpenWorkspaceChanges()}
-            canGenerateWorkflow={
-              !!activeSessionId &&
-              !isArchived &&
-              sessionMembers.length > 0 &&
-              hasWorkflowGoal &&
-              !sendMessage.isPending
-            }
-            isGeneratingWorkflow={sendMessage.isPending}
-            onGenerateWorkflow={handleGenerateWorkflow}
           />
 
           {/* Cleanup mode controls */}

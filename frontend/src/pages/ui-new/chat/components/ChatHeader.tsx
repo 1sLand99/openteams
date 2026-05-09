@@ -58,9 +58,6 @@ export interface ChatHeaderProps {
   hasNewChanges?: boolean;
   onViewChanges?: () => void;
   onOpenWorkspaceChanges?: () => void;
-  canGenerateWorkflow?: boolean;
-  isGeneratingWorkflow?: boolean;
-  onGenerateWorkflow?: () => void;
 }
 
 export function ChatHeader({
@@ -93,9 +90,6 @@ export function ChatHeader({
   hasNewChanges,
   onViewChanges,
   onOpenWorkspaceChanges,
-  canGenerateWorkflow = false,
-  isGeneratingWorkflow = false,
-  onGenerateWorkflow,
 }: ChatHeaderProps) {
   const { t } = useTranslation('chat');
   const { t: tCommon } = useTranslation('common');
@@ -284,23 +278,6 @@ export function ChatHeader({
           {titleError && <div className="text-xs text-error">{titleError}</div>}
         </div>
         <div className="chat-session-header-actions flex items-center gap-base">
-          {activeSession && onGenerateWorkflow && (
-            <button
-              type="button"
-              onClick={onGenerateWorkflow}
-              disabled={!canGenerateWorkflow || isGeneratingWorkflow}
-              className={cn(
-                'rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors',
-                canGenerateWorkflow && !isGeneratingWorkflow
-                  ? 'border-[#2563EB] bg-[#EEF4FF] text-[#1D4ED8] hover:bg-[#DBEAFE]'
-                  : 'cursor-not-allowed border-[#D8E2F0] bg-[#F8FAFC] text-[#94A3B8]'
-              )}
-            >
-              {isGeneratingWorkflow
-                ? t('workflow.generating', { defaultValue: '生成中...' })
-                : t('workflow.runNow', { defaultValue: '立即执行' })}
-            </button>
-          )}
           {activeSession && !isSearchOpen && (
             <button
               type="button"
