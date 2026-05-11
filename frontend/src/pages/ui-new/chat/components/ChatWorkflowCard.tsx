@@ -7,6 +7,7 @@ import {
   WarningCircleIcon,
   PauseIcon,
 } from '@phosphor-icons/react';
+import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import type { WorkflowCardData } from '@/lib/api';
 import { ChatMarkdown } from '@/components/ui-new/primitives/conversation/ChatMarkdown';
@@ -46,7 +47,7 @@ const REVIEW_READY_STEP_STATUSES = new Set([
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
 
-function GeneratingPlanAnimation() {
+function GeneratingPlanAnimation({ label }: { label?: string }) {
   const nodes = [
     { label: 'Goal', x: 28, y: 56 },
     { label: 'Steps', x: 138, y: 30 },
@@ -160,7 +161,7 @@ function GeneratingPlanAnimation() {
       </div>
 
       <div className="text-[13px] font-medium text-blue-400">
-        Generating workflow plan<motion.span
+        {label ?? 'Generating workflow plan'}<motion.span
           animate={{ opacity: [0, 1, 0] }}
           transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
         >...</motion.span>
@@ -267,6 +268,7 @@ export function ChatWorkflowCard({
   onSubmitIterationFeedback,
   pendingActionId,
 }: ChatWorkflowCardProps) {
+  const { t } = useTranslation('chat');
   const projection =
     projectionProp ?? extractWorkflowCardProjection(message.meta);
   if (!projection) {
@@ -287,10 +289,10 @@ export function ChatWorkflowCard({
   const displayGoal = generationMeta?.plan_goal?.trim() || projection.goal;
   const hasWorkflowGraph = projection.plan.nodes.length > 0;
   const emptyGraphDescription = isPlanGenerationFailed
-    ? 'Plan generation stopped before the preview was created. Retry to generate a fresh plan from the same goal.'
+    ? t('workflow.card.emptyGraph.planGenerationFailed', { defaultValue: 'Plan generation stopped before the preview was created. Retry to generate a fresh plan from the same goal.' })
     : isPlanGenerationPending
-      ? 'The system is drafting a workflow plan. This placeholder card will update when the preview is ready.'
-      : 'No workflow graph is available yet.';
+      ? t('workflow.card.emptyGraph.planGenerationPending', { defaultValue: 'The system is drafting a workflow plan. This placeholder card will update when the preview is ready.' })
+      : t('workflow.card.emptyGraph.noGraph', { defaultValue: 'No workflow graph is available yet.' });
   const isPreview =
     projection.state === 'preview_ready' ||
     projection.state === 'preview_invalid';
@@ -334,26 +336,26 @@ export function ChatWorkflowCard({
   );
 
   const stateLabel = isPlanGenerationFailed
-    ? 'Plan Generation Failed'
+    ? t('workflow.card.stateLabels.planGenerationFailed', { defaultValue: 'Plan Generation Failed' })
     : isPlanGenerationPending
-      ? 'Generating Plan'
+      ? t('workflow.card.stateLabels.generatingPlan', { defaultValue: 'Generating Plan' })
       : isExecutionRecompiling
-        ? 'Recompiling Plan'
+        ? t('workflow.card.stateLabels.recompilingPlan', { defaultValue: 'Recompiling Plan' })
         : projection.state === 'completed'
-          ? 'Work Item'
+          ? t('workflow.card.stateLabels.workItem', { defaultValue: 'Work Item' })
           : projection.state === 'failed'
-            ? 'Execution Failed'
+            ? t('workflow.card.stateLabels.executionFailed', { defaultValue: 'Execution Failed' })
             : projection.state === 'preview_ready'
-              ? 'Plan Ready'
+              ? t('workflow.card.stateLabels.planReady', { defaultValue: 'Plan Ready' })
               : projection.state === 'preview_invalid'
-                ? 'Plan Invalid'
+                ? t('workflow.card.stateLabels.planInvalid', { defaultValue: 'Plan Invalid' })
                 : projection.state === 'waiting'
-                  ? 'Action Required'
+                  ? t('workflow.card.stateLabels.actionRequired', { defaultValue: 'Action Required' })
                   : projection.state === 'paused'
-                    ? 'Paused'
+                    ? t('workflow.card.stateLabels.paused', { defaultValue: 'Paused' })
                     : projection.state === 'pending'
-                      ? 'Preparing'
-                      : 'Workflow Running';
+                      ? t('workflow.card.stateLabels.preparing', { defaultValue: 'Preparing' })
+                      : t('workflow.card.stateLabels.workflowRunning', { defaultValue: 'Workflow Running' });
 
   return (
     <div className="w-full max-w-[640px] rounded-[24px] border border-[#D8E2F0] bg-white p-4 shadow-sm flex flex-col">
@@ -389,7 +391,7 @@ export function ChatWorkflowCard({
                   : 'rounded-full bg-[#EEF4FF] px-3 py-1 text-xs font-semibold text-[#1D4ED8]'
               }
             >
-              {isPlanGenerationFailed ? 'Failed' : 'Generating'}
+              {isPlanGenerationFailed ? t('workflow.card.badges.failed', { defaultValue: 'Failed' }) : t('workflow.card.badges.generating', { defaultValue: 'Generating' })}
             </div>
           ) : (
             <div className="rounded-full bg-[#EEF4FF] px-3 py-1 text-xs font-semibold text-[#1D4ED8]">
@@ -431,7 +433,7 @@ export function ChatWorkflowCard({
         </div>
       ) : isPlanGenerationPending ? (
         <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50/30 px-6 py-8 text-center">
-          <GeneratingPlanAnimation />
+          <GeneratingPlanAnimation label={t('workflow.card.generatingPlan', { defaultValue: 'Generating workflow plan' })} />
         </div>
       ) : (
         <div
@@ -440,7 +442,7 @@ export function ChatWorkflowCard({
           }`}
         >
           <div className="text-xs font-bold uppercase tracking-[0.16em] text-[#64748B]">
-            {isPlanGenerationCard ? 'Plan Draft' : 'Workflow'}
+            {isPlanGenerationCard ? t('workflow.card.emptyGraph.planDraft', { defaultValue: 'Plan Draft' }) : t('workflow.card.emptyGraph.workflow', { defaultValue: 'Workflow' })}
           </div>
           {isPlanGenerationCard ? (
             <ChatMarkdown
@@ -492,7 +494,7 @@ export function ChatWorkflowCard({
       {isInvalid && projection.validation_errors && (
         <div className="mt-4 rounded-[16px] border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm leading-6 text-[#991B1B]">
           <div className="text-xs font-bold uppercase tracking-[0.16em]">
-            Validation Errors
+            {t('workflow.card.errors.validationErrors', { defaultValue: 'Validation Errors' })}
           </div>
           <div className="mt-1">{projection.validation_errors}</div>
         </div>
@@ -505,7 +507,7 @@ export function ChatWorkflowCard({
             onClick={onOpenWindow}
             className="rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-medium text-[#475569] transition-colors hover:bg-[#F1F5F9]"
           >
-            Open
+            {t('workflow.card.buttons.open', { defaultValue: 'Open' })}
           </button>
         )}
         {projection.state === 'preview_ready' &&
@@ -517,7 +519,7 @@ export function ChatWorkflowCard({
               className="flex items-center gap-2 rounded-full bg-[#2563EB] px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#1D4ED8]"
             >
               <PlayIcon className="size-4" weight="bold" />
-              Execute Plan
+              {t('workflow.card.buttons.executePlan', { defaultValue: 'Execute Plan' })}
             </button>
           )}
         {canPauseExecution && projection.execution_id && onPauseAll && (
@@ -527,7 +529,7 @@ export function ChatWorkflowCard({
             className="flex items-center gap-2 rounded-full bg-[#D97706] px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#B45309]"
           >
             <PauseIcon className="size-4" weight="bold" />
-            Pause All
+            {t('workflow.card.buttons.pauseAll', { defaultValue: 'Pause All' })}
           </button>
         )}
         {canResumeExecution && projection.execution_id && onResume && (
@@ -537,7 +539,7 @@ export function ChatWorkflowCard({
             className="flex items-center gap-2 rounded-full bg-[var(--chat-session-send-blue,#5094fb)] px-5 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[var(--chat-session-send-blue-hover,#4084eb)]"
           >
             <PlayIcon className="size-4" weight="bold" />
-            Resume
+            {t('workflow.card.buttons.resume', { defaultValue: 'Resume' })}
           </button>
         )}
         {showRetryPlanGenerationButton && (
@@ -554,8 +556,8 @@ export function ChatWorkflowCard({
               weight="bold"
             />
             {retryPlanGenerationPending
-              ? 'Retrying...'
-              : 'Retry Plan Generation'}
+              ? t('workflow.card.buttons.retrying', { defaultValue: 'Retrying...' })
+              : t('workflow.card.buttons.retryPlanGeneration', { defaultValue: 'Retry Plan Generation' })}
           </button>
         )}
       </div>
@@ -603,7 +605,7 @@ export function ChatWorkflowCard({
       {isPlanGenerationFailed && generationErrorMessage && (
         <div className="mt-4 rounded-[16px] border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm leading-6 text-[#991B1B]">
           <div className="text-xs font-bold uppercase tracking-[0.16em]">
-            Generation Error
+            {t('workflow.card.errors.generationError', { defaultValue: 'Generation Error' })}
           </div>
           <ChatMarkdown
             content={generationErrorMessage}
@@ -618,7 +620,7 @@ export function ChatWorkflowCard({
       {isPlanGenerationCard && retryPlanGenerationError && (
         <div className="mt-4 rounded-[16px] border border-[#FECACA] bg-[#FEF2F2] p-4 text-sm leading-6 text-[#991B1B]">
           <div className="text-xs font-bold uppercase tracking-[0.16em]">
-            Retry Request Failed
+            {t('workflow.card.errors.retryRequestFailed', { defaultValue: 'Retry Request Failed' })}
           </div>
           <div className="mt-1">{retryPlanGenerationError}</div>
         </div>
@@ -627,7 +629,7 @@ export function ChatWorkflowCard({
       {projection.state === 'completed' && (
         <div className="mt-4 rounded-[16px] border border-[#D1FAE5] bg-[#ECFDF5] p-4">
           <div className="text-xs font-bold uppercase tracking-[0.16em] text-[#15803D]">
-            Final Delivery
+            {t('workflow.card.finalDelivery', { defaultValue: 'Final Delivery' })}
           </div>
           {projection.result_summary && (
             <div className="mt-2 text-sm leading-6 text-[#166534]">

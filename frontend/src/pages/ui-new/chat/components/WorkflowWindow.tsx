@@ -112,16 +112,14 @@ const REVIEW_READY_STEP_STATUSES = new Set([
 ]);
 const REVIEW_SETTINGS_EXECUTION_FINISHED_ERROR =
   'Review settings cannot be changed after execution has finished.';
-const REVIEW_SETTINGS_FINISHED_MESSAGE =
-  '当前工作流状态不支持修改审核设置。';
 
-function getReviewSettingsErrorMessage(error: unknown): string {
+function getReviewSettingsErrorMessage(error: unknown, t: (key: string, opts?: Record<string, unknown>) => string): string {
   const message =
     error instanceof Error
       ? error.message
-      : 'Unable to update review settings.';
+      : t('workflow.reviewSettings.updateError', { defaultValue: 'Unable to update review settings.' });
   return message.includes(REVIEW_SETTINGS_EXECUTION_FINISHED_ERROR)
-    ? REVIEW_SETTINGS_FINISHED_MESSAGE
+    ? t('workflow.reviewSettings.finishedMessage', { defaultValue: 'Review settings cannot be modified in the current workflow state.' })
     : message;
 }
 
@@ -552,10 +550,11 @@ export function ApprovalCard({
   onReject: (stepId: string, transcriptId: string) => void;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation('chat');
   return (
     <div className="rounded-2xl border border-[#FDE68A] bg-[#FFFBEB] p-3">
       <div className="text-xs font-bold uppercase tracking-wider text-[#92400E]">
-        Approval Required
+        {t('workflow.approvalCard.title', { defaultValue: 'Approval Required' })}
       </div>
       <div className="mt-1 text-sm font-semibold text-[#0F172A]">{title}</div>
       {description && (
@@ -568,7 +567,7 @@ export function ApprovalCard({
           disabled={disabled}
           className="rounded-full bg-[#16A34A] px-3 py-1 text-xs font-semibold text-white hover:bg-[#15803D] disabled:opacity-50 transition-colors"
         >
-          Approve
+          {t('workflow.approvalCard.approve', { defaultValue: 'Approve' })}
         </button>
         <button
           type="button"
@@ -576,7 +575,7 @@ export function ApprovalCard({
           disabled={disabled}
           className="rounded-full bg-[#DC2626] px-3 py-1 text-xs font-semibold text-white hover:bg-[#B91C1C] disabled:opacity-50 transition-colors"
         >
-          Reject
+          {t('workflow.approvalCard.reject', { defaultValue: 'Reject' })}
         </button>
       </div>
     </div>
@@ -604,10 +603,11 @@ export function PermissionRequestCard({
   onDeny: (stepId: string, transcriptId: string) => void;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation('chat');
   return (
     <div className="rounded-2xl border border-[#BFDBFE] bg-[#EFF6FF] p-3">
       <div className="text-xs font-bold uppercase tracking-wider text-[#1E40AF]">
-        Permission Request
+        {t('workflow.permissionCard.title', { defaultValue: 'Permission Request' })}
       </div>
       <div className="mt-1 text-sm font-semibold text-[#0F172A]">{title}</div>
       {description && (
@@ -620,7 +620,7 @@ export function PermissionRequestCard({
           disabled={disabled}
           className="rounded-full bg-[#2563EB] px-3 py-1 text-xs font-semibold text-white hover:bg-[#1D4ED8] disabled:opacity-50 transition-colors"
         >
-          Grant
+          {t('workflow.permissionCard.grant', { defaultValue: 'Grant' })}
         </button>
         <button
           type="button"
@@ -628,7 +628,7 @@ export function PermissionRequestCard({
           disabled={disabled}
           className="rounded-full border border-[#CBD5E1] bg-white px-3 py-1 text-xs font-semibold text-[#475569] hover:bg-[#F1F5F9] disabled:opacity-50 transition-colors"
         >
-          Deny
+          {t('workflow.permissionCard.deny', { defaultValue: 'Deny' })}
         </button>
       </div>
     </div>
@@ -652,10 +652,11 @@ export function ContinueConfirmationCard({
   onContinue: (stepId: string, transcriptId: string) => void;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation('chat');
   return (
     <div className="rounded-2xl border border-[#D1FAE5] bg-[#ECFDF5] p-3">
       <div className="text-xs font-bold uppercase tracking-wider text-[#15803D]">
-        Continue?
+        {t('workflow.continueCard.title', { defaultValue: 'Continue?' })}
       </div>
       <div className="mt-1 text-sm text-[#166534]">{message}</div>
       <div className="mt-2">
@@ -665,7 +666,7 @@ export function ContinueConfirmationCard({
           disabled={disabled}
           className="rounded-full bg-[#16A34A] px-3 py-1 text-xs font-semibold text-white hover:bg-[#15803D] disabled:opacity-50 transition-colors"
         >
-          Continue
+          {t('workflow.continueCard.confirm', { defaultValue: 'Continue' })}
         </button>
       </div>
     </div>
@@ -689,6 +690,7 @@ export function InputRequestCard({
   onSubmit: (stepId: string, transcriptId: string, inputText: string) => void;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation('chat');
   const [value, setValue] = useState('');
 
   useEffect(() => {
@@ -700,7 +702,7 @@ export function InputRequestCard({
   return (
     <div className="rounded-2xl border border-[#C7D2FE] bg-[#EEF2FF] p-3">
       <div className="text-xs font-bold uppercase tracking-wider text-[#4338CA]">
-        Input Required
+        {t('workflow.inputCard.title', { defaultValue: 'Input Required' })}
       </div>
       <div className="mt-1 text-sm font-semibold text-[#0F172A]">{prompt}</div>
       {description && (
@@ -709,7 +711,7 @@ export function InputRequestCard({
       <textarea
         value={value}
         onChange={(event) => setValue(event.target.value)}
-        placeholder={placeholder ?? 'Type your response here'}
+        placeholder={placeholder ?? t('workflow.inputCard.placeholder', { defaultValue: 'Type your response here' })}
         disabled={disabled}
         rows={4}
         className="mt-3 w-full resize-y rounded-xl border border-[#C7D2FE] bg-white px-3 py-2 text-xs text-[#0F172A] outline-none transition-colors placeholder:text-[#94A3B8] focus:border-[#818CF8] disabled:cursor-not-allowed disabled:opacity-60"
@@ -721,7 +723,7 @@ export function InputRequestCard({
           disabled={disabled || trimmedValue.length === 0}
           className="rounded-full bg-[#4F46E5] px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-[#4338CA] disabled:opacity-50"
         >
-          Submit
+          {t('workflow.inputCard.submit', { defaultValue: 'Submit' })}
         </button>
       </div>
     </div>
@@ -793,10 +795,10 @@ function InspectorCard({
 
   const instruction =
     planNode?.data.instructions?.trim() ||
-    'No task instructions were provided for this step.';
+    t('workflow.inspector.noInstructions', { defaultValue: 'No task instructions were provided for this step.' });
   const summaryText =
     step.summary_text?.trim() ||
-    'No summary has been generated for this step yet.';
+    t('workflow.inspector.noSummary', { defaultValue: 'No summary has been generated for this step yet.' });
   const loopName = loop?.loop_key?.trim() ?? '';
   const loopRejectionReason = loop?.rejection_reason?.trim() ?? '';
   const isFailed = WORKFLOW_FAILURE_STEP_STATUSES.has(step.status);
@@ -914,7 +916,7 @@ function InspectorCard({
           )}
         >
           <FileText className="h-4 w-4" />
-          Details
+          {t('workflow.inspector.tabDetails', { defaultValue: 'Details' })}
         </button>
         <button
           type="button"
@@ -927,7 +929,7 @@ function InspectorCard({
           )}
         >
           <ScrollText className="h-4 w-4" />
-          Logs
+          {t('workflow.inspector.tabLogs', { defaultValue: 'Logs' })}
         </button>
         <div className="flex-grow flex justify-end pb-1 h-full py-2 pr-6">
           <span
@@ -940,7 +942,7 @@ function InspectorCard({
                     .trim() || 'bg-slate-50 text-slate-500'
             )}
           >
-            {workflowStatusLabel(step.status)}
+            {workflowStatusLabel(step.status, t)}
           </span>
         </div>
       </div>
@@ -961,20 +963,20 @@ function InspectorCard({
               {loopName && (
                 <>
                   <span className="w-1 h-1 rounded-full bg-slate-300"></span>
-                  <span>Loop: {loopName}</span>
+                  <span>{t('workflow.inspector.loopPrefix', { name: loopName, defaultValue: `Loop: ${loopName}` })}</span>
                 </>
               )}
               {reviewPhase && (
                 <>
                   <span className="w-1 h-1 rounded-full bg-slate-300"></span>
-                  <span>Review: {reviewPhase.label}</span>
+                  <span>{t('workflow.inspector.reviewPrefix', { label: reviewPhase.label, defaultValue: `Review: ${reviewPhase.label}` })}</span>
                 </>
               )}
             </div>
 
             <div className="mb-6">
               <h3 className="text-base font-bold text-slate-800 mb-3 pl-3 border-l-4 border-indigo-500 capitalize">
-                Instruction
+                {t('workflow.inspector.instructionHeading', { defaultValue: 'Instruction' })}
               </h3>
               <div className="bg-slate-50/80 border border-slate-100 rounded-xl p-4 text-[13px] leading-relaxed text-slate-700 whitespace-pre-wrap">
                 {instruction}
@@ -984,8 +986,8 @@ function InspectorCard({
             {(isFailed || isCompleted) && (
               <div className="mb-6">
                 <h3 className="text-base font-bold text-slate-800 mb-3 pl-3 border-l-4 border-indigo-500 capitalize">
-                  Summary
-                </h3>
+                {t('workflow.inspector.summaryHeading', { defaultValue: 'Summary' })}
+              </h3>
                 <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
                   <ChatMarkdown
                     content={summaryText}
@@ -1000,7 +1002,7 @@ function InspectorCard({
             {latestReviewLabel && (
               <div className="mb-6">
                 <h3 className="text-base font-bold text-slate-800 mb-3 pl-3 border-l-4 border-indigo-500 capitalize">
-                  Feedback
+                  {t('workflow.inspector.feedbackHeading', { defaultValue: 'Feedback' })}
                 </h3>
                 <div className="bg-[#F8FAFC] border border-[#E2E8F0] rounded-xl p-4">
                   <ChatMarkdown
@@ -1015,13 +1017,13 @@ function InspectorCard({
 
             <div className="mb-6">
               <h3 className="text-base font-bold text-slate-800 mb-3 pl-3 border-l-4 border-indigo-500 capitalize">
-                Execution Record Output
+                {t('workflow.inspector.executionRecordHeading', { defaultValue: 'Execution Record Output' })}
               </h3>
               <div className="text-[13px] text-slate-600 leading-relaxed">
                 {isLoadingTranscript ? (
                   <div className="flex items-center gap-2 text-xs text-slate-400">
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    Loading transcript...
+                    {t('workflow.inspector.loadingTranscript', { defaultValue: 'Loading transcript...' })}
                   </div>
                 ) : outputEntries.length > 0 ? (
                   <div className="space-y-4">
@@ -1066,7 +1068,7 @@ function InspectorCard({
                   </div>
                 ) : (
                   <div className="text-xs text-slate-400">
-                    No output entries for this step yet.
+                    {t('workflow.inspector.noOutputEntries', { defaultValue: 'No output entries for this step yet.' })}
                   </div>
                 )}
               </div>
@@ -1076,7 +1078,7 @@ function InspectorCard({
               <div className="mb-6">
                 <h3 className="text-base font-bold text-rose-600 mb-3 pl-3 border-l-4 border-rose-500 capitalize flex items-center gap-2">
                   <AlertCircle className="w-4 h-4" />
-                  Error
+                  {t('workflow.inspector.errorHeading', { defaultValue: 'Error' })}
                 </h3>
                 <div className="bg-rose-50/50 border border-rose-100 rounded-xl p-4 max-h-40 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-rose-700">
                   {loopRejectionReason || summaryText}
@@ -1089,7 +1091,7 @@ function InspectorCard({
             {isLoadingTranscript ? (
               <div className="flex items-center justify-center gap-2 py-8 text-xs text-slate-500">
                 <Loader2 className="w-4 h-4 animate-spin" />
-                Loading logs...
+                {t('workflow.inspector.loadingLogs', { defaultValue: 'Loading logs...' })}
               </div>
             ) : agentLogGroups.length > 0 ? (
               agentLogGroups.map((group, groupIndex) => {
@@ -1112,7 +1114,7 @@ function InspectorCard({
                       <span className="inline-flex min-w-0 items-center gap-2">
                         <Bot className="h-4 w-4 shrink-0 text-slate-400" />
                         <span className="truncate">
-                          {group.agentName} - Thinking Process
+                          {t('workflow.inspector.thinkingProcess', { agentName: group.agentName, defaultValue: `${group.agentName} - Thinking Process` })}
                         </span>
                       </span>
                       <button
@@ -1123,8 +1125,8 @@ function InspectorCard({
                         }
                       >
                         {isGroupCollapsed || !allExpanded
-                          ? 'Expand'
-                          : 'Collapse'}
+                          ? t('workflow.inspector.expand', { defaultValue: 'Expand' })
+                          : t('workflow.inspector.collapse', { defaultValue: 'Collapse' })}
                       </button>
                     </div>
                     {!isGroupCollapsed && (
@@ -1163,7 +1165,7 @@ function InspectorCard({
               })
             ) : (
               <div className="flex items-center justify-center py-8 text-xs text-slate-500">
-                No logs for this step yet.
+                {t('workflow.inspector.noLogs', { defaultValue: 'No logs for this step yet.' })}
               </div>
             )}
           </div>
@@ -1183,7 +1185,7 @@ function InspectorCard({
             )}
           >
             <MessageSquare className="w-4 h-4" />
-            {isChatVisible ? 'Close Chat' : 'Open Chat'}
+            {isChatVisible ? t('workflow.inspector.closeChat', { defaultValue: 'Close Chat' }) : t('workflow.inspector.openChat', { defaultValue: 'Open Chat' })}
           </button>
 
           {step.status === 'running' && (onInterruptStep || onStopStep) && (
@@ -1199,7 +1201,7 @@ function InspectorCard({
               className="flex-1 py-2.5 px-4 rounded-xl font-semibold text-sm cursor-pointer transition-all flex items-center justify-center gap-2 bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 hover:border-rose-300 shadow-sm"
             >
               <Ban className="w-4 h-4" />
-              Terminate
+              {t('workflow.inspector.terminate', { defaultValue: 'Terminate' })}
             </button>
           )}
           {isRetryableWorkflowStepStatus(step.status) && onRetryStep && (
@@ -1252,6 +1254,7 @@ function ChatPanel({
   onSendInput?: (stepId: string, inputText: string) => void;
   canSendInput: boolean;
 }) {
+  const { t } = useTranslation('chat');
   const [inputText, setInputText] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -1281,7 +1284,7 @@ function ChatPanel({
         </div>
         <div className="flex-1 min-w-0">
           <h2 className="font-semibold text-slate-800 text-xs truncate">
-            Agent Conversation
+            {t('workflow.chatPanel.title', { defaultValue: 'Agent Conversation' })}
           </h2>
           <div className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-emerald-500" />
@@ -1329,10 +1332,10 @@ function ChatPanel({
                 <div className="text-xs font-bold text-amber-800 flex items-center gap-2 mb-2">
                   <AlertCircle className="w-4 h-4" />{' '}
                   {entry.entry_type === 'approval_request'
-                    ? 'Approval Required'
+                    ? t('workflow.chatPanel.approvalRequired', { defaultValue: 'Approval Required' })
                     : entry.entry_type === 'permission_request'
-                      ? 'Permission Request'
-                      : 'Continue?'}
+                      ? t('workflow.chatPanel.permissionRequest', { defaultValue: 'Permission Request' })
+                      : t('workflow.chatPanel.continuePrompt', { defaultValue: 'Continue?' })}
                 </div>
                 <p className="text-[11px] text-slate-600 mb-3 leading-relaxed font-medium">
                   {entry.content}
@@ -1356,8 +1359,8 @@ function ChatPanel({
                       className="flex-1 py-1.5 bg-emerald-600 text-white rounded text-[10px] font-bold hover:bg-emerald-700 transition-colors shadow-sm disabled:opacity-50"
                     >
                       {entry.entry_type === 'continue_confirmation'
-                        ? 'CONTINUE'
-                        : 'APPROVE'}
+                        ? t('workflow.chatPanel.continueAction', { defaultValue: 'CONTINUE' })
+                        : t('workflow.chatPanel.approveAction', { defaultValue: 'APPROVE' })}
                     </button>
                     {entry.entry_type !== 'continue_confirmation' && (
                       <button
@@ -1374,7 +1377,7 @@ function ChatPanel({
                         disabled={pendingActionId === entry.id}
                         className="flex-1 py-1.5 bg-white border border-slate-300 text-slate-700 rounded text-[10px] font-bold hover:bg-slate-50 transition-colors disabled:opacity-50"
                       >
-                        REJECT
+                        {t('workflow.chatPanel.rejectAction', { defaultValue: 'REJECT' })}
                       </button>
                     )}
                   </div>
@@ -1430,7 +1433,7 @@ function ChatPanel({
             type="text"
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
-            placeholder="Reply to agent..."
+            placeholder={t('workflow.chatPanel.replyPlaceholder', { defaultValue: 'Reply to agent...' })}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 e.preventDefault();
@@ -1484,6 +1487,7 @@ export function WorkflowWindow({
   onSubmitIterationFeedback,
   pendingActionId,
 }: WorkflowWindowProps) {
+  const { t } = useTranslation('chat');
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const [isChatVisible, setIsChatVisible] = useState(false);
   const [executionRecordTab, setExecutionRecordTab] =
@@ -1533,7 +1537,7 @@ export function WorkflowWindow({
     isReviewSettingsLocked || isSavingReviewSettings || !onUpdateReviewSettings;
   const reviewSettingsDisplayError =
     reviewSettingsError ??
-    (isReviewSettingsLocked ? REVIEW_SETTINGS_FINISHED_MESSAGE : null);
+    (isReviewSettingsLocked ? t('workflow.reviewSettings.finishedMessage', { defaultValue: 'Review settings cannot be modified in the current workflow state.' }) : null);
   const agents = useMemo(() => projection.agents ?? [], [projection.agents]);
   const leadAgentId =
     agents[0]?.workflow_agent_session_id ?? agents[0]?.session_agent_id ?? null;
@@ -1680,7 +1684,7 @@ export function WorkflowWindow({
   const handleSaveReviewSettings = useCallback(async () => {
     if (!projection.execution_id || !onUpdateReviewSettings) return;
     if (isReviewSettingsLocked) {
-      setReviewSettingsError(REVIEW_SETTINGS_FINISHED_MESSAGE);
+      setReviewSettingsError(t('workflow.reviewSettings.finishedMessage', { defaultValue: 'Review settings cannot be modified in the current workflow state.' }));
       return;
     }
     setReviewSettingsError(null);
@@ -1703,7 +1707,7 @@ export function WorkflowWindow({
       ]);
       setIsReviewSettingsOpen(false);
     } catch (error) {
-      setReviewSettingsError(getReviewSettingsErrorMessage(error));
+      setReviewSettingsError(getReviewSettingsErrorMessage(error, t));
     } finally {
       setIsSavingReviewSettings(false);
     }
@@ -1812,11 +1816,13 @@ export function WorkflowWindow({
     ? (loopByKey.get(activeStep.loop_key) ?? null)
     : null;
   const activeStepReviewPhase = workflowReviewPhaseMeta(
-    activeStep?.review_phase
+    activeStep?.review_phase,
+    t
   );
   const activeStepLatestReview = activeStep?.latest_review ?? null;
   const activeStepLatestReviewLabel = workflowLatestReviewLabel(
-    activeStepLatestReview
+    activeStepLatestReview,
+    t
   );
   const activeStepLatestReviewFeedback = workflowLatestReviewFeedback(
     activeStepLatestReview
@@ -1984,7 +1990,7 @@ export function WorkflowWindow({
         title: projection.pending_review.target_title,
         message:
           projection.pending_review.prompt_template.message ||
-          'Review required',
+          t('workflow.notifications.reviewRequired', { defaultValue: 'Review required' }),
       });
     }
 
@@ -1992,7 +1998,7 @@ export function WorkflowWindow({
       items.push({
         id: workflowFinalReviewAction.transcriptId,
         type: 'final_review',
-        title: 'Final Review',
+        title: t('workflow.notifications.finalReviewTitle', { defaultValue: 'Final Review' }),
         message: workflowFinalReviewAction.message,
       });
     }
@@ -2056,12 +2062,12 @@ export function WorkflowWindow({
                 <span className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse" />
               )}
               {isExecutionRecompiling
-                ? 'Recompiling plan...'
+                ? t('workflow.status.recompiling', { defaultValue: 'Recompiling plan...' })
                 : hasWorkflowCompleted
-                  ? `Completed - ${normalizedResultSummary || 'All steps finished'}`
+                  ? t('workflow.status.completed', { summary: normalizedResultSummary || t('workflow.status.completedDefault', { defaultValue: 'All steps finished' }), defaultValue: `Completed - ${normalizedResultSummary || 'All steps finished'}` })
                   : hasWorkflowFailed
-                    ? `Failed - ${normalizedErrorMessage || 'Execution error'}`
-                    : `Progress ${progressPercent}% · ${projection.completed_step_count}/${projection.total_step_count} steps`}
+                    ? t('workflow.status.failed', { error: normalizedErrorMessage || t('workflow.status.failedDefault', { defaultValue: 'Execution error' }), defaultValue: `Failed - ${normalizedErrorMessage || 'Execution error'}` })
+                    : t('workflow.status.progress', { percent: progressPercent, completed: projection.completed_step_count, total: projection.total_step_count, defaultValue: `Progress ${progressPercent}% · ${projection.completed_step_count}/${projection.total_step_count} steps` })}
             </p>
           </div>
         </div>
@@ -2074,7 +2080,7 @@ export function WorkflowWindow({
                 type="button"
                 onClick={() => onExecute(projection.plan_id!)}
                 className="p-1.5 bg-white shadow-sm rounded-md transition-all text-indigo-600 hover:bg-indigo-50"
-                title="Execute Plan"
+                title={t('workflow.controls.executePlan', { defaultValue: 'Execute Plan' })}
               >
                 <Play className="w-4 h-4 fill-current" />
               </button>
@@ -2084,7 +2090,7 @@ export function WorkflowWindow({
                 type="button"
                 onClick={() => onResume(projection.execution_id!)}
                 className="p-1.5 bg-white shadow-sm rounded-md transition-all text-indigo-600 hover:bg-indigo-50"
-                title="Resume"
+                title={t('workflow.controls.resume', { defaultValue: 'Resume' })}
               >
                 <Play className="w-4 h-4 fill-current" />
               </button>
@@ -2094,7 +2100,7 @@ export function WorkflowWindow({
                 type="button"
                 onClick={() => onPauseAll(projection.execution_id!)}
                 className="p-1.5 hover:bg-white hover:shadow-sm rounded-md transition-all text-slate-500"
-                title="Pause All"
+                title={t('workflow.controls.pauseAll', { defaultValue: 'Pause All' })}
               >
                 <Pause className="w-4 h-4" />
               </button>
@@ -2114,7 +2120,7 @@ export function WorkflowWindow({
                     }
                   }}
                   className="p-1.5 hover:bg-white hover:shadow-sm rounded-md transition-all text-slate-500"
-                  title="Stop"
+                  title={t('workflow.controls.stop', { defaultValue: 'Stop' })}
                 >
                   <Square className="w-4 h-4" />
                 </button>
@@ -2125,8 +2131,8 @@ export function WorkflowWindow({
               type="button"
               onClick={() => setIsReviewSettingsOpen((open) => !open)}
               className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition-colors"
-              title="Review settings"
-              aria-label="Review settings"
+              title={t('workflow.reviewSettings.title', { defaultValue: 'Review settings' })}
+              aria-label={t('workflow.reviewSettings.close', { defaultValue: 'Review settings' })}
             >
               <Settings className="w-4 h-4" />
             </button>
@@ -2141,17 +2147,17 @@ export function WorkflowWindow({
             <div className="flex items-start justify-between border-b border-slate-100 px-5 py-4 bg-slate-50">
               <div className="pr-4">
                 <div className="text-sm font-semibold text-slate-900 mb-1">
-                  Review Settings
+                  {t('workflow.reviewSettings.title', { defaultValue: 'Review Settings' })}
                 </div>
                 <div className="text-xs text-slate-500 leading-relaxed">
-                  Choose who should review each workflow result.
+                  {t('workflow.reviewSettings.description', { defaultValue: 'Choose who should review each workflow result.' })}
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setIsReviewSettingsOpen(false)}
                 className="mt-0.5 shrink-0 rounded-md p-1.5 text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-700"
-                aria-label="Close review settings"
+                aria-label={t('workflow.reviewSettings.close', { defaultValue: 'Close review settings' })}
               >
                 <X className="h-4 w-4" />
               </button>
@@ -2161,10 +2167,10 @@ export function WorkflowWindow({
                 <div>
                   <div className="mb-3 flex items-center justify-between">
                     <div className="text-xs font-semibold uppercase tracking-wider text-slate-800">
-                      Task Steps
+                      {t('workflow.reviewSettings.taskSteps', { defaultValue: 'Task Steps' })}
                     </div>
                     <div className="text-[11px] text-slate-500">
-                      Lead / User review
+                      {t('workflow.reviewSettings.leadUserReview', { defaultValue: 'Lead / User review' })}
                     </div>
                   </div>
                   <div className="flex flex-col gap-3">
@@ -2186,11 +2192,11 @@ export function WorkflowWindow({
                           <div className="grid grid-cols-2 gap-2">
                             <ReviewSwitch
                               icon={Crown}
-                              label="Lead"
+                              label={t('workflow.reviewSettings.leadLabel', { defaultValue: 'Lead' })}
                               tooltip={
                                 draft.leadReview
-                                  ? '关闭此任务节点的主Agent审核'
-                                  : '开启此任务节点的主Agent审核'
+                                  ? t('workflow.reviewSettings.leadReviewOff', { defaultValue: 'Disable lead agent review for this task step' })
+                                  : t('workflow.reviewSettings.leadReviewOn', { defaultValue: 'Enable lead agent review for this task step' })
                               }
                               checked={draft.leadReview}
                               disabled={reviewSettingsDisabled}
@@ -2204,11 +2210,11 @@ export function WorkflowWindow({
                             />
                             <ReviewSwitch
                               icon={Hand}
-                              label="User"
+                              label={t('workflow.reviewSettings.userLabel', { defaultValue: 'User' })}
                               tooltip={
                                 draft.userReview
-                                  ? '关闭此任务节点的用户审核'
-                                  : '开启此任务节点的用户审核'
+                                  ? t('workflow.reviewSettings.userReviewOff', { defaultValue: 'Disable user review for this task step' })
+                                  : t('workflow.reviewSettings.userReviewOn', { defaultValue: 'Enable user review for this task step' })
                               }
                               checked={draft.userReview}
                               disabled={reviewSettingsDisabled}
@@ -2232,10 +2238,10 @@ export function WorkflowWindow({
                 <div>
                   <div className="mb-3 flex items-center justify-between">
                     <div className="text-xs font-semibold uppercase tracking-wider text-slate-800">
-                      Workflow Loops
+                      {t('workflow.reviewSettings.workflowLoops', { defaultValue: 'Workflow Loops' })}
                     </div>
                     <div className="text-[11px] text-slate-500">
-                      User review only
+                      {t('workflow.reviewSettings.userReviewOnly', { defaultValue: 'User review only' })}
                     </div>
                   </div>
                   <div className="flex flex-col gap-3">
@@ -2263,11 +2269,11 @@ export function WorkflowWindow({
                           <div className="grid grid-cols-1 gap-2">
                             <ReviewSwitch
                               icon={Hand}
-                              label="User"
+                              label={t('workflow.reviewSettings.userLabel', { defaultValue: 'User' })}
                               tooltip={
                                 draft.userReview
-                                  ? '关闭此工作流循环的用户审核'
-                                  : '开启此工作流循环的用户审核'
+                                  ? t('workflow.reviewSettings.loopUserReviewOff', { defaultValue: 'Disable user review for this workflow loop' })
+                                  : t('workflow.reviewSettings.loopUserReviewOn', { defaultValue: 'Enable user review for this workflow loop' })
                               }
                               checked={draft.userReview}
                               disabled={reviewSettingsDisabled}
@@ -2299,7 +2305,7 @@ export function WorkflowWindow({
                 onClick={() => setIsReviewSettingsOpen(false)}
                 className="rounded-md border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50"
               >
-                Cancel
+                {t('workflow.reviewSettings.cancel', { defaultValue: 'Cancel' })}
               </button>
               <button
                 type="button"
@@ -2311,7 +2317,7 @@ export function WorkflowWindow({
                 }
                 className="rounded-md bg-[#5094fb] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#4080e0] disabled:cursor-not-allowed disabled:opacity-50 shadow-sm"
               >
-                {isSavingReviewSettings ? 'Saving...' : 'Save Changes'}
+                {isSavingReviewSettings ? t('workflow.reviewSettings.saving', { defaultValue: 'Saving...' }) : t('workflow.reviewSettings.saveChanges', { defaultValue: 'Save Changes' })}
               </button>
             </div>
           </div>
@@ -2345,10 +2351,10 @@ export function WorkflowWindow({
               >
                 <div className="bg-indigo-600 p-2.5 flex items-center justify-between text-white">
                   <span className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5">
-                    <Bell className="w-3.5 h-3.5" /> Pending Review
+                    <Bell className="w-3.5 h-3.5" /> {t('workflow.notifications.pendingReview', { defaultValue: 'Pending Review' })}
                   </span>
                   <span className="text-[10px] bg-indigo-400/50 px-1.5 py-0.5 rounded">
-                    {notif.type === 'final_review' ? 'Final' : 'Step'}
+                    {notif.type === 'final_review' ? t('workflow.notifications.typeFinal', { defaultValue: 'Final' }) : t('workflow.notifications.typeStep', { defaultValue: 'Step' })}
                   </span>
                 </div>
                 <div className="p-4 space-y-3">
@@ -2385,7 +2391,7 @@ export function WorkflowWindow({
                           }
                           className="flex-1 py-1.5 bg-indigo-600 text-white rounded-md text-[10px] font-bold shadow-sm hover:bg-indigo-700 transition-colors disabled:opacity-50"
                         >
-                          ACCEPT
+                          {t('workflow.notifications.accept', { defaultValue: 'ACCEPT' })}
                         </button>
                         <button
                           type="button"
@@ -2402,7 +2408,7 @@ export function WorkflowWindow({
                           }
                           className="flex-1 py-1.5 bg-slate-100 text-slate-700 rounded-md text-[10px] font-bold hover:bg-slate-200 transition-colors disabled:opacity-50"
                         >
-                          REJECT
+                          {t('workflow.notifications.reject', { defaultValue: 'REJECT' })}
                         </button>
                       </>
                     ) : projection.pending_review && onRespondPendingReview ? (
@@ -2421,7 +2427,7 @@ export function WorkflowWindow({
                           }
                           className="flex-1 py-1.5 bg-indigo-600 text-white rounded-md text-[10px] font-bold shadow-sm hover:bg-indigo-700 transition-colors disabled:opacity-50"
                         >
-                          APPROVE
+                          {t('workflow.notifications.approve', { defaultValue: 'APPROVE' })}
                         </button>
                         <button
                           type="button"
@@ -2433,7 +2439,7 @@ export function WorkflowWindow({
                           }}
                           className="flex-1 py-1.5 bg-slate-100 text-slate-700 rounded-md text-[10px] font-bold hover:bg-slate-200 transition-colors"
                         >
-                          VIEW DETAILS
+                          {t('workflow.notifications.viewDetails', { defaultValue: 'VIEW DETAILS' })}
                         </button>
                       </>
                     ) : null}

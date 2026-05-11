@@ -96,7 +96,7 @@ export enum ChatSessionStatus { active = "active", archived = "archived" }
 
 export type CreateChatSession = { title: string | null, workspace_path: string | null, };
 
-export type UpdateChatSession = { title: string | null, status: ChatSessionStatus | null, lead_agent_id: string | null | null, summary_text: string | null, archive_ref: string | null, last_seen_diff_key: string | null, team_protocol: string | null, team_protocol_enabled: boolean | null, default_workspace_path: string | null, };
+export type UpdateChatSession = { title: string | null, status: ChatSessionStatus | null, lead_agent_id?: string | null, summary_text: string | null, archive_ref: string | null, last_seen_diff_key: string | null, team_protocol: string | null, team_protocol_enabled: boolean | null, default_workspace_path: string | null, };
 
 export type ChatAgent = { id: string, name: string, runner_type: string, system_prompt: string, tools_enabled: JsonValue, model_name: string | null, created_at: string, updated_at: string, };
 

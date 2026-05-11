@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ChevronUp, ChevronDown } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { WorkflowIterationSummaryData } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -34,6 +35,7 @@ export function WorkflowIterationFeedbackCard({
   pendingActionId,
   onSubmit,
 }: WorkflowIterationFeedbackCardProps) {
+  const { t } = useTranslation('chat');
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [showReview, setShowReview] = useState(false);
   const [expandedReject, setExpandedReject] = useState(false);
@@ -79,7 +81,7 @@ export function WorkflowIterationFeedbackCard({
     const nextWhatWrong = whatWrong.trim();
     const nextExpected = expected.trim();
     if (!nextWhatWrong || !nextExpected) {
-      setValidationError('Reject requires what_wrong and expected.');
+      setValidationError(t('workflow.iterationFeedback.validationError', { defaultValue: 'Reject requires what_wrong and expected.' }));
       return;
     }
     setValidationError(null);
@@ -103,7 +105,7 @@ export function WorkflowIterationFeedbackCard({
         type="button"
         onClick={() => setIsCollapsed(false)}
         className="flex items-center gap-3 bg-white border border-slate-200 rounded-full px-4 py-1.5 shadow-sm hover:border-blue-400 transition-all group"
-        title={`Round ${currentRound} · ${completedSteps}/${totalSteps} completed${runningStepTitle ? ` · Running: ${runningStepTitle}` : ''}`}
+        title={t('workflow.iterationFeedback.round', { round: currentRound, defaultValue: `Round ${currentRound}` }) + ` · ${completedSteps}/${totalSteps} ${t('workflow.iterationFeedback.steps', { defaultValue: 'Steps' }).toLowerCase()}${runningStepTitle ? ` · ${t('workflow.iterationFeedback.running', { defaultValue: 'Running' })}: ${runningStepTitle}` : ''}`}
       >
         <div className="flex items-center gap-1.5">
           <div className={cn(
@@ -113,7 +115,7 @@ export function WorkflowIterationFeedbackCard({
           <span className="text-xs font-bold text-slate-700">R{currentRound}</span>
         </div>
         <div className="h-3 w-[1px] bg-slate-200" />
-        <span className="text-xs font-medium text-slate-600">{completedSteps}/{totalSteps} Steps</span>
+        <span className="text-xs font-medium text-slate-600">{completedSteps}/{totalSteps} {t('workflow.iterationFeedback.steps', { defaultValue: 'Steps' })}</span>
         <div className="h-3 w-[1px] bg-slate-200" />
         <span className="text-xs font-bold text-blue-600">{progressPercent}%</span>
       </button>
@@ -130,7 +132,7 @@ export function WorkflowIterationFeedbackCard({
       >
         <div className="flex items-center gap-3 mb-2.5">
           <div className="bg-blue-50 text-blue-600 px-2 py-0.5 rounded-lg text-[10px] font-bold tracking-tight border border-blue-100 uppercase shrink-0">
-            Round {currentRound}
+            {t('workflow.iterationFeedback.round', { round: currentRound, defaultValue: `Round ${currentRound}` })}
           </div>
           <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden relative">
             <div
@@ -144,22 +146,22 @@ export function WorkflowIterationFeedbackCard({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <div className="flex flex-col">
-              <span className="text-[10px] text-slate-400 uppercase font-medium">Steps</span>
+              <span className="text-[10px] text-slate-400 uppercase font-medium">{t('workflow.iterationFeedback.steps', { defaultValue: 'Steps' })}</span>
               <span className="text-xs font-bold text-slate-700">{completedSteps} / {totalSteps}</span>
             </div>
             <div className="h-6 w-[1px] bg-slate-100" />
             <div className="flex flex-col">
-              <span className="text-[10px] text-slate-400 uppercase font-medium">Status</span>
+              <span className="text-[10px] text-slate-400 uppercase font-medium">{t('workflow.iterationFeedback.status', { defaultValue: 'Status' })}</span>
               <div className="flex items-center gap-1.5">
                 {runningStepTitle ? (
                   <>
                     <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-                    <span className="text-xs font-bold text-emerald-600">Running</span>
+                    <span className="text-xs font-bold text-emerald-600">{t('workflow.iterationFeedback.running', { defaultValue: 'Running' })}</span>
                   </>
                 ) : (
                   <>
                     <div className="w-2 h-2 bg-slate-300 rounded-full" />
-                    <span className="text-xs font-bold text-slate-400">Idle</span>
+                    <span className="text-xs font-bold text-slate-400">{t('workflow.iterationFeedback.idle', { defaultValue: 'Idle' })}</span>
                   </>
                 )}
               </div>
@@ -170,7 +172,7 @@ export function WorkflowIterationFeedbackCard({
 
         {runningStepTitle && (
           <div className="mt-3 py-2 px-3 bg-slate-50 rounded-xl border border-slate-100">
-            <span className="text-[10px] text-slate-400 block mb-0.5 uppercase">Current Step</span>
+            <span className="text-[10px] text-slate-400 block mb-0.5 uppercase">{t('workflow.iterationFeedback.currentStep', { defaultValue: 'Current Step' })}</span>
             <p className="text-xs text-slate-600 font-medium truncate">{runningStepTitle}</p>
           </div>
         )}
@@ -192,7 +194,7 @@ export function WorkflowIterationFeedbackCard({
                 "text-[10px] font-bold uppercase tracking-wider",
                 expandedReject ? "text-rose-700" : "text-indigo-700"
               )}>
-                {expandedReject ? "Reject with Feedback" : "Review Required"}
+                {expandedReject ? t('workflow.iterationFeedback.rejectWithFeedback', { defaultValue: 'Reject with Feedback' }) : t('workflow.iterationFeedback.reviewRequired', { defaultValue: 'Review Required' })}
               </span>
             </div>
             <button
@@ -207,50 +209,50 @@ export function WorkflowIterationFeedbackCard({
           {expandedReject && (
             <div className="space-y-3 mb-4">
               <div>
-                <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">What went wrong?</label>
+                <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">{t('workflow.iterationFeedback.whatWrongLabel', { defaultValue: 'What went wrong?' })}</label>
                 <textarea
                   value={whatWrong}
                   onChange={(e) => setWhatWrong(e.target.value)}
                   rows={2}
                   disabled={disabled || !canSubmit}
-                  placeholder="Describe the issue..."
+                  placeholder={t('workflow.iterationFeedback.whatWrongPlaceholder', { defaultValue: 'Describe the issue...' })}
                   className="w-full bg-white border border-slate-200 rounded-xl p-3 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-300 transition-all placeholder:text-slate-300 disabled:opacity-60"
                 />
               </div>
               <div>
-                <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Expected outcome</label>
+                <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">{t('workflow.iterationFeedback.expectedLabel', { defaultValue: 'Expected outcome' })}</label>
                 <textarea
                   value={expected}
                   onChange={(e) => setExpected(e.target.value)}
                   rows={2}
                   disabled={disabled || !canSubmit}
-                  placeholder="What should have happened?"
+                  placeholder={t('workflow.iterationFeedback.expectedPlaceholder', { defaultValue: 'What should have happened?' })}
                   className="w-full bg-white border border-slate-200 rounded-xl p-3 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-300 transition-all placeholder:text-slate-300 disabled:opacity-60"
                 />
               </div>
               <div className="flex gap-3">
                 <div className="flex-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Priority</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">{t('workflow.iterationFeedback.priorityLabel', { defaultValue: 'Priority' })}</label>
                   <select
                     value={priority}
                     onChange={(e) => setPriority(e.target.value as 'high' | 'medium' | 'low')}
                     disabled={disabled || !canSubmit}
                     className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-300 disabled:opacity-60"
                   >
-                    <option value="high">High</option>
-                    <option value="medium">Medium</option>
-                    <option value="low">Low</option>
+                    <option value="high">{t('workflow.iterationFeedback.priorityHigh', { defaultValue: 'High' })}</option>
+                    <option value="medium">{t('workflow.iterationFeedback.priorityMedium', { defaultValue: 'Medium' })}</option>
+                    <option value="low">{t('workflow.iterationFeedback.priorityLow', { defaultValue: 'Low' })}</option>
                   </select>
                 </div>
               </div>
               <div>
-                <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Additional Notes</label>
+                <label className="text-[10px] font-bold text-slate-400 uppercase mb-1 block">{t('workflow.iterationFeedback.additionalNotesLabel', { defaultValue: 'Additional Notes' })}</label>
                 <textarea
                   value={additionalNotes}
                   onChange={(e) => setAdditionalNotes(e.target.value)}
                   rows={2}
                   disabled={disabled || !canSubmit}
-                  placeholder="Optional notes..."
+                  placeholder={t('workflow.iterationFeedback.additionalNotesPlaceholder', { defaultValue: 'Optional notes...' })}
                   className="w-full bg-white border border-slate-200 rounded-xl p-3 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-rose-200 focus:border-rose-300 transition-all placeholder:text-slate-300 disabled:opacity-60"
                 />
               </div>
@@ -270,7 +272,7 @@ export function WorkflowIterationFeedbackCard({
                 disabled={disabled || !canSubmit}
                 className="flex-1 bg-indigo-50 border border-indigo-100 text-indigo-700 py-2.5 rounded-xl text-xs font-bold hover:bg-indigo-100 hover:border-indigo-200 transition-all active:scale-95 disabled:opacity-50 disabled:active:scale-100 shadow-sm"
               >
-                ACCEPT
+                {t('workflow.iterationFeedback.accept', { defaultValue: 'ACCEPT' })}
               </button>
             )}
             <button
@@ -284,7 +286,7 @@ export function WorkflowIterationFeedbackCard({
                   : "bg-white border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-700"
               )}
             >
-              {expandedReject ? 'SUBMIT REJECTION' : 'REJECT'}
+              {expandedReject ? t('workflow.iterationFeedback.submitRejection', { defaultValue: 'SUBMIT REJECTION' }) : t('workflow.iterationFeedback.reject', { defaultValue: 'REJECT' })}
             </button>
             {expandedReject && (
               <button
@@ -295,7 +297,7 @@ export function WorkflowIterationFeedbackCard({
                 }}
                 className="px-4 bg-white border border-slate-200 text-slate-400 py-2.5 rounded-xl text-xs font-bold hover:bg-slate-50 hover:text-slate-600 transition-all"
               >
-                CANCEL
+                {t('workflow.iterationFeedback.cancel', { defaultValue: 'CANCEL' })}
               </button>
             )}
           </div>

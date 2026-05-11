@@ -233,7 +233,7 @@ export function MessageInputArea({
           )}
         >
           <GitBranchIcon weight={isWorkflowMode ? "bold" : "regular"} className={cn("size-4 transition-colors", isWorkflowMode ? "text-blue-500" : "text-slate-400 group-hover:text-slate-500 dark:text-slate-500 dark:group-hover:text-slate-400")} />
-          Workflow
+          {t('input_tabs.workflow')}
           {isWorkflowMode && <div className="absolute -bottom-[2px] left-0 right-0 h-[3px] bg-transparent" />}
         </button>
         <button
@@ -248,7 +248,7 @@ export function MessageInputArea({
           )}
         >
           <ChatCircleDotsIcon weight={!isWorkflowMode ? "bold" : "regular"} className={cn("size-4 transition-colors", !isWorkflowMode ? "text-slate-700 dark:text-slate-300" : "text-slate-400 group-hover:text-slate-500 dark:text-slate-500 dark:group-hover:text-slate-400")} />
-          Chat
+          {t('input_tabs.chat')}
           {!isWorkflowMode && <div className="absolute -bottom-[2px] left-0 right-0 h-[3px] bg-transparent" />}
         </button>
       </div>

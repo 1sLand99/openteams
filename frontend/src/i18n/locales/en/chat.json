@@ -793,6 +793,243 @@
       "openExplorerSuccess": "Opened in file manager."
     }
   },
+  "workflow": {
+    "approvalCard": {
+      "title": "Approval Required",
+      "approve": "Approve",
+      "reject": "Reject"
+    },
+    "permissionCard": {
+      "title": "Permission Request",
+      "grant": "Grant",
+      "deny": "Deny"
+    },
+    "continueCard": {
+      "title": "Continue?",
+      "confirm": "Continue"
+    },
+    "inputCard": {
+      "title": "Input Required",
+      "placeholder": "Type your response here",
+      "submit": "Submit"
+    },
+    "inspector": {
+      "tabDetails": "Details",
+      "tabLogs": "Logs",
+      "noInstructions": "No task instructions were provided for this step.",
+      "noSummary": "No summary has been generated for this step yet.",
+      "loopPrefix": "Loop: {{name}}",
+      "reviewPrefix": "Review: {{label}}",
+      "instructionHeading": "Instruction",
+      "summaryHeading": "Summary",
+      "feedbackHeading": "Feedback",
+      "executionRecordHeading": "Execution Record Output",
+      "loadingTranscript": "Loading transcript...",
+      "noOutputEntries": "No output entries for this step yet.",
+      "errorHeading": "Error",
+      "loadingLogs": "Loading logs...",
+      "thinkingProcess": "{{agentName}} - Thinking Process",
+      "expand": "Expand",
+      "collapse": "Collapse",
+      "noLogs": "No logs for this step yet.",
+      "closeChat": "Close Chat",
+      "openChat": "Open Chat",
+      "terminate": "Terminate"
+    },
+    "chatPanel": {
+      "title": "Agent Conversation",
+      "approvalRequired": "Approval Required",
+      "permissionRequest": "Permission Request",
+      "continuePrompt": "Continue?",
+      "continueAction": "CONTINUE",
+      "approveAction": "APPROVE",
+      "rejectAction": "REJECT",
+      "replyPlaceholder": "Reply to agent..."
+    },
+    "status": {
+      "recompiling": "Recompiling plan...",
+      "completed": "Completed - {{summary}}",
+      "completedDefault": "All steps finished",
+      "failed": "Failed - {{error}}",
+      "failedDefault": "Execution error",
+      "progress": "Progress {{percent}}% · {{completed}}/{{total}} steps"
+    },
+    "controls": {
+      "executePlan": "Execute Plan",
+      "resume": "Resume",
+      "pauseAll": "Pause All",
+      "stop": "Stop"
+    },
+    "reviewSettings": {
+      "title": "Review Settings",
+      "description": "Choose who should review each workflow result.",
+      "close": "Close review settings",
+      "taskSteps": "Task Steps",
+      "leadUserReview": "Lead / User review",
+      "leadLabel": "Lead",
+      "userLabel": "User",
+      "leadReviewOn": "Enable lead agent review for this task step",
+      "leadReviewOff": "Disable lead agent review for this task step",
+      "userReviewOn": "Enable user review for this task step",
+      "userReviewOff": "Disable user review for this task step",
+      "workflowLoops": "Workflow Loops",
+      "userReviewOnly": "User review only",
+      "loopUserReviewOn": "Enable user review for this workflow loop",
+      "loopUserReviewOff": "Disable user review for this workflow loop",
+      "cancel": "Cancel",
+      "saving": "Saving...",
+      "saveChanges": "Save Changes",
+      "executionFinishedError": "Review settings cannot be changed after execution has finished.",
+      "finishedMessage": "Review settings cannot be modified in the current workflow state.",
+      "updateError": "Unable to update review settings."
+    },
+    "notifications": {
+      "pendingReview": "Pending Review",
+      "typeFinal": "Final",
+      "typeStep": "Step",
+      "accept": "ACCEPT",
+      "reject": "REJECT",
+      "approve": "APPROVE",
+      "viewDetails": "VIEW DETAILS",
+      "finalReviewTitle": "Final Review",
+      "reviewRequired": "Review required"
+    },
+    "card": {
+      "generatingPlan": "Generating workflow plan",
+      "stateLabels": {
+        "planGenerationFailed": "Plan Generation Failed",
+        "generatingPlan": "Generating Plan",
+        "recompilingPlan": "Recompiling Plan",
+        "workItem": "Work Item",
+        "executionFailed": "Execution Failed",
+        "planReady": "Plan Ready",
+        "planInvalid": "Plan Invalid",
+        "actionRequired": "Action Required",
+        "paused": "Paused",
+        "preparing": "Preparing",
+        "workflowRunning": "Workflow Running"
+      },
+      "badges": {
+        "failed": "Failed",
+        "generating": "Generating"
+      },
+      "emptyGraph": {
+        "planGenerationFailed": "Plan generation stopped before the preview was created. Retry to generate a fresh plan from the same goal.",
+        "planGenerationPending": "The system is drafting a workflow plan. This placeholder card will update when the preview is ready.",
+        "noGraph": "No workflow graph is available yet.",
+        "planDraft": "Plan Draft",
+        "workflow": "Workflow"
+      },
+      "buttons": {
+        "open": "Open",
+        "executePlan": "Execute Plan",
+        "pauseAll": "Pause All",
+        "resume": "Resume",
+        "retrying": "Retrying...",
+        "retryPlanGeneration": "Retry Plan Generation"
+      },
+      "errors": {
+        "validationErrors": "Validation Errors",
+        "generationError": "Generation Error",
+        "retryRequestFailed": "Retry Request Failed"
+      },
+      "finalDelivery": "Final Delivery"
+    },
+    "iterationFeedback": {
+      "round": "Round {{round}}",
+      "steps": "Steps",
+      "status": "Status",
+      "running": "Running",
+      "idle": "Idle",
+      "currentStep": "Current Step",
+      "reviewRequired": "Review Required",
+      "rejectWithFeedback": "Reject with Feedback",
+      "whatWrongLabel": "What went wrong?",
+      "whatWrongPlaceholder": "Describe the issue...",
+      "expectedLabel": "Expected outcome",
+      "expectedPlaceholder": "What should have happened?",
+      "priorityLabel": "Priority",
+      "priorityHigh": "High",
+      "priorityMedium": "Medium",
+      "priorityLow": "Low",
+      "additionalNotesLabel": "Additional Notes",
+      "additionalNotesPlaceholder": "Optional notes...",
+      "validationError": "Reject requires what_wrong and expected.",
+      "accept": "ACCEPT",
+      "submitRejection": "SUBMIT REJECTION",
+      "reject": "REJECT",
+      "cancel": "CANCEL"
+    },
+    "pendingReview": {
+      "title": "Pending Review",
+      "reviewTypes": {
+        "stepReview": "Step Review",
+        "loopReview": "Loop Review",
+        "finalReview": "Final Review"
+      },
+      "defaultMessage": "Please review the current result.",
+      "context": "Context",
+      "feedbackLabel": "Feedback",
+      "feedbackPlaceholder": "Please provide specific revision comments",
+      "validationError": "Reject requires feedback.",
+      "approve": "APPROVE",
+      "submitReject": "SUBMIT REJECT",
+      "reject": "REJECT"
+    },
+    "finalReview": {
+      "title": "Final Review",
+      "defaultMessage": "Task completed. Accept the result?",
+      "accept": "ACCEPT",
+      "reject": "REJECT"
+    },
+    "graph": {
+      "tip": "(Tip: Scroll to zoom, drag to pan)",
+      "layoutWarning": "Layout warning: using fallback layout",
+      "fitView": "Fit to canvas",
+      "leadFallback": "Lead"
+    },
+    "statusLabels": {
+      "stopRequested": "Stop Requested",
+      "waitingInput": "Waiting Input",
+      "reviewing": "Reviewing",
+      "preCompleted": "Pre-Completed",
+      "pending": "Pending",
+      "running": "Running",
+      "ready": "Ready",
+      "waitingReview": "Reviewing",
+      "waitingUser": "Waiting User",
+      "passed": "Passed",
+      "completed": "Completed",
+      "rejected": "Rejected",
+      "failed": "Failed",
+      "loop": "Loop"
+    },
+    "reviewPhase": {
+      "executing": "Executing",
+      "leadReview": "Lead Review",
+      "waitingUser": "Waiting User"
+    },
+    "reviewVerdict": {
+      "accepted": "Accepted",
+      "approved": "Approved",
+      "rejected": "Rejected",
+      "reviewed": "Reviewed"
+    }
+  },
+  "leadAgent": {
+    "label": "Lead Agent",
+    "switchError": "Failed to switch Lead Agent. Please try again.",
+    "switchDialog": {
+      "title": "Switch Lead Agent",
+      "message": "Switch Lead Agent from \"{{currentLeadName}}\" to \"{{targetLeadName}}\"?",
+      "switching": "Switching…",
+      "confirm": "Confirm"
+    }
+  },
+  "input_tabs": {
+    "workflow": "Workflow",
+    "chat": "Chat"
+  },
   "workflow_plan_generation_unavailable": "Workflow plan generation is unavailable for this session.",
   "workflow_retry": "Retry"
 }

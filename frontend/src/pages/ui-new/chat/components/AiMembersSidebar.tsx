@@ -1553,7 +1553,7 @@ export function AiMembersSidebar({
                       </span>
                       <MemberNameWithTooltip name={agent.name} />
                       {isWorkflowMode && agent.id === effectiveLeadAgentId && (
-                        <Tooltip content={t('members.leadAgent', { defaultValue: 'Lead Agent' })} side="bottom">
+                        <Tooltip content={t('leadAgent.label', { defaultValue: 'Lead Agent' })} side="bottom">
                           <span className="chat-session-member-lead-icon">
                             <CrownSimple className="size-3.5" weight="fill" />
                           </span>
@@ -1564,7 +1564,10 @@ export function AiMembersSidebar({
                       <button
                         type="button"
                         className="chat-session-member-action workspace"
-                        onClick={() => onOpenWorkspace(agent.id)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenWorkspace(agent.id);
+                        }}
                       >
                         {t('members.history')}
                       </button>
@@ -1574,7 +1577,10 @@ export function AiMembersSidebar({
                           'chat-session-member-action edit',
                           isArchived && 'pointer-events-none opacity-50'
                         )}
-                        onClick={() => onEditMember({ agent, sessionAgent })}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onEditMember({ agent, sessionAgent });
+                        }}
                         disabled={isArchived}
                       >
                         {t('members.edit')}
@@ -1585,7 +1591,10 @@ export function AiMembersSidebar({
                           'chat-session-member-action danger',
                           isArchived && 'pointer-events-none opacity-50'
                         )}
-                        onClick={() => onRemoveMember({ agent, sessionAgent })}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onRemoveMember({ agent, sessionAgent });
+                        }}
                         disabled={isArchived}
                       >
                         {t('members.remove')}

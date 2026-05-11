@@ -929,19 +929,10 @@ pub fn build_plan_generation_prompt(
     "default_retry": 1,
     "global_pause_supported": true
   },
-  "viewport": {
-    "x": 0,
-    "y": 0,
-    "zoom": 1
-  },
   "nodes": [
     {
       "id": "unique_step_key",
       "type": "workflowStep",
-      "position": {
-        "x": 0,
-        "y": 0
-      },
       "data": {
         "stepType": "task | review | result",
         "agentId": "optional string",

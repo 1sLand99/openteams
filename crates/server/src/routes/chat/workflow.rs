@@ -31,7 +31,7 @@ use services::services::{
     workflow_orchestrator::WorkflowOrchestrator,
     workflow_runtime::{
         WorkflowCardAgent, WorkflowCardProjection, build_plan_generation_prompt,
-        extract_json_payload, resolve_workflow_goal, run_workflow_agent_prompt,
+        extract_json_payload, resolve_lead_agent, resolve_workflow_goal, run_workflow_agent_prompt,
     },
     workflow_validator,
 };
@@ -109,13 +109,9 @@ pub async fn generate_plan_and_run(
         agents.push(agent);
     }
 
-    let lead_session_agent = session_agents
-        .first()
-        .ok_or_else(|| ApiError::BadRequest("Lead session agent was not found.".to_string()))?;
-    let lead_agent = agents
-        .iter()
-        .find(|agent| agent.id == lead_session_agent.agent_id)
-        .ok_or_else(|| ApiError::BadRequest("Lead agent was not found.".to_string()))?;
+    let (lead_agent, lead_session_agent) =
+        resolve_lead_agent(&session, &session_agents, &agents)
+            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
 
     let available_agents = session_agents
         .iter()

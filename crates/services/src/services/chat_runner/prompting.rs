@@ -867,6 +867,15 @@ impl ChatRunner {
             }
         }
 
+        // if chat::is_workflow_chat_input_mode(&message.meta.0) {
+        //     markdown.push_str(
+        //         "\n### Execution Mode\n"
+        //     );
+        //     markdown.push_str(
+        //         ""
+        //     );
+        // }
+
         markdown.push_str("\n## Output Requirements\n");
         markdown.push_str("Return **only a JSON array** matching the following schema.\n\n");
 
@@ -894,38 +903,55 @@ impl ChatRunner {
         );
         markdown.push_str(&work_records_rel.to_string_lossy());
         markdown.push_str("`.\n");
-        markdown.push_str("7. `workflow_generate`: \n");
-        markdown.push_str(
-            "- Emit `workflow_generate` only when the user explicitly asks to start generating an execution plan.\n",
-        );
-        markdown.push_str(
-            "- Treat explicit trigger phrases such as `生成计划`, `开始执行`, `开始落实`, `进入执行`, `generate plan`, or `start execution`, and close equivalents, as valid start-plan requests.\n",
-        );
-        markdown.push_str(
-            "- Review the chat history first and confirm that a final implementation plan has already been discussed and agreed on.\n",
-        );
-        markdown.push_str(
-            "- If no final plan is confirmed, emit `workflow_generate` with `plan_check: false` and also send a `send` message to `\"you\"` explaining the current planning status; do not send workflow-mode messages to other agents.\n",
-        );
-        markdown.push_str(
-            "- If a final plan is confirmed, emit `workflow_generate` with `plan_check: true`; its `content` must be a concise plan-generation brief that includes the essential plan summary, relevant plan files, participating members, and other execution-defining context.\n\n",
-        );
+        if chat::is_workflow_chat_input_mode(&message.meta.0) {
+            markdown.push_str("7. `workflow_generate`: \n");
+            markdown.push_str(
+                "- Emit `workflow_generate` only when the user explicitly asks to start generating an execution plan.\n",
+            );
+            markdown.push_str(
+                "- Treat explicit trigger phrases such as `生成计划`, `开始执行`, `开始落实`, `进入执行`, `generate plan`, or `start execution`, and close equivalents, as valid start-plan requests.\n",
+            );
+            markdown.push_str(
+                "- Review the chat history first and confirm that a final implementation plan has already been discussed and agreed on.\n",
+            );
+            markdown.push_str(
+                "- If no final plan is confirmed, emit `workflow_generate` with `plan_check: false` and also send a `send` message to `\"you\"` explaining the current planning status; do not send workflow-mode messages to other agents.\n",
+            );
+            markdown.push_str(
+                "- If a final plan is confirmed, emit `workflow_generate` with `plan_check: true`; its `content` must be a concise plan-generation brief that includes the essential plan summary, relevant plan files, participating members, and other execution-defining context.\n\n",
+            );
+        }
 
-        markdown.push_str("### Schema\n");
-        markdown.push_str("```json\n");
-        markdown.push_str(PROTOCOL_OUTPUT_SCHEMA_JSON);
-        markdown.push_str("\n```\n\n");
+        if chat::is_workflow_chat_input_mode(&message.meta.0) {
+            markdown.push_str("### Schema\n");
+            markdown.push_str("```json\n");
+            markdown.push_str(PROTOCOL_OUTPUT_SCHEMA_JSON_WORKFLOW_PLAN);
+            markdown.push_str("\n```\n\n");
+        } else {
+            markdown.push_str("### Schema\n");
+            markdown.push_str("```json\n");
+            markdown.push_str(PROTOCOL_OUTPUT_SCHEMA_JSON);
+            markdown.push_str("\n```\n\n");
+        }
 
-        markdown.push_str("### Example\n");
-        markdown.push_str("```json\n");
-        markdown.push_str(MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON);
-        markdown.push_str("\n```\n\n");
+        if chat::is_workflow_chat_input_mode(&message.meta.0) {
+            markdown.push_str("### Example\n");
+            markdown.push_str("```json\n");
+            markdown.push_str(MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON_WORKFLOW_PLAN);
+            markdown.push_str("\n```\n\n");
+        } else {
+            markdown.push_str("### Example\n");
+            markdown.push_str("```json\n");
+            markdown.push_str(MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON);
+            markdown.push_str("\n```\n\n");
+        }
 
         if !is_protocol_retry {
             markdown.push_str("## Agent\n");
             markdown.push_str("- name: ");
             markdown.push_str(&agent.name);
             markdown.push('\n');
+            // todo: add lead agent 
             let normalized_system_prompt =
                 Self::strip_embedded_team_protocol_from_system_prompt(&agent.system_prompt);
             if !normalized_system_prompt.is_empty() {
@@ -979,7 +1005,7 @@ impl ChatRunner {
             }
             markdown.push('\n');
         }
-
+        
         markdown.push_str("## History\n");
         markdown.push_str("Read history only when the task clearly depends on continuation, refinement, or prior context.  \n");
         markdown.push_str("Available files:\n");

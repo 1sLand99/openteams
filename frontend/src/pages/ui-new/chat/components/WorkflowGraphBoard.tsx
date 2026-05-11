@@ -283,9 +283,7 @@ function buildFallbackLayout(
   const totalHeight =
     y +
     Math.max(
-      ...laid.map(
-        (c) => (c.height ?? NODE_HEIGHT) + gap
-      ),
+      ...laid.map((c) => (c.height ?? NODE_HEIGHT) + gap),
       NODE_HEIGHT + gap
     );
 
@@ -311,7 +309,8 @@ function flattenEdges(
       const isHovered =
         hoveredNodeId != null &&
         edgeData &&
-        (edgeData.source === hoveredNodeId || edgeData.target === hoveredNodeId);
+        (edgeData.source === hoveredNodeId ||
+          edgeData.target === hoveredNodeId);
 
       edge.sections?.forEach((section, index) => {
         let d = `M ${section.startPoint.x} ${section.startPoint.y}`;
@@ -454,11 +453,7 @@ export function WorkflowGraphBoard({
         setLayout(result);
         setLayoutError(null);
 
-        if (
-          result.width &&
-          result.height &&
-          containerRef.current
-        ) {
+        if (result.width && result.height && containerRef.current) {
           const container = containerRef.current.getBoundingClientRect();
           const scale = Math.min(
             1,
@@ -474,9 +469,7 @@ export function WorkflowGraphBoard({
         console.error('ELK Layout error:', err);
         setLayoutError(String(err?.message ?? err));
         // Fallback: simple grid layout without ELK
-        const fallbackLayout = buildFallbackLayout(
-          graph.children ?? []
-        );
+        const fallbackLayout = buildFallbackLayout(graph.children ?? []);
         setLayout(fallbackLayout);
         if (containerRef.current) {
           const container = containerRef.current.getBoundingClientRect();
@@ -524,10 +517,15 @@ export function WorkflowGraphBoard({
   }, []);
 
   const handlePointerDown = (e: React.PointerEvent) => {
-    if (e.button === 2 || e.button === 1 || (e.button === 0 && e.altKey)) {
+    const target = e.target as HTMLElement | null;
+    const isInteractiveTarget = target?.closest(
+      '[data-workflow-node], button, a, input, textarea, select'
+    );
+    if (e.button === 1 || (e.button === 0 && !isInteractiveTarget)) {
       isDragging.current = true;
       lastMousePos.current = { x: e.clientX, y: e.clientY };
       e.currentTarget.setPointerCapture(e.pointerId);
+      e.preventDefault();
     }
   };
 
@@ -548,16 +546,15 @@ export function WorkflowGraphBoard({
   };
 
   const handleFitView = () => {
-    if (
-      layout &&
-      layout.width &&
-      layout.height &&
-      containerRef.current
-    ) {
+    if (layout && layout.width && layout.height && containerRef.current) {
       const container = containerRef.current.getBoundingClientRect();
       const w = layout.width;
       const h = layout.height;
-      const scale = Math.min(1, (container.width - 100) / w, (container.height - 100) / h);
+      const scale = Math.min(
+        1,
+        (container.width - 100) / w,
+        (container.height - 100) / h
+      );
       const x = (container.width - w * scale) / 2;
       const y = (container.height - h * scale) / 2;
       setTransform({ x, y, scale });
@@ -604,7 +601,7 @@ export function WorkflowGraphBoard({
         if (mode === 'background') {
           const loopData = loops.find((l) => l.loop_key === child.id);
           const loopStatus = loopData?.status ?? null;
-          const loopTone = workflowLoopStatusMeta(loopStatus);
+          const loopTone = workflowLoopStatusMeta(loopStatus, t);
 
           elements.push(
             <div key={`loop-bg-${child.id}`}>
@@ -617,17 +614,23 @@ export function WorkflowGraphBoard({
                   height: child.height,
                   borderColor: loopTone.borderColor,
                   backgroundColor: '#FFFFFF',
-                  boxShadow: '0 4px 12px rgba(0,0,0,0.03), inset 0 2px 20px 0 rgba(0,0,0,0.01)',
+                  boxShadow:
+                    '0 4px 12px rgba(0,0,0,0.03), inset 0 2px 20px 0 rgba(0,0,0,0.01)',
                 }}
               >
                 {/* Floating Header Badge */}
-                <div 
+                <div
                   className="absolute -top-3 left-6 flex items-center gap-2 px-3 py-1.5 rounded-full bg-white border border-slate-200 shadow-sm"
                   style={{ borderColor: loopTone.borderColor }}
                 >
                   <div className="flex items-center gap-1.5">
-                    <ArrowsClockwiseIcon className="size-3 text-slate-400" weight="bold" />
-                    <span className="text-[10px] font-bold tracking-tight text-slate-800 uppercase">{child.id}</span>
+                    <ArrowsClockwiseIcon
+                      className="size-3 text-slate-400"
+                      weight="bold"
+                    />
+                    <span className="text-[10px] font-bold tracking-tight text-slate-800 uppercase">
+                      {child.id}
+                    </span>
                   </div>
                   <div className="w-px h-3 bg-slate-200 mx-0.5" />
                   <span
@@ -663,8 +666,7 @@ export function WorkflowGraphBoard({
           !!onRetryStep &&
           !!retryStepId &&
           isRetryableWorkflowStepStatus(step?.status);
-        const isRetryPending =
-          !!retryStepId && pendingActionId === retryStepId;
+        const isRetryPending = !!retryStepId && pendingActionId === retryStepId;
         const stepAgentLabel = step?.agent_name?.trim();
         const agentName =
           (stepAgentLabel
@@ -673,7 +675,7 @@ export function WorkflowGraphBoard({
           (dataNode.data.agentId
             ? (agentNameByLookup.get(dataNode.data.agentId.trim()) ?? null)
             : null) ??
-          'Lead';
+          t('workflow.graph.leadFallback', { defaultValue: 'Lead' });
 
         elements.push(
           <div
@@ -695,13 +697,11 @@ export function WorkflowGraphBoard({
             onClick={() => onSelectStep?.(child.id)}
             onMouseEnter={() => setHoveredNodeId(child.id)}
             onMouseLeave={() => setHoveredNodeId(null)}
+            data-workflow-node="true"
             role={onSelectStep ? 'button' : undefined}
             tabIndex={onSelectStep ? 0 : -1}
             onKeyDown={(e) => {
-              if (
-                onSelectStep &&
-                (e.key === 'Enter' || e.key === ' ')
-              ) {
+              if (onSelectStep && (e.key === 'Enter' || e.key === ' ')) {
                 e.preventDefault();
                 onSelectStep(child.id);
               }
@@ -715,15 +715,14 @@ export function WorkflowGraphBoard({
                 className={cn(
                   status === 'running' && 'text-indigo-500',
                   status === 'completed' && 'text-emerald-500',
-                  (status === 'waiting_review' ||
-                    status === 'waiting_input') &&
+                  (status === 'waiting_review' || status === 'waiting_input') &&
                     'text-amber-500',
                   (status === 'failed' || status === 'interrupted') &&
                     'text-rose-500',
                   status === 'pending' && 'text-slate-400'
                 )}
               >
-                {workflowStatusLabel(status)}
+                {workflowStatusLabel(status, t)}
               </span>
             </div>
             <div
@@ -758,10 +757,7 @@ export function WorkflowGraphBoard({
                 className="absolute -bottom-3 right-3 inline-flex items-center gap-1 rounded-full bg-rose-600 px-2.5 py-1 text-[10px] font-semibold text-white shadow-sm hover:bg-rose-700 disabled:opacity-60 transition-colors"
               >
                 <ArrowClockwiseIcon
-                  className={cn(
-                    'size-3',
-                    isRetryPending && 'animate-spin'
-                  )}
+                  className={cn('size-3', isRetryPending && 'animate-spin')}
                   weight="bold"
                 />
                 {t('workflow_retry', { defaultValue: '重试' })}
@@ -779,11 +775,7 @@ export function WorkflowGraphBoard({
 
   return (
     <div
-      className={cn(
-        'relative overflow-hidden',
-        'rounded-[16px]',
-        className
-      )}
+      className={cn('relative overflow-hidden', 'rounded-[16px]', className)}
       ref={containerRef}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -798,10 +790,10 @@ export function WorkflowGraphBoard({
       }}
     >
       <div className="absolute top-4 left-4 pointer-events-none z-10 text-xs text-slate-600 font-medium flex flex-col gap-1">
-        <span>(Tip: 滚轮缩放，右键拖拽平移)</span>
+        <span>{t('workflow.graph.tip', { defaultValue: '(Tip: Scroll to zoom, drag to pan)' })}</span>
         {layoutError && (
           <span className="text-amber-500 font-semibold pointer-events-auto">
-            Layout warning: using fallback layout
+            {t('workflow.graph.layoutWarning', { defaultValue: 'Layout warning: using fallback layout' })}
           </span>
         )}
       </div>
@@ -811,7 +803,7 @@ export function WorkflowGraphBoard({
           type="button"
           onClick={handleFitView}
           className="p-2.5 bg-white text-slate-600 rounded-full shadow-md border border-slate-200 hover:bg-slate-50 hover:text-slate-900 transition-colors"
-          title="适应画布"
+          title={t('workflow.graph.fitView', { defaultValue: 'Fit to canvas' })}
         >
           <ArrowsInSimpleIcon className="size-4" weight="bold" />
         </button>

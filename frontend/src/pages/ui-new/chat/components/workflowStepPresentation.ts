@@ -20,6 +20,8 @@ type WorkflowStatusTone = {
   glowClass: string;
 };
 
+type TFunction = (key: string, opts?: Record<string, unknown>) => string;
+
 const toTitleCase = (value: string) =>
   value
     .split(/[_\s-]+/)
@@ -27,18 +29,28 @@ const toTitleCase = (value: string) =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ');
 
-export function workflowStatusLabel(status?: string | null) {
+export function workflowStatusLabel(status?: string | null, t?: TFunction) {
   switch (status) {
     case 'interrupt_requested':
-      return 'Stop Requested';
+      return t?.('workflow.statusLabels.stopRequested', { defaultValue: 'Stop Requested' }) ?? 'Stop Requested';
     case 'waiting_input':
-      return 'Waiting Input';
+      return t?.('workflow.statusLabels.waitingInput', { defaultValue: 'Waiting Input' }) ?? 'Waiting Input';
     case 'waiting_review':
-      return 'Awaiting Review';
+      return t?.('workflow.statusLabels.reviewing', { defaultValue: 'Reviewing' }) ?? 'Reviewing';
     case 'pre_completed':
-      return 'Pre-Completed';
+      return t?.('workflow.statusLabels.preCompleted', { defaultValue: 'Pre-Completed' }) ?? 'Pre-Completed';
+    case 'running':
+      return t?.('workflow.statusLabels.running', { defaultValue: 'Running' }) ?? 'Running';
+    case 'completed':
+      return t?.('workflow.statusLabels.completed', { defaultValue: 'Completed' }) ?? 'Completed';
+    case 'failed':
+      return t?.('workflow.statusLabels.failed', { defaultValue: 'Failed' }) ?? 'Failed';
+    case 'pending':
+      return t?.('workflow.statusLabels.pending', { defaultValue: 'Pending' }) ?? 'Pending';
+    case 'ready':
+      return t?.('workflow.statusLabels.ready', { defaultValue: 'Ready' }) ?? 'Ready';
     default:
-      return status ? toTitleCase(status) : 'Pending';
+      return status ? toTitleCase(status) : (t?.('workflow.statusLabels.pending', { defaultValue: 'Pending' }) ?? 'Pending');
   }
 }
 
@@ -146,23 +158,23 @@ export function workflowStatusBadgeClass(status?: string | null) {
   }
 }
 
-export function workflowReviewPhaseMeta(reviewPhase?: string | null) {
+export function workflowReviewPhaseMeta(reviewPhase?: string | null, t?: TFunction) {
   switch (reviewPhase) {
     case 'worker_executing':
       return {
-        label: 'Executing',
+        label: t?.('workflow.reviewPhase.executing', { defaultValue: 'Executing' }) ?? 'Executing',
         badgeClass: 'border-[#BFDBFE] bg-[#EFF6FF] text-[#1D4ED8]',
         textClass: 'text-[#1D4ED8]',
       };
     case 'lead_reviewing':
       return {
-        label: 'Lead Review',
+        label: t?.('workflow.reviewPhase.leadReview', { defaultValue: 'Lead Review' }) ?? 'Lead Review',
         badgeClass: 'border-[#FCD34D] bg-[#FFFBEB] text-[#B45309]',
         textClass: 'text-[#B45309]',
       };
     case 'waiting_user':
       return {
-        label: 'Waiting User',
+        label: t?.('workflow.reviewPhase.waitingUser', { defaultValue: 'Waiting User' }) ?? 'Waiting User',
         badgeClass: 'border-[#C7D2FE] bg-[#EEF2FF] text-[#4338CA]',
         textClass: 'text-[#4338CA]',
       };
@@ -177,24 +189,26 @@ export function workflowReviewPhaseMeta(reviewPhase?: string | null) {
   }
 }
 
-export function workflowReviewVerdictMeta(verdict?: string | null) {
+export function workflowReviewVerdictMeta(verdict?: string | null, t?: TFunction) {
   switch (verdict) {
     case 'approved':
     case 'accepted':
       return {
-        label: verdict === 'accepted' ? 'Accepted' : 'Approved',
+        label: verdict === 'accepted'
+          ? (t?.('workflow.reviewVerdict.accepted', { defaultValue: 'Accepted' }) ?? 'Accepted')
+          : (t?.('workflow.reviewVerdict.approved', { defaultValue: 'Approved' }) ?? 'Approved'),
         badgeClass: 'border-[#86EFAC] bg-[#F0FDF4] text-[#166534]',
         textClass: 'text-[#166534]',
       };
     case 'rejected':
       return {
-        label: 'Rejected',
+        label: t?.('workflow.reviewVerdict.rejected', { defaultValue: 'Rejected' }) ?? 'Rejected',
         badgeClass: 'border-[#FCA5A5] bg-[#FEF2F2] text-[#991B1B]',
         textClass: 'text-[#991B1B]',
       };
     default:
       return {
-        label: verdict ? toTitleCase(verdict) : 'Reviewed',
+        label: verdict ? toTitleCase(verdict) : (t?.('workflow.reviewVerdict.reviewed', { defaultValue: 'Reviewed' }) ?? 'Reviewed'),
         badgeClass: 'border-[#CBD5E1] bg-[#F8FAFC] text-[#475569]',
         textClass: 'text-[#475569]',
       };
@@ -202,17 +216,18 @@ export function workflowReviewVerdictMeta(verdict?: string | null) {
 }
 
 export function workflowLatestReviewLabel(
-  review?: WorkflowCardReviewLike | null
+  review?: WorkflowCardReviewLike | null,
+  t?: TFunction
 ) {
   if (!review) {
     return null;
   }
 
-  const verdict = workflowReviewVerdictMeta(review.verdict);
+  const verdict = workflowReviewVerdictMeta(review.verdict, t);
   const reviewer = review.reviewer_type ? toTitleCase(review.reviewer_type) : null;
   const round =
     typeof review.review_round === 'number' && review.review_round > 0
-      ? `Round ${review.review_round}`
+      ? (t?.('workflow.iterationFeedback.round', { round: review.review_round, defaultValue: `Round ${review.review_round}` }) ?? `Round ${review.review_round}`)
       : null;
 
   return [reviewer, verdict.label, round].filter(Boolean).join(' - ');
@@ -225,11 +240,11 @@ export function workflowLatestReviewFeedback(
   return feedback && feedback.length > 0 ? feedback : null;
 }
 
-export function workflowLoopStatusMeta(status?: string | null): WorkflowLoopStatusMeta {
+export function workflowLoopStatusMeta(status?: string | null, t?: TFunction): WorkflowLoopStatusMeta {
   switch (status) {
     case 'running':
       return {
-        label: 'Running',
+        label: t?.('workflow.statusLabels.running', { defaultValue: 'Running' }) ?? 'Running',
         badgeClass: 'border-[#93C5FD] bg-[#DBEAFE] text-[#1D4ED8]',
         borderColor: '#60A5FA',
         surfaceClass: 'bg-[rgba(219,234,254,0.28)]',
@@ -237,7 +252,7 @@ export function workflowLoopStatusMeta(status?: string | null): WorkflowLoopStat
       };
     case 'waiting_review':
       return {
-        label: 'Waiting Review',
+        label: t?.('workflow.statusLabels.reviewing', { defaultValue: 'Reviewing' }) ?? 'Reviewing',
         badgeClass: 'border-[#C7D2FE] bg-[#E0E7FF] text-[#4338CA]',
         borderColor: '#818CF8',
         surfaceClass: 'bg-[rgba(224,231,255,0.28)]',
@@ -245,7 +260,7 @@ export function workflowLoopStatusMeta(status?: string | null): WorkflowLoopStat
       };
     case 'waiting_user':
       return {
-        label: 'Waiting User',
+        label: t?.('workflow.statusLabels.waitingUser', { defaultValue: 'Waiting User' }) ?? 'Waiting User',
         badgeClass: 'border-[#DDD6FE] bg-[#F3E8FF] text-[#7C3AED]',
         borderColor: '#A78BFA',
         surfaceClass: 'bg-[rgba(243,232,255,0.28)]',
@@ -253,7 +268,7 @@ export function workflowLoopStatusMeta(status?: string | null): WorkflowLoopStat
       };
     case 'passed':
       return {
-        label: 'Passed',
+        label: t?.('workflow.statusLabels.passed', { defaultValue: 'Passed' }) ?? 'Passed',
         badgeClass: 'border-[#99F6E4] bg-[#CCFBF1] text-[#115E59]',
         borderColor: '#2DD4BF',
         surfaceClass: 'bg-[rgba(204,251,241,0.30)]',
@@ -261,7 +276,7 @@ export function workflowLoopStatusMeta(status?: string | null): WorkflowLoopStat
       };
     case 'completed':
       return {
-        label: 'Completed',
+        label: t?.('workflow.statusLabels.completed', { defaultValue: 'Completed' }) ?? 'Completed',
         badgeClass: 'border-[#86EFAC] bg-[#DCFCE7] text-[#166534]',
         borderColor: '#4ADE80',
         surfaceClass: 'bg-[rgba(220,252,231,0.30)]',
@@ -269,7 +284,7 @@ export function workflowLoopStatusMeta(status?: string | null): WorkflowLoopStat
       };
     case 'rejected':
       return {
-        label: 'Rejected',
+        label: t?.('workflow.statusLabels.rejected', { defaultValue: 'Rejected' }) ?? 'Rejected',
         badgeClass: 'border-[#FCA5A5] bg-[#FEE2E2] text-[#991B1B]',
         borderColor: '#F87171',
         surfaceClass: 'bg-[rgba(254,226,226,0.34)]',
@@ -277,7 +292,7 @@ export function workflowLoopStatusMeta(status?: string | null): WorkflowLoopStat
       };
     case 'failed':
       return {
-        label: 'Failed',
+        label: t?.('workflow.statusLabels.failed', { defaultValue: 'Failed' }) ?? 'Failed',
         badgeClass: 'border-[#FCA5A5] bg-[#FEE2E2] text-[#991B1B]',
         borderColor: '#EF4444',
         surfaceClass: 'bg-[rgba(254,226,226,0.34)]',
@@ -285,7 +300,7 @@ export function workflowLoopStatusMeta(status?: string | null): WorkflowLoopStat
       };
     default:
       return {
-        label: status ? toTitleCase(status) : 'Loop',
+        label: status ? toTitleCase(status) : (t?.('workflow.statusLabels.loop', { defaultValue: 'Loop' }) ?? 'Loop'),
         badgeClass: 'border-[#CBD5E1] bg-[#F8FAFC] text-[#475569]',
         borderColor: '#CBD5E1',
         surfaceClass: 'bg-[rgba(241,245,249,0.30)]',

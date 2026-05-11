@@ -68,6 +68,7 @@ use crate::services::{
     chat::{self, ChatServiceError},
     config::{self, UiLanguage},
     native_skills::{NativeSkillError, list_native_skills_for_runner},
+    workflow_runtime::resolve_lead_agent,
 };
 
 const OPENTEAMS_HOME_DIR: &str = ".openteams";
@@ -95,7 +96,7 @@ const OPENTEAMS_GITIGNORE_ENTRY: &str = ".openteams/";
 /// Only `InvalidJson` and `NotJsonArray` errors trigger a retry; semantic errors
 /// (e.g. `EmptyMessage`, `MissingSendTarget`) are not retried.
 const MAX_PROTOCOL_PARSE_RETRIES: u32 = 1;
-const PROTOCOL_OUTPUT_SCHEMA_JSON: &str = r#"{
+const PROTOCOL_OUTPUT_SCHEMA_JSON_WORKFLOW_PLAN: &str = r#"{
   "type": "array",
   "items": {
     "anyOf": [
@@ -154,12 +155,65 @@ const PROTOCOL_OUTPUT_SCHEMA_JSON: &str = r#"{
   },
   "minItems": 1
 }"#;
+const PROTOCOL_OUTPUT_SCHEMA_JSON: &str = r#"{
+  "type": "array",
+  "items": {
+    "anyOf": [
+      {
+        "type": "object",
+        "properties": {
+          "type": { "const": "send" },
+          "to": { "type": "string", "minLength": 1 },
+          "content": { "type": "string", "minLength": 1 },
+          "intent": {
+            "type": "string",
+            "enum": ["request", "reply", "notify", "blocker", "confirm"]
+          }
+        },
+        "required": ["type", "to", "content"],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "type": { "const": "record" },
+          "content": { "type": "string", "minLength": 1 }
+        },
+        "required": ["type", "content"],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "type": { "const": "artifact" },
+          "content": { "type": "string", "minLength": 1 }
+        },
+        "required": ["type", "content"],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "type": { "const": "conclusion" },
+          "content": { "type": "string", "minLength": 1 }
+        },
+        "required": ["type", "content"],
+        "additionalProperties": false
+      }
+    ]
+  },
+  "minItems": 1
+}"#;
 const MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON: &str = r#"[
   {"type": "send", "to": "you", "intent": "request", "content": "I have finished the implementation"},
   {"type": "record", "content": "The metrics are `latency_p95_ms` and `success_rate`."},
   {"type": "conclusion", "content": "Finished metric definition. Next: wire collection into runner."}
 ]"#;
-
+const MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON_WORKFLOW_PLAN: &str = r#"[
+  {"type": "send", "to": "you", "intent": "request", "content": "I have finished the implementation"},
+  {"type": "record", "content": "The metrics are `latency_p95_ms` and `success_rate`."},
+  {"type": "workflow_generate", "plan_check": true, "content": "Generate a workflow plan to implement the following task: ..."}
+]"#;
 struct DiffInfo {
     _truncated: bool,
     observed_paths: Vec<String>,
@@ -1080,7 +1134,7 @@ impl ChatRunner {
         let mut mentions = message.mentions.0.clone();
         if mentions.is_empty() {
             match self
-                .resolve_default_mention_for_unmentioned_user_message(session_id, message)
+                .resolve_default_mention_for_unmentioned_user_message(session, message)
                 .await
             {
                 Ok(Some(default_mention)) => {
@@ -1137,7 +1191,7 @@ impl ChatRunner {
 
     async fn resolve_default_mention_for_unmentioned_user_message(
         &self,
-        session_id: Uuid,
+        session: &ChatSession,
         message: &ChatMessage,
     ) -> Result<Option<String>, ChatRunnerError> {
         if message.sender_type != ChatSenderType::User || !message.mentions.0.is_empty() {
@@ -1145,22 +1199,43 @@ impl ChatRunner {
         }
 
         let session_agents =
-            ChatSessionAgent::find_all_for_session(&self.db.pool, session_id).await?;
+            ChatSessionAgent::find_all_for_session(&self.db.pool, session.id).await?;
         if session_agents.is_empty() {
             return Ok(None);
         }
 
         let agents = ChatAgent::find_all(&self.db.pool).await?;
-        let agent_map: HashMap<Uuid, ChatAgent> =
-            agents.into_iter().map(|agent| (agent.id, agent)).collect();
 
-        for session_agent in session_agents {
+        // In workflow mode, route to the designated lead agent (falls back to first if none set).
+        // In free mode, route to the first session agent (original behaviour).
+        let is_workflow_mode = message
+            .meta
+            .get("chat_input_mode")
+            .and_then(|v| v.as_str())
+            .map(|v| v == "workflow")
+            .unwrap_or(false);
+
+        if is_workflow_mode {
+            tracing::debug!(
+                session_id = %session.id,
+                message_id = %message.id,
+                "attempting to resolve lead agent for workflow mode message"
+            );
+            match resolve_lead_agent(session, &session_agents, &agents) {
+                Ok((lead_agent, _)) => return Ok(Some(lead_agent.name.clone())),
+                Err(_) => return Ok(None),
+            }
+        }
+
+        // Free mode: first available agent
+        let agent_map: std::collections::HashMap<Uuid, &ChatAgent> =
+            agents.iter().map(|a| (a.id, a)).collect();
+        for session_agent in &session_agents {
             if let Some(agent) = agent_map.get(&session_agent.agent_id) {
                 return Ok(Some(agent.name.clone()));
             }
-
             tracing::warn!(
-                session_id = %session_id,
+                session_id = %session.id,
                 session_agent_id = %session_agent.id,
                 agent_id = %session_agent.agent_id,
                 "default route skipped session agent with missing backing agent"

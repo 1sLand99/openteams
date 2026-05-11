@@ -858,7 +858,6 @@ export const chatApi = {
       body: JSON.stringify({
         title: null,
         status: null,
-        lead_agent_id: null,
         summary_text: null,
         archive_ref: null,
         last_seen_diff_key: diffKey,

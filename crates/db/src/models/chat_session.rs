@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_with::rust::double_option;
 use sqlx::{FromRow, SqlitePool, Type};
 use ts_rs::TS;
 use uuid::Uuid;
@@ -40,6 +41,12 @@ pub struct CreateChatSession {
 pub struct UpdateChatSession {
     pub title: Option<String>,
     pub status: Option<ChatSessionStatus>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "double_option"
+    )]
+    #[ts(optional, type = "string | null")]
     pub lead_agent_id: Option<Option<Uuid>>,
     pub summary_text: Option<String>,
     pub archive_ref: Option<String>,
