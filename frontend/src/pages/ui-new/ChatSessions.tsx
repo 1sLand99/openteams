@@ -2494,7 +2494,18 @@ export function ChatSessions() {
           createdAtMs: new Date(group.createdAt).getTime(),
           group,
         })),
-      ].sort((a, b) => a.createdAtMs - b.createdAtMs),
+      ].sort((a, b) => {
+        const aIsWorkflow =
+          a.kind === 'message' &&
+          !!extractWorkflowCardProjection(a.message.meta);
+        const bIsWorkflow =
+          b.kind === 'message' &&
+          !!extractWorkflowCardProjection(b.message.meta);
+        if (aIsWorkflow !== bIsWorkflow) {
+          return aIsWorkflow ? 1 : -1;
+        }
+        return a.createdAtMs - b.createdAtMs;
+      }),
     [queuedMessageIds, visibleMessageList, workItemGroups]
   );
   const latestWorkItemEntryKey =

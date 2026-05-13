@@ -669,18 +669,6 @@ export function ChatWorkflowCard({
               {projection.result_summary}
             </div>
           )}
-          {projection.outputs.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {projection.outputs.map((output) => (
-                <span
-                  key={output}
-                  className="rounded-full bg-white/80 px-3 py-1 text-xs font-medium text-[#166534]"
-                >
-                  {output}
-                </span>
-              ))}
-            </div>
-          )}
         </div>
       )}
 

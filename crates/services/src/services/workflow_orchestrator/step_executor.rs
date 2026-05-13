@@ -596,7 +596,7 @@ impl WorkflowOrchestrator {
         edges: &[WorkflowStepEdge],
         initial_result: WorkflowStepRunResult,
     ) -> Result<StepOutcome, OrchestratorError> {
-        let dependency_summaries = predecessor_summaries(step, current_steps, edges);
+        let dependency_summaries = predecessor_summaries(step, current_steps, edges, Some(plan));
         let acceptance_criteria = Self::acceptance_criteria_for_step(plan, step);
         let workflow_goal = plan
             .summary_text
@@ -1364,7 +1364,8 @@ impl WorkflowOrchestrator {
         )
         .await;
 
-        let dependency_summaries = predecessor_summaries(&running_step, current_steps, edges);
+        let dependency_summaries =
+            predecessor_summaries(&running_step, current_steps, edges, Some(plan));
         let step_transcript_context = WorkflowTranscript::find_by_step(pool, running_step.id)
             .await?
             .into_iter()

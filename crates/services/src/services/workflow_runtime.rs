@@ -1,4 +1,10 @@
-use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    str::FromStr,
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::Utc;
 use dashmap::DashMap;
@@ -1159,9 +1165,7 @@ Your peers are shipping while you're spinning. The calibration committee sees ev
 - Claims "done" without verification → Show me the evidence. Build, test, run, paste the output.
 "#;
 
-static STEP_EXECUTION_PROMPT_PREFIX: &str = r#"You are implementing a step in an OpenTeams workflow.
-
-## Output Format
+static STEP_EXECUTION_PROMPT_PREFIX: &str = r#"## Output Format
 
 Return exactly one JSON object — no Markdown, no comments, no prose outside the JSON.
 
@@ -1195,14 +1199,6 @@ Return exactly one JSON object — no Markdown, no comments, no prose outside th
 {"type": "input_request", "step_key": "...", "execution_id": "...", "prompt": "what you need from user", "description": "optional detail", "placeholder": "placeholder text"}
 ```
 
-### TDD Workflow
-
-If it is a coding task, follow Test-Driven Development for every implementation step:
-1. **Red** — Write failing tests first that define the expected behavior. Run them to confirm they fail.
-2. **Green** — Write the minimum implementation to make all tests pass. No extra features.
-3. **Refactor** — Clean up code while keeping tests green. Improve naming, remove duplication, simplify logic.
-4. If no test framework exists in the project, create minimal verification scripts that assert expected behavior before implementing.
-
 ### Constraints
 1. `step_key` and `execution_id` must be filled with the values provided below.
 2. Only `final_result`, `error`, `approval_request`, `permission_request`, `continue_confirmation`, or `input_request` are allowed.
@@ -1215,9 +1211,35 @@ If it is a coding task, follow Test-Driven Development for every implementation 
 9. Always include test files in `outputs` alongside implementation files.
 
 ## Language Requirement
-
 You MUST respond in the same language as the Instructions field above. 
 The `summary`, `content`, and `message` fields in your JSON output must use the same language as the step instructions.
+
+"#;
+
+static STEP_EXECUTION_TDD_WORKFLOW_FOR_TASK_TYPE: &str = r#"
+
+### TDD Workflow
+
+If it is a coding task, follow Test-Driven Development for every implementation step:
+1. **Red** — Write failing tests first that define the expected behavior. Run them to confirm they fail.
+2. **Green** — Write the minimum implementation to make all tests pass. No extra features.
+3. **Refactor** — Clean up code while keeping tests green. Improve naming, remove duplication, simplify logic.
+4. If no test framework exists in the project, create minimal verification scripts that assert expected behavior before implementing.
+"#;
+
+static STEP_EXECUTION_TDD_WORKFLOW_FOR_REVIEW_TYPE: &str = r#"
+
+## Review Discipline
+
+Verify the worker's output independently; do not rely on their report.
+
+Check:
+- Read changed files from `outputs` and compare them with instructions and acceptance criteria.
+- Reject missing requirements, unrequested scope, obvious bugs, edge-case gaps, or broken shared contracts.
+- Run or inspect tests; confirm they prove real behavior and TDD was followed when required.
+- Ensure the result fits the workflow goal and predecessor outputs.
+
+If rejecting, cite specific issues with file/line evidence when available.
 "#;
 
 pub fn build_step_execution_prompt(
@@ -1239,20 +1261,41 @@ pub fn build_step_execution_prompt(
     };
 
     let mut prompt = String::with_capacity(4096);
+    if step.step_type == WorkflowStepType::Task {
+        prompt.push_str("You are implementing a task in an workflow step.\n\n");
+    } else if step.step_type == WorkflowStepType::Review 
+                || step.step_type == WorkflowStepType::Result 
+    {
+        prompt.push_str("You are reviewing the output of the workers' implementation.\n\n");
+    }
+
+    if step.step_type == WorkflowStepType::Task {
+        prompt.push_str(STEP_EXECUTION_TDD_WORKFLOW_FOR_TASK_TYPE);
+    } else if step.step_type == WorkflowStepType::Review
+        || step.step_type == WorkflowStepType::Result
+    {
+        prompt.push_str(STEP_EXECUTION_TDD_WORKFLOW_FOR_REVIEW_TYPE);
+    }
+
     prompt.push_str(STEP_EXECUTION_PROMPT_PREFIX);
+
     prompt.push_str(&format!(
         r#"## Task Description
 
 Step: {step_title}
 Type: {step_type}
-Instructions: {step_instructions}
+
+<Instructions>
+{step_instructions}
+</Instructions>
 
 ## Context
 
 Workflow goal: {workflow_goal}
 
-Completed predecessor summaries:
+<PredecessorSummaries>
 {dependency_text}
+</PredecessorSummaries>
 
 ## Report
 
@@ -1296,7 +1339,7 @@ pub fn build_step_execution_prompt_with_schema(
     prompt
 }
 
-static LEAD_REVIEW_PROMPT_PREFIX: &str = r#"You are the Lead Agent of this workflow, reviewing a worker's step output.
+static LEAD_REVIEW_PROMPT_PREFIX: &str = r#"You are reviewing a worker's step task output.
 
 ## CRITICAL: Do Not Trust the Report
 
@@ -2575,19 +2618,131 @@ pub fn predecessor_summaries(
     step: &WorkflowStep,
     steps: &[WorkflowStep],
     edges: &[WorkflowStepEdge],
+    plan: Option<&WorkflowPlan>,
 ) -> Vec<String> {
+    match step.step_type {
+        WorkflowStepType::Task => direct_predecessor_contexts(step, steps, edges),
+        WorkflowStepType::Review => review_dependency_contexts(step, steps, edges),
+        WorkflowStepType::Result => result_dependency_contexts(step, steps, edges, plan),
+    }
+}
+
+fn direct_predecessor_contexts(
+    step: &WorkflowStep,
+    steps: &[WorkflowStep],
+    edges: &[WorkflowStepEdge],
+) -> Vec<String> {
+    direct_predecessor_steps(step, steps, edges)
+        .into_iter()
+        .map(|source_step| format_step_dependency_context("Dependency Node", source_step))
+        .collect()
+}
+
+fn review_dependency_contexts(
+    step: &WorkflowStep,
+    steps: &[WorkflowStep],
+    edges: &[WorkflowStepEdge],
+) -> Vec<String> {
+    let mut reviewed_steps = step
+        .loop_id
+        .map(|loop_id| {
+            let mut members = steps
+                .iter()
+                .filter(|candidate| {
+                    candidate.id != step.id
+                        && candidate.loop_id == Some(loop_id)
+                        && candidate.step_type == WorkflowStepType::Task
+                })
+                .collect::<Vec<_>>();
+            members.sort_by_key(|candidate| candidate.display_order);
+            members
+        })
+        .unwrap_or_default();
+
+    if reviewed_steps.is_empty() {
+        reviewed_steps = direct_predecessor_steps(step, steps, edges);
+    }
+
+    reviewed_steps
+        .into_iter()
+        .map(|source_step| format_step_dependency_context("Reviewed Loop Node", source_step))
+        .collect()
+}
+
+fn result_dependency_contexts(
+    step: &WorkflowStep,
+    steps: &[WorkflowStep],
+    edges: &[WorkflowStepEdge],
+    plan: Option<&WorkflowPlan>,
+) -> Vec<String> {
+    let mut contexts = Vec::new();
+
+    if let Some(plan) = plan {
+        contexts.push(format!(
+            "## Result Dependency: Full Workflow Plan JSON\n\n```json\n{}\n```",
+            pretty_workflow_plan_json(&plan.plan_json)
+        ));
+    }
+
+    contexts
+}
+
+fn direct_predecessor_steps<'a>(
+    step: &WorkflowStep,
+    steps: &'a [WorkflowStep],
+    edges: &[WorkflowStepEdge],
+) -> Vec<&'a WorkflowStep> {
     let step_by_id: HashMap<Uuid, &WorkflowStep> = steps
         .iter()
         .map(|candidate| (candidate.id, candidate))
         .collect();
+    let mut seen = HashSet::new();
 
     edges
         .iter()
         .filter(|edge| edge.to_step_id == step.id)
-        .filter_map(|edge| step_by_id.get(&edge.from_step_id).copied())
-        .filter_map(|source_step| parse_summary_payload(source_step.summary_text.as_deref()))
-        .map(|payload| payload.content.unwrap_or(payload.summary))
+        .filter_map(|edge| {
+            if seen.insert(edge.from_step_id) {
+                step_by_id.get(&edge.from_step_id).copied()
+            } else {
+                None
+            }
+        })
         .collect()
+}
+
+fn format_step_dependency_context(label: &str, step: &WorkflowStep) -> String {
+    let payload = parse_summary_payload(step.summary_text.as_deref());
+    let summary = payload
+        .as_ref()
+        .map(|payload| payload.summary.trim())
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or("None");
+
+    format!(
+        r#"## {label}: {title}
+
+- Type: {step_type}
+<Instructions>
+{instructions}
+</Instructions>
+
+<Summary>
+{summary}
+</Summary>
+"#,
+        label = label,
+        title = step.title,
+        step_type = to_workflow_wire_value(&step.step_type),
+        instructions = step.instructions,
+        summary = summary,
+    )
+}
+
+fn pretty_workflow_plan_json(plan_json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(plan_json)
+        .and_then(|value| serde_json::to_string_pretty(&value))
+        .unwrap_or_else(|_| plan_json.to_string())
 }
 
 pub fn parse_summary_payload(summary_text: Option<&str>) -> Option<SummaryPayload> {
@@ -2890,8 +3045,9 @@ mod tests {
         chat_session_agent::{ChatSessionAgent, ChatSessionAgentState},
         workflow_plan::WorkflowPlan,
         workflow_plan_revision::WorkflowPlanRevision,
+        workflow_step_edge::WorkflowStepEdge,
         workflow_types::{
-            WorkflowPlanStatus, WorkflowRevisionEditor, WorkflowValidationStatus,
+            WorkflowEdgeKind, WorkflowPlanStatus, WorkflowRevisionEditor, WorkflowValidationStatus,
             to_workflow_wire_value,
         },
     };
@@ -3015,6 +3171,18 @@ mod tests {
         }
     }
 
+    fn sample_edge(from_step_id: Uuid, to_step_id: Uuid) -> WorkflowStepEdge {
+        WorkflowStepEdge {
+            id: Uuid::new_v4(),
+            execution_id: Uuid::new_v4(),
+            compiled_revision_id: None,
+            from_step_id,
+            to_step_id,
+            edge_kind: WorkflowEdgeKind::Hard,
+            created_at: Utc::now(),
+        }
+    }
+
     fn sample_agent_views() -> (Vec<ChatSessionAgent>, Vec<ChatAgent>) {
         let now = Utc::now();
         let agent_id = Uuid::new_v4();
@@ -3133,6 +3301,99 @@ mod tests {
         assert_eq!(
             resolve_workflow_response_language_instruction(&UiLanguage::En),
             "You MUST write human-readable JSON string values in English."
+        );
+    }
+
+    #[test]
+    fn predecessor_summaries_for_task_include_dependency_node_details() {
+        let mut source = sample_step(WorkflowStepStatus::Completed);
+        source.step_key = "build-api".to_string();
+        source.title = "Build API".to_string();
+        source.instructions = "Implement the API".to_string();
+        source.summary_text = Some(
+            serde_json::json!({
+                "summary": "API is implemented",
+                "content": "Implemented the endpoint and tests.",
+                "outputs": ["crates/server/src/routes/api.rs"]
+            })
+            .to_string(),
+        );
+        let mut target = sample_step(WorkflowStepStatus::Ready);
+        target.step_key = "wire-ui".to_string();
+        let edge = sample_edge(source.id, target.id);
+
+        let contexts = predecessor_summaries(&target, &[source, target.clone()], &[edge], None);
+
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts[0].contains("## Dependency Node: Build API"));
+        assert!(contexts[0].contains("- Step key: build-api"));
+        assert!(contexts[0].contains("- Type: task"));
+        assert!(contexts[0].contains("Implement the API"));
+        assert!(contexts[0].contains("Implemented the endpoint and tests."));
+        assert!(contexts[0].contains("crates/server/src/routes/api.rs"));
+    }
+
+    #[test]
+    fn predecessor_summaries_for_review_include_reviewed_loop_nodes() {
+        let loop_id = Uuid::new_v4();
+        let mut reviewed = sample_step(WorkflowStepStatus::Completed);
+        reviewed.step_key = "draft".to_string();
+        reviewed.title = "Draft Feature".to_string();
+        reviewed.instructions = "Draft the feature".to_string();
+        reviewed.loop_id = Some(loop_id);
+        reviewed.summary_text = Some(
+            serde_json::json!({
+                "summary": "Draft complete",
+                "content": "Feature draft is ready for review.",
+                "outputs": ["frontend/src/feature.tsx"]
+            })
+            .to_string(),
+        );
+        let mut review = sample_step(WorkflowStepStatus::Ready);
+        review.step_key = "review".to_string();
+        review.title = "Review Feature".to_string();
+        review.step_type = WorkflowStepType::Review;
+        review.loop_id = Some(loop_id);
+
+        let contexts = predecessor_summaries(&review, &[review.clone(), reviewed], &[], None);
+
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts[0].contains("## Reviewed Loop Node: Draft Feature"));
+        assert!(contexts[0].contains("- Step key: draft"));
+        assert!(contexts[0].contains("- Type: task"));
+        assert!(contexts[0].contains("Feature draft is ready for review."));
+    }
+
+    #[test]
+    fn predecessor_summaries_for_result_include_full_plan_json() {
+        let plan = sample_plan(Uuid::new_v4());
+        let mut source = sample_step(WorkflowStepStatus::Completed);
+        source.step_key = "step-1".to_string();
+        source.summary_text = Some(
+            serde_json::json!({
+                "summary": "Step complete",
+                "content": "Done.",
+                "outputs": []
+            })
+            .to_string(),
+        );
+        let mut result = sample_step(WorkflowStepStatus::Ready);
+        result.step_key = "result".to_string();
+        result.title = "Result".to_string();
+        result.step_type = WorkflowStepType::Result;
+
+        let contexts = predecessor_summaries(&result, &[source, result.clone()], &[], Some(&plan));
+
+        assert!(
+            contexts
+                .first()
+                .is_some_and(|context| context.contains("Full Workflow Plan JSON"))
+        );
+        assert!(contexts[0].contains("\"title\": \"Projection Contract\""));
+        assert!(
+            contexts
+                .iter()
+                .any(|context| context.contains("Workflow Node Result"))
         );
     }
 

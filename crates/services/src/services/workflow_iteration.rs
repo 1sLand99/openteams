@@ -635,7 +635,7 @@ pub fn build_iteration_plan_prompt(
     history: &[WorkflowIterationFeedback],
     lead_agent_id: &str,
     available_agents: &[WorkflowCardAgent],
-    previous_plan: &WorkflowPlanJson,
+    _previous_plan: &WorkflowPlanJson,
     response_language_instruction: &str,
 ) -> String {
     let history_text = if history.is_empty() {
@@ -652,8 +652,6 @@ pub fn build_iteration_plan_prompt(
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let previous_plan_json =
-        serde_json::to_string_pretty(previous_plan).unwrap_or_else(|_| "{}".to_string());
     let available_agents_json =
         serde_json::to_string_pretty(available_agents).unwrap_or_else(|_| "[]".to_string());
     let feedback_text = format_iteration_feedback(user_feedback_json);
@@ -776,21 +774,14 @@ Hard requirements:
 
     prompt.push_str("\n\n## Iteration Context\n\n");
     prompt.push_str(&format!(
-        "### User Re-iteration Request\nThe user has requested a new iteration of the workflow plan after rejecting the previous round. Generate a revised plan for iteration round {next_round}, not a first-pass plan.\n\n"
+        "Iteration request: user rejected the previous round and requested a revised plan for round {next_round}. Preserve correct work; change only what the feedback requires.\n"
     ));
-    prompt.push_str("Use this context to revise the plan while keeping the same WorkflowPlanJson output contract.\n");
-    prompt.push_str("- Preserve correct work from earlier rounds where possible. Do not regenerate steps that already succeeded unless the feedback explicitly requires changes to them.\n");
-    prompt.push_str("- Address the user feedback directly and explicitly in the new plan.\n");
-    prompt.push_str("- If existing files need revision, make that clear in step instructions.\n");
-    prompt.push_str("- Reference what changed and why compared to the previous plan.\n");
     prompt.push_str("\n### Previous Round State\n");
     prompt.push_str(current_state_summary.trim());
     prompt.push_str("\n\n### User Feedback (reason for rejection)\n");
     prompt.push_str(&feedback_text);
     prompt.push_str("\n\n### Iteration History\n");
     prompt.push_str(&history_text);
-    // prompt.push_str("\n\n### Previous Plan JSON\n");
-    // prompt.push_str(&previous_plan_json);
 
     prompt.push_str("\n\nFinal instruction: return the workflow plan JSON object only.");
     prompt
@@ -1080,8 +1071,8 @@ mod tests {
 
         assert!(prompt.contains("Workflow Plan Generation"));
         assert!(prompt.contains("workflow iteration round 2"));
-        assert!(prompt.contains("User Re-iteration Request"));
-        assert!(prompt.contains("not a first-pass plan"));
+        assert!(prompt.contains("Iteration request: user rejected the previous round"));
+        assert!(prompt.contains("requested a revised plan for round 2"));
         assert!(prompt.contains("Ship a stable workflow"));
         assert!(prompt.contains("Round 1 completed without tests"));
         assert!(prompt.contains("- what_wrong: Missing tests"));
