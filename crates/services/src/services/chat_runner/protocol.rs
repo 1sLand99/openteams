@@ -805,6 +805,7 @@ impl ChatRunner {
             current_round: 0,
             loops: Vec::new(),
             pending_review: None,
+            pending_input: None,
             iteration_history: Vec::new(),
             round_graphs: Vec::new(),
             plan,
@@ -973,6 +974,15 @@ impl ChatRunner {
                 ChatRunnerError::AgentNotFound(format!("lead agent resolution failed: {err}"))
             })?;
         let lead_agent_id = lead_agent.id.to_string();
+        let mut lead_session_agent = lead_session_agent.clone();
+
+        let _plan_skills = self
+            .prepare_and_resolve_agent_skills(
+                &mut lead_session_agent,
+                lead_agent,
+                crate::services::agent_skill_policy::AgentPromptContext::PlanGeneration,
+            )
+            .await?;
         let available_agents: Vec<WorkflowCardAgent> = session_agents
             .iter()
             .filter_map(|session_agent| {
@@ -1073,7 +1083,7 @@ impl ChatRunner {
             &self.db,
             &session,
             lead_agent,
-            lead_session_agent,
+            &lead_session_agent,
             None,
             &prompt,
             Uuid::nil(),
@@ -1180,7 +1190,7 @@ impl ChatRunner {
                 self,
                 &session,
                 source_msg_id,
-                lead_session_agent,
+                &lead_session_agent,
                 &plan_json,
                 Some(placeholder.id),
             )

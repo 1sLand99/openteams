@@ -844,7 +844,8 @@
       "continueAction": "CONTINUER",
       "approveAction": "APPROUVER",
       "rejectAction": "REJETER",
-      "replyPlaceholder": "Répondre à l'agent..."
+      "replyPlaceholder": "Répondre à l'agent...",
+      "readOnlyPlaceholder": "Réponse possible uniquement lorsque cette étape attend une saisie ou une revue."
     },
     "status": {
       "recompiling": "Recompilation du plan...",
@@ -892,7 +893,11 @@
       "approve": "APPROUVER",
       "viewDetails": "VOIR DÉTAILS",
       "finalReviewTitle": "Revue finale",
-      "reviewRequired": "Revue requise"
+      "reviewRequired": "Revue requise",
+      "pendingInput": "Saisie requise",
+      "typeInput": "Saisie",
+      "inputRequired": "Saisie requise",
+      "respond": "RÉPONDRE"
     },
     "card": {
       "generatingPlan": "Génération du plan de workflow",
@@ -1016,6 +1021,12 @@
       "approved": "Approuvé",
       "rejected": "Rejeté",
       "reviewed": "Examiné"
+    },
+    "pendingInput": {
+      "title": "Saisie requise",
+      "defaultPrompt": "L’agent a besoin d’informations supplémentaires pour continuer.",
+      "placeholder": "Saisissez votre réponse ici",
+      "submit": "ENVOYER"
     }
   },
   "leadAgent": {

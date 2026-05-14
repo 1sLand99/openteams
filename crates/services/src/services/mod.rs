@@ -1,3 +1,4 @@
+pub mod agent_skill_policy;
 pub mod analytics;
 pub mod analytics_events;
 pub mod approvals;

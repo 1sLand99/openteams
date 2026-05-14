@@ -844,7 +844,8 @@
       "continueAction": "CONTINUE",
       "approveAction": "APPROVE",
       "rejectAction": "REJECT",
-      "replyPlaceholder": "Reply to agent..."
+      "replyPlaceholder": "Reply to agent...",
+      "readOnlyPlaceholder": "Read-only until this step is waiting for input or review."
     },
     "status": {
       "recompiling": "Recompiling plan...",
@@ -892,7 +893,11 @@
       "approve": "APPROVE",
       "viewDetails": "VIEW DETAILS",
       "finalReviewTitle": "Final Review",
-      "reviewRequired": "Review required"
+      "reviewRequired": "Review required",
+      "pendingInput": "Input Required",
+      "typeInput": "Input",
+      "inputRequired": "Input required",
+      "respond": "RESPOND"
     },
     "card": {
       "generatingPlan": "Generating workflow plan",
@@ -1016,6 +1021,12 @@
       "approved": "Approved",
       "rejected": "Rejected",
       "reviewed": "Reviewed"
+    },
+    "pendingInput": {
+      "title": "Input Required",
+      "defaultPrompt": "The agent needs more input to continue.",
+      "placeholder": "Type your response here",
+      "submit": "SUBMIT"
     }
   },
   "leadAgent": {

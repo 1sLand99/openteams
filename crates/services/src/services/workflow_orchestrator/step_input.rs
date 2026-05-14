@@ -42,6 +42,7 @@ impl WorkflowOrchestrator {
             WorkflowStepStatus::WaitingInput
                 | WorkflowStepStatus::Failed
                 | WorkflowStepStatus::WaitingReview
+                | WorkflowStepStatus::Interrupted
         )
     }
 

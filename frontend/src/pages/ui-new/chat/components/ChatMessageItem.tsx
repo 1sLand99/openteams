@@ -157,6 +157,7 @@ export interface ChatMessageItemProps {
     action: 'approve' | 'reject',
     feedback?: string
   ) => void;
+  onSubmitWorkflowStepInput?: (stepId: string, inputText: string) => void;
   onSubmitWorkflowIterationFeedback?: (payload: {
     executionId: string;
     action: 'accept' | 'reject';
@@ -203,6 +204,7 @@ export function ChatMessageItem({
   workflowCardProjection: workflowCardProjectionOverride,
   workflowFinalReviewAction,
   onRespondPendingReview,
+  onSubmitWorkflowStepInput,
   onSubmitWorkflowIterationFeedback,
   pendingWorkflowActionId,
 }: ChatMessageItemProps) {
@@ -373,10 +375,13 @@ export function ChatMessageItem({
                   onRetryStep={onRetryWorkflowStep}
                   finalReviewAction={workflowFinalReviewAction}
                   onRespondPendingReview={onRespondPendingReview}
+                  onSubmitStepInput={onSubmitWorkflowStepInput}
                   onSubmitIterationFeedback={onSubmitWorkflowIterationFeedback}
                   pendingActionId={pendingWorkflowActionId}
                   onRetryPlanGeneration={onRetryWorkflowPlanGeneration}
-                  retryPlanGenerationPending={workflowPlanGenerationRetryPending}
+                  retryPlanGenerationPending={
+                    workflowPlanGenerationRetryPending
+                  }
                   retryPlanGenerationError={workflowPlanGenerationRetryError}
                   onOpenWindow={
                     onOpenWorkflowWindow

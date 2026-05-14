@@ -844,7 +844,8 @@
       "continueAction": "계속",
       "approveAction": "승인",
       "rejectAction": "거부",
-      "replyPlaceholder": "에이전트에게 답장..."
+      "replyPlaceholder": "에이전트에게 답장...",
+      "readOnlyPlaceholder": "이 단계가 입력 대기 또는 리뷰 대기일 때만 답장할 수 있습니다."
     },
     "status": {
       "recompiling": "계획 재컴파일 중...",
@@ -892,7 +893,11 @@
       "approve": "승인",
       "viewDetails": "상세 보기",
       "finalReviewTitle": "최종 리뷰",
-      "reviewRequired": "리뷰 필요"
+      "reviewRequired": "리뷰 필요",
+      "pendingInput": "입력 필요",
+      "typeInput": "입력",
+      "inputRequired": "입력이 필요합니다",
+      "respond": "응답"
     },
     "card": {
       "generatingPlan": "워크플로 계획 생성 중",
@@ -1016,6 +1021,12 @@
       "approved": "승인됨",
       "rejected": "거부됨",
       "reviewed": "리뷰됨"
+    },
+    "pendingInput": {
+      "title": "입력 필요",
+      "defaultPrompt": "계속하려면 에이전트에 추가 입력이 필요합니다.",
+      "placeholder": "여기에 답변을 입력하세요",
+      "submit": "제출"
     }
   },
   "leadAgent": {

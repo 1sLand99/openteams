@@ -844,7 +844,8 @@
       "continueAction": "CONTINUAR",
       "approveAction": "APROBAR",
       "rejectAction": "RECHAZAR",
-      "replyPlaceholder": "Responder al agente..."
+      "replyPlaceholder": "Responder al agente...",
+      "readOnlyPlaceholder": "Solo puedes responder cuando este paso espera entrada o revisión."
     },
     "status": {
       "recompiling": "Recompilando plan...",
@@ -892,7 +893,11 @@
       "approve": "APROBAR",
       "viewDetails": "VER DETALLES",
       "finalReviewTitle": "Revisión final",
-      "reviewRequired": "Revisión requerida"
+      "reviewRequired": "Revisión requerida",
+      "pendingInput": "Entrada requerida",
+      "typeInput": "Entrada",
+      "inputRequired": "Entrada requerida",
+      "respond": "RESPONDER"
     },
     "card": {
       "generatingPlan": "Generando plan de flujo de trabajo",
@@ -1016,6 +1021,12 @@
       "approved": "Aprobado",
       "rejected": "Rechazado",
       "reviewed": "Revisado"
+    },
+    "pendingInput": {
+      "title": "Entrada requerida",
+      "defaultPrompt": "El agente necesita más información para continuar.",
+      "placeholder": "Escribe tu respuesta aquí",
+      "submit": "ENVIAR"
     }
   },
   "leadAgent": {

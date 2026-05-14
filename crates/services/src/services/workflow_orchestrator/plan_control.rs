@@ -244,6 +244,7 @@ impl WorkflowOrchestrator {
             current_round: 0,
             loops: Vec::new(),
             pending_review: None,
+            pending_input: None,
             iteration_history: Vec::new(),
             round_graphs: Vec::new(),
             plan: parsed_plan,

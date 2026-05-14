@@ -8,11 +8,7 @@ import {
 } from 'react';
 import { UsersThreeIcon, CaretDoubleDownIcon } from '@phosphor-icons/react';
 import { useTranslation } from 'react-i18next';
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   ChatMessage,
@@ -1570,7 +1566,8 @@ export function ChatSessions() {
     });
     const hasFreshDetailCache =
       !!detailCacheEntry &&
-      Date.now() - detailCacheEntry.fetchedAtMs < WORKFLOW_DETAIL_CACHE_STALE_MS;
+      Date.now() - detailCacheEntry.fetchedAtMs <
+        WORKFLOW_DETAIL_CACHE_STALE_MS;
 
     if (
       !workflowWindowOpen ||
@@ -5289,6 +5286,12 @@ export function ChatSessions() {
                           workflowFinalReviewAction={workflowFinalReviewAction}
                           onRespondPendingReview={
                             handleRespondPendingWorkflowReview
+                          }
+                          onSubmitWorkflowStepInput={(stepId, inputText) =>
+                            submitWorkflowStepInputMutation.mutate({
+                              stepId,
+                              inputText,
+                            })
                           }
                           onSubmitWorkflowIterationFeedback={
                             handleSubmitWorkflowIterationFeedback

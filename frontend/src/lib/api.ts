@@ -188,6 +188,16 @@ export interface WorkflowPendingReviewData {
   };
 }
 
+export interface WorkflowPendingInputData {
+  input_id: string;
+  step_id: string;
+  step_key: string;
+  target_title: string;
+  prompt: string;
+  description?: string | null;
+  placeholder?: string | null;
+}
+
 export interface WorkflowIterationSummaryData {
   round_index: number;
   status: string;
@@ -288,6 +298,7 @@ export interface WorkflowCardData {
   }>;
   plan: WorkflowCardPlanData;
   pending_review?: WorkflowPendingReviewData | null;
+  pending_input?: WorkflowPendingInputData | null;
   validation_errors?: string | null;
   is_terminal?: boolean;
   has_transcripts?: boolean | null;

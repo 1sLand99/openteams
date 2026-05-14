@@ -173,6 +173,17 @@ pub struct WorkflowPendingReview {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct WorkflowPendingInput {
+    pub input_id: String,
+    pub step_id: String,
+    pub step_key: String,
+    pub target_title: String,
+    pub prompt: String,
+    pub description: Option<String>,
+    pub placeholder: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct WorkflowIterationSummary {
     pub round_index: i32,
     pub status: String,
@@ -237,6 +248,7 @@ pub struct WorkflowCardProjection {
     pub current_round: i32,
     pub loops: Vec<WorkflowCardLoop>,
     pub pending_review: Option<WorkflowPendingReview>,
+    pub pending_input: Option<WorkflowPendingInput>,
     pub iteration_history: Vec<WorkflowIterationSummary>,
     pub round_graphs: Vec<WorkflowRoundGraph>,
     pub plan: WorkflowPlanJson,
@@ -1249,6 +1261,34 @@ Check:
 If rejecting, cite specific issues with file/line evidence when available.
 "#;
 
+static STEP_EXECUTION_RESULT_REVIEW_WORKFLOW: &str = r#"
+
+## Final Workflow Result Review Discipline
+
+You are responsible for the final review of the entire workflow plan, not only
+the current result step.
+
+Follow this review method in order:
+1. Reconstruct the workflow goal, this result step's instructions, and every
+   predecessor summary before writing the final result.
+2. Check each task, review, and retry loop as part of one plan. Treat rejected
+   or superseded attempts as history only; use the latest accepted/completed
+   round as the source of truth.
+3. Verify that every required workflow output is present, consistent with the
+   plan goal, and supported by the predecessor work and review evidence.
+4. Validate integration across steps: no missing handoff, conflicting result,
+   stale assumption, unreviewed rejection, or incomplete retry may be hidden in
+   the final result.
+5. If any required step is missing, blocked, failed, rejected without a
+   successful retry, or not supported by evidence, report BLOCKED or
+   DONE_WITH_CONCERNS instead of DONE.
+6. Produce a concise final result that explains what was completed, what was
+   verified, what deliverables exist, and any remaining risks or follow-up work.
+
+Do not invent evidence. If predecessor summaries are insufficient, say exactly
+what is missing and how it affects the final workflow result.
+"#;
+
 pub fn build_step_execution_prompt(
     execution: &WorkflowExecution,
     workflow_goal: &str,
@@ -1271,17 +1311,21 @@ pub fn build_step_execution_prompt(
     if step.step_type == WorkflowStepType::Task {
         prompt.push_str("You are implementing a task in an workflow step.\n\n");
     } else if step.step_type == WorkflowStepType::Review
-        || step.step_type == WorkflowStepType::Result
     {
         prompt.push_str("You are reviewing the output of the workers' implementation.\n\n");
+    } else if step.step_type == WorkflowStepType::Result
+    {
+        prompt.push_str("You are reviewing the results of the current workflow execution.\n\n");
     }
 
     if step.step_type == WorkflowStepType::Task {
         prompt.push_str(STEP_EXECUTION_TDD_WORKFLOW_FOR_TASK_TYPE);
     } else if step.step_type == WorkflowStepType::Review
-        || step.step_type == WorkflowStepType::Result
     {
         prompt.push_str(STEP_EXECUTION_TDD_WORKFLOW_FOR_REVIEW_TYPE);
+    } else if step.step_type == WorkflowStepType::Result
+    {
+        prompt.push_str(STEP_EXECUTION_RESULT_REVIEW_WORKFLOW);
     }
 
     prompt.push_str(STEP_EXECUTION_PROMPT_PREFIX);
@@ -1327,6 +1371,7 @@ pub fn build_step_execution_prompt_with_schema(
     step: &WorkflowStep,
     completed_dependency_summaries: &[String],
     step_transcript_context: Option<&str>,
+    agent_skill_names: &[String],
 ) -> String {
     let mut prompt = build_step_execution_prompt(
         execution,
@@ -1335,6 +1380,11 @@ pub fn build_step_execution_prompt_with_schema(
         completed_dependency_summaries,
         step_transcript_context,
     );
+    if let Some(section) =
+        crate::services::agent_skill_policy::format_skills_prompt_section(agent_skill_names)
+    {
+        prompt.push_str(&section);
+    }
     prompt.push_str("\n\nRequired JSON Schema:\n```json\n");
     prompt.push_str(&workflow_step_protocol_json_schema(
         execution.id,
@@ -1602,6 +1652,7 @@ pub fn build_step_revision_prompt_with_schema(
     feedback_content: &str,
     previous_summary: &str,
     retry_count: i32,
+    agent_skill_names: &[String],
 ) -> String {
     let mut prompt = build_step_revision_prompt(
         step,
@@ -1610,6 +1661,11 @@ pub fn build_step_revision_prompt_with_schema(
         previous_summary,
         retry_count,
     );
+    if let Some(section) =
+        crate::services::agent_skill_policy::format_skills_prompt_section(agent_skill_names)
+    {
+        prompt.push_str(&section);
+    }
     prompt.push_str("\n\nRequired JSON Schema:\n```json\n");
     prompt.push_str(&workflow_step_protocol_json_schema(
         step.execution_id,
@@ -1793,6 +1849,7 @@ pub fn build_workflow_card_projection(
     apply_runtime_loop_keys(&mut plan_json, &loop_key_by_step_key);
 
     let pending_review = build_pending_review(steps, loops, transcripts);
+    let pending_input = build_pending_input(steps, transcripts);
 
     let step_views = build_workflow_step_views(
         steps,
@@ -1879,6 +1936,7 @@ pub fn build_workflow_card_projection(
         current_round: execution.current_round,
         loops: loop_views,
         pending_review,
+        pending_input,
         iteration_history,
         round_graphs,
         plan: plan_json,
@@ -1956,6 +2014,7 @@ pub fn build_workflow_card_projection_lightweight(
     apply_runtime_loop_keys(&mut plan_json, &loop_key_by_step_key);
 
     let pending_review = build_pending_review(steps, loops, transcripts);
+    let pending_input = build_pending_input(steps, transcripts);
 
     let step_views = steps
         .iter()
@@ -2052,6 +2111,7 @@ pub fn build_workflow_card_projection_lightweight(
         current_round: execution.current_round,
         loops: loop_views,
         pending_review,
+        pending_input,
         iteration_history,
         round_graphs: Vec::new(),
         plan: plan_json,
@@ -3090,6 +3150,43 @@ fn derive_step_review_phase(
         WorkflowStepStatus::Revising => Some("revising".to_string()),
         _ => None,
     }
+}
+
+fn build_pending_input(
+    steps: &[WorkflowStep],
+    transcripts: &[WorkflowTranscript],
+) -> Option<WorkflowPendingInput> {
+    let transcript = transcripts.iter().rev().find(|transcript| {
+        transcript.entry_type == "input_request"
+            && !matches!(
+                transcript_meta_value(transcript).get("resolved"),
+                Some(serde_json::Value::Bool(true))
+            )
+    })?;
+    let step = steps.iter().find(|step| {
+        Some(step.id) == transcript.step_id && step.status == WorkflowStepStatus::WaitingInput
+    })?;
+    let meta = transcript_meta_value(transcript);
+
+    Some(WorkflowPendingInput {
+        input_id: transcript.id.to_string(),
+        step_id: step.id.to_string(),
+        step_key: step.step_key.clone(),
+        target_title: step.title.clone(),
+        prompt: transcript.content.clone(),
+        description: meta
+            .get("description")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        placeholder: meta
+            .get("placeholder")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    })
 }
 
 fn build_pending_review(

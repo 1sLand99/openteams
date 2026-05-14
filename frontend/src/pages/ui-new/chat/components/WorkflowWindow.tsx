@@ -31,6 +31,7 @@ import { ChatMarkdown } from '@/components/ui-new/primitives/conversation/ChatMa
 import { getWorkflowTranscriptRefetchInterval } from '@/lib/workflowRequestPolicy';
 import { WorkflowIterationFeedbackCard } from './WorkflowIterationFeedbackCard';
 import { WorkflowGraphBoard } from './WorkflowGraphBoard';
+import { WorkflowPendingInputCard } from './WorkflowPendingInputCard';
 import { WorkflowPendingReviewCard } from './WorkflowPendingReviewCard';
 import {
   workflowLatestReviewFeedback,
@@ -127,6 +128,12 @@ const workflowDetailMarkdownTextClassName = [
   '[&_:not(pre)>code]:py-0.5',
   '[&_:not(pre)>code]:rounded-md',
 ].join(' ');
+
+function canWorkflowStepAcceptChatInput(
+  step?: WorkflowCardStep | null
+): boolean {
+  return step?.status === 'waiting_review' || step?.status === 'waiting_input';
+}
 
 function getReviewSettingsErrorMessage(
   error: unknown,
@@ -707,68 +714,6 @@ export function ContinueConfirmationCard({
           className="rounded-full bg-[#16A34A] px-3 py-1 text-xs font-semibold text-white hover:bg-[#15803D] disabled:opacity-50 transition-colors"
         >
           {t('workflow.continueCard.confirm', { defaultValue: 'Continue' })}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-export function InputRequestCard({
-  prompt,
-  description,
-  placeholder,
-  stepId,
-  transcriptId,
-  onSubmit,
-  disabled,
-}: {
-  prompt: string;
-  description?: string;
-  placeholder?: string;
-  stepId: string;
-  transcriptId: string;
-  onSubmit: (stepId: string, transcriptId: string, inputText: string) => void;
-  disabled?: boolean;
-}) {
-  const { t } = useTranslation('chat');
-  const [value, setValue] = useState('');
-
-  useEffect(() => {
-    setValue('');
-  }, [stepId]);
-
-  const trimmedValue = value.trim();
-
-  return (
-    <div className="rounded-2xl border border-[#C7D2FE] bg-[#EEF2FF] p-3">
-      <div className="text-xs font-bold uppercase tracking-wider text-[#4338CA]">
-        {t('workflow.inputCard.title', { defaultValue: 'Input Required' })}
-      </div>
-      <div className="mt-1 text-sm font-semibold text-[#0F172A]">{prompt}</div>
-      {description && (
-        <div className="mt-1 text-xs text-[#475569]">{description}</div>
-      )}
-      <textarea
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-        placeholder={
-          placeholder ??
-          t('workflow.inputCard.placeholder', {
-            defaultValue: 'Type your response here',
-          })
-        }
-        disabled={disabled}
-        rows={4}
-        className="mt-3 w-full resize-y rounded-xl border border-[#C7D2FE] bg-white px-3 py-2 text-xs text-[#0F172A] outline-none transition-colors placeholder:text-[#94A3B8] focus:border-[#818CF8] disabled:cursor-not-allowed disabled:opacity-60"
-      />
-      <div className="mt-2 flex justify-end">
-        <button
-          type="button"
-          onClick={() => onSubmit(stepId, transcriptId, trimmedValue)}
-          disabled={disabled || trimmedValue.length === 0}
-          className="rounded-full bg-[#4F46E5] px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-[#4338CA] disabled:opacity-50"
-        >
-          {t('workflow.inputCard.submit', { defaultValue: 'Submit' })}
         </button>
       </div>
     </div>
@@ -1391,6 +1336,7 @@ function ChatPanel({
   agentName,
   entries,
   pendingReview,
+  pendingInput,
   pendingActionId,
   onApproval,
   onRespondPendingReview,
@@ -1402,6 +1348,7 @@ function ChatPanel({
   agentName: string;
   entries: WorkflowTranscriptEntry[];
   pendingReview?: WorkflowCardData['pending_review'];
+  pendingInput?: WorkflowCardData['pending_input'];
   pendingActionId?: string | null;
   onApproval?: (
     stepId: string,
@@ -1435,7 +1382,7 @@ function ChatPanel({
 
   const handleSend = () => {
     const trimmed = inputText.trim();
-    if (!trimmed || !onSendInput) return;
+    if (!trimmed || !onSendInput || !canSendInput) return;
     onSendInput(step.id, trimmed);
     setInputText('');
   };
@@ -1631,37 +1578,53 @@ function ChatPanel({
             />
           </div>
         )}
-        <div className="relative">
-          <input
-            type="text"
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            placeholder={t('workflow.chatPanel.replyPlaceholder', {
-              defaultValue: 'Reply to agent...',
-            })}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            disabled={!canSendInput}
-            className="w-full pl-4 pr-10 py-3 bg-slate-100 border-none rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-shadow disabled:opacity-60 disabled:cursor-not-allowed"
+        {pendingInput && (
+          <WorkflowPendingInputCard
+            pendingInput={pendingInput}
+            pendingActionId={pendingActionId}
+            onSubmit={onSendInput}
           />
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={!inputText.trim() || !canSendInput}
-            className={cn(
-              'absolute right-3 top-2.5 w-6 h-6 flex items-center justify-center transition-colors',
-              inputText.trim() && canSendInput
-                ? 'text-indigo-600 hover:text-indigo-700'
-                : 'text-slate-400'
-            )}
-          >
-            <Send className="w-4 h-4" />
-          </button>
-        </div>
+        )}
+        {!pendingInput && (
+          <div className="relative">
+            <input
+              type="text"
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              placeholder={
+                canSendInput
+                  ? t('workflow.chatPanel.replyPlaceholder', {
+                      defaultValue: 'Reply to agent...',
+                    })
+                  : t('workflow.chatPanel.readOnlyPlaceholder', {
+                      defaultValue:
+                        'Read-only until this step is waiting for input or review.',
+                    })
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+              disabled={!canSendInput}
+              className="w-full pl-4 pr-10 py-3 bg-slate-100 border-none rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-shadow disabled:opacity-60 disabled:cursor-not-allowed"
+            />
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={!inputText.trim() || !canSendInput}
+              className={cn(
+                'absolute right-3 top-2.5 w-6 h-6 flex items-center justify-center transition-colors',
+                inputText.trim() && canSendInput
+                  ? 'text-indigo-600 hover:text-indigo-700'
+                  : 'text-slate-400'
+              )}
+            >
+              <Send className="w-4 h-4" />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2304,6 +2267,27 @@ export function WorkflowWindow({
     }
 
     if (
+      projection.pending_input &&
+      !(
+        openedReviewNotificationId === projection.pending_input.input_id &&
+        isChatVisible &&
+        activeNodeId === projection.pending_input.step_key
+      )
+    ) {
+      items.push({
+        id: projection.pending_input.input_id,
+        type: 'input_request',
+        title: projection.pending_input.target_title,
+        message:
+          projection.pending_input.prompt ||
+          t('workflow.notifications.inputRequired', {
+            defaultValue: 'Input required',
+          }),
+        nodeId: projection.pending_input.step_key,
+      });
+    }
+
+    if (
       workflowFinalReviewAction &&
       openedReviewNotificationId !== workflowFinalReviewAction.transcriptId
     ) {
@@ -2323,6 +2307,7 @@ export function WorkflowWindow({
     isChatVisible,
     openedReviewNotificationId,
     pendingReviewNodeId,
+    projection.pending_input,
     projection.pending_review,
     t,
     workflowFinalReviewAction,
@@ -2335,7 +2320,9 @@ export function WorkflowWindow({
       setActiveNodeId(id);
       setIsChatVisible(
         (current) =>
-          current || !!options?.forceChat || step?.status === 'waiting_input'
+          current ||
+          !!options?.forceChat ||
+          canWorkflowStepAcceptChatInput(step)
       );
     },
     [stepByKey]
@@ -2363,12 +2350,17 @@ export function WorkflowWindow({
     activeNodeId && activeNodeId === pendingReviewNodeId
       ? projection.pending_review
       : null;
+  const activeStepPendingInput =
+    activeStep && projection.pending_input?.step_id === activeStep.id
+      ? projection.pending_input
+      : null;
 
   const handleSendStepInput = useCallback(
     (stepId: string, inputText: string) => {
       if (!onSubmitStepInput) return;
       const step = projection.steps.find((s) => s.id === stepId);
       if (!step) return;
+      if (!canWorkflowStepAcceptChatInput(step)) return;
       onSubmitStepInput(stepId, inputText);
       setRuntimeInputTranscripts((prev) => [
         ...prev,
@@ -2789,18 +2781,26 @@ export function WorkflowWindow({
                 <div className="bg-[#5094fb] p-2.5 flex items-center justify-between text-white">
                   <span className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5">
                     <Bell className="w-3.5 h-3.5" />{' '}
-                    {t('workflow.notifications.pendingReview', {
-                      defaultValue: 'Pending Review',
-                    })}
+                    {notif.type === 'input_request'
+                      ? t('workflow.notifications.pendingInput', {
+                          defaultValue: 'Input Required',
+                        })
+                      : t('workflow.notifications.pendingReview', {
+                          defaultValue: 'Pending Review',
+                        })}
                   </span>
                   <span className="text-[10px] bg-white/20 px-1.5 py-0.5 rounded">
                     {notif.type === 'final_review'
                       ? t('workflow.notifications.typeFinal', {
                           defaultValue: 'Final',
                         })
-                      : t('workflow.notifications.typeStep', {
-                          defaultValue: 'Step',
-                        })}
+                      : notif.type === 'input_request'
+                        ? t('workflow.notifications.typeInput', {
+                            defaultValue: 'Input',
+                          })
+                        : t('workflow.notifications.typeStep', {
+                            defaultValue: 'Step',
+                          })}
                   </span>
                 </div>
                 <div className="p-4 space-y-3">
@@ -2839,6 +2839,18 @@ export function WorkflowWindow({
                           })}
                         </button>
                       </>
+                    ) : notif.type === 'input_request' ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openPendingReviewInChat(notif.id, notif.nodeId)
+                        }
+                        className="flex-1 py-1.5 bg-[#5094fb] text-white rounded-md text-[10px] font-bold shadow-sm hover:bg-[#4080e0] transition-colors"
+                      >
+                        {t('workflow.notifications.respond', {
+                          defaultValue: 'RESPOND',
+                        })}
+                      </button>
                     ) : projection.pending_review && onRespondPendingReview ? (
                       <>
                         <button
@@ -2989,13 +3001,15 @@ export function WorkflowWindow({
                   agentName={resolveStepAgentName(activeStep)}
                   entries={visibleActiveTranscript}
                   pendingReview={activeStepPendingReview}
+                  pendingInput={activeStepPendingInput}
                   pendingActionId={pendingActionId}
                   onApproval={onApproval}
                   onRespondPendingReview={onRespondPendingReview}
                   onClose={() => setIsChatVisible(false)}
                   onSendInput={handleSendStepInput}
                   canSendInput={
-                    !!onSubmitStepInput && activeStep.status === 'waiting_input'
+                    !!onSubmitStepInput &&
+                    canWorkflowStepAcceptChatInput(activeStep)
                   }
                 />
               </motion.aside>

@@ -695,6 +695,7 @@ async fn build_plan_workflow_card_projection(
         current_round: 0,
         loops: Vec::new(),
         pending_review: None,
+        pending_input: None,
         iteration_history: Vec::new(),
         round_graphs: Vec::new(),
         plan: parsed_plan,
@@ -798,7 +799,9 @@ mod tests {
             "card_type": "workflow_execution"
         });
         inject_workflow_card_summary_into_message_meta(&mut meta);
-        let summary = meta.get("workflow_card_summary").expect("summary should exist");
+        let summary = meta
+            .get("workflow_card_summary")
+            .expect("summary should exist");
         assert_eq!(summary["is_terminal"], false);
     }
 
@@ -812,7 +815,9 @@ mod tests {
             }
         });
         inject_workflow_card_summary_into_message_meta(&mut meta);
-        let summary = meta.get("workflow_card_summary").expect("summary should exist");
+        let summary = meta
+            .get("workflow_card_summary")
+            .expect("summary should exist");
         assert_eq!(summary["execution_id"], "abc");
     }
 
@@ -823,7 +828,10 @@ mod tests {
             "workflow_card": {"some": "data"}
         });
         inject_workflow_card_summary_into_message_meta(&mut meta);
-        assert!(meta.get("workflow_card").is_some(), "non-workflow card should be preserved");
+        assert!(
+            meta.get("workflow_card").is_some(),
+            "non-workflow card should be preserved"
+        );
         assert!(meta.get("workflow_card_summary").is_none());
     }
 }

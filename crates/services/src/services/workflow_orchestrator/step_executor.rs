@@ -21,6 +21,8 @@ use db::{
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::services::agent_skill_policy::AgentPromptContext;
+
 use super::{
     super::{
         chat_runner::ChatRunner,
@@ -865,12 +867,25 @@ impl WorkflowOrchestrator {
                                     "step_revising_running",
                                 )
                                 .await?;
+                                let mut sa_clone = session_agent.clone();
+                                let agent_skill_names: Vec<String> = chat_runner
+                                    .prepare_and_resolve_agent_skills(
+                                        &mut sa_clone,
+                                        agent,
+                                        AgentPromptContext::StepRevision,
+                                    )
+                                    .await
+                                    .unwrap_or_default()
+                                    .iter()
+                                    .map(|s| s.name.clone())
+                                    .collect();
                                 let revision_prompt = build_step_revision_prompt_with_schema(
                                     &running_revision_step,
                                     WorkflowRevisionFeedbackSource::User,
                                     &feedback,
                                     &persisted.result.summary,
                                     running_revision_step.retry_count,
+                                    &agent_skill_names,
                                 );
 
                                 let (protocol_message, _raw_output) =
@@ -1008,12 +1023,25 @@ impl WorkflowOrchestrator {
                         "step_revising_running",
                     )
                     .await?;
+                    let mut sa_clone = session_agent.clone();
+                    let agent_skill_names: Vec<String> = chat_runner
+                        .prepare_and_resolve_agent_skills(
+                            &mut sa_clone,
+                            agent,
+                            AgentPromptContext::StepRevision,
+                        )
+                        .await
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|s| s.name.clone())
+                        .collect();
                     let revision_prompt = build_step_revision_prompt_with_schema(
                         &running_revision_step,
                         WorkflowRevisionFeedbackSource::Lead,
                         &feedback,
                         &persisted.result.summary,
                         running_revision_step.retry_count,
+                        &agent_skill_names,
                     );
 
                     let (protocol_message, _raw_output) =
@@ -1384,6 +1412,19 @@ impl WorkflowOrchestrator {
             .unwrap_or_else(|| plan.title.clone());
         let pending_revision_feedback =
             Self::parse_pending_revision_feedback(running_step.revision_context.as_deref());
+        let prompt_context = if pending_revision_feedback.is_some() {
+            AgentPromptContext::StepRevision
+        } else {
+            AgentPromptContext::StepExecution
+        };
+        let mut sa_clone = session_agent.clone();
+        let agent_skill_names: Vec<String> = chat_runner
+            .prepare_and_resolve_agent_skills(&mut sa_clone, agent, prompt_context)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
         let prompt = if let Some(pending_feedback) = pending_revision_feedback.as_ref() {
             build_step_revision_prompt_with_schema(
                 &running_step,
@@ -1391,6 +1432,7 @@ impl WorkflowOrchestrator {
                 &pending_feedback.feedback,
                 &pending_feedback.previous_summary,
                 running_step.retry_count,
+                &agent_skill_names,
             )
         } else {
             build_step_execution_prompt_with_schema(
@@ -1399,6 +1441,7 @@ impl WorkflowOrchestrator {
                 &running_step,
                 &dependency_summaries,
                 Some(&step_transcript_context),
+                &agent_skill_names,
             )
         };
 

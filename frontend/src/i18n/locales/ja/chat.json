@@ -844,7 +844,8 @@
       "continueAction": "続行",
       "approveAction": "承認",
       "rejectAction": "却下",
-      "replyPlaceholder": "エージェントに返信..."
+      "replyPlaceholder": "エージェントに返信...",
+      "readOnlyPlaceholder": "このステップが入力待ちまたはレビュー待ちのときだけ返信できます。"
     },
     "status": {
       "recompiling": "プランを再コンパイル中...",
@@ -892,7 +893,11 @@
       "approve": "承認",
       "viewDetails": "詳細を表示",
       "finalReviewTitle": "最終レビュー",
-      "reviewRequired": "レビューが必要"
+      "reviewRequired": "レビューが必要",
+      "pendingInput": "入力が必要",
+      "typeInput": "入力",
+      "inputRequired": "入力が必要です",
+      "respond": "返信"
     },
     "card": {
       "generatingPlan": "ワークフロープランを生成中",
@@ -1016,6 +1021,12 @@
       "approved": "承認済み",
       "rejected": "却下済み",
       "reviewed": "レビュー済み"
+    },
+    "pendingInput": {
+      "title": "入力が必要",
+      "defaultPrompt": "続行するにはエージェントに追加の入力が必要です。",
+      "placeholder": "ここに返信を入力",
+      "submit": "送信"
     }
   },
   "leadAgent": {

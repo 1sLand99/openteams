@@ -428,13 +428,15 @@ export type WorkflowReviewPromptTemplate = { message: string, fields: Array<Work
 
 export type WorkflowPendingReview = { review_id: string, review_type: string, target_id: string, target_title: string, context_summary: string, prompt_template: WorkflowReviewPromptTemplate, };
 
+export type WorkflowPendingInput = { input_id: string, step_id: string, step_key: string, target_title: string, prompt: string, description: string | null, placeholder: string | null, };
+
 export type WorkflowIterationSummary = { round_index: number, status: string, user_feedback: string | null, result_summary: string | null, started_at: string, completed_at: string | null, };
 
 export type WorkflowRoundGraph = { round_id: string, round_index: number, revision_id: string, status: string, plan: WorkflowPlanJson, steps: Array<WorkflowCardStep>, loops: Array<WorkflowCardLoop>, };
 
 export type WorkflowCardStep = { id: string, step_key: string, title: string, step_type: string, status: string, review_phase: string | null, lead_review_required: boolean, user_review_required: boolean, retry_count: number, max_retry: number, loop_key: string | null, latest_review: WorkflowCardReview | null, agent_name: string | null, summary_text: string | null, content: string | null, };
 
-export type WorkflowCardProjection = { execution_id: string | null, plan_id: string, revision_id: string, title: string, goal: string, state: WorkflowCardState, execution_status: string, error_message: string | null, completed_step_count: number, total_step_count: number, result_summary: string | null, outputs: Array<string>, agents: Array<WorkflowCardAgent>, steps: Array<WorkflowCardStep>, current_round: number, loops: Array<WorkflowCardLoop>, pending_review: WorkflowPendingReview | null, iteration_history: Array<WorkflowIterationSummary>, round_graphs: Array<WorkflowRoundGraph>, plan: WorkflowPlanJson, started_at: string | null, completed_at: string | null, validation_errors: string | null, is_terminal: boolean, has_transcripts: boolean | null, };
+export type WorkflowCardProjection = { execution_id: string | null, plan_id: string, revision_id: string, title: string, goal: string, state: WorkflowCardState, execution_status: string, error_message: string | null, completed_step_count: number, total_step_count: number, result_summary: string | null, outputs: Array<string>, agents: Array<WorkflowCardAgent>, steps: Array<WorkflowCardStep>, current_round: number, loops: Array<WorkflowCardLoop>, pending_review: WorkflowPendingReview | null, pending_input: WorkflowPendingInput | null, iteration_history: Array<WorkflowIterationSummary>, round_graphs: Array<WorkflowRoundGraph>, plan: WorkflowPlanJson, started_at: string | null, completed_at: string | null, validation_errors: string | null, is_terminal: boolean, has_transcripts: boolean | null, };
 
 export type UserIterationFeedbackDetail = { what_wrong: string, expected: string, priority: string | null, additional_notes: string | null, };
 

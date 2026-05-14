@@ -65,9 +65,12 @@ use crate::services::config::preset_loader::PresetLoader;
 use crate::services::{
     analytics::AnalyticsService,
     analytics_events::{AnalyticsProjector, DomainEvent},
-    chat::{self, ChatServiceError},
+    chat::{self, ChatServiceError, is_workflow_chat_input_mode},
     config::{self, UiLanguage},
-    native_skills::{NativeSkillError, list_native_skills_for_runner},
+    native_skills::{
+        NativeSkillError, auto_allow_builtin_skills, ensure_builtin_skills_installed,
+        list_native_skills_for_runner,
+    },
     workflow_runtime::resolve_lead_agent,
 };
 
@@ -1569,7 +1572,7 @@ impl ChatRunner {
             return Ok(());
         }
 
-        let session_agent = if session_agent.state != ChatSessionAgentState::Running {
+        let mut session_agent = if session_agent.state != ChatSessionAgentState::Running {
             ChatSessionAgent::update_state(
                 &self.db.pool,
                 session_agent.id,
@@ -1698,11 +1701,14 @@ impl ChatRunner {
             let session_agents = self.build_session_agent_summaries(session_id).await?;
             let session = ChatSession::find_by_id(&self.db.pool, session_id).await?;
 
-            // todo: 如果当前是workflow模式，那么检查是否
-
-            // Resolve the enabled native skills allowed for this session member.
+            // Resolve builtin + user-configured skills for this agent.
+            let prompt_context = if is_workflow_chat_input_mode(&source_message.meta.0) {
+                crate::services::agent_skill_policy::AgentPromptContext::WorkflowChat
+            } else {
+                crate::services::agent_skill_policy::AgentPromptContext::FreeChat
+            };
             let agent_skills = self
-                .resolve_session_agent_skills(&session_agent, &agent)
+                .prepare_and_resolve_agent_skills(&mut session_agent, &agent, prompt_context)
                 .await?;
 
             // Load UI language setting for agent response language

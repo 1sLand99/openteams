@@ -844,7 +844,8 @@
       "continueAction": "繼續",
       "approveAction": "核准",
       "rejectAction": "拒絕",
-      "replyPlaceholder": "回覆 Agent..."
+      "replyPlaceholder": "回覆 Agent...",
+      "readOnlyPlaceholder": "僅當此步驟等待輸入或審核時可回覆。"
     },
     "status": {
       "recompiling": "正在重新編譯計畫...",
@@ -892,7 +893,11 @@
       "approve": "核准",
       "viewDetails": "檢視詳情",
       "finalReviewTitle": "最終審核",
-      "reviewRequired": "需要審核"
+      "reviewRequired": "需要審核",
+      "pendingInput": "需要輸入",
+      "typeInput": "輸入",
+      "inputRequired": "需要輸入",
+      "respond": "回覆"
     },
     "card": {
       "generatingPlan": "正在產生工作流程計畫",
@@ -1016,6 +1021,12 @@
       "approved": "已核准",
       "rejected": "已拒絕",
       "reviewed": "已審核"
+    },
+    "pendingInput": {
+      "title": "需要輸入",
+      "defaultPrompt": "Agent 需要更多輸入才能繼續。",
+      "placeholder": "在此輸入回覆",
+      "submit": "提交"
     }
   },
   "leadAgent": {

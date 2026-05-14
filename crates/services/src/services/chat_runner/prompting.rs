@@ -140,7 +140,7 @@ impl ChatRunner {
             .map_err(|_| ChatRunnerError::UnknownRunnerType(raw.to_string()))
     }
 
-    pub(super) async fn resolve_session_agent_skills(
+    pub(crate) async fn resolve_session_agent_skills(
         &self,
         session_agent: &ChatSessionAgent,
         agent: &ChatAgent,
@@ -165,6 +165,56 @@ impl ChatRunner {
             .filter(|item| allowed_skill_ids.contains(&item.skill.id.to_string()))
             .map(|item| item.skill)
             .collect();
+
+        Ok(skills)
+    }
+
+    pub(crate) async fn ensure_and_allow_builtin_skills(
+        &self,
+        session_agent: &mut ChatSessionAgent,
+        agent: &ChatAgent,
+        skill_names: &[&str],
+    ) -> Result<(), ChatRunnerError> {
+        let runner_type = self.parse_runner_type(agent)?;
+
+        ensure_builtin_skills_installed(&self.db.pool, runner_type, skill_names).await?;
+        auto_allow_builtin_skills(&self.db.pool, session_agent, runner_type, skill_names).await?;
+
+        Ok(())
+    }
+
+    /// Unified entry point before running any agent prompt.
+    /// 1. Installs and allows builtin skills required by the given context.
+    /// 2. Resolves all authorized skills for the session agent.
+    /// Returns the list of resolved skills for prompt injection.
+    pub(crate) async fn prepare_and_resolve_agent_skills(
+        &self,
+        session_agent: &mut ChatSessionAgent,
+        agent: &ChatAgent,
+        context: crate::services::agent_skill_policy::AgentPromptContext,
+    ) -> Result<Vec<db::models::chat_skill::ChatSkill>, ChatRunnerError> {
+        let skills = self
+            .resolve_session_agent_skills(session_agent, agent)
+            .await?;
+        let mut required_installed_skills = crate::services::agent_skill_policy::required_builtin_skills(context)
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        for skill in &skills {
+            let name = skill.name.trim();
+            if !name.is_empty()
+                && !required_installed_skills
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(name))
+            {
+                required_installed_skills.push(name);
+            }
+        }
+
+        if !required_installed_skills.is_empty() {
+            self.ensure_and_allow_builtin_skills(session_agent, agent, &required_installed_skills)
+                .await?;
+        }
 
         Ok(skills)
     }
@@ -930,7 +980,8 @@ impl ChatRunner {
         if is_workflow_mode {
             markdown.push_str("\n## Workflow Mode\n");
             markdown.push_str("**Currently in workflow mode**, you are the lead agent in this mode, responsible for confirming requirements with the user, discussing solution details, and generating an execution plan.\n");
-            markdown.push_str("You MUST use the brainstorming skill to complete the solution design. no implementation work is allowed.\n");
+            markdown.push_str("You MUST use the `brainstorming` skill to complete the solution design. no implementation work is allowed.\n");
+            markdown.push_str("After the solution is confirmed, please prompt the user to decide if they want to proceed with generating the plan.\n");
         }
 
         markdown.push_str("## Current Turn\n");

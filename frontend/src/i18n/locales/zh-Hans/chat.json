@@ -844,7 +844,8 @@
       "continueAction": "继续",
       "approveAction": "批准",
       "rejectAction": "拒绝",
-      "replyPlaceholder": "回复 Agent..."
+      "replyPlaceholder": "回复 Agent...",
+      "readOnlyPlaceholder": "仅当此步骤等待输入或审核时可回复。"
     },
     "status": {
       "recompiling": "正在重新编译计划...",
@@ -892,7 +893,11 @@
       "approve": "批准",
       "viewDetails": "查看详情",
       "finalReviewTitle": "最终审核",
-      "reviewRequired": "需要审核"
+      "reviewRequired": "需要审核",
+      "pendingInput": "需要输入",
+      "typeInput": "输入",
+      "inputRequired": "需要输入",
+      "respond": "回复"
     },
     "card": {
       "generatingPlan": "正在生成工作流计划",
@@ -1016,6 +1021,12 @@
       "approved": "已批准",
       "rejected": "已拒绝",
       "reviewed": "已审核"
+    },
+    "pendingInput": {
+      "title": "需要输入",
+      "defaultPrompt": "Agent 需要更多输入才能继续。",
+      "placeholder": "在此输入回复",
+      "submit": "提交"
     }
   },
   "leadAgent": {
