@@ -1134,9 +1134,13 @@ export function ChatPresetsEditorPanel({
               label={t('settings.presets.teams.fields.leadAgent', {
                 defaultValue: 'Lead Agent',
               })}
-              description={t('settings.presets.teams.fields.leadAgentDescription', {
-                defaultValue: 'The member responsible for generating execution plans in workflow mode. Defaults to the first member if not set.',
-              })}
+              description={t(
+                'settings.presets.teams.fields.leadAgentDescription',
+                {
+                  defaultValue:
+                    'The member responsible for generating execution plans in workflow mode. Defaults to the first member if not set.',
+                }
+              )}
             >
               <SettingsSelect
                 value={selectedTeam.lead_member_id ?? ''}
@@ -1148,7 +1152,9 @@ export function ChatPresetsEditorPanel({
                     }),
                   },
                   ...selectedTeam.member_ids
-                    .map((memberId) => draft.members.find((m) => m.id === memberId))
+                    .map((memberId) =>
+                      draft.members.find((m) => m.id === memberId)
+                    )
                     .filter((m): m is ChatMemberPreset => !!m)
                     .map((member) => ({
                       value: member.id,

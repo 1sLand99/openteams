@@ -229,12 +229,15 @@ export function MessageInputArea({
 
   return (
     <div className="chat-session-input-area shrink-0 relative flex flex-col">
-      <div className={cn(
-        "chat-session-input-shell flex flex-col transition-all duration-300 overflow-visible relative",
-        "bg-white dark:bg-[#0a0a0a] border border-slate-200 dark:border-slate-800 shadow-sm",
-        isWorkflowMode ? "rounded-2xl ring-1 ring-blue-500/10" : "rounded-2xl"
-      )}>
-        {replyToMessage && (          <div className="chat-session-reply-card" title={replySummaryText}>
+      <div
+        className={cn(
+          'chat-session-input-shell flex flex-col transition-all duration-300 overflow-visible relative',
+          'bg-white dark:bg-[#0a0a0a] border border-slate-200 dark:border-slate-800 shadow-sm',
+          isWorkflowMode ? 'rounded-2xl ring-1 ring-blue-500/10' : 'rounded-2xl'
+        )}
+      >
+        {replyToMessage && (
+          <div className="chat-session-reply-card" title={replySummaryText}>
             <div className="chat-session-reply-main">
               <QuotesIcon className="chat-session-reply-quote" weight="fill" />
               <div className="chat-session-reply-content">
@@ -444,9 +447,15 @@ export function MessageInputArea({
                     {isWorkflowMode ? (
                       <GitBranchIcon className="size-icon-xs" weight="bold" />
                     ) : (
-                      <ChatCircleDotsIcon className="size-icon-xs" weight="bold" />
+                      <ChatCircleDotsIcon
+                        className="size-icon-xs"
+                        weight="bold"
+                      />
                     )}
-                    <ArrowsClockwiseIcon className="absolute -right-1 -bottom-1 size-2.5 rounded-full bg-white text-slate-400 dark:bg-[#0a0a0a] dark:text-slate-500" weight="bold" />
+                    <ArrowsClockwiseIcon
+                      className="absolute -right-1 -bottom-1 size-2.5 rounded-full bg-white text-slate-400 dark:bg-[#0a0a0a] dark:text-slate-500"
+                      weight="bold"
+                    />
                   </span>
                 </button>
               </span>

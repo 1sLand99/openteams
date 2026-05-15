@@ -1305,7 +1305,10 @@ export function AiMembersSidebar({
   );
 
   const renderMemberFormPanel = () => (
-    <div className="chat-session-member-form-panel rounded-sm px-1 py-base space-y-half" style={{ marginLeft: '-4px', marginRight: '-4px' }}>
+    <div
+      className="chat-session-member-form-panel rounded-sm px-1 py-base space-y-half"
+      style={{ marginLeft: '-4px', marginRight: '-4px' }}
+    >
       {!editingMember && (
         <div className="chat-session-member-form-tabs flex gap-1 rounded-xl p-1">
           <button
@@ -1520,16 +1523,18 @@ export function AiMembersSidebar({
                       'cursor-pointer'
                   )}
                   style={getAgentAvatarStyle(avatarSeed)}
-                  onClick={() =>
-                    handleMemberCardClick({ agent, sessionAgent })
-                  }
+                  onClick={() => handleMemberCardClick({ agent, sessionAgent })}
                   role={
-                    isWorkflowMode && agent.id !== effectiveLeadAgentId && !isArchived
+                    isWorkflowMode &&
+                    agent.id !== effectiveLeadAgentId &&
+                    !isArchived
                       ? 'button'
                       : undefined
                   }
                   tabIndex={
-                    isWorkflowMode && agent.id !== effectiveLeadAgentId && !isArchived
+                    isWorkflowMode &&
+                    agent.id !== effectiveLeadAgentId &&
+                    !isArchived
                       ? 0
                       : undefined
                   }
@@ -1553,7 +1558,12 @@ export function AiMembersSidebar({
                       </span>
                       <MemberNameWithTooltip name={agent.name} />
                       {isWorkflowMode && agent.id === effectiveLeadAgentId && (
-                        <Tooltip content={t('leadAgent.label', { defaultValue: 'Lead Agent' })} side="bottom">
+                        <Tooltip
+                          content={t('leadAgent.label', {
+                            defaultValue: 'Lead Agent',
+                          })}
+                          side="bottom"
+                        >
                           <span className="chat-session-member-lead-icon">
                             <CrownSimple className="size-3.5" weight="fill" />
                           </span>
@@ -1705,8 +1715,8 @@ export function AiMembersSidebar({
       <LeadAgentConfirmationDialog
         isOpen={isLeadSwitchDialogOpen}
         currentLeadName={
-          sessionMembers.find((m) => m.agent.id === effectiveLeadAgentId)?.agent.name ??
-          ''
+          sessionMembers.find((m) => m.agent.id === effectiveLeadAgentId)?.agent
+            .name ?? ''
         }
         targetLeadName={
           sessionMembers.find((m) => m.agent.id === targetLeadAgentId)?.agent

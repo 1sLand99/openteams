@@ -598,7 +598,9 @@
   .dark .new-design .chat-session-member-import-card {
     border-color: #2a3445;
     background: #192233;
-    transition: background-color 0.15s ease, border-color 0.15s ease;
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease;
   }
 
   .new-design.dark .chat-session-member-import-card:hover,

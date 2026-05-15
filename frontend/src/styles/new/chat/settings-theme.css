@@ -1358,7 +1358,9 @@
     border: 1.5px solid #d4def2;
     background: #ffffff;
     box-shadow: none;
-    transition: background-color 0.15s ease, border-color 0.15s ease;
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease;
   }
 
   .new-design .chat-session-member-import-card:hover {

@@ -9,14 +9,23 @@ type WorkflowPendingReviewCardProps = {
   onSubmit?: (action: 'approve' | 'reject', feedback?: string) => void;
 };
 
-function getReviewTypeLabel(reviewType: string, t: (key: string, opts?: Record<string, unknown>) => string) {
+function getReviewTypeLabel(
+  reviewType: string,
+  t: (key: string, opts?: Record<string, unknown>) => string
+) {
   switch (reviewType) {
     case 'step_user_review':
-      return t('workflow.pendingReview.reviewTypes.stepReview', { defaultValue: 'Step Review' });
+      return t('workflow.pendingReview.reviewTypes.stepReview', {
+        defaultValue: 'Step Review',
+      });
     case 'loop_user_review':
-      return t('workflow.pendingReview.reviewTypes.loopReview', { defaultValue: 'Loop Review' });
+      return t('workflow.pendingReview.reviewTypes.loopReview', {
+        defaultValue: 'Loop Review',
+      });
     case 'iteration_acceptance':
-      return t('workflow.pendingReview.reviewTypes.finalReview', { defaultValue: 'Final Review' });
+      return t('workflow.pendingReview.reviewTypes.finalReview', {
+        defaultValue: 'Final Review',
+      });
     default:
       return reviewType;
   }
@@ -54,7 +63,11 @@ export function WorkflowPendingReviewCard({
 
     const trimmedFeedback = feedback.trim();
     if (!trimmedFeedback) {
-      setValidationError(t('workflow.pendingReview.validationError', { defaultValue: 'Reject requires feedback.' }));
+      setValidationError(
+        t('workflow.pendingReview.validationError', {
+          defaultValue: 'Reject requires feedback.',
+        })
+      );
       return;
     }
 
@@ -65,7 +78,8 @@ export function WorkflowPendingReviewCard({
   return (
     <div className="bg-white border-2 border-amber-400 p-4 rounded-xl shadow-lg">
       <div className="text-xs font-bold text-amber-800 flex items-center gap-2 mb-2">
-        <AlertCircle className="w-4 h-4" /> {t('workflow.pendingReview.title', { defaultValue: 'Pending Review' })}
+        <AlertCircle className="w-4 h-4" />{' '}
+        {t('workflow.pendingReview.title', { defaultValue: 'Pending Review' })}
       </div>
 
       <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -78,7 +92,10 @@ export function WorkflowPendingReviewCard({
       </div>
 
       <p className="text-[11px] text-slate-600 mb-3 leading-relaxed font-medium">
-        {pendingReview.prompt_template.message || t('workflow.pendingReview.defaultMessage', { defaultValue: 'Please review the current result.' })}
+        {pendingReview.prompt_template.message ||
+          t('workflow.pendingReview.defaultMessage', {
+            defaultValue: 'Please review the current result.',
+          })}
       </p>
 
       {pendingReview.context_summary && (
@@ -95,14 +112,22 @@ export function WorkflowPendingReviewCard({
       {expandedReject && (
         <div className="mb-3">
           <div className="text-[10px] font-bold uppercase tracking-widest text-rose-700 mb-1">
-            {feedbackField?.label ?? t('workflow.pendingReview.feedbackLabel', { defaultValue: 'Feedback' })}
+            {feedbackField?.label ??
+              t('workflow.pendingReview.feedbackLabel', {
+                defaultValue: 'Feedback',
+              })}
           </div>
           <textarea
             value={feedback}
             onChange={(event) => setFeedback(event.target.value)}
             rows={3}
             disabled={disabled}
-            placeholder={feedbackField?.placeholder ?? t('workflow.pendingReview.feedbackPlaceholder', { defaultValue: 'Please provide specific revision comments' })}
+            placeholder={
+              feedbackField?.placeholder ??
+              t('workflow.pendingReview.feedbackPlaceholder', {
+                defaultValue: 'Please provide specific revision comments',
+              })
+            }
             className="w-full rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none transition-colors placeholder:text-slate-400 focus:border-rose-400 focus:ring-2 focus:ring-rose-400/20 disabled:cursor-not-allowed disabled:opacity-60"
           />
           {validationError && (
@@ -132,7 +157,11 @@ export function WorkflowPendingReviewCard({
               : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50'
           }`}
         >
-          {expandedReject ? t('workflow.pendingReview.submitReject', { defaultValue: 'SUBMIT REJECT' }) : t('workflow.pendingReview.reject', { defaultValue: 'REJECT' })}
+          {expandedReject
+            ? t('workflow.pendingReview.submitReject', {
+                defaultValue: 'SUBMIT REJECT',
+              })
+            : t('workflow.pendingReview.reject', { defaultValue: 'REJECT' })}
         </button>
       </div>
     </div>
