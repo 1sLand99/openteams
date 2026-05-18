@@ -3,6 +3,7 @@
 use chrono::Utc;
 use db::models::{
     chat_agent::ChatAgent,
+    chat_run::{ChatRun, CreateChatRun},
     chat_session_agent::ChatSessionAgent,
     chat_work_item::{ChatWorkItem, ChatWorkItemType},
     workflow_agent_session::WorkflowAgentSession,
@@ -390,6 +391,9 @@ impl WorkflowOrchestrator {
                 OrchestratorError::NotFound(format!("agent {} 未找到", session_agent.agent_id))
             })?;
 
+        let completion_run_id =
+            Self::ensure_workflow_completion_chat_run(pool, execution, session_agent).await?;
+
         let conclusion = match payload.content.as_deref().map(str::trim) {
             Some(content) if !content.is_empty() && content != payload.summary.trim() => {
                 format!("{}\n\n{}", payload.summary, content)
@@ -402,7 +406,7 @@ impl WorkflowOrchestrator {
                 execution.session_id,
                 session_agent.id,
                 agent.id,
-                execution.id,
+                completion_run_id,
                 &agent.name,
                 ChatWorkItemType::Conclusion,
                 conclusion,
@@ -420,7 +424,7 @@ impl WorkflowOrchestrator {
                     execution.session_id,
                     session_agent.id,
                     agent.id,
-                    execution.id,
+                    completion_run_id,
                     &agent.name,
                     ChatWorkItemType::Artifact,
                     format!("`{output}`"),
@@ -429,6 +433,36 @@ impl WorkflowOrchestrator {
         }
 
         Ok(())
+    }
+
+    async fn ensure_workflow_completion_chat_run(
+        pool: &SqlitePool,
+        execution: &WorkflowExecution,
+        session_agent: &ChatSessionAgent,
+    ) -> Result<Uuid, OrchestratorError> {
+        if ChatRun::find_by_id(pool, execution.id).await?.is_some() {
+            return Ok(execution.id);
+        }
+
+        let run_index = ChatRun::next_run_index(pool, session_agent.id).await?;
+        ChatRun::create(
+            pool,
+            &CreateChatRun {
+                session_id: execution.session_id,
+                session_agent_id: session_agent.id,
+                workspace_path: session_agent.workspace_path.clone(),
+                run_index,
+                run_dir: format!("workflow_execution_{}", execution.id),
+                input_path: None,
+                output_path: None,
+                raw_log_path: None,
+                meta_path: None,
+            },
+            execution.id,
+        )
+        .await?;
+
+        Ok(execution.id)
     }
 
     pub async fn write_transcript(
