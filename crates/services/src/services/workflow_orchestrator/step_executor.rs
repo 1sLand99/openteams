@@ -117,7 +117,7 @@ fn detect_active_frontier_workspace_conflicts(
                 predecessors.iter().all(|predecessor_id| {
                     step_by_id
                         .get(predecessor_id)
-                        .is_some_and(|predecessor| is_completed_like_step(predecessor))
+                        .is_some_and(is_completed_like_step)
                 })
             })
             .unwrap_or(true);
