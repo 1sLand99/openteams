@@ -203,25 +203,27 @@ pub fn loop_review_protocol_json_schema(
     .unwrap_or_else(|_| "{}".to_string())
 }
 
-pub fn build_loop_rejection_prompt(
-    loop_retry_count: i32,
-    loop_rejection_reason: &str,
-    step_specific_feedback: &str,
-    other_steps_feedback_summary: &[String],
-    your_previous_summary: &str,
-    step: &WorkflowStep,
-    external_dependency_text: &[String],
-    response_language_instruction: &str,
-) -> String {
-    let other_steps_feedback_summary = if other_steps_feedback_summary.is_empty() {
-        "无".to_string()
+pub struct LoopRejectionPromptInput<'a> {
+    pub loop_retry_count: i32,
+    pub loop_rejection_reason: &'a str,
+    pub step_specific_feedback: &'a str,
+    pub other_steps_feedback_summary: &'a [String],
+    pub your_previous_summary: &'a str,
+    pub step: &'a WorkflowStep,
+    pub external_dependency_text: &'a [String],
+    pub response_language_instruction: &'a str,
+}
+
+pub fn build_loop_rejection_prompt(input: LoopRejectionPromptInput<'_>) -> String {
+    let other_steps_feedback_summary = if input.other_steps_feedback_summary.is_empty() {
+        "None".to_string()
     } else {
-        other_steps_feedback_summary.join("\n")
+        input.other_steps_feedback_summary.join("\n")
     };
-    let external_dependency_text = if external_dependency_text.is_empty() {
-        "无".to_string()
+    let external_dependency_text = if input.external_dependency_text.is_empty() {
+        "None".to_string()
     } else {
-        external_dependency_text.join("\n")
+        input.external_dependency_text.join("\n")
     };
 
     format!(
@@ -256,15 +258,15 @@ Step instructions: {step_instructions}
 
 ### Completed Upstream Step Summaries (outside the loop)
 {external_dependency_text}"#,
-        loop_retry_count = loop_retry_count,
-        loop_rejection_reason = loop_rejection_reason,
-        step_specific_feedback = step_specific_feedback,
+        loop_retry_count = input.loop_retry_count,
+        loop_rejection_reason = input.loop_rejection_reason,
+        step_specific_feedback = input.step_specific_feedback,
         other_steps_feedback_summary = other_steps_feedback_summary,
-        your_previous_summary = your_previous_summary,
-        step_title = step.title,
-        step_instructions = step.instructions,
+        your_previous_summary = input.your_previous_summary,
+        step_title = input.step.title,
+        step_instructions = input.step.instructions,
         external_dependency_text = external_dependency_text,
-        response_language_instruction = response_language_instruction.trim(),
+        response_language_instruction = input.response_language_instruction.trim(),
     )
 }
 
@@ -455,16 +457,16 @@ mod tests {
     #[test]
     fn build_loop_rejection_prompt_contains_feedback_sections() {
         let step = sample_worker_step();
-        let prompt = build_loop_rejection_prompt(
-            2,
-            "整体结构不一致",
-            "请统一术语",
-            &["其他节点需要同步命名".to_string()],
-            "Old summary",
-            &step,
-            &["外部依赖 A 已完成".to_string()],
-            "You MUST write human-readable JSON string values in Simplified Chinese.",
-        );
+        let prompt = build_loop_rejection_prompt(LoopRejectionPromptInput {
+            loop_retry_count: 2,
+            loop_rejection_reason: "整体结构不一致",
+            step_specific_feedback: "请统一术语",
+            other_steps_feedback_summary: &["其他节点需要同步命名".to_string()],
+            your_previous_summary: "Old summary",
+            step: &step,
+            external_dependency_text: &["外部依赖 A 已完成".to_string()],
+            response_language_instruction: "You MUST write human-readable JSON string values in Simplified Chinese.",
+        });
 
         assert!(prompt.contains("loop retry 2"));
         assert!(prompt.contains("整体结构不一致"));
