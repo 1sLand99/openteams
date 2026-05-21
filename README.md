@@ -36,7 +36,12 @@
 </div>
 
 ---
-[hero video](./readmes/images/hero.mp4)
+
+<div align="center">
+  <video src="https://raw.githubusercontent.com/openteams-lab/openteams/main/readmes/images/hero.mp4" controls width="100%">
+    <a href="https://github.com/openteams-lab/openteams/raw/refs/heads/main/readmes/images/hero.mp4">Watch the hero video</a>
+  </video>
+</div>
 
 ## What is openteam
 

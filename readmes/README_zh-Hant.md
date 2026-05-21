@@ -36,7 +36,11 @@
 </div>
 
 ---
-![](images/hero.mp4)
+<div align="center">
+  <video src="https://raw.githubusercontent.com/openteams-lab/openteams/main/readmes/images/hero.mp4" controls width="100%">
+    <a href="https://github.com/openteams-lab/openteams/raw/refs/heads/main/readmes/images/hero.mp4">觀看產品影片</a>
+  </video>
+</div>
 
 ## 什麼是 openteams
 

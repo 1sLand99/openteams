@@ -36,7 +36,11 @@
 </div>
 
 ---
-![Interfaz de producto de OpenTeams con varios agentes de IA a la izquierda, una conversación compartida y un grafo de workflow en el centro, y paneles de revisión y artefactos a la derecha.](images/hero.mp4)
+<div align="center">
+  <video src="https://raw.githubusercontent.com/openteams-lab/openteams/main/readmes/images/hero.mp4" controls width="100%">
+    <a href="https://github.com/openteams-lab/openteams/raw/refs/heads/main/readmes/images/hero.mp4">Ver el video del producto</a>
+  </video>
+</div>
 
 ## Qué es openteams
 

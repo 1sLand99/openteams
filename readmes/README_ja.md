@@ -36,7 +36,11 @@
 </div>
 
 ---
-![複数の AI エージェント、共有会話、ワークフローグラフ、レビューと成果物パネルを表示する OpenTeams の製品 UI。](images/hero.mp4)
+<div align="center">
+  <video src="https://raw.githubusercontent.com/openteams-lab/openteams/main/readmes/images/hero.mp4" controls width="100%">
+    <a href="https://github.com/openteams-lab/openteams/raw/refs/heads/main/readmes/images/hero.mp4">製品動画を見る</a>
+  </video>
+</div>
 
 ## openteams とは
 
