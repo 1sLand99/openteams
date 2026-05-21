@@ -5,10 +5,11 @@
 <div align="center">
   <img src="frontend/public/openteams-brand-logo.png" alt="OpenTeams" width="200" style="margin-top: 10px; margin-bottom: 10px;">
 
-  <h5>Build everything with your AI team</h5>
+  <h5>Plan, Build, and Ship — with a team of AI agents instead of one</h5>
 
   <p>
-    openteams is an open-source workspace for multi-agent collaboration — build AI teams, run local coding agents, and coordinate work through chat or structured workflows, all in one context.
+    Multiple AI agents share one context — collaborate freely through chat, 
+   or orchestrate complex tasks through workflows you can see, review, and retry.
   </p>
 
   <p>
@@ -58,6 +59,19 @@ AI agents are getting stronger at planning, coding, reviewing, and testing. But 
 **openteams** solves both problems. All agents share a single context within the same session—no more juggling between agents or repeating yourself. Complex tasks become **visible, controllable workflows** — you refine the plan before it runs, watch each step execute, and intervene at any node: approve, reject, retry, or redirect.
 
 > The real productivity leverage is not more agents. It is orchestrating them — with a complex plan you can see and steps you can control.
+
+## Common Use Cases
+
+You type: "Add GitHub issue sync to the workspace."
+
+1. **Lead agent clarifies requirements:** It asks about sync direction (one-way or two-way?), conflict handling (skip, overwrite, or log?), and which issue fields to map. You confirm: one-way pull, log conflicts, map title/body/labels/status.
+2. **Lead agent designs the approach and builds the execution plan:** The plan shows 5 steps — `Backend: OAuth + GitHub API` → `Backend: Sync Engine` → `Frontend: Sync Status UI` → `Integration Tests` → `Final Review`. Each step has a clear scope, assigned agent, and acceptance criteria.
+3. **You review and approve the plan:** You can adjust steps, reorder dependencies, or reassign agents before any code runs.
+4. **Agents execute — you observe progress in real time:** `Backend: OAuth` runs first. Once complete, `Sync Engine` and `Frontend: Sync Status UI` start in parallel. Every step shows its status, diff, and logs on the workflow graph.
+5. **You review and approve each completed step:** `Backend: OAuth` finishes. You inspect the diff, see the token refresh logic, and approve. The next steps proceed.
+6. **A step fails — you retry just that step:** `Integration Tests` fails because the sync engine returns raw timestamps instead of ISO format. You review the error log, and retry only `Integration Tests` step. The rest of the workflow stays intact.
+7. **Final review and acceptance:** All steps pass. You review the full diff, artifacts, and test results, then accept.
+8. **Follow-up via Free Chat:** Two days later, a user reports the sync status badge flickers. You open Free Chat: `@Frontend Agent the sync status badge flickers when polling — debounce the state update`. Fixed in one turn, no workflow needed.
 
 ## Quick Start
 ### Install
@@ -173,26 +187,10 @@ Have a feature request or want to help shape the direction? [Open a discussion](
 
 openteams is for:
 
-- developers already using multiple coding agents
-- independent builders who want more leverage without more manual coordination
-- small engineering teams adopting AI-first workflows
-- technical leads who need reviewable, repeatable agent execution
-- teams that want both lightweight chat and structured workflow orchestration
+- developers using multiple coding agents who are tired of juggling them
+- technical leads who need agent runs to be reviewable and reproducible
 
 It is not just a place to collect more agents. It is a way to turn agents into a working team.
-
-## Common Use Cases
-
-You type: "Add GitHub issue sync to the workspace."
-
-1. **Lead agent clarifies requirements:** It asks about sync direction (one-way or two-way?), conflict handling (skip, overwrite, or log?), and which issue fields to map. You confirm: one-way pull, log conflicts, map title/body/labels/status.
-2. **Lead agent designs the approach and builds the execution plan:** The plan shows 5 steps — `Backend: OAuth + GitHub API` → `Backend: Sync Engine` → `Frontend: Sync Status UI` → `Integration Tests` → `Final Review`. Each step has a clear scope, assigned agent, and acceptance criteria.
-3. **You review and approve the plan:** You can adjust steps, reorder dependencies, or reassign agents before any code runs.
-4. **Agents execute — you observe progress in real time:** `Backend: OAuth` runs first. Once complete, `Sync Engine` and `Frontend: Sync Status UI` start in parallel. Every step shows its status, diff, and logs on the workflow graph.
-5. **You review and approve each completed step:** `Backend: OAuth` finishes. You inspect the diff, see the token refresh logic, and approve. The next steps proceed.
-6. **A step fails — you retry just that step:** `Integration Tests` fails because the sync engine returns raw timestamps instead of ISO format. You review the error log, and retry only `Integration Tests` step. The rest of the workflow stays intact.
-7. **Final review and acceptance:** All steps pass. You review the full diff, artifacts, and test results, then accept.
-8. **Follow-up via Free Chat:** Two days later, a user reports the sync status badge flickers. You open Free Chat: `@Frontend Agent the sync status badge flickers when polling — debounce the state update`. Fixed in one turn, no workflow needed.
 
 ## Tech Stack
 

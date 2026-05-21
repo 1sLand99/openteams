@@ -5,10 +5,10 @@
 <div align="center">
   <img src="../frontend/public/openteams-brand-logo.png" alt="OpenTeams" width="200" style="margin-top: 10px; margin-bottom: 10px;">
 
-  <h5>Construye con tu equipo de IA</h5>
+  <h5>Planifica, construye y entrega — con un equipo de agentes de IA en lugar de uno solo</h5>
 
   <p>
-    openteams es un espacio de trabajo open source para colaboración multiagente: crea equipos de IA, ejecuta agentes de código locales y coordina el trabajo mediante chat o workflows estructurados, todo en un solo lugar.
+    Varios agentes de IA comparten un mismo contexto: colabora libremente por chat u orquesta tareas complejas con workflows que puedes ver, revisar y reintentar.
   </p>
 
   <p>
@@ -57,6 +57,20 @@ Los agentes de IA son cada vez mejores planificando, programando, revisando y pr
 **openteams** resuelve ambos problemas. Los agentes **comparten un único contexto**, así que el trabajo no se pierde entre traspasos. Las tareas complejas se convierten en **workflows visibles y controlables**: puedes refinar el plan antes de ejecutarlo, ver cada paso mientras avanza e intervenir en cualquier nodo para aprobar, rechazar, reintentar o redirigir.
 
 > La verdadera ventaja no es tener más agentes. Es orquestarlos con un plan complejo que puedes ver y pasos que puedes controlar.
+
+## Casos de uso comunes
+
+Escribes: “Añade sincronización de issues de GitHub al workspace.”
+
+
+1. **El lead agent aclara los requisitos:** pregunta por la dirección de sincronización (¿unidireccional o bidireccional?), el manejo de conflictos (¿omitir, sobrescribir o registrar?) y qué campos de issue mapear. Confirmas: pull unidireccional, registrar conflictos, mapear title/body/labels/status.
+2. **El lead agent diseña el enfoque y construye el plan de ejecución:** el plan muestra 5 pasos: `Backend: OAuth + GitHub API` → `Backend: Sync Engine` → `Frontend: Sync Status UI` → `Integration Tests` → `Final Review`. Cada paso tiene alcance claro, agente asignado y criterios de aceptación.
+3. **Revisas y apruebas el plan:** puedes ajustar pasos, reordenar dependencias o reasignar agentes antes de que se ejecute código.
+4. **Los agentes ejecutan y observas el progreso en tiempo real:** `Backend: OAuth` corre primero. Cuando termina, `Sync Engine` y `Frontend: Sync Status UI` empiezan en paralelo. Cada paso muestra su estado, diff y logs en el grafo de workflow.
+5. **Revisas y apruebas cada paso completado:** `Backend: OAuth` termina. Inspeccionas el diff, ves la lógica de refresh de tokens y apruebas. Los siguientes pasos continúan.
+6. **Un paso falla y reintentas solo ese paso:** `Integration Tests` falla porque el motor de sync devuelve timestamps crudos en vez de formato ISO. Revisas el log de error y reintentas solo el paso `Integration Tests`. El resto del workflow permanece intacto.
+7. **Revisión final y aceptación:** todos los pasos pasan. Revisas el diff completo, los artefactos y los resultados de pruebas, y luego aceptas.
+8. **Seguimiento con Free Chat:** dos días después, un usuario reporta que el badge de estado de sync parpadea durante el polling. Abres Free Chat: `@Frontend Agent the sync status badge flickers when polling — debounce the state update`. Se corrige en un turno, sin workflow.
 
 ## Inicio rápido
 ### Instalación
@@ -170,27 +184,10 @@ openteams está en desarrollo activo. Hacia allí vamos:
 
 openteams es para:
 
-- desarrolladores que ya usan varios agentes de código
-- builders independientes que quieren más palanca sin más coordinación manual
-- pequeños equipos de ingeniería que adoptan workflows AI-first
-- líderes técnicos que necesitan ejecución de agentes revisable y repetible
-- equipos que quieren tanto chat ligero como orquestación estructurada de workflows
+- desarrolladores que usan varios agentes de código y están cansados de hacer malabares con ellos
+- líderes técnicos que necesitan que las ejecuciones de agentes sean revisables y reproducibles
 
 No es solo un lugar para reunir más agentes. Es una forma de convertir agentes en un equipo que trabaja.
-
-## Casos de uso comunes
-
-Escribes: “Añade sincronización de issues de GitHub al workspace.”
-
-
-1. **El lead agent aclara los requisitos:** pregunta por la dirección de sincronización (¿unidireccional o bidireccional?), el manejo de conflictos (¿omitir, sobrescribir o registrar?) y qué campos de issue mapear. Confirmas: pull unidireccional, registrar conflictos, mapear title/body/labels/status.
-2. **El lead agent diseña el enfoque y construye el plan de ejecución:** el plan muestra 5 pasos: `Backend: OAuth + GitHub API` → `Backend: Sync Engine` → `Frontend: Sync Status UI` → `Integration Tests` → `Final Review`. Cada paso tiene alcance claro, agente asignado y criterios de aceptación.
-3. **Revisas y apruebas el plan:** puedes ajustar pasos, reordenar dependencias o reasignar agentes antes de que se ejecute código.
-4. **Los agentes ejecutan y observas el progreso en tiempo real:** `Backend: OAuth` corre primero. Cuando termina, `Sync Engine` y `Frontend: Sync Status UI` empiezan en paralelo. Cada paso muestra su estado, diff y logs en el grafo de workflow.
-5. **Revisas y apruebas cada paso completado:** `Backend: OAuth` termina. Inspeccionas el diff, ves la lógica de refresh de tokens y apruebas. Los siguientes pasos continúan.
-6. **Un paso falla y reintentas solo ese paso:** `Integration Tests` falla porque el motor de sync devuelve timestamps crudos en vez de formato ISO. Revisas el log de error y reintentas solo el paso `Integration Tests`. El resto del workflow permanece intacto.
-7. **Revisión final y aceptación:** todos los pasos pasan. Revisas el diff completo, los artefactos y los resultados de pruebas, y luego aceptas.
-8. **Seguimiento con Free Chat:** dos días después, un usuario reporta que el badge de estado de sync parpadea durante el polling. Abres Free Chat: `@Frontend Agent the sync status badge flickers when polling — debounce the state update`. Se corrige en un turno, sin workflow.
 
 ## Stack tecnológico
 
