@@ -38,8 +38,8 @@
 ---
 
 <div align="center">
-  <video src="https://github.com/user-attachments/assets/441c8b42-d376-43ef-8af2-d88c55ccfff7" controls width="100%">
-    <a href="https://github.com/user-attachments/assets/441c8b42-d376-43ef-8af2-d88c55ccfff7">Watch the hero video</a>
+  <video src="https://github.com/user-attachments/assets/f918d5c7-68ff-4a8b-b2b4-f4f0ab31c17d" controls width="100%">
+    <a href="https://github.com/user-attachments/assets/f918d5c7-68ff-4a8b-b2b4-f4f0ab31c17d">Watch the hero video</a>
   </video>
 </div>
 
