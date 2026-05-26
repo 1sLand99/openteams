@@ -285,6 +285,7 @@ pnpm run lint
 - [GitHub Issues](https://github.com/openteams-lab/openteams/issues): 버그 리포트와 기능 요청
 - [GitHub Discussions](https://github.com/openteams-lab/openteams/discussions): 제품 아이디어와 질문
 - [Discord](https://discord.gg/openteams): 커뮤니티 채팅
+- [Linux.do](https://linux.do): 친구 링크, 커뮤니티 교류 지원에 감사드립니다
 - QQ:
 
 ## 라이선스

@@ -285,6 +285,7 @@ Consultez [CONTRIBUTING.md](../CONTRIBUTING.md) pour le guide complet.
 - [GitHub Issues](https://github.com/openteams-lab/openteams/issues) : bugs et demandes de fonctionnalités
 - [GitHub Discussions](https://github.com/openteams-lab/openteams/discussions) : idées produit et questions
 - [Discord](https://discord.gg/openteams) : chat communautaire
+- [Linux.do](https://linux.do) : lien ami ; merci pour le soutien aux échanges de la communauté
 - QQ:
 
 ## Licence

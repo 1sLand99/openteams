@@ -289,7 +289,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide.
 - [GitHub Issues](https://github.com/openteams-lab/openteams/issues): bug reports and feature requests
 - [GitHub Discussions](https://github.com/openteams-lab/openteams/discussions): product ideas and questions
 - [Discord](https://discord.gg/openteams): community chat
-- QQ:
+- [Linux.do](https://linux.do): friendly link; thanks for providing community discussion support
 
 
 ## License

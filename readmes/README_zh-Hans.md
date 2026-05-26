@@ -285,6 +285,7 @@ pnpm run lint
 - [GitHub Issues](https://github.com/openteams-lab/openteams/issues)：bug 报告和功能请求
 - [GitHub Discussions](https://github.com/openteams-lab/openteams/discussions)：产品想法和问题
 - [Discord](https://discord.gg/openteams)：社区聊天
+- [Linux.do](https://linux.do)：友情链接，感谢提供社区交流支持
 - QQ:
 
 ## 许可证
