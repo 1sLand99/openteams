@@ -131,32 +131,45 @@ fn subscribe_shutdown() -> watch::Receiver<bool> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::HashMap,
+        sync::{LazyLock, Mutex},
+        time::Duration,
+    };
+
     use super::{BrowserLifecycleState, IDLE_SHUTDOWN_GRACE, SESSION_TTL, should_request_shutdown};
+
+    static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn set_state(state: BrowserLifecycleState) {
+        let mut current = super::STATE
+            .lock()
+            .expect("browser lifecycle state lock poisoned");
+        *current = state;
+    }
 
     #[test]
     fn shutdown_requires_a_seen_session() {
-        {
-            let mut state = super::STATE
-                .lock()
-                .expect("browser lifecycle state lock poisoned");
-            *state = BrowserLifecycleState::default();
-        }
+        let _guard = TEST_LOCK
+            .lock()
+            .expect("browser lifecycle test lock poisoned");
+
+        set_state(BrowserLifecycleState::default());
 
         assert!(!should_request_shutdown());
     }
 
     #[test]
     fn shutdown_waits_for_idle_grace_after_close() {
-        {
-            let mut state = super::STATE
-                .lock()
-                .expect("browser lifecycle state lock poisoned");
-            *state = BrowserLifecycleState {
-                sessions: Default::default(),
-                idle_since: Some(std::time::Instant::now()),
-                has_seen_session: true,
-            };
-        }
+        let _guard = TEST_LOCK
+            .lock()
+            .expect("browser lifecycle test lock poisoned");
+
+        set_state(BrowserLifecycleState {
+            sessions: Default::default(),
+            idle_since: Some(std::time::Instant::now()),
+            has_seen_session: true,
+        });
 
         assert!(!should_request_shutdown());
 
@@ -172,22 +185,19 @@ mod tests {
 
     #[test]
     fn stale_sessions_are_pruned_before_shutdown() {
-        {
-            let mut state = super::STATE
-                .lock()
-                .expect("browser lifecycle state lock poisoned");
-            *state = BrowserLifecycleState {
-                sessions: HashMap::from([(
-                    "session-1".to_string(),
-                    std::time::Instant::now() - SESSION_TTL - Duration::from_secs(1),
-                )]),
-                idle_since: Some(std::time::Instant::now() - IDLE_SHUTDOWN_GRACE),
-                has_seen_session: true,
-            };
-        }
+        let _guard = TEST_LOCK
+            .lock()
+            .expect("browser lifecycle test lock poisoned");
+
+        set_state(BrowserLifecycleState {
+            sessions: HashMap::from([(
+                "session-1".to_string(),
+                std::time::Instant::now() - SESSION_TTL - Duration::from_secs(1),
+            )]),
+            idle_since: Some(std::time::Instant::now() - IDLE_SHUTDOWN_GRACE),
+            has_seen_session: true,
+        });
 
         assert!(should_request_shutdown());
     }
-
-    use std::{collections::HashMap, time::Duration};
 }
