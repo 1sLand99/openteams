@@ -183,6 +183,7 @@
   "workflow.statusLabels.rejected": "却下",
   "workflow.statusLabels.reviewing": "レビュー中",
   "workflow.statusLabels.running": "実行中",
+  "workflow.statusLabels.skipped": "スキップ",
   "workflow.statusLabels.stopRequested": "停止要求済み",
   "workflow.statusLabels.waitingInput": "入力待ち",
   "workflow.statusLabels.waitingUser": "ユーザー待ち",

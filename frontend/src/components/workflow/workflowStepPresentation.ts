@@ -65,6 +65,11 @@ export function workflowStatusLabel(status?: string | null, t?: TFunction) {
         t?.('workflow.statusLabels.running', { defaultValue: 'Running' }) ??
         'Running'
       );
+    case 'skipped':
+      return (
+        t?.('workflow.statusLabels.skipped', { defaultValue: 'Skipped' }) ??
+        'Skipped'
+      );
     case 'completed':
       return (
         t?.('workflow.statusLabels.completed', { defaultValue: 'Completed' }) ??

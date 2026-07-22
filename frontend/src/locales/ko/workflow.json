@@ -183,6 +183,7 @@
   "workflow.statusLabels.rejected": "거부됨",
   "workflow.statusLabels.reviewing": "검토 중",
   "workflow.statusLabels.running": "실행 중",
+  "workflow.statusLabels.skipped": "건너뜀",
   "workflow.statusLabels.stopRequested": "중지 요청됨",
   "workflow.statusLabels.waitingInput": "입력 대기",
   "workflow.statusLabels.waitingUser": "사용자 대기",

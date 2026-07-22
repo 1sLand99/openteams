@@ -183,6 +183,7 @@
   "workflow.statusLabels.rejected": "已拒绝",
   "workflow.statusLabels.reviewing": "审核中",
   "workflow.statusLabels.running": "运行中",
+  "workflow.statusLabels.skipped": "已跳过",
   "workflow.statusLabels.stopRequested": "已请求停止",
   "workflow.statusLabels.waitingInput": "等待输入",
   "workflow.statusLabels.waitingUser": "等待用户",

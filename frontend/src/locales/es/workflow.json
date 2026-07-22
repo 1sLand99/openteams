@@ -183,6 +183,7 @@
   "workflow.statusLabels.rejected": "Rechazado",
   "workflow.statusLabels.reviewing": "En revisión",
   "workflow.statusLabels.running": "En ejecución",
+  "workflow.statusLabels.skipped": "Omitido",
   "workflow.statusLabels.stopRequested": "Detención solicitada",
   "workflow.statusLabels.waitingInput": "Esperando entrada",
   "workflow.statusLabels.waitingUser": "Esperando usuario",
