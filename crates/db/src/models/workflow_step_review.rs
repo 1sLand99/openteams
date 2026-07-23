@@ -65,6 +65,29 @@ impl WorkflowStepReview {
         .await
     }
 
+    pub async fn count_lead_reviews_in_current_cycle(
+        pool: &SqlitePool,
+        step_id: Uuid,
+    ) -> Result<i32, sqlx::Error> {
+        sqlx::query_scalar::<_, i32>(
+            r#"
+            SELECT MAX(
+                (
+                    SELECT COUNT(*)
+                    FROM chat_workflow_step_reviews
+                    WHERE step_id = ?1 AND reviewer_type = 'lead'
+                ) - lead_review_attempt_offset,
+                0
+            )
+            FROM chat_workflow_steps
+            WHERE id = ?1
+            "#,
+        )
+        .bind(step_id)
+        .fetch_one(pool)
+        .await
+    }
+
     pub async fn create(
         pool: &SqlitePool,
         data: &CreateWorkflowStepReview,

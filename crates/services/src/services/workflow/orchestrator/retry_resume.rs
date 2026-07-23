@@ -218,7 +218,7 @@ impl WorkflowOrchestrator {
         };
 
         // Prepare retry keeping task outputs
-        let prepared_step = WorkflowStep::prepare_retry_review(pool, step.id).await?;
+        let prepared_step = WorkflowStep::prepare_manual_retry_review(pool, step.id).await?;
         let ready_step = Self::transition_step_and_sync(
             pool,
             chat_runner,
@@ -393,7 +393,7 @@ impl WorkflowOrchestrator {
 
         Self::validate_step_retry_candidate(&step)?;
 
-        let prepared_step = WorkflowStep::prepare_retry(pool, step.id).await?;
+        let prepared_step = WorkflowStep::prepare_manual_retry(pool, step.id).await?;
         let ready_step = Self::transition_step_and_sync(
             pool,
             chat_runner,

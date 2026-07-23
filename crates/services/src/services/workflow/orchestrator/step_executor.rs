@@ -729,12 +729,7 @@ Read this file before writing the final result. Do not rely on the workflow plan
         pool: &SqlitePool,
         step_id: Uuid,
     ) -> Result<i32, OrchestratorError> {
-        Ok(WorkflowStepReview::find_by_step(pool, step_id)
-            .await?
-            .iter()
-            .filter(|review| review.reviewer_type == ReviewerType::Lead)
-            .count() as i32
-            + 1)
+        Ok(WorkflowStepReview::count_lead_reviews_in_current_cycle(pool, step_id).await? + 1)
     }
 
     fn resolve_lead_review_targets<'a>(
