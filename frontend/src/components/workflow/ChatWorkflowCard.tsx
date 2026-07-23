@@ -314,7 +314,7 @@ type ChatWorkflowCardProps = {
   finalReviewAction?: WorkflowFinalReviewActionData | null;
   onRespondPendingReview?: (
     reviewId: string,
-    action: 'approve' | 'reject',
+    action: string,
     feedback?: string
   ) => void;
   onSubmitStepInput?: (stepId: string, inputText: string) => void;

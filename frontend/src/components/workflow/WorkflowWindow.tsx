@@ -750,7 +750,7 @@ export type WorkflowWindowProps = {
   ) => void;
   onRespondPendingReview?: (
     reviewId: string,
-    action: 'approve' | 'reject',
+    action: string,
     feedback?: string,
     expectedStepId?: string
   ) => void;
@@ -1556,7 +1556,7 @@ function ChatPanel({
   ) => void;
   onRespondPendingReview?: (
     reviewId: string,
-    action: 'approve' | 'reject',
+    action: string,
     feedback?: string,
     expectedStepId?: string
   ) => void;
@@ -2641,6 +2641,13 @@ export function WorkflowWindow({
   const currentPendingReviewStep = currentPendingReview
     ? getPendingReviewStep(currentPendingReview)
     : null;
+  const currentPendingReviewActions =
+    currentPendingReview?.prompt_template.actions?.map((action) => action.action) ??
+    ['approve', 'reject'];
+  const canApproveCurrentPendingReview =
+    currentPendingReviewActions.includes('approve');
+  const canRejectCurrentPendingReview =
+    currentPendingReviewActions.includes('reject');
 
   useEffect(() => {
     if (
@@ -2751,7 +2758,9 @@ export function WorkflowWindow({
   });
   useCommandHandler('workflow.review.select-approve', {
     scope: 'focused-component',
-    enabled: Boolean(currentPendingReview && !pendingAction),
+    enabled: Boolean(
+      currentPendingReview && canApproveCurrentPendingReview && !pendingAction
+    ),
     execute: () => {
       if (!currentPendingReview) return;
       setReviewSelection({
@@ -2763,7 +2772,9 @@ export function WorkflowWindow({
   });
   useCommandHandler('workflow.review.select-reject', {
     scope: 'focused-component',
-    enabled: Boolean(currentPendingReview && !pendingAction),
+    enabled: Boolean(
+      currentPendingReview && canRejectCurrentPendingReview && !pendingAction
+    ),
     execute: () => {
       if (!currentPendingReview) return;
       setReviewSelection({
@@ -3092,6 +3103,18 @@ export function WorkflowWindow({
                         })}
                       </button>
                     ) : notif.type === 'input_request' ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openPendingReviewInChat(notif.id, notif.nodeId)
+                        }
+                        className="flex-1 py-1.5 border border-[var(--workflow-notification-action-border)] text-[var(--workflow-notification-action-text)] rounded bg-transparent text-[10px] font-semibold uppercase tracking-[0.04em] hover:bg-[var(--workflow-notification-action-hover-bg)] hover:border-[var(--workflow-notification-action-hover-border)] transition-colors"
+                      >
+                        {t('workflow.notifications.respond', {
+                          defaultValue: 'RESPOND',
+                        })}
+                      </button>
+                    ) : notif.type === 'loop_skipped_retry_decision' ? (
                       <button
                         type="button"
                         onClick={() =>

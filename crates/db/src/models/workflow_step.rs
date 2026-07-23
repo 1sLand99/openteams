@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -215,6 +215,42 @@ impl WorkflowStep {
         .await
     }
 
+    pub async fn update_status_if_current_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+        expected_status: WorkflowStepStatus,
+        status: WorkflowStepStatus,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_steps
+            SET status = ?3,
+                started_at = CASE
+                    WHEN ?3 = 'running' THEN COALESCE(started_at, datetime('now', 'subsec'))
+                    ELSE started_at
+                END,
+                completed_at = CASE
+                    WHEN ?3 IN ('completed', 'skipped') THEN datetime('now', 'subsec')
+                    WHEN ?3 IN ('pending', 'ready', 'running', 'revising') THEN NULL
+                    ELSE completed_at
+                END,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1 AND status = ?2
+            RETURNING id, execution_id, round_id, compiled_revision_id, step_key,
+                      step_type, title, instructions, assigned_workflow_agent_session_id,
+                      status, retry_count, max_retry, round_index, display_order,
+                      latest_run_id, summary_text, content, loop_id,
+                      lead_review_required, user_review_required, revision_context,
+                      created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(id)
+        .bind(expected_status)
+        .bind(status)
+        .fetch_optional(connection)
+        .await
+    }
+
     pub async fn mark_completed_if_current(
         pool: &SqlitePool,
         id: Uuid,
@@ -328,6 +364,31 @@ impl WorkflowStep {
         .await
     }
 
+    pub async fn update_revision_context_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+        revision_context: Option<String>,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_steps
+            SET revision_context = ?2,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1
+            RETURNING id, execution_id, round_id, compiled_revision_id, step_key,
+                      step_type, title, instructions, assigned_workflow_agent_session_id,
+                      status, retry_count, max_retry, round_index, display_order,
+                      latest_run_id, summary_text, content, loop_id,
+                      lead_review_required, user_review_required, revision_context,
+                      created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(id)
+        .bind(revision_context)
+        .fetch_one(connection)
+        .await
+    }
+
     pub async fn update_review_requirements(
         pool: &SqlitePool,
         id: Uuid,
@@ -403,6 +464,96 @@ impl WorkflowStep {
         )
         .bind(id)
         .fetch_one(pool)
+        .await
+    }
+
+    pub async fn prepare_retry_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_steps
+            SET retry_count = retry_count + 1,
+                latest_run_id = NULL,
+                summary_text = NULL,
+                content = NULL,
+                started_at = NULL,
+                completed_at = NULL,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1
+            RETURNING id, execution_id, round_id, compiled_revision_id, step_key,
+                      step_type, title, instructions, assigned_workflow_agent_session_id,
+                      status, retry_count, max_retry, round_index, display_order,
+                      latest_run_id, summary_text, content, loop_id,
+                      lead_review_required, user_review_required, revision_context,
+                      created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(id)
+        .fetch_one(connection)
+        .await
+    }
+
+    pub async fn prepare_retry_if_current_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+        expected_status: WorkflowStepStatus,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_steps
+            SET retry_count = retry_count + 1,
+                latest_run_id = NULL,
+                summary_text = NULL,
+                content = NULL,
+                started_at = NULL,
+                completed_at = NULL,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1 AND status = ?2
+            RETURNING id, execution_id, round_id, compiled_revision_id, step_key,
+                      step_type, title, instructions, assigned_workflow_agent_session_id,
+                      status, retry_count, max_retry, round_index, display_order,
+                      latest_run_id, summary_text, content, loop_id,
+                      lead_review_required, user_review_required, revision_context,
+                      created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(id)
+        .bind(expected_status)
+        .fetch_optional(connection)
+        .await
+    }
+
+    pub async fn reopen_skipped_for_user_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+        revision_context: Option<String>,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_steps
+            SET status = 'pending',
+                retry_count = retry_count + 1,
+                latest_run_id = NULL,
+                summary_text = NULL,
+                content = NULL,
+                revision_context = ?2,
+                started_at = NULL,
+                completed_at = NULL,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1 AND status = 'skipped'
+            RETURNING id, execution_id, round_id, compiled_revision_id, step_key,
+                      step_type, title, instructions, assigned_workflow_agent_session_id,
+                      status, retry_count, max_retry, round_index, display_order,
+                      latest_run_id, summary_text, content, loop_id,
+                      lead_review_required, user_review_required, revision_context,
+                      created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(id)
+        .bind(revision_context)
+        .fetch_optional(connection)
         .await
     }
 

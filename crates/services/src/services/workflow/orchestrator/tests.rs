@@ -84,6 +84,144 @@ fn workflow_agent_identity_helpers_keep_shared_execution_profiles_distinct() {
     assert!(!names.contains_key(&shared_agent_id.to_string()));
 }
 
+#[tokio::test]
+async fn scheduler_recovery_retries_transient_failure_then_succeeds() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let wake_attempts = Arc::new(AtomicUsize::new(0));
+    let recorded_sleeps = Arc::new(AtomicUsize::new(0));
+    let wake_attempts_for_call = wake_attempts.clone();
+    let recorded_sleeps_for_call = recorded_sleeps.clone();
+
+    let outcome = WorkflowOrchestrator::run_scheduler_recovery(
+        Uuid::new_v4(),
+        || std::future::ready(Ok(Some(WorkflowExecutionStatus::Running))),
+        move || {
+            let attempt = wake_attempts_for_call.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(if attempt == 0 {
+                Err(OrchestratorError::Database(sqlx::Error::PoolTimedOut))
+            } else {
+                Ok(())
+            })
+        },
+        move |_| {
+            recorded_sleeps_for_call.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(())
+        },
+    )
+    .await;
+
+    assert_eq!(outcome, SchedulerRecoveryOutcome::Succeeded);
+    assert_eq!(wake_attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(recorded_sleeps.load(Ordering::SeqCst), 1);
+    assert!(is_retryable_scheduler_error(&OrchestratorError::Runtime(
+        WorkflowRuntimeError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "temporary runtime timeout",
+        ))
+    )));
+}
+
+#[tokio::test]
+async fn scheduler_recovery_exits_on_permanent_error_without_retrying() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let wake_attempts = Arc::new(AtomicUsize::new(0));
+    let wake_attempts_for_call = wake_attempts.clone();
+    let outcome = WorkflowOrchestrator::run_scheduler_recovery(
+        Uuid::new_v4(),
+        || std::future::ready(Ok(Some(WorkflowExecutionStatus::Running))),
+        move || {
+            wake_attempts_for_call.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Err(OrchestratorError::IllegalTransition(
+                "permanent invalid state".to_string(),
+            )))
+        },
+        |_| std::future::ready(()),
+    )
+    .await;
+
+    assert_eq!(outcome, SchedulerRecoveryOutcome::PermanentFailure);
+    assert_eq!(wake_attempts.load(Ordering::SeqCst), 1);
+    assert!(!is_retryable_scheduler_error(&OrchestratorError::NotFound(
+        "missing execution".to_string()
+    )));
+}
+
+#[tokio::test]
+async fn scheduler_recovery_stops_after_transient_retry_limit() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let wake_attempts = Arc::new(AtomicUsize::new(0));
+    let wake_attempts_for_call = wake_attempts.clone();
+    let outcome = WorkflowOrchestrator::run_scheduler_recovery(
+        Uuid::new_v4(),
+        || std::future::ready(Ok(Some(WorkflowExecutionStatus::Running))),
+        move || {
+            wake_attempts_for_call.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Err(OrchestratorError::Database(sqlx::Error::PoolTimedOut)))
+        },
+        |_| std::future::ready(()),
+    )
+    .await;
+
+    assert_eq!(outcome, SchedulerRecoveryOutcome::RetryLimitReached);
+    assert_eq!(
+        wake_attempts.load(Ordering::SeqCst),
+        SCHEDULER_RECOVERY_MAX_ATTEMPTS as usize
+    );
+}
+
+#[tokio::test]
+async fn scheduler_recovery_exits_before_wake_for_terminal_or_missing_execution() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let terminal_wakes = Arc::new(AtomicUsize::new(0));
+    let terminal_wakes_for_call = terminal_wakes.clone();
+    let terminal_outcome = WorkflowOrchestrator::run_scheduler_recovery(
+        Uuid::new_v4(),
+        || std::future::ready(Ok(Some(WorkflowExecutionStatus::Completed))),
+        move || {
+            terminal_wakes_for_call.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(()))
+        },
+        |_| std::future::ready(()),
+    )
+    .await;
+    assert_eq!(
+        terminal_outcome,
+        SchedulerRecoveryOutcome::ExecutionTerminal
+    );
+    assert_eq!(terminal_wakes.load(Ordering::SeqCst), 0);
+
+    let missing_wakes = Arc::new(AtomicUsize::new(0));
+    let missing_wakes_for_call = missing_wakes.clone();
+    let missing_outcome = WorkflowOrchestrator::run_scheduler_recovery(
+        Uuid::new_v4(),
+        || std::future::ready(Ok(None)),
+        move || {
+            missing_wakes_for_call.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(()))
+        },
+        |_| std::future::ready(()),
+    )
+    .await;
+    assert_eq!(missing_outcome, SchedulerRecoveryOutcome::ExecutionMissing);
+    assert_eq!(missing_wakes.load(Ordering::SeqCst), 0);
+}
+
 struct StopFixture {
     db: DBService,
     execution: WorkflowExecution,
@@ -295,6 +433,60 @@ async fn seed_workflow_stop_fixture() -> StopFixture {
         review_step_id: review.id,
         ready_step_id: ready.id,
     }
+}
+
+#[tokio::test]
+async fn loop_retry_preparation_is_atomic_and_emits_step_status_event() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let recorded = WorkflowStep::record_execution_result(
+        &fixture.db.pool,
+        fixture.ready_step_id,
+        Uuid::new_v4(),
+        Some("old summary".to_string()),
+        Some("old content".to_string()),
+    )
+    .await
+    .expect("record prior result");
+    let completed =
+        WorkflowStep::update_status(&fixture.db.pool, recorded.id, WorkflowStepStatus::Completed)
+            .await
+            .expect("mark completed before loop retry");
+    let retry_count_before = completed.retry_count;
+
+    let retried = reducer::prepare_step_retry(
+        &fixture.db.pool,
+        &fixture.execution,
+        &completed,
+        Some(serde_json::json!({ "reason": "test_loop_retry" })),
+    )
+    .await
+    .expect("prepare loop retry")
+    .entity;
+
+    assert_eq!(retried.status, WorkflowStepStatus::Ready);
+    assert_eq!(retried.retry_count, retry_count_before + 1);
+    assert!(retried.latest_run_id.is_none());
+    assert!(retried.summary_text.is_none());
+    assert!(retried.content.is_none());
+    let events = WorkflowEvent::find_by_execution(&fixture.db.pool, fixture.execution.id)
+        .await
+        .expect("load workflow events");
+    let event = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.step_id == Some(retried.id)
+                && event.event_type == WorkflowEventType::StepStatusChanged
+        })
+        .expect("retry status event");
+    assert_eq!(event.status_before.as_deref(), Some("completed"));
+    assert_eq!(event.status_after.as_deref(), Some("ready"));
+    assert!(
+        event
+            .detail_json
+            .as_deref()
+            .is_some_and(|detail| detail.contains("test_loop_retry"))
+    );
 }
 
 #[tokio::test]
@@ -852,6 +1044,15 @@ fn only_interrupted_blocked_and_failed_steps_can_transition_to_skipped() {
             "{status:?} must not be skippable"
         );
     }
+
+    assert!(
+        reducer::validate_step_transition(
+            &WorkflowStepStatus::Skipped,
+            &WorkflowStepStatus::Pending,
+        )
+        .is_err(),
+        "skipped nodes may only reopen through the dedicated user-decision command"
+    );
 }
 
 #[test]

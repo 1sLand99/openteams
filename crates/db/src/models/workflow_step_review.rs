@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -90,6 +90,34 @@ impl WorkflowStepReview {
         .bind(&data.feedback)
         .bind(data.review_round)
         .fetch_one(pool)
+        .await
+    }
+
+    pub async fn create_in_transaction(
+        connection: &mut SqliteConnection,
+        data: &CreateWorkflowStepReview,
+        id: Uuid,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            INSERT INTO chat_workflow_step_reviews (
+                id, step_id, execution_id, reviewer_type, reviewer_id, verdict, feedback,
+                review_round
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE(?8, 0))
+            RETURNING id, step_id, execution_id, reviewer_type, reviewer_id, verdict,
+                      feedback, review_round, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(data.step_id)
+        .bind(data.execution_id)
+        .bind(&data.reviewer_type)
+        .bind(&data.reviewer_id)
+        .bind(&data.verdict)
+        .bind(&data.feedback)
+        .bind(data.review_round)
+        .fetch_one(connection)
         .await
     }
 }

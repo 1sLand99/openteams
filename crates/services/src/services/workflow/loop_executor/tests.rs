@@ -212,4 +212,173 @@ mod tests {
             Some("whole loop issue")
         );
     }
+
+    #[test]
+    fn filtered_targets_are_the_only_feedback_injected_on_normal_retry() {
+        let workflow_loop = sample_loop("loop-a");
+        let active_target = LoopFeedbackTarget {
+            step: sample_loop_step(&workflow_loop, "active"),
+            issue_scope_id: "active-issue".to_string(),
+            feedback: "retry active".to_string(),
+        };
+        let map = feedback_map_from_targets(&[active_target]);
+
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("active").map(String::as_str), Some("retry active"));
+        assert!(!map.contains_key("waived-skipped"));
+    }
+
+    #[test]
+    fn all_waived_targets_pass_before_the_final_attempt_limit_is_applied() {
+        assert!(workflow_review_attempt_limit_reached(
+            MAX_WORKFLOW_REVIEW_ATTEMPTS
+        ));
+        assert_eq!(
+            rejected_loop_review_disposition(MAX_WORKFLOW_REVIEW_ATTEMPTS, &[]),
+            RejectedLoopReviewDisposition::PassedByUserWaiver
+        );
+
+        let workflow_loop = sample_loop("loop-a");
+        let remaining_target = LoopFeedbackTarget {
+            step: sample_loop_step(&workflow_loop, "remaining"),
+            issue_scope_id: "remaining-issue".to_string(),
+            feedback: "still unresolved".to_string(),
+        };
+        assert_eq!(
+            rejected_loop_review_disposition(
+                MAX_WORKFLOW_REVIEW_ATTEMPTS,
+                &[remaining_target]
+            ),
+            RejectedLoopReviewDisposition::LimitReached
+        );
+    }
+
+    #[test]
+    fn waiver_covered_lead_pass_preserves_required_user_acceptance_checkpoint() {
+        let mut workflow_loop = sample_loop("loop-a");
+        workflow_loop.user_review_required = true;
+        assert!(requires_user_acceptance_checkpoint(&workflow_loop));
+
+        workflow_loop.user_review_required = false;
+        assert!(!requires_user_acceptance_checkpoint(&workflow_loop));
+    }
+
+    #[test]
+    fn keeping_skipped_step_clears_pending_feedback_and_records_waiver() {
+        let workflow_loop = sample_loop("loop-a");
+        let mut step = sample_loop_step(&workflow_loop, "step-a");
+        step.status = WorkflowStepStatus::Skipped;
+        let existing = serde_json::json!({
+            "pending_feedback": {
+                "scope": "loop",
+                "loop_key": "loop-a",
+                "feedback": "restart this work"
+            }
+        })
+        .to_string();
+
+        let merged = merge_loop_skip_waiver_context(
+            Some(&existing),
+            &workflow_loop,
+            &step,
+            "User accepts the skipped scope.",
+        );
+        step.revision_context = Some(merged.clone());
+        let parsed: serde_json::Value = serde_json::from_str(&merged).expect("valid context");
+
+        assert!(parsed.get("pending_feedback").is_none());
+        assert!(
+            loop_skip_waiver(&step, "loop-a")
+                .as_deref()
+                .is_some_and(|waiver| waiver.contains("User accepts the skipped scope."))
+        );
+        assert!(loop_skip_waiver(&step, "loop-b").is_none());
+        assert!(has_matching_active_skip_waiver(
+            &step,
+            &workflow_loop,
+            " User accepts   the skipped scope. "
+        ));
+        assert!(!has_matching_active_skip_waiver(
+            &step,
+            &workflow_loop,
+            "the reviewer rephrased the same skipped-step concern"
+        ));
+
+        let stable_issue_scope = loop_skip_issue_scope_id(
+            &workflow_loop,
+            &step,
+            "skipped-dependency-not-needed",
+        );
+        step.revision_context = Some(merge_loop_skip_waiver_context_for_issue(
+            step.revision_context.as_deref(),
+            &workflow_loop,
+            &step,
+            &stable_issue_scope,
+            "The skipped dependency is not needed.",
+        ));
+        let prompt_waivers = loop_skip_waiver(&step, "loop-a").expect("active prompt waivers");
+        assert!(prompt_waivers.contains("User accepts the skipped scope."));
+        assert!(prompt_waivers.contains(stable_issue_scope.as_str()));
+        assert!(has_matching_active_skip_waiver_for_issue(
+            &step,
+            &workflow_loop,
+            &stable_issue_scope,
+            "Rephrased: this dependency remains unnecessary."
+        ));
+        let new_issue_scope = loop_skip_issue_scope_id(
+            &workflow_loop,
+            &step,
+            "new-security-regression",
+        );
+        assert!(!has_matching_active_skip_waiver_for_issue(
+            &step,
+            &workflow_loop,
+            &new_issue_scope,
+            "A new security regression was found."
+        ));
+
+        let waiver = parsed["loop_skip_waivers"]
+            .as_array()
+            .and_then(|waivers| waivers.last())
+            .expect("active waiver");
+        let expected_scope_id = format!("loop:{}:step:{}", workflow_loop.id, step.id);
+        assert_eq!(
+            waiver.get("scope_id").and_then(|value| value.as_str()),
+            Some(expected_scope_id.as_str())
+        );
+
+        let superseded = supersede_loop_skip_waiver_context(
+            step.revision_context.as_deref(),
+            &workflow_loop,
+            &step,
+        )
+        .expect("supersede active waiver");
+        step.revision_context = Some(superseded);
+        assert!(loop_skip_waiver(&step, "loop-a").is_none());
+        assert!(!has_matching_active_skip_waiver(
+            &step,
+            &workflow_loop,
+            "User accepts the skipped scope."
+        ));
+    }
+
+    #[test]
+    fn waiver_prompt_only_applies_while_step_is_still_skipped() {
+        let workflow_loop = sample_loop("loop-a");
+        let mut step = sample_loop_step(&workflow_loop, "step-a");
+        step.status = WorkflowStepStatus::Skipped;
+        step.revision_context = Some(merge_loop_skip_waiver_context(
+            None,
+            &workflow_loop,
+            &step,
+            "accepted issue",
+        ));
+        assert!(
+            loop_skip_waiver(&step, "loop-a")
+                .as_deref()
+                .is_some_and(|waiver| waiver.contains("accepted issue"))
+        );
+        step.status = WorkflowStepStatus::Pending;
+        assert!(loop_skip_waiver(&step, "loop-a").is_none());
+    }
 }

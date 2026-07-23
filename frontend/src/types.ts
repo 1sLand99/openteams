@@ -1324,6 +1324,14 @@ export interface WorkflowPendingReviewField {
 export interface WorkflowPendingReviewPromptTemplate {
   message?: string | null;
   fields: WorkflowPendingReviewField[];
+  actions?: WorkflowPendingReviewAction[];
+}
+
+export interface WorkflowPendingReviewAction {
+  action: string;
+  label?: string | null;
+  style?: string | null;
+  requires_feedback?: boolean | null;
 }
 
 export interface WorkflowPendingReviewData {

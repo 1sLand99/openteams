@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useAppTranslation } from '@/hooks/useAppTranslation';
 import type { WorkflowPendingReviewData } from '@/lib/api';
 import { localizeWorkflowGeneratedText } from './workflowGeneratedText';
@@ -6,7 +6,7 @@ import { localizeWorkflowGeneratedText } from './workflowGeneratedText';
 type WorkflowPendingReviewCardProps = {
   pendingReview: WorkflowPendingReviewData;
   pendingActionId?: string | null;
-  onSubmit?: (action: 'approve' | 'reject', feedback?: string) => void;
+  onSubmit?: (action: string, feedback?: string) => void;
 };
 
 function getReviewTypeLabel(
@@ -21,6 +21,10 @@ function getReviewTypeLabel(
     case 'loop_user_review':
       return t('workflow.pendingReview.reviewTypes.loopReview', {
         defaultValue: 'Loop Review',
+      });
+    case 'loop_skipped_retry_decision':
+      return t('workflow.pendingReview.reviewTypes.skippedRetryDecision', {
+        defaultValue: 'Skipped Step Decision',
       });
     case 'iteration_acceptance':
       return t('workflow.pendingReview.reviewTypes.finalReview', {
@@ -37,9 +41,14 @@ export function WorkflowPendingReviewCard({
   onSubmit,
 }: WorkflowPendingReviewCardProps) {
   const { t } = useAppTranslation();
-  const [expandedReject, setExpandedReject] = useState(false);
+  const [expandedAction, setExpandedAction] = useState<string | null>(null);
   const [feedback, setFeedback] = useState('');
   const [validationError, setValidationError] = useState<string | null>(null);
+  useEffect(() => {
+    setExpandedAction(null);
+    setFeedback('');
+    setValidationError(null);
+  }, [pendingReview.review_id]);
   const feedbackField = useMemo(
     () =>
       pendingReview.prompt_template.fields.find(
@@ -48,6 +57,26 @@ export function WorkflowPendingReviewCard({
     [pendingReview.prompt_template.fields]
   );
   const disabled = pendingActionId === pendingReview.review_id;
+  const actions = useMemo(
+    () =>
+      pendingReview.prompt_template.actions?.length
+        ? pendingReview.prompt_template.actions
+        : [
+            {
+              action: 'approve',
+              label: 'Approve',
+              style: 'primary',
+              requires_feedback: false,
+            },
+            {
+              action: 'reject',
+              label: 'Reject',
+              style: 'danger',
+              requires_feedback: true,
+            },
+          ],
+    [pendingReview.prompt_template.actions]
+  );
   const reviewMessage = pendingReview.prompt_template.message
     ? localizeWorkflowGeneratedText(pendingReview.prompt_template.message, t)
     : t('workflow.pendingReview.defaultMessage', {
@@ -74,30 +103,67 @@ export function WorkflowPendingReviewCard({
             defaultValue: 'Please provide specific revision comments',
           });
 
-  const handleApprove = () => {
-    setExpandedReject(false);
-    setValidationError(null);
-    onSubmit?.('approve');
+  const getActionLabel = (action: (typeof actions)[number]) => {
+    switch (action.action) {
+      case 'approve':
+        return t('workflow.pendingReview.approve', { defaultValue: 'APPROVE' });
+      case 'reject':
+        return expandedAction === action.action
+          ? t('workflow.pendingReview.submitReject', {
+              defaultValue: 'SUBMIT REJECT',
+            })
+          : t('workflow.pendingReview.reject', { defaultValue: 'REJECT' });
+      case 'restart_skipped':
+        return t('workflow.pendingReview.restartSkipped', {
+          defaultValue: 'RESTART SKIPPED',
+        });
+      case 'keep_skipped':
+        return t('workflow.pendingReview.keepSkipped', {
+          defaultValue: 'KEEP SKIPPED',
+        });
+      default:
+        return action.label
+          ? localizeWorkflowGeneratedText(action.label, t)
+          : action.action;
+    }
   };
 
-  const handleReject = () => {
-    if (!expandedReject) {
-      setExpandedReject(true);
+  const getActionClassName = (style?: string | null) => {
+    if (style === 'danger') {
+      return 'border border-[rgba(229,72,77,0.3)] bg-transparent text-[#E5484D] hover:bg-[rgba(229,72,77,0.08)]';
+    }
+    if (style === 'secondary') {
+      return 'border border-[var(--hairline-strong)] bg-transparent text-[var(--workflow-review-body)] hover:bg-[var(--surface-2)]';
+    }
+    return 'border border-[#6e8de8]/30 text-[var(--workflow-review-accent)] bg-[#6e8de8]/8 hover:bg-[#6e8de8]/14 hover:border-[#6e8de8]/50';
+  };
+
+  const handleAction = (action: (typeof actions)[number]) => {
+    if (action.requires_feedback && expandedAction !== action.action) {
+      setExpandedAction(action.action);
+      setValidationError(null);
       return;
     }
 
     const trimmedFeedback = feedback.trim();
-    if (!trimmedFeedback) {
+    if (action.requires_feedback && !trimmedFeedback) {
       setValidationError(
         t('workflow.pendingReview.validationError', {
-          defaultValue: 'Reject requires feedback.',
+          defaultValue: 'This action requires feedback.',
         })
       );
       return;
     }
 
+    setExpandedAction(null);
     setValidationError(null);
-    onSubmit?.('reject', trimmedFeedback);
+    if (!action.requires_feedback) {
+      setFeedback('');
+    }
+    onSubmit?.(
+      action.action,
+      action.requires_feedback ? trimmedFeedback : undefined
+    );
   };
 
   return (
@@ -148,8 +214,8 @@ export function WorkflowPendingReviewCard({
         </div>
       )}
 
-      {/* Reject feedback area */}
-      {expandedReject && (
+      {/* Action feedback area */}
+      {expandedAction && (
         <div className="mb-3">
           <div className="mb-1.5 font-mono text-[9px] font-medium uppercase tracking-[0.1em] text-[var(--workflow-danger,#ef4444)] opacity-80">
             {feedbackLabel}
@@ -171,31 +237,20 @@ export function WorkflowPendingReviewCard({
       )}
 
       {/* Action buttons */}
-      <div className="flex gap-2">
-        <button
-          type="button"
-          onClick={handleApprove}
-          disabled={disabled || !onSubmit}
-          className="flex-1 rounded py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.04em] transition-all disabled:cursor-not-allowed disabled:opacity-40 border border-[#6e8de8]/30 text-[var(--workflow-review-accent)] bg-[#6e8de8]/8 hover:bg-[#6e8de8]/14 hover:border-[#6e8de8]/50"
-        >
-          {t('workflow.pendingReview.approve', { defaultValue: 'APPROVE' })}
-        </button>
-        <button
-          type="button"
-          onClick={handleReject}
-          disabled={disabled || !onSubmit}
-          className={`flex-1 rounded py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.04em] transition-all disabled:cursor-not-allowed disabled:opacity-40 ${
-            expandedReject
-              ? 'border border-[rgba(229,72,77,0.3)] bg-transparent text-[#E5484D] hover:bg-[rgba(229,72,77,0.08)]'
-              : 'border border-transparent bg-transparent text-[#E5484D] hover:bg-[rgba(229,72,77,0.06)]'
-          }`}
-        >
-          {expandedReject
-            ? t('workflow.pendingReview.submitReject', {
-                defaultValue: 'SUBMIT REJECT',
-              })
-            : t('workflow.pendingReview.reject', { defaultValue: 'REJECT' })}
-        </button>
+      <div className="flex flex-wrap gap-2">
+        {actions.map((action) => (
+          <button
+            key={action.action}
+            type="button"
+            onClick={() => handleAction(action)}
+            disabled={disabled || !onSubmit}
+            className={`min-w-[120px] flex-1 rounded py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.04em] transition-all disabled:cursor-not-allowed disabled:opacity-40 ${getActionClassName(
+              action.style
+            )}`}
+          >
+            {getActionLabel(action)}
+          </button>
+        ))}
       </div>
     </div>
   );

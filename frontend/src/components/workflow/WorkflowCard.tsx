@@ -397,7 +397,7 @@ export function WorkflowCard({
 
   const handlePendingReview = (
     reviewId: string,
-    action: 'approve' | 'reject',
+    action: string,
     feedback?: string,
     expectedStepId?: string,
   ) =>

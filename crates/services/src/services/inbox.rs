@@ -397,7 +397,7 @@ fn workflow_user_action_item(
         title: title_hint
             .and_then(|value| optional_compact_text(value, 120))
             .unwrap_or_else(|| action.title.to_string()),
-        body: workflow_action_body(execution, transcript),
+        body: workflow_action_body(execution, transcript, title_hint),
         source_type: action.source_type.to_string(),
         source_id: Some(transcript.id.to_string()),
         dedupe_key: format!("{}:{}", action.dedupe_prefix, transcript.id),
@@ -567,6 +567,7 @@ fn workflow_action_notification_kind(entry_type: &str) -> Option<WorkflowActionN
 fn workflow_action_body(
     execution: &WorkflowExecution,
     transcript: &WorkflowTranscript,
+    title_hint: Option<&str>,
 ) -> Option<String> {
     let description = transcript
         .meta_json
@@ -579,7 +580,13 @@ fn workflow_action_body(
                 .map(str::to_string)
         });
     let detail = description
-        .or_else(|| optional_compact_text(&transcript.content, 240))
+        .or_else(|| {
+            if transcript.content.starts_with("workflow.") {
+                title_hint.and_then(|value| optional_compact_text(value, 240))
+            } else {
+                optional_compact_text(&transcript.content, 240)
+            }
+        })
         .unwrap_or_else(|| execution.title.clone());
     optional_compact_text(&format!("{}: {detail}", execution.title), 360)
 }
@@ -1167,6 +1174,23 @@ mod tests {
         assert_eq!(
             review_item.dedupe_key,
             format!("workflow_review:{}", review.id)
+        );
+
+        let mut skipped_decision = sample_transcript(execution.id, "loop_review");
+        skipped_decision.content = "workflow.loop_skipped_retry_decision.request".to_string();
+        let skipped_item = super::workflow_user_action_item(
+            None,
+            &execution,
+            &skipped_decision,
+            Some("Choose how to handle the skipped loop steps."),
+        )
+        .expect("skipped decision notification");
+        assert!(!skipped_item.title.contains("workflow."));
+        assert!(
+            skipped_item
+                .body
+                .as_deref()
+                .is_some_and(|body| !body.contains("workflow."))
         );
 
         let final_review = sample_transcript(execution.id, "final_review");

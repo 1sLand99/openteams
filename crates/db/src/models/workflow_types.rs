@@ -267,6 +267,8 @@ pub enum WorkflowEventType {
     StepUserReviewRejected,
     LoopStarted,
     LoopRetrying,
+    LoopWaitingUser,
+    LoopUserDecisionRecorded,
     LoopPassed,
     LoopFailed,
     IterationFeedbackReceived,

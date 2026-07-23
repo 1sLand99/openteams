@@ -536,15 +536,12 @@ pub async fn generate_plan_and_run(
     let deployment_clone = deployment.clone();
     let execution_id = execution.id;
     tokio::spawn(async move {
-        if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+        WorkflowOrchestrator::wake_scheduler_with_recovery(
             deployment_clone.db(),
             deployment_clone.chat_runner(),
             execution_id,
         )
-        .await
-        {
-            tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed when running plan");
-        }
+        .await;
     });
 
     Ok((
@@ -733,15 +730,12 @@ pub async fn execute_plan(
     let deployment_clone = deployment.clone();
     let execution_id = bootstrap.execution.id;
     tokio::spawn(async move {
-        if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+        WorkflowOrchestrator::wake_scheduler_with_recovery(
             deployment_clone.db(),
             deployment_clone.chat_runner(),
             execution_id,
         )
-        .await
-        {
-            tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed when executing plan");
-        }
+        .await;
     });
 
     Ok((
@@ -863,15 +857,12 @@ pub async fn resume_execution(
 
     let deployment_clone = deployment.clone();
     tokio::spawn(async move {
-        if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+        WorkflowOrchestrator::wake_scheduler_with_recovery(
             deployment_clone.db(),
             deployment_clone.chat_runner(),
             execution_id,
         )
-        .await
-        {
-            tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed when resuming execution");
-        }
+        .await;
     });
 
     Ok((
@@ -1135,15 +1126,12 @@ pub async fn submit_step_input(
         let deployment_clone = deployment.clone();
         let execution_id = result.execution.id;
         tokio::spawn(async move {
-            if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+            WorkflowOrchestrator::wake_scheduler_with_recovery(
                 deployment_clone.db(),
                 deployment_clone.chat_runner(),
                 execution_id,
             )
-            .await
-            {
-                tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed after submitting step input");
-            }
+            .await;
         });
     }
 
@@ -1259,15 +1247,12 @@ pub async fn skip_step(
 
     let deployment_clone = deployment.clone();
     tokio::spawn(async move {
-        if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+        WorkflowOrchestrator::wake_scheduler_with_recovery(
             deployment_clone.db(),
             deployment_clone.chat_runner(),
             execution.id,
         )
-        .await
-        {
-            tracing::error!(execution_id = %execution.id, step_id = %step_id, error = %err, "workflow scheduler failed after skipping step");
-        }
+        .await;
     });
 
     Ok((
@@ -1388,15 +1373,12 @@ async fn resolve_step_action(
         let deployment_clone = deployment.clone();
         let execution_id = resolved.execution.id;
         tokio::spawn(async move {
-            if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+            WorkflowOrchestrator::wake_scheduler_with_recovery(
                 deployment_clone.db(),
                 deployment_clone.chat_runner(),
                 execution_id,
             )
-            .await
-            {
-                tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed after resolving step action");
-            }
+            .await;
         });
     }
 
@@ -1842,15 +1824,12 @@ pub async fn resolve_approval(
         let deployment_clone = deployment.clone();
         let execution_id = resolved.execution.id;
         tokio::spawn(async move {
-            if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+            WorkflowOrchestrator::wake_scheduler_with_recovery(
                 deployment_clone.db(),
                 deployment_clone.chat_runner(),
                 execution_id,
             )
-            .await
-            {
-                tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed after resolving approval action");
-            }
+            .await;
         });
     }
 

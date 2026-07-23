@@ -1,6 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -60,12 +60,13 @@ impl WorkflowTranscript {
             FROM chat_workflow_transcripts
             WHERE execution_id = ?1
               AND entry_type = 'final_review'
-              AND (
-                meta_json IS NULL
-                OR json_valid(meta_json) = 0
-                OR json_extract(meta_json, '$.resolved') IS NULL
-                OR json_extract(meta_json, '$.resolved') = 0
-              )
+              AND COALESCE(
+                CASE
+                  WHEN meta_json IS NULL OR json_valid(meta_json) = 0 THEN 0
+                  ELSE json_extract(meta_json, '$.resolved')
+                END,
+                0
+              ) = 0
             ORDER BY created_at ASC
             LIMIT 1
             "#,
@@ -147,12 +148,13 @@ impl WorkflowTranscript {
                 FROM chat_workflow_transcripts
                 WHERE execution_id = ?2
                   AND entry_type = 'final_review'
-                  AND (
-                    meta_json IS NULL
-                    OR json_valid(meta_json) = 0
-                    OR json_extract(meta_json, '$.resolved') IS NULL
-                    OR json_extract(meta_json, '$.resolved') = 0
-                  )
+                  AND COALESCE(
+                    CASE
+                      WHEN meta_json IS NULL OR json_valid(meta_json) = 0 THEN 0
+                      ELSE json_extract(meta_json, '$.resolved')
+                    END,
+                    0
+                  ) = 0
             )
             RETURNING *
             "#,
@@ -188,6 +190,82 @@ impl WorkflowTranscript {
         .await
     }
 
+    pub async fn update_meta_json_if_unresolved(
+        pool: &SqlitePool,
+        id: Uuid,
+        meta_json: &str,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_transcripts
+            SET meta_json = ?2
+            WHERE id = ?1
+              AND COALESCE(
+                CASE
+                  WHEN meta_json IS NULL OR json_valid(meta_json) = 0 THEN 0
+                  ELSE json_extract(meta_json, '$.resolved')
+                END,
+                0
+              ) = 0
+            RETURNING *
+            "#,
+        )
+        .bind(id)
+        .bind(meta_json)
+        .fetch_optional(pool)
+        .await
+    }
+
+    pub async fn update_meta_json_if_unresolved_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+        meta_json: &str,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_transcripts
+            SET meta_json = ?2
+            WHERE id = ?1
+              AND COALESCE(
+                CASE
+                  WHEN meta_json IS NULL OR json_valid(meta_json) = 0 THEN 0
+                  ELSE json_extract(meta_json, '$.resolved')
+                END,
+                0
+              ) = 0
+            RETURNING *
+            "#,
+        )
+        .bind(id)
+        .bind(meta_json)
+        .fetch_optional(connection)
+        .await
+    }
+
+    pub async fn create_in_transaction(
+        connection: &mut SqliteConnection,
+        data: &CreateWorkflowTranscript,
+        id: Uuid,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            "INSERT INTO chat_workflow_transcripts (id, execution_id, round_id, workflow_agent_session_id, step_id, sender_type, entry_type, content, meta_json, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             RETURNING *",
+        )
+        .bind(id)
+        .bind(data.execution_id)
+        .bind(data.round_id)
+        .bind(data.workflow_agent_session_id)
+        .bind(data.step_id)
+        .bind(&data.sender_type)
+        .bind(&data.entry_type)
+        .bind(&data.content)
+        .bind(&data.meta_json)
+        .bind(Utc::now().to_rfc3339())
+        .fetch_one(connection)
+        .await
+    }
+
     pub async fn find_unresolved_reviews_by_execution(
         pool: &SqlitePool,
         execution_id: Uuid,
@@ -198,12 +276,13 @@ impl WorkflowTranscript {
             FROM chat_workflow_transcripts
             WHERE execution_id = ?1
               AND entry_type IN ('step_review', 'loop_review', 'final_review')
-              AND (
-                meta_json IS NULL
-                OR json_valid(meta_json) = 0
-                OR json_extract(meta_json, '$.resolved') IS NULL
-                OR json_extract(meta_json, '$.resolved') = 0
-              )
+              AND COALESCE(
+                CASE
+                  WHEN meta_json IS NULL OR json_valid(meta_json) = 0 THEN 0
+                  ELSE json_extract(meta_json, '$.resolved')
+                END,
+                0
+              ) = 0
             ORDER BY created_at ASC
             "#,
         )
@@ -438,6 +517,140 @@ mod tests {
         .expect("count final reviews")
         .get::<i64, _>("count");
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn update_meta_json_if_unresolved_claims_transcript_once() {
+        let pool = transcript_pool().await;
+        let transcript = WorkflowTranscript::create(
+            &pool,
+            &CreateWorkflowTranscript {
+                execution_id: Uuid::new_v4(),
+                round_id: None,
+                workflow_agent_session_id: None,
+                step_id: None,
+                sender_type: "control".to_string(),
+                entry_type: "loop_review".to_string(),
+                content: "decision".to_string(),
+                meta_json: Some(serde_json::json!({ "resolved": false }).to_string()),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create transcript");
+
+        let resolved_meta = serde_json::json!({ "resolved": true }).to_string();
+        assert!(
+            WorkflowTranscript::update_meta_json_if_unresolved(
+                &pool,
+                transcript.id,
+                &resolved_meta,
+            )
+            .await
+            .expect("claim transcript")
+            .is_some()
+        );
+        assert!(
+            WorkflowTranscript::update_meta_json_if_unresolved(
+                &pool,
+                transcript.id,
+                &resolved_meta,
+            )
+            .await
+            .expect("reject duplicate claim")
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn unresolved_cas_safely_handles_legacy_meta_shapes() {
+        let pool = transcript_pool().await;
+        let cases = [
+            (None, true),
+            (Some("not-json".to_string()), true),
+            (
+                Some(serde_json::json!({ "kind": "legacy" }).to_string()),
+                true,
+            ),
+            (
+                Some(serde_json::json!({ "resolved": false }).to_string()),
+                true,
+            ),
+            (
+                Some(serde_json::json!({ "resolved": true }).to_string()),
+                false,
+            ),
+        ];
+
+        for (meta_json, should_claim) in cases {
+            let transcript = WorkflowTranscript::create(
+                &pool,
+                &CreateWorkflowTranscript {
+                    execution_id: Uuid::new_v4(),
+                    round_id: None,
+                    workflow_agent_session_id: None,
+                    step_id: None,
+                    sender_type: "control".to_string(),
+                    entry_type: "loop_review".to_string(),
+                    content: "legacy decision".to_string(),
+                    meta_json,
+                },
+                Uuid::new_v4(),
+            )
+            .await
+            .expect("create legacy transcript");
+            let claimed = WorkflowTranscript::update_meta_json_if_unresolved(
+                &pool,
+                transcript.id,
+                &serde_json::json!({ "resolved": true }).to_string(),
+            )
+            .await
+            .expect("legacy CAS must not raise malformed JSON");
+            assert_eq!(claimed.is_some(), should_claim);
+        }
+    }
+
+    #[tokio::test]
+    async fn transactional_claim_rolls_back_with_later_failure() {
+        let pool = transcript_pool().await;
+        let transcript = WorkflowTranscript::create(
+            &pool,
+            &CreateWorkflowTranscript {
+                execution_id: Uuid::new_v4(),
+                round_id: None,
+                workflow_agent_session_id: None,
+                step_id: None,
+                sender_type: "control".to_string(),
+                entry_type: "loop_review".to_string(),
+                content: "decision".to_string(),
+                meta_json: Some(serde_json::json!({ "resolved": false }).to_string()),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create transcript");
+
+        let mut transaction = pool.begin().await.expect("begin transaction");
+        WorkflowTranscript::update_meta_json_if_unresolved_in_transaction(
+            &mut transaction,
+            transcript.id,
+            &serde_json::json!({ "resolved": true }).to_string(),
+        )
+        .await
+        .expect("claim inside transaction")
+        .expect("transcript claim");
+        transaction.rollback().await.expect("rollback transaction");
+
+        assert!(
+            WorkflowTranscript::update_meta_json_if_unresolved(
+                &pool,
+                transcript.id,
+                &serde_json::json!({ "resolved": true }).to_string(),
+            )
+            .await
+            .expect("claim after rollback")
+            .is_some()
+        );
     }
 
     #[tokio::test]

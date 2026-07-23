@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rimraf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx src/components/workflow/WorkflowPendingReviewCard.test.tsx && tsx src/components/workflow/workflowGeneratedText.test.ts"
   },
   "dependencies": {
     "@codemirror/language-data": "^6.5.2",

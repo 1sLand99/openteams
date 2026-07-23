@@ -20,12 +20,31 @@ pub(crate) struct LoopExecutor<'a> {
 
 enum LoopReviewDecision {
     Passed,
+    PassedByUserWaiver {
+        feedback: String,
+        review_step: Box<WorkflowStep>,
+    },
     Rejected {
         feedback: String,
-        step_feedbacks: HashMap<String, String>,
+        feedback_targets: Vec<LoopFeedbackTarget>,
     },
     LimitReached {
         feedback: String,
         review_attempt: i32,
     },
+}
+
+#[derive(Debug, Clone)]
+struct LoopFeedbackTarget {
+    step: WorkflowStep,
+    issue_scope_id: String,
+    feedback: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RejectedLoopReviewDisposition {
+    PassedByUserWaiver,
+    NeedsSkippedDecision,
+    LimitReached,
+    Retry,
 }
