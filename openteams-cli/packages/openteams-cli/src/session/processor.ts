@@ -36,6 +36,27 @@ export namespace SessionProcessor {
     let attempt = 0
     let needsCompaction = false
 
+    async function ensureToolCall(toolCallID: string, toolName: string) {
+      const existing = toolcalls[toolCallID]
+      if (existing) return existing
+
+      const part = (await Session.updatePart({
+        id: PartID.ascending(),
+        messageID: input.assistantMessage.id,
+        sessionID: input.assistantMessage.sessionID,
+        type: "tool",
+        tool: toolName,
+        callID: toolCallID,
+        state: {
+          status: "pending",
+          input: {},
+          raw: "",
+        },
+      })) as MessageV2.ToolPart
+      toolcalls[toolCallID] = part
+      return part
+    }
+
     const result = {
       get message() {
         return input.assistantMessage
@@ -110,20 +131,7 @@ export namespace SessionProcessor {
                   break
 
                 case "tool-input-start":
-                  const part = await Session.updatePart({
-                    id: toolcalls[value.id]?.id ?? PartID.ascending(),
-                    messageID: input.assistantMessage.id,
-                    sessionID: input.assistantMessage.sessionID,
-                    type: "tool",
-                    tool: value.toolName,
-                    callID: value.id,
-                    state: {
-                      status: "pending",
-                      input: {},
-                      raw: "",
-                    },
-                  })
-                  toolcalls[value.id] = part as MessageV2.ToolPart
+                  await ensureToolCall(value.id, value.toolName)
                   break
 
                 case "tool-input-delta":
@@ -133,48 +141,46 @@ export namespace SessionProcessor {
                   break
 
                 case "tool-call": {
-                  const match = toolcalls[value.toolCallId]
-                  if (match) {
-                    const part = await Session.updatePart({
-                      ...match,
-                      tool: value.toolName,
-                      state: {
-                        status: "running",
-                        input: value.input,
-                        time: {
-                          start: Date.now(),
-                        },
+                  const match = await ensureToolCall(value.toolCallId, value.toolName)
+                  const part = await Session.updatePart({
+                    ...match,
+                    tool: value.toolName,
+                    state: {
+                      status: "running",
+                      input: value.input,
+                      time: {
+                        start: Date.now(),
                       },
-                      metadata: value.providerMetadata,
+                    },
+                    metadata: value.providerMetadata,
+                  })
+                  toolcalls[value.toolCallId] = part as MessageV2.ToolPart
+
+                  const parts = await MessageV2.parts(input.assistantMessage.id)
+                  const lastThree = parts.slice(-DOOM_LOOP_THRESHOLD)
+
+                  if (
+                    lastThree.length === DOOM_LOOP_THRESHOLD &&
+                    lastThree.every(
+                      (p) =>
+                        p.type === "tool" &&
+                        p.tool === value.toolName &&
+                        p.state.status !== "pending" &&
+                        JSON.stringify(p.state.input) === JSON.stringify(value.input),
+                    )
+                  ) {
+                    const agent = await Agent.get(input.assistantMessage.agent)
+                    await PermissionNext.ask({
+                      permission: "doom_loop",
+                      patterns: [value.toolName],
+                      sessionID: input.assistantMessage.sessionID,
+                      metadata: {
+                        tool: value.toolName,
+                        input: value.input,
+                      },
+                      always: [value.toolName],
+                      ruleset: agent.permission,
                     })
-                    toolcalls[value.toolCallId] = part as MessageV2.ToolPart
-
-                    const parts = await MessageV2.parts(input.assistantMessage.id)
-                    const lastThree = parts.slice(-DOOM_LOOP_THRESHOLD)
-
-                    if (
-                      lastThree.length === DOOM_LOOP_THRESHOLD &&
-                      lastThree.every(
-                        (p) =>
-                          p.type === "tool" &&
-                          p.tool === value.toolName &&
-                          p.state.status !== "pending" &&
-                          JSON.stringify(p.state.input) === JSON.stringify(value.input),
-                      )
-                    ) {
-                      const agent = await Agent.get(input.assistantMessage.agent)
-                      await PermissionNext.ask({
-                        permission: "doom_loop",
-                        patterns: [value.toolName],
-                        sessionID: input.assistantMessage.sessionID,
-                        metadata: {
-                          tool: value.toolName,
-                          input: value.input,
-                        },
-                        always: [value.toolName],
-                        ruleset: agent.permission,
-                      })
-                    }
                   }
                   break
                 }

@@ -73,6 +73,11 @@ const STRUCTURED_OUTPUT_RETRY_FEEDBACK =
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
 
+  /** @internal */
+  export function isTerminalCompletion(finish: string | undefined, hasToolActivity: boolean) {
+    return !!finish && (!["tool-calls", "unknown"].includes(finish) || !hasToolActivity)
+  }
+
   const state = Instance.state(
     () => {
       const data: Record<
@@ -313,12 +318,16 @@ export namespace SessionPrompt {
 
       let lastUser: MessageV2.User | undefined
       let lastAssistant: MessageV2.Assistant | undefined
+      let lastAssistantHasToolActivity = false
       let lastFinished: MessageV2.Assistant | undefined
       let tasks: (MessageV2.CompactionPart | MessageV2.SubtaskPart)[] = []
       for (let i = msgs.length - 1; i >= 0; i--) {
         const msg = msgs[i]
         if (!lastUser && msg.info.role === "user") lastUser = msg.info as MessageV2.User
-        if (!lastAssistant && msg.info.role === "assistant") lastAssistant = msg.info as MessageV2.Assistant
+        if (!lastAssistant && msg.info.role === "assistant") {
+          lastAssistant = msg.info as MessageV2.Assistant
+          lastAssistantHasToolActivity = msg.parts.some((part) => part.type === "tool")
+        }
         if (!lastFinished && msg.info.role === "assistant" && msg.info.finish)
           lastFinished = msg.info as MessageV2.Assistant
         if (lastUser && lastFinished) break
@@ -332,8 +341,8 @@ export namespace SessionPrompt {
       const shouldContinueStructuredOutputRetry =
         !!structuredOutputRetryFeedback && lastUser.format?.type === "json_schema"
       if (
-        lastAssistant?.finish &&
-        !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
+        lastAssistant &&
+        isTerminalCompletion(lastAssistant?.finish, lastAssistantHasToolActivity) &&
         lastUser.id < lastAssistant.id &&
         !shouldContinueStructuredOutputRetry
       ) {
@@ -722,8 +731,9 @@ export namespace SessionPrompt {
         break
       }
 
-      // Check if model finished (finish reason is not "tool-calls" or "unknown")
-      const modelFinished = processor.message.finish && !["tool-calls", "unknown"].includes(processor.message.finish)
+      const parts = await MessageV2.parts(processor.message.id)
+      const hasToolActivity = parts.some((part) => part.type === "tool")
+      const modelFinished = isTerminalCompletion(processor.message.finish, hasToolActivity)
 
       if (modelFinished && !processor.message.error) {
         if (format.type === "json_schema") {
@@ -741,6 +751,8 @@ export namespace SessionPrompt {
           await Session.updateMessage(processor.message)
           break
         }
+
+        break
       }
 
       if (result === "stop") break
