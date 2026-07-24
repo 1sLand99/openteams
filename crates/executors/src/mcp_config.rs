@@ -405,7 +405,7 @@ impl CodingAgent {
             CodingAgent::Copilot(..) => Copilot,
             CodingAgent::KimiCode(_) => Passthrough,
             #[cfg(feature = "qa-mode")]
-            CodingAgent::QaMock(_) => Passthrough, // QA mock doesn't need MCP
+            CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => Passthrough,
         };
 
         let canonical = PRECONFIGURED_MCP_SERVERS.clone();

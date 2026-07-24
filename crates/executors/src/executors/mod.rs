@@ -14,6 +14,8 @@ use ts_rs::TS;
 use workspace_utils::msg_store::MsgStore;
 
 #[cfg(feature = "qa-mode")]
+use crate::executors::acp::AcpQaExecutor;
+#[cfg(feature = "qa-mode")]
 use crate::executors::qa_mock::QaMockExecutor;
 use crate::{
     actions::{ExecutorAction, review::RepoReviewContext},
@@ -128,6 +130,8 @@ pub enum CodingAgent {
     KimiCode,
     #[cfg(feature = "qa-mode")]
     QaMock(QaMockExecutor),
+    #[cfg(feature = "qa-mode")]
+    AcpQa(AcpQaExecutor),
 }
 
 impl CodingAgent {
@@ -211,7 +215,7 @@ impl CodingAgent {
             Self::Copilot(_) => vec![],
             Self::KimiCode(_) => vec![BaseAgentCapability::SetupHelper],
             #[cfg(feature = "qa-mode")]
-            Self::QaMock(_) => vec![], // QA mock doesn't need special capabilities
+            Self::QaMock(_) | Self::AcpQa(_) => vec![],
         }
     }
 }
@@ -469,5 +473,17 @@ mod tests {
         let result: Result<BaseCodingAgent, _> = serde_json::from_str(r#""CURSOR""#);
         assert!(result.is_ok(), "CURSOR should deserialize via serde");
         assert_eq!(result.unwrap(), BaseCodingAgent::CursorAgent);
+    }
+
+    #[test]
+    fn generic_acp_runner_is_not_a_production_variant() {
+        #[cfg(not(feature = "qa-mode"))]
+        assert!(BaseCodingAgent::from_str("ACP_QA").is_err());
+
+        #[cfg(feature = "qa-mode")]
+        assert_eq!(
+            BaseCodingAgent::from_str("ACP_QA").unwrap(),
+            BaseCodingAgent::AcpQa
+        );
     }
 }

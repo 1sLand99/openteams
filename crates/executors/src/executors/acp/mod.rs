@@ -1,34 +1,50 @@
 pub mod client;
+pub mod config;
+pub mod events;
 pub mod harness;
+pub mod mcp;
 pub mod normalize_logs;
-pub mod session;
+pub mod output;
+#[cfg(feature = "qa-mode")]
+pub mod qa;
+pub mod runtime;
 
 use std::{fmt::Display, str::FromStr};
 
 pub use client::AcpClient;
+pub use config::{
+    AcpApprovalPolicy, AcpClientServicePolicy, AcpConfigSelection, AcpRunConfig,
+    AcpSessionPreferences,
+};
 pub use harness::AcpAgentHarness;
 pub use normalize_logs::*;
+#[cfg(feature = "qa-mode")]
+pub use qa::AcpQaExecutor;
 use serde::{Deserialize, Serialize};
-pub use session::SessionManager;
 use workspace_utils::approvals::ApprovalStatus;
 
 /// Parsed event types for internal processing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AcpEvent {
     User(String),
+    UserBlock(agent_client_protocol::schema::v1::ContentBlock),
     SessionStart(String),
-    Message(agent_client_protocol::ContentBlock),
-    Thought(agent_client_protocol::ContentBlock),
-    ToolCall(agent_client_protocol::ToolCall),
-    ToolUpdate(agent_client_protocol::ToolCallUpdate),
-    Plan(agent_client_protocol::Plan),
-    AvailableCommands(Vec<agent_client_protocol::AvailableCommand>),
-    CurrentMode(agent_client_protocol::SessionModeId),
-    RequestPermission(agent_client_protocol::RequestPermissionRequest),
+    Message(agent_client_protocol::schema::v1::ContentBlock),
+    Thought(agent_client_protocol::schema::v1::ContentBlock),
+    ToolCall(agent_client_protocol::schema::v1::ToolCall),
+    ToolUpdate(agent_client_protocol::schema::v1::ToolCallUpdate),
+    Plan(agent_client_protocol::schema::v1::Plan),
+    AvailableCommands(Vec<agent_client_protocol::schema::v1::AvailableCommand>),
+    CurrentMode(agent_client_protocol::schema::v1::SessionModeId),
+    ConfigOptions(Vec<agent_client_protocol::schema::v1::SessionConfigOption>),
+    SessionInfo(agent_client_protocol::schema::v1::SessionInfoUpdate),
+    Usage(agent_client_protocol::schema::v1::UsageUpdate),
+    RequestPermission(agent_client_protocol::schema::v1::RequestPermissionRequest),
     ApprovalResponse(ApprovalResponse),
+    Warning(String),
     Error(String),
     Done(String),
-    Other(agent_client_protocol::SessionNotification),
+    Other(agent_client_protocol::schema::v1::SessionNotification),
 }
 
 impl Display for AcpEvent {

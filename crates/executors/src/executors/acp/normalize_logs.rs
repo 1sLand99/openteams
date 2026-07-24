@@ -4,14 +4,14 @@ use std::{
     sync::{Arc, LazyLock},
 };
 
-use agent_client_protocol::{self as acp, SessionNotification};
+use agent_client_protocol::schema::v1 as acp;
 use futures::StreamExt;
 use regex::Regex;
 use serde::Deserialize;
 use workspace_utils::{approvals::ApprovalStatus, msg_store::MsgStore};
 
 pub use super::AcpAgentHarness;
-use super::AcpEvent;
+use super::{AcpEvent, events::AcpRuntimeEvent};
 use crate::{
     approvals::ToolCallMetadata,
     logs::{
@@ -73,7 +73,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                     }
                     AcpEvent::Message(content) => {
                         streaming.thinking_text = None;
-                        if let agent_client_protocol::ContentBlock::Text(text) = content {
+                        if let acp::ContentBlock::Text(text) = content {
                             let is_new = streaming.assistant_text.is_none();
                             if is_new {
                                 if text.text == "\n" {
@@ -104,7 +104,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                     }
                     AcpEvent::Thought(content) => {
                         streaming.assistant_text = None;
-                        if let agent_client_protocol::ContentBlock::Text(text) = content {
+                        if let acp::ContentBlock::Text(text) = content {
                             let is_new = streaming.thinking_text.is_none();
                             if is_new {
                                 let idx = entry_index.next();
@@ -189,7 +189,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         msg_store.push_patch(ConversationPatch::add_normalized_entry(idx, entry));
                     }
                     AcpEvent::RequestPermission(perm) => {
-                        if let Ok(tc) = agent_client_protocol::ToolCall::try_from(perm.tool_call) {
+                        if let Ok(tc) = acp::ToolCall::try_from(perm.tool_call) {
                             handle_tool_call(
                                 &tc,
                                 &worktree_path,
@@ -217,7 +217,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                                 .or_else(|| Some("".to_string()));
                         }
                         tracing::trace!("Got tool call update: {:?}", update);
-                        if let Ok(tc) = agent_client_protocol::ToolCall::try_from(update.clone()) {
+                        if let Ok(tc) = acp::ToolCall::try_from(update.clone()) {
                             handle_tool_call(
                                 &tc,
                                 &worktree_path,
@@ -259,13 +259,59 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                                 .push_patch(ConversationPatch::add_normalized_entry(idx, entry));
                         }
                     }
-                    AcpEvent::User(_) | AcpEvent::Other(_) => (),
+                    AcpEvent::Usage(usage) => {
+                        let used = usage.used.min(u32::MAX as u64) as u32;
+                        let size = usage.size.min(u32::MAX as u64) as u32;
+                        let idx = entry_index.next();
+                        let entry = NormalizedEntry {
+                            timestamp: None,
+                            entry_type: NormalizedEntryType::TokenUsageInfo(
+                                crate::logs::TokenUsageInfo {
+                                    total_tokens: used,
+                                    model_context_window: size,
+                                    input_tokens: None,
+                                    output_tokens: None,
+                                    reasoning_output_tokens: None,
+                                    cache_read_tokens: None,
+                                    runtime_agent: None,
+                                    runtime_model_id: None,
+                                    provider_id: None,
+                                    runtime_thread_id: None,
+                                    usage_scope: Some("session_snapshot".to_string()),
+                                    snapshot_total_tokens: Some(used),
+                                    snapshot_input_tokens: None,
+                                    snapshot_output_tokens: None,
+                                    snapshot_reasoning_output_tokens: None,
+                                    snapshot_cache_read_tokens: None,
+                                    is_estimated: false,
+                                },
+                            ),
+                            content: format!("Context usage: {used} / {size}"),
+                            metadata: None,
+                        };
+                        msg_store.push_patch(ConversationPatch::add_normalized_entry(idx, entry));
+                    }
+                    AcpEvent::Warning(message) => {
+                        let idx = entry_index.next();
+                        let entry = NormalizedEntry {
+                            timestamp: None,
+                            entry_type: NormalizedEntryType::SystemMessage,
+                            content: message,
+                            metadata: None,
+                        };
+                        msg_store.push_patch(ConversationPatch::add_normalized_entry(idx, entry));
+                    }
+                    AcpEvent::User(_)
+                    | AcpEvent::UserBlock(_)
+                    | AcpEvent::ConfigOptions(_)
+                    | AcpEvent::SessionInfo(_)
+                    | AcpEvent::Other(_) => (),
                 }
             }
         }
 
         fn handle_tool_call(
-            tc: &agent_client_protocol::ToolCall,
+            tc: &acp::ToolCall,
             worktree_path: &Path,
             streaming: &mut StreamingState,
             tool_states: &mut ToolStates,
@@ -305,7 +351,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
 
         fn map_to_action_type(tc: &PartialToolCallData) -> ActionType {
             match tc.kind {
-                agent_client_protocol::ToolKind::Read => {
+                acp::ToolKind::Read => {
                     // Special-case: read_many_files style titles parsed via helper
                     if tc.id.0.starts_with("read_many_files") {
                         let result = collect_text_content(&tc.content).map(|text| ToolResult {
@@ -327,7 +373,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                             .to_string(),
                     }
                 }
-                agent_client_protocol::ToolKind::Edit => {
+                acp::ToolKind::Edit => {
                     let changes = extract_file_changes(tc);
                     ActionType::FileEdit {
                         path: tc
@@ -339,21 +385,20 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         changes,
                     }
                 }
-                agent_client_protocol::ToolKind::Execute => {
+                acp::ToolKind::Execute => {
                     let command = AcpEventParser::parse_execute_command(tc);
                     // Prefer structured raw_output, else fallback to aggregated text content
-                    let completed =
-                        matches!(tc.status, agent_client_protocol::ToolCallStatus::Completed);
+                    let completed = matches!(tc.status, acp::ToolCallStatus::Completed);
                     tracing::trace!(
                         "Mapping execute tool call, completed: {}, command: {}",
                         completed,
                         command
                     );
                     let tc_exit_status = match tc.status {
-                        agent_client_protocol::ToolCallStatus::Completed => {
+                        acp::ToolCallStatus::Completed => {
                             Some(crate::logs::CommandExitStatus::Success { success: true })
                         }
-                        agent_client_protocol::ToolCallStatus::Failed => {
+                        acp::ToolCallStatus::Failed => {
                             Some(crate::logs::CommandExitStatus::Success { success: false })
                         }
                         _ => None,
@@ -372,7 +417,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                     };
                     ActionType::CommandRun { command, result }
                 }
-                agent_client_protocol::ToolKind::Delete => ActionType::FileEdit {
+                acp::ToolKind::Delete => ActionType::FileEdit {
                     path: tc
                         .path
                         .clone()
@@ -381,7 +426,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         .to_string(),
                     changes: vec![FileChange::Delete],
                 },
-                agent_client_protocol::ToolKind::Search => {
+                acp::ToolKind::Search => {
                     let query = tc
                         .raw_input
                         .as_ref()
@@ -390,7 +435,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         .unwrap_or_else(|| tc.title.clone());
                     ActionType::Search { query }
                 }
-                agent_client_protocol::ToolKind::Fetch => {
+                acp::ToolKind::Fetch => {
                     let mut url = tc
                         .raw_input
                         .as_ref()
@@ -405,7 +450,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                     }
                     ActionType::WebFetch { url }
                 }
-                agent_client_protocol::ToolKind::Think => {
+                acp::ToolKind::Think => {
                     let tool_name = extract_tool_name_from_id(tc.id.0.as_ref())
                         .unwrap_or_else(|| tc.title.clone());
                     // For think/save_memory, surface both title and aggregated text content as arguments
@@ -431,12 +476,10 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         result,
                     }
                 }
-                agent_client_protocol::ToolKind::SwitchMode => ActionType::Other {
+                acp::ToolKind::SwitchMode => ActionType::Other {
                     description: "switch_mode".to_string(),
                 },
-                agent_client_protocol::ToolKind::Other
-                | agent_client_protocol::ToolKind::Move
-                | _ => {
+                acp::ToolKind::Other | acp::ToolKind::Move | _ => {
                     // Derive a friendlier tool name from the id if it looks like name-<digits>
                     let tool_name = extract_tool_name_from_id(tc.id.0.as_ref())
                         .unwrap_or_else(|| tc.title.clone());
@@ -474,7 +517,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
         fn extract_file_changes(tc: &PartialToolCallData) -> Vec<FileChange> {
             let mut changes = Vec::new();
             for c in &tc.content {
-                if let agent_client_protocol::ToolCallContent::Diff(diff) = c {
+                if let acp::ToolCallContent::Diff(diff) = c {
                     let path = diff.path.to_string_lossy().to_string();
                     let rel = if !path.is_empty() {
                         path
@@ -533,11 +576,9 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
 
         fn get_tool_content(tc: &PartialToolCallData) -> String {
             match tc.kind {
-                agent_client_protocol::ToolKind::Execute => {
-                    AcpEventParser::parse_execute_command(tc)
-                }
-                agent_client_protocol::ToolKind::Think => "Saving memory".to_string(),
-                agent_client_protocol::ToolKind::Other => {
+                acp::ToolKind::Execute => AcpEventParser::parse_execute_command(tc),
+                acp::ToolKind::Think => "Saving memory".to_string(),
+                acp::ToolKind::Other => {
                     let tool_name = extract_tool_name_from_id(tc.id.0.as_ref())
                         .unwrap_or_else(|| "tool".to_string());
                     if tc.title.is_empty() {
@@ -546,7 +587,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         format!("{}: {}", tool_name, tc.title)
                     }
                 }
-                agent_client_protocol::ToolKind::Read => {
+                acp::ToolKind::Read => {
                     if tc.id.0.starts_with("read_many_files") {
                         "Read files".to_string()
                     } else {
@@ -581,13 +622,11 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
             URL_RE.find(text).map(|m| m.as_str().to_string())
         }
 
-        fn collect_text_content(
-            content: &[agent_client_protocol::ToolCallContent],
-        ) -> Option<String> {
+        fn collect_text_content(content: &[acp::ToolCallContent]) -> Option<String> {
             let mut out = String::new();
             for c in content {
-                if let agent_client_protocol::ToolCallContent::Content(inner) = c
-                    && let agent_client_protocol::ContentBlock::Text(t) = &inner.content
+                if let acp::ToolCallContent::Content(inner) = c
+                    && let acp::ContentBlock::Text(t) = &inner.content
                 {
                     out.push_str(&t.text);
                     if !out.ends_with('\n') {
@@ -598,12 +637,13 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
             if out.is_empty() { None } else { Some(out) }
         }
 
-        fn convert_tool_status(status: &agent_client_protocol::ToolCallStatus) -> LogToolStatus {
+        fn convert_tool_status(status: &acp::ToolCallStatus) -> LogToolStatus {
             match status {
-                agent_client_protocol::ToolCallStatus::Pending
-                | agent_client_protocol::ToolCallStatus::InProgress => LogToolStatus::Created,
-                agent_client_protocol::ToolCallStatus::Completed => LogToolStatus::Success,
-                agent_client_protocol::ToolCallStatus::Failed => LogToolStatus::Failed,
+                acp::ToolCallStatus::Pending | acp::ToolCallStatus::InProgress => {
+                    LogToolStatus::Created
+                }
+                acp::ToolCallStatus::Completed => LogToolStatus::Success,
+                acp::ToolCallStatus::Failed => LogToolStatus::Failed,
                 _ => {
                     tracing::debug!("Unknown tool call status: {:?}", status);
                     LogToolStatus::Created
@@ -615,18 +655,18 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
 
 struct PartialToolCallData {
     index: usize,
-    id: agent_client_protocol::ToolCallId,
-    kind: agent_client_protocol::ToolKind,
+    id: acp::ToolCallId,
+    kind: acp::ToolKind,
     title: String,
-    status: agent_client_protocol::ToolCallStatus,
+    status: acp::ToolCallStatus,
     path: Option<PathBuf>,
-    content: Vec<agent_client_protocol::ToolCallContent>,
+    content: Vec<acp::ToolCallContent>,
     raw_input: Option<serde_json::Value>,
     raw_output: Option<serde_json::Value>,
 }
 
 impl PartialToolCallData {
-    fn extend(&mut self, tc: &agent_client_protocol::ToolCall, worktree_path: &Path) {
+    fn extend(&mut self, tc: &acp::ToolCall, worktree_path: &Path) {
         self.id = tc.tool_call_id.clone();
         if tc.kind != Default::default() {
             self.kind = tc.kind;
@@ -660,9 +700,9 @@ impl PartialToolCallData {
 impl Default for PartialToolCallData {
     fn default() -> Self {
         Self {
-            id: agent_client_protocol::ToolCallId::new(""),
+            id: acp::ToolCallId::new(""),
             index: 0,
-            kind: agent_client_protocol::ToolKind::default(),
+            kind: acp::ToolKind::default(),
             title: String::new(),
             status: Default::default(),
             path: None,
@@ -680,6 +720,9 @@ impl AcpEventParser {
     pub fn parse_line(line: &str) -> Option<AcpEvent> {
         let trimmed = line.trim();
 
+        if let Ok(runtime_event) = serde_json::from_str::<AcpRuntimeEvent>(trimmed) {
+            return Some(runtime_event.payload);
+        }
         if let Ok(acp_event) = serde_json::from_str::<AcpEvent>(trimmed) {
             return Some(acp_event);
         }
@@ -717,28 +760,6 @@ pub enum ParsedLine {
     Event(AcpEvent),
     Error(String),
     Done,
-}
-
-impl TryFrom<SessionNotification> for AcpEvent {
-    type Error = ();
-
-    fn try_from(notification: SessionNotification) -> Result<Self, ()> {
-        let event = match notification.update {
-            acp::SessionUpdate::AgentMessageChunk(chunk) => AcpEvent::Message(chunk.content),
-            acp::SessionUpdate::AgentThoughtChunk(chunk) => AcpEvent::Thought(chunk.content),
-            acp::SessionUpdate::ToolCall(tc) => AcpEvent::ToolCall(tc),
-            acp::SessionUpdate::ToolCallUpdate(update) => AcpEvent::ToolUpdate(update),
-            acp::SessionUpdate::Plan(plan) => AcpEvent::Plan(plan),
-            acp::SessionUpdate::AvailableCommandsUpdate(update) => {
-                AcpEvent::AvailableCommands(update.available_commands)
-            }
-            acp::SessionUpdate::CurrentModeUpdate(update) => {
-                AcpEvent::CurrentMode(update.current_mode_id)
-            }
-            _ => return Err(()),
-        };
-        Ok(event)
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

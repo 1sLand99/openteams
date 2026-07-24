@@ -1,262 +1,774 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+    process::{ExitStatus, Stdio},
+    sync::Arc,
+};
 
-use agent_client_protocol::{self as acp};
-use async_trait::async_trait;
-use tokio::sync::{Mutex, mpsc};
+use agent_client_protocol::schema::v1::{
+    CreateTerminalRequest, CreateTerminalResponse, Error, KillTerminalRequest,
+    KillTerminalResponse, PermissionOptionKind, ReadTextFileRequest, ReadTextFileResponse,
+    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionNotification, TerminalExitStatus, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    WriteTextFileRequest, WriteTextFileResponse,
+};
+use command_group::{AsyncCommandGroup, AsyncGroupChild};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+    sync::Mutex,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use workspace_utils::approvals::ApprovalStatus;
 
 use crate::{
     approvals::{ExecutorApprovalError, ExecutorApprovalService},
-    executors::acp::{AcpEvent, ApprovalResponse},
+    executors::acp::{
+        AcpApprovalPolicy, AcpClientServicePolicy, AcpEvent, ApprovalResponse, events,
+        output::AcpOutput,
+    },
 };
 
-/// ACP client that handles agent-client protocol communication
+/// State shared by stable ACP client callbacks.
 #[derive(Clone)]
 pub struct AcpClient {
-    event_tx: mpsc::UnboundedSender<AcpEvent>,
+    output: AcpOutput,
     approvals: Option<Arc<dyn ExecutorApprovalService>>,
-    feedback_queue: Arc<Mutex<Vec<String>>>,
+    approval_policy: AcpApprovalPolicy,
     cancel: CancellationToken,
+    cwd: PathBuf,
+    additional_directories: Vec<PathBuf>,
+    services: AcpClientServicePolicy,
+    terminal_env: HashMap<String, String>,
+    terminals: Arc<Mutex<HashMap<String, TerminalRecord>>>,
 }
 
 impl AcpClient {
-    /// Create a new ACP client
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        event_tx: mpsc::UnboundedSender<AcpEvent>,
+        output: AcpOutput,
         approvals: Option<Arc<dyn ExecutorApprovalService>>,
+        approval_policy: AcpApprovalPolicy,
         cancel: CancellationToken,
+        cwd: PathBuf,
+        additional_directories: Vec<PathBuf>,
+        services: AcpClientServicePolicy,
+        terminal_env: HashMap<String, String>,
     ) -> Self {
         Self {
-            event_tx,
+            output,
             approvals,
-            feedback_queue: Arc::new(Mutex::new(Vec::new())),
+            approval_policy,
             cancel,
+            cwd,
+            additional_directories,
+            services,
+            terminal_env: terminal_env
+                .into_iter()
+                .filter(|(name, _)| !is_sensitive_env_name(name))
+                .collect(),
+            terminals: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub fn record_user_prompt_event(&self, prompt: &str) {
-        self.send_event(AcpEvent::User(prompt.to_string()));
+    pub async fn record_user_prompt_event(&self, prompt: &str) {
+        self.send_event(AcpEvent::User(prompt.to_string())).await;
     }
 
-    /// Send an event to the event channel
-    fn send_event(&self, event: AcpEvent) {
-        if let Err(e) = self.event_tx.send(event) {
-            warn!("Failed to send ACP event: {}", e);
+    async fn send_event(&self, event: AcpEvent) {
+        if self.output.send(event).await.is_err() {
+            warn!("ACP output channel closed");
         }
     }
 
-    /// Queue a user feedback message to be sent after a denial.
-    pub async fn enqueue_feedback(&self, message: String) {
-        let trimmed = message.trim().to_string();
-        if !trimmed.is_empty() {
-            let mut q = self.feedback_queue.lock().await;
-            q.push(trimmed);
-        }
-    }
-
-    /// Drain and return queued feedback messages.
-    pub async fn drain_feedback(&self) -> Vec<String> {
-        let mut q = self.feedback_queue.lock().await;
-        q.drain(..).collect()
-    }
-}
-
-#[async_trait(?Send)]
-impl acp::Client for AcpClient {
-    async fn request_permission(
+    pub async fn handle_notification(
         &self,
-        args: acp::RequestPermissionRequest,
-    ) -> Result<acp::RequestPermissionResponse, acp::Error> {
-        self.send_event(AcpEvent::RequestPermission(args.clone()));
+        notification: SessionNotification,
+    ) -> Result<(), Error> {
+        self.send_event(events::event_from_notification(notification))
+            .await;
+        Ok(())
+    }
 
-        if self.approvals.is_none() {
-            // Auto-approve with best available option when no approval service is configured
-            let chosen_option = args
-                .options
-                .iter()
-                .find(|o| matches!(o.kind, acp::PermissionOptionKind::AllowAlways))
-                .or_else(|| {
-                    args.options
-                        .iter()
-                        .find(|o| matches!(o.kind, acp::PermissionOptionKind::AllowOnce))
-                })
-                .or_else(|| args.options.first());
+    pub async fn request_permission(
+        &self,
+        request: RequestPermissionRequest,
+    ) -> Result<RequestPermissionResponse, Error> {
+        self.send_event(AcpEvent::RequestPermission(request.clone()))
+            .await;
 
-            let outcome = if let Some(opt) = chosen_option {
-                debug!("Auto-approving permission with option: {}", opt.option_id);
-                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
-                    opt.option_id.clone(),
-                ))
-            } else {
-                warn!("No permission options available, cancelling");
-                acp::RequestPermissionOutcome::Cancelled
-            };
-
-            return Ok(acp::RequestPermissionResponse::new(outcome));
+        match self.approval_policy {
+            AcpApprovalPolicy::AutoAllow => {
+                return Ok(select_option(
+                    &request,
+                    &[
+                        PermissionOptionKind::AllowAlways,
+                        PermissionOptionKind::AllowOnce,
+                    ],
+                ));
+            }
+            AcpApprovalPolicy::AutoReject => {
+                return Ok(select_option(
+                    &request,
+                    &[
+                        PermissionOptionKind::RejectAlways,
+                        PermissionOptionKind::RejectOnce,
+                    ],
+                ));
+            }
+            AcpApprovalPolicy::Ask => {}
         }
 
-        let tool_call_id = args.tool_call.tool_call_id.0.to_string();
-        let approval_service = self
-            .approvals
-            .as_ref()
-            .ok_or(ExecutorApprovalError::ServiceUnavailable)
-            .map_err(|_| acp::Error::invalid_request())?;
+        let tool_call_id = request.tool_call.tool_call_id.0.to_string();
+        let Some(approval_service) = self.approvals.as_ref() else {
+            warn!("ACP approval service unavailable; cancelling permission request");
+            return Ok(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+        };
 
         let status = match approval_service
             .request_tool_approval(
-                args.tool_call.fields.title.as_deref().unwrap_or("tool"),
-                serde_json::json!({ "tool_call": args.tool_call }),
+                request.tool_call.fields.title.as_deref().unwrap_or("tool"),
+                serde_json::json!({ "tool_call": request.tool_call }),
                 &tool_call_id,
                 self.cancel.clone(),
             )
             .await
         {
-            Ok(s) => s,
+            Ok(status) => status,
             Err(ExecutorApprovalError::Cancelled) => {
-                debug!("ACP approval cancelled for tool_call_id={}", tool_call_id);
-                return Ok(acp::RequestPermissionResponse::new(
-                    acp::RequestPermissionOutcome::Cancelled,
+                return Ok(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
                 ));
             }
-            Err(err) => {
-                tracing::error!(
-                    "ACP approval failed for tool_call_id={}: {err}",
-                    tool_call_id
-                );
-                return Err(acp::Error::internal_error());
+            Err(error) => {
+                tracing::error!("ACP approval failed for tool_call_id={tool_call_id}: {error}");
+                return Err(Error::internal_error());
             }
         };
 
-        // Map our ApprovalStatus to ACP outcome
         let outcome = match &status {
-            ApprovalStatus::Approved => {
-                let chosen = args
-                    .options
-                    .iter()
-                    .find(|o| matches!(o.kind, acp::PermissionOptionKind::AllowOnce));
-                if let Some(opt) = chosen {
-                    acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
-                        opt.option_id.clone(),
-                    ))
-                } else {
-                    tracing::error!("No suitable approval option found, cancelling");
-                    return Err(acp::Error::invalid_request());
-                }
-            }
-            ApprovalStatus::Denied { reason } => {
-                // If user provided a reason, queue it to send after denial
-                if let Some(feedback) = reason.as_ref() {
-                    self.enqueue_feedback(feedback.clone()).await;
-                }
-                let chosen = args
-                    .options
-                    .iter()
-                    .find(|o| matches!(o.kind, acp::PermissionOptionKind::RejectOnce));
-                if let Some(opt) = chosen {
-                    acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
-                        opt.option_id.clone(),
-                    ))
-                } else {
-                    warn!("No permission options for denial, cancelling");
-                    acp::RequestPermissionOutcome::Cancelled
-                }
-            }
-            ApprovalStatus::TimedOut => {
-                warn!("Approval timed out");
-                acp::RequestPermissionOutcome::Cancelled
-            }
-            ApprovalStatus::Pending => {
-                // This should not occur after waiter resolves
-                warn!("Approval resolved to Pending");
-                acp::RequestPermissionOutcome::Cancelled
+            ApprovalStatus::Approved => select_option(
+                &request,
+                &[
+                    PermissionOptionKind::AllowOnce,
+                    PermissionOptionKind::AllowAlways,
+                ],
+            ),
+            ApprovalStatus::Denied { .. } => select_option(
+                &request,
+                &[
+                    PermissionOptionKind::RejectOnce,
+                    PermissionOptionKind::RejectAlways,
+                ],
+            ),
+            ApprovalStatus::TimedOut | ApprovalStatus::Pending => {
+                RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
             }
         };
 
         self.send_event(AcpEvent::ApprovalResponse(ApprovalResponse {
-            tool_call_id: tool_call_id.clone(),
-            status: status.clone(),
-        }));
+            tool_call_id,
+            status,
+        }))
+        .await;
 
-        Ok(acp::RequestPermissionResponse::new(outcome))
+        Ok(outcome)
     }
 
-    async fn session_notification(&self, args: acp::SessionNotification) -> Result<(), acp::Error> {
-        // Convert to typed events
-        let event = match args.update {
-            acp::SessionUpdate::AgentMessageChunk(chunk) => Some(AcpEvent::Message(chunk.content)),
-            acp::SessionUpdate::AgentThoughtChunk(chunk) => Some(AcpEvent::Thought(chunk.content)),
-            acp::SessionUpdate::ToolCall(tc) => Some(AcpEvent::ToolCall(tc)),
-            acp::SessionUpdate::ToolCallUpdate(update) => Some(AcpEvent::ToolUpdate(update)),
-            acp::SessionUpdate::Plan(plan) => Some(AcpEvent::Plan(plan)),
-            _ => Some(AcpEvent::Other(args)),
-        };
+    pub async fn read_text_file(
+        &self,
+        request: ReadTextFileRequest,
+    ) -> Result<ReadTextFileResponse, Error> {
+        if !self.services.read_text_file {
+            return Err(Error::method_not_found());
+        }
+        let path = self.resolve_existing_path(&request.path).await?;
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|_| Error::resource_not_found(None))?;
+        if content.len() > self.services.max_file_bytes {
+            return Err(Error::invalid_request().data("file exceeds ACP read limit"));
+        }
+        let content = select_lines(&content, request.line, request.limit);
+        Ok(ReadTextFileResponse::new(content))
+    }
 
-        if let Some(event) = event {
-            self.send_event(event);
+    pub async fn write_text_file(
+        &self,
+        request: WriteTextFileRequest,
+    ) -> Result<WriteTextFileResponse, Error> {
+        if !self.services.write_text_file {
+            return Err(Error::method_not_found());
+        }
+        if request.content.len() > self.services.max_file_bytes {
+            return Err(Error::invalid_request().data("file exceeds ACP write limit"));
+        }
+        let path = self.resolve_write_path(&request.path).await?;
+        tokio::fs::write(path, request.content)
+            .await
+            .map_err(|_| Error::internal_error())?;
+        Ok(WriteTextFileResponse::new())
+    }
+
+    pub async fn create_terminal(
+        &self,
+        request: CreateTerminalRequest,
+    ) -> Result<CreateTerminalResponse, Error> {
+        if !self.services.terminal {
+            return Err(Error::method_not_found());
+        }
+        let cwd = match request.cwd.as_deref() {
+            Some(path) => self.resolve_existing_path(path).await?,
+            None => self.cwd.clone(),
+        };
+        {
+            let terminals = self.terminals.lock().await;
+            if terminals.len() >= self.services.max_terminals {
+                return Err(Error::request_cancelled().data("ACP terminal limit reached"));
+            }
         }
 
-        Ok(())
+        let mut command = Command::new(&request.command);
+        command
+            .args(&request.args)
+            .current_dir(cwd)
+            .kill_on_drop(true)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, value) in &self.terminal_env {
+            command.env(key, value);
+        }
+        for variable in request.env {
+            if !is_sensitive_env_name(&variable.name) {
+                command.env(variable.name, variable.value);
+            }
+        }
+        let mut child = command.group_spawn().map_err(|_| Error::internal_error())?;
+        let stdout = child.inner().stdout.take();
+        let stderr = child.inner().stderr.take();
+        let terminal_id = uuid::Uuid::new_v4().to_string();
+        let max_output_bytes = request
+            .output_byte_limit
+            .map(|value| value.min(self.services.max_terminal_output_bytes as u64) as usize)
+            .unwrap_or(self.services.max_terminal_output_bytes);
+        let output = Arc::new(Mutex::new(TerminalBuffer::new(max_output_bytes)));
+        let mut readers = Vec::new();
+        if let Some(stdout) = stdout {
+            readers.push(tokio::spawn(capture_terminal_output(
+                stdout,
+                output.clone(),
+            )));
+        }
+        if let Some(stderr) = stderr {
+            readers.push(tokio::spawn(capture_terminal_output(
+                stderr,
+                output.clone(),
+            )));
+        }
+
+        self.terminals.lock().await.insert(
+            terminal_id.clone(),
+            TerminalRecord {
+                session_id: request.session_id.0.to_string(),
+                child: Arc::new(Mutex::new(child)),
+                output,
+                exit_status: Arc::new(Mutex::new(None)),
+                readers: Arc::new(Mutex::new(readers)),
+            },
+        );
+        Ok(CreateTerminalResponse::new(TerminalId::new(terminal_id)))
     }
 
-    // File system operations - not implemented as we don't expose FS
-    async fn write_text_file(
+    pub async fn terminal_output(
         &self,
-        _args: acp::WriteTextFileRequest,
-    ) -> Result<acp::WriteTextFileResponse, acp::Error> {
-        Err(acp::Error::method_not_found())
+        request: TerminalOutputRequest,
+    ) -> Result<TerminalOutputResponse, Error> {
+        let record = self
+            .terminal_record(&request.session_id.0, &request.terminal_id.0)
+            .await?;
+        refresh_terminal_status(&record).await?;
+        if record.exit_status.lock().await.is_some() {
+            drain_terminal_readers(&record).await;
+        }
+        let output = record.output.lock().await;
+        Ok(
+            TerminalOutputResponse::new(output.content.clone(), output.truncated)
+                .exit_status(record.exit_status.lock().await.clone()),
+        )
     }
 
-    async fn read_text_file(
+    pub async fn wait_for_terminal_exit(
         &self,
-        _args: acp::ReadTextFileRequest,
-    ) -> Result<acp::ReadTextFileResponse, acp::Error> {
-        Err(acp::Error::method_not_found())
+        request: WaitForTerminalExitRequest,
+    ) -> Result<WaitForTerminalExitResponse, Error> {
+        let record = self
+            .terminal_record(&request.session_id.0, &request.terminal_id.0)
+            .await?;
+        if let Some(status) = record.exit_status.lock().await.clone() {
+            drain_terminal_readers(&record).await;
+            return Ok(WaitForTerminalExitResponse::new(status));
+        }
+        let status = record
+            .child
+            .lock()
+            .await
+            .wait()
+            .await
+            .map_err(|_| Error::internal_error())?;
+        let status = terminal_exit_status(status);
+        *record.exit_status.lock().await = Some(status.clone());
+        drain_terminal_readers(&record).await;
+        Ok(WaitForTerminalExitResponse::new(status))
     }
 
-    // Terminal operations - not implemented
-    async fn create_terminal(
+    pub async fn kill_terminal(
         &self,
-        _args: acp::CreateTerminalRequest,
-    ) -> Result<acp::CreateTerminalResponse, acp::Error> {
-        Err(acp::Error::method_not_found())
+        request: KillTerminalRequest,
+    ) -> Result<KillTerminalResponse, Error> {
+        let record = {
+            let terminals = self.terminals.lock().await;
+            terminals.get(request.terminal_id.0.as_ref()).cloned()
+        };
+        let Some(record) = record else {
+            return Ok(KillTerminalResponse::new());
+        };
+        if record.session_id != request.session_id.0.as_ref() {
+            return Err(Error::invalid_params());
+        }
+        let mut child = record.child.lock().await;
+        if child
+            .try_wait()
+            .map_err(|_| Error::internal_error())?
+            .is_none()
+        {
+            child.start_kill().map_err(|_| Error::internal_error())?;
+        }
+        Ok(KillTerminalResponse::new())
     }
 
-    async fn terminal_output(
+    pub async fn release_terminal(
         &self,
-        _args: acp::TerminalOutputRequest,
-    ) -> Result<acp::TerminalOutputResponse, acp::Error> {
-        Err(acp::Error::method_not_found())
+        request: ReleaseTerminalRequest,
+    ) -> Result<ReleaseTerminalResponse, Error> {
+        let record = self
+            .terminals
+            .lock()
+            .await
+            .remove(request.terminal_id.0.as_ref());
+        let Some(record) = record else {
+            return Ok(ReleaseTerminalResponse::new());
+        };
+        if record.session_id != request.session_id.0.as_ref() {
+            return Err(Error::invalid_params());
+        }
+        let mut child = record.child.lock().await;
+        if child
+            .try_wait()
+            .map_err(|_| Error::internal_error())?
+            .is_none()
+        {
+            let _ = child.kill().await;
+        }
+        drop(child);
+        drain_terminal_readers(&record).await;
+        Ok(ReleaseTerminalResponse::new())
     }
 
-    async fn release_terminal(
+    pub async fn shutdown_terminals(&self) {
+        let records = self
+            .terminals
+            .lock()
+            .await
+            .drain()
+            .map(|(_, record)| record)
+            .collect::<Vec<_>>();
+        for record in records {
+            let mut child = record.child.lock().await;
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill().await;
+            }
+            drop(child);
+            drain_terminal_readers(&record).await;
+        }
+    }
+
+    async fn terminal_record(
         &self,
-        _args: acp::ReleaseTerminalRequest,
-    ) -> Result<acp::ReleaseTerminalResponse, acp::Error> {
-        Err(acp::Error::method_not_found())
+        session_id: &str,
+        terminal_id: &str,
+    ) -> Result<TerminalRecord, Error> {
+        if !self.services.terminal {
+            return Err(Error::method_not_found());
+        }
+        let record = self
+            .terminals
+            .lock()
+            .await
+            .get(terminal_id)
+            .cloned()
+            .ok_or_else(|| Error::resource_not_found(None))?;
+        if record.session_id != session_id {
+            return Err(Error::invalid_params());
+        }
+        Ok(record)
     }
 
-    async fn wait_for_terminal_exit(
-        &self,
-        _args: acp::WaitForTerminalExitRequest,
-    ) -> Result<acp::WaitForTerminalExitResponse, acp::Error> {
-        Err(acp::Error::method_not_found())
+    async fn resolve_existing_path(&self, requested: &Path) -> Result<PathBuf, Error> {
+        reject_parent_components(requested)?;
+        let candidate = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            self.cwd.join(requested)
+        };
+        let canonical = tokio::fs::canonicalize(candidate)
+            .await
+            .map_err(|_| Error::resource_not_found(None))?;
+        self.require_allowed(&canonical).await
     }
 
-    async fn kill_terminal_command(
-        &self,
-        _args: acp::KillTerminalCommandRequest,
-    ) -> Result<acp::KillTerminalCommandResponse, acp::Error> {
-        Err(acp::Error::method_not_found())
+    async fn resolve_write_path(&self, requested: &Path) -> Result<PathBuf, Error> {
+        reject_parent_components(requested)?;
+        let candidate = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            self.cwd.join(requested)
+        };
+        let Some(parent) = candidate.parent() else {
+            return Err(Error::invalid_params());
+        };
+        let canonical_parent = tokio::fs::canonicalize(parent)
+            .await
+            .map_err(|_| Error::resource_not_found(None))?;
+        let canonical_parent = self.require_allowed(&canonical_parent).await?;
+        let Some(name) = candidate.file_name() else {
+            return Err(Error::invalid_params());
+        };
+        Ok(canonical_parent.join(name))
     }
 
-    // Extension methods
-    async fn ext_method(&self, _args: acp::ExtRequest) -> Result<acp::ExtResponse, acp::Error> {
-        Err(acp::Error::method_not_found())
+    async fn require_allowed(&self, path: &Path) -> Result<PathBuf, Error> {
+        for root in std::iter::once(&self.cwd).chain(self.additional_directories.iter()) {
+            let canonical_root = tokio::fs::canonicalize(root)
+                .await
+                .map_err(|_| Error::invalid_params())?;
+            if path.starts_with(&canonical_root) {
+                return Ok(path.to_path_buf());
+            }
+        }
+        Err(Error::invalid_params().data("path is outside the ACP workspace roots"))
+    }
+}
+
+#[derive(Clone)]
+struct TerminalRecord {
+    session_id: String,
+    child: Arc<Mutex<AsyncGroupChild>>,
+    output: Arc<Mutex<TerminalBuffer>>,
+    exit_status: Arc<Mutex<Option<TerminalExitStatus>>>,
+    readers: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+struct TerminalBuffer {
+    content: String,
+    max_bytes: usize,
+    truncated: bool,
+}
+
+impl TerminalBuffer {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            content: String::new(),
+            max_bytes,
+            truncated: false,
+        }
     }
 
-    async fn ext_notification(&self, _args: acp::ExtNotification) -> Result<(), acp::Error> {
-        Ok(())
+    fn push(&mut self, text: &str) {
+        self.content.push_str(text);
+        if self.content.len() <= self.max_bytes {
+            return;
+        }
+        self.truncated = true;
+        let mut start = self.content.len().saturating_sub(self.max_bytes);
+        while start < self.content.len() && !self.content.is_char_boundary(start) {
+            start += 1;
+        }
+        self.content.drain(..start);
+    }
+}
+
+async fn capture_terminal_output(
+    mut reader: impl AsyncRead + Unpin,
+    output: Arc<Mutex<TerminalBuffer>>,
+) {
+    let mut chunk = [0_u8; 8192];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(count) => {
+                output
+                    .lock()
+                    .await
+                    .push(&String::from_utf8_lossy(&chunk[..count]));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+async fn refresh_terminal_status(record: &TerminalRecord) -> Result<(), Error> {
+    if record.exit_status.lock().await.is_some() {
+        return Ok(());
+    }
+    if let Some(status) = record
+        .child
+        .lock()
+        .await
+        .try_wait()
+        .map_err(|_| Error::internal_error())?
+    {
+        *record.exit_status.lock().await = Some(terminal_exit_status(status));
+    }
+    Ok(())
+}
+
+async fn drain_terminal_readers(record: &TerminalRecord) {
+    let readers = record.readers.lock().await.drain(..).collect::<Vec<_>>();
+    for reader in readers {
+        let _ = reader.await;
+    }
+}
+
+fn terminal_exit_status(status: ExitStatus) -> TerminalExitStatus {
+    let code = status.code().and_then(|code| u32::try_from(code).ok());
+    TerminalExitStatus::new().exit_code(code)
+}
+
+fn is_sensitive_env_name(name: &str) -> bool {
+    let normalized = name.to_ascii_uppercase();
+    ["TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY"]
+        .iter()
+        .any(|fragment| normalized.contains(fragment))
+}
+
+fn select_option(
+    request: &RequestPermissionRequest,
+    preference: &[PermissionOptionKind],
+) -> RequestPermissionResponse {
+    let option = preference
+        .iter()
+        .find_map(|kind| request.options.iter().find(|option| option.kind == *kind));
+    match option {
+        Some(option) => {
+            debug!(
+                option_kind = ?option.kind,
+                "resolved ACP permission request"
+            );
+            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(option.option_id.clone()),
+            ))
+        }
+        None => RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
+    }
+}
+
+fn reject_parent_components(path: &Path) -> Result<(), Error> {
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(Error::invalid_params().data("parent path components are not allowed"));
+    }
+    Ok(())
+}
+
+fn select_lines(content: &str, line: Option<u32>, limit: Option<u32>) -> String {
+    let start = line.unwrap_or(1).saturating_sub(1) as usize;
+    let limit = limit.map(|value| value as usize).unwrap_or(usize::MAX);
+    content
+        .lines()
+        .skip(start)
+        .take(limit)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use agent_client_protocol::schema::v1::{
+        CreateTerminalRequest, PermissionOption, SessionId, TerminalOutputRequest, ToolCallId,
+        ToolCallUpdate, ToolCallUpdateFields, WaitForTerminalExitRequest,
+    };
+
+    use super::*;
+
+    fn request(kinds: &[PermissionOptionKind]) -> RequestPermissionRequest {
+        RequestPermissionRequest::new(
+            SessionId::new("session"),
+            ToolCallUpdate::new(ToolCallId::new("tool"), ToolCallUpdateFields::new()),
+            kinds
+                .iter()
+                .enumerate()
+                .map(|(index, kind)| {
+                    PermissionOption::new(format!("option-{index}"), "choice", *kind)
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn auto_allow_never_falls_back_to_reject() {
+        let response = select_option(
+            &request(&[PermissionOptionKind::RejectOnce]),
+            &[
+                PermissionOptionKind::AllowAlways,
+                PermissionOptionKind::AllowOnce,
+            ],
+        );
+        assert!(matches!(
+            response.outcome,
+            RequestPermissionOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn auto_reject_prefers_reject_always() {
+        let response = select_option(
+            &request(&[
+                PermissionOptionKind::RejectOnce,
+                PermissionOptionKind::RejectAlways,
+            ]),
+            &[
+                PermissionOptionKind::RejectAlways,
+                PermissionOptionKind::RejectOnce,
+            ],
+        );
+        let RequestPermissionOutcome::Selected(selected) = response.outcome else {
+            panic!("expected selected response");
+        };
+        assert_eq!(selected.option_id.0.as_ref(), "option-1");
+    }
+
+    #[test]
+    fn parent_path_is_rejected() {
+        assert!(reject_parent_components(Path::new("../secret")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_guard_rejects_symlink_escape() {
+        let root = std::env::temp_dir().join(format!("openteams-acp-fs-{}", uuid::Uuid::new_v4()));
+        let outside =
+            std::env::temp_dir().join(format!("openteams-acp-outside-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.expect("root");
+        tokio::fs::create_dir_all(&outside).await.expect("outside");
+        tokio::fs::write(outside.join("secret"), "secret")
+            .await
+            .expect("secret");
+        std::os::unix::fs::symlink(&outside, root.join("escape")).expect("symlink");
+
+        let (output, output_task) = AcpOutput::start(tokio::io::sink());
+        let client = AcpClient::new(
+            output.clone(),
+            None,
+            AcpApprovalPolicy::AutoReject,
+            CancellationToken::new(),
+            root.clone(),
+            Vec::new(),
+            AcpClientServicePolicy {
+                read_text_file: true,
+                ..AcpClientServicePolicy::default()
+            },
+            HashMap::new(),
+        );
+        let result = client
+            .read_text_file(ReadTextFileRequest::new(
+                SessionId::new("session"),
+                root.join("escape").join("secret"),
+            ))
+            .await;
+        assert!(result.is_err());
+
+        drop(client);
+        drop(output);
+        output_task
+            .await
+            .expect("output task")
+            .expect("output flush");
+        tokio::fs::remove_dir_all(root).await.expect("remove root");
+        tokio::fs::remove_dir_all(outside)
+            .await
+            .expect("remove outside");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_lifecycle_is_bounded_and_idempotent() {
+        let root =
+            std::env::temp_dir().join(format!("openteams-acp-terminal-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.expect("root");
+        let (output, output_task) = AcpOutput::start(tokio::io::sink());
+        let client = AcpClient::new(
+            output.clone(),
+            None,
+            AcpApprovalPolicy::AutoReject,
+            CancellationToken::new(),
+            root.clone(),
+            Vec::new(),
+            AcpClientServicePolicy {
+                terminal: true,
+                max_terminal_output_bytes: 5,
+                ..AcpClientServicePolicy::default()
+            },
+            HashMap::new(),
+        );
+        let session_id = SessionId::new("session");
+        let created = client
+            .create_terminal(
+                CreateTerminalRequest::new(session_id.clone(), "/bin/sh")
+                    .args(vec!["-c".to_string(), "printf 123456789".to_string()]),
+            )
+            .await
+            .expect("create terminal");
+        let waited = client
+            .wait_for_terminal_exit(WaitForTerminalExitRequest::new(
+                session_id.clone(),
+                created.terminal_id.clone(),
+            ))
+            .await
+            .expect("wait terminal");
+        assert_eq!(waited.exit_status.exit_code, Some(0));
+        let terminal_output = client
+            .terminal_output(TerminalOutputRequest::new(
+                session_id.clone(),
+                created.terminal_id.clone(),
+            ))
+            .await
+            .expect("terminal output");
+        assert!(terminal_output.truncated);
+        assert_eq!(terminal_output.output, "56789");
+        let release = ReleaseTerminalRequest::new(session_id, created.terminal_id);
+        client
+            .release_terminal(release.clone())
+            .await
+            .expect("release terminal");
+        client
+            .release_terminal(release)
+            .await
+            .expect("release terminal twice");
+
+        drop(client);
+        drop(output);
+        output_task
+            .await
+            .expect("output task")
+            .expect("output flush");
+        tokio::fs::remove_dir_all(root).await.expect("remove root");
     }
 }

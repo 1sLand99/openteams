@@ -2,14 +2,15 @@
 
 状态：Proposed  
 目标版本：ACP v1 stable / Rust SDK 1.0  
-适用范围：`crates/executors`、Chat Runner、Workflow Runtime、Agent Runtime 配置  
+适用范围：`crates/executors`、Chat Runner、Workflow Runtime、Gemini/Qwen Runtime 配置
 不在范围：ACP v2、远程 HTTP/WebSocket transport、厂商私有能力扩展
 
 ## 1. 摘要
 
 OpenTeams 将新增一个厂商无关的 ACP v1 通用执行器。它的协议行为只由 ACP v1
 稳定规范、初始化返回的能力以及 Session 返回的配置选项决定，不以 Gemini CLI、
-Qwen Code 或其他已接入 Agent 的现状反推通用设计。
+Qwen Code 的现状反推通用设计。通用核心只作为 Gemini/Qwen 的内部执行基础，并通过
+隐藏的 QA runner 验证；本阶段不向用户开放第三方 ACP Agent 接入。
 
 核心决策：
 
@@ -26,6 +27,8 @@ Qwen Code 或其他已接入 Agent 的现状反推通用设计。
    Chat、Workflow、审批、日志、Session ID 和 token 统计。
 8. MCP Server 是首期必做能力；每次创建或恢复 Session 都传递本次运行明确允许的
    MCP Server 完整列表，不能依赖厂商配置文件被 Agent 隐式加载。
+9. 不增加生产环境可选的 Generic ACP runner、公开配置 Schema 或配置 UI；协议核心
+   通过 test/`qa-mode` runner 接入 Free Chat 和 Workflow 做集成验证。
 
 ## 2. 设计真源
 
@@ -93,9 +96,9 @@ Qwen Code 或其他已接入 Agent 的现状反推通用设计。
 
 ### 4.1 目标
 
-- 对任意正确实现 ACP v1 稳定协议的本地 CLI Agent 提供统一执行路径。
+- 为 Gemini、Qwen 提供同一套符合 ACP v1 稳定协议的内部执行路径。
 - 完整执行初始化与能力协商，并只调用 Agent 声明支持的可选方法。
-- 为模型、推理、模式和 Agent 自定义配置提供统一配置入口。
+- 为模型、推理、模式和 Agent 自定义配置提供统一内部配置机制。
 - 支持明确、可测试的审批策略。
 - 支持 ACP v1 客户端文件系统和 Terminal 服务，并执行工作区安全约束。
 - 支持 ACP v1 MCP Server 配置解析、transport 能力门控，并在 new/load/resume 时
@@ -113,6 +116,7 @@ Qwen Code 或其他已接入 Agent 的现状反推通用设计。
   stdio、HTTP 和 SSE MCP Server 描述。
 - 不要求所有 Agent 实现所有可选能力。
 - 不在第一阶段实现 ACP Registry 自动安装和升级。
+- 不向用户开放第三方 Generic ACP runner、启动命令配置或专用配置 UI。
 - 不重构所有执行器公共接口，也不改变非 ACP Agent 的运行逻辑。
 - 不把 Agent 私有扩展提升为 OpenTeams 通用能力。
 
@@ -135,7 +139,7 @@ Qwen Code 或其他已接入 Agent 的现状反推通用设计。
 ## 6. 总体架构
 
 ```text
-Gemini/Qwen/任意 ACP Agent 启动描述
+Gemini/Qwen/ACP QA fixture 启动描述
                  │
                  ▼
         AcpRuntime（厂商无关）
@@ -314,7 +318,7 @@ OpenTeams 固定请求 `ProtocolVersion::V1`，同时发送：
 
 - Gemini/Qwen 的 `yolo: true` 迁移为 `auto_allow`。
 - `yolo: false` 迁移为 `ask`。
-- Generic ACP 新配置默认使用 `ask`。
+- 通用 ACP 核心默认使用 `ask`。
 - 迁移期间保留旧 profile 的反序列化兼容，但新配置和 UI 不再暴露 `yolo`。
 
 ### 8.3 用户拒绝
@@ -682,6 +686,7 @@ InitializeError
 ProtocolVersionMismatch
 AuthenticationRequired / AuthenticationFailed
 CapabilityNotSupported
+FollowUpNotSupported
 SessionError
 ConfigOptionRejected
 PermissionError
@@ -695,6 +700,8 @@ Cancelled
 错误策略：
 
 - initialize、auth、new/resume/load、prompt 失败是 run 失败。
+- Follow-up 时 Agent 同时缺少 `session/resume` 与 `session/load` 能力，返回
+  `FollowUpNotSupported`；已选择的 session 方法调用失败仍归为 `SessionError`。
 - 可选配置无法应用时 warning 并使用 Agent 默认值。
 - 可选 update 无法显示时保留 transcript 并降级，不结束 run。
 - JSON-RPC method not found 仅在能力声明与实际行为矛盾时记录兼容性错误。
@@ -725,21 +732,19 @@ Cancelled
 - Session ID 从日志流进入 DB 的现有持久化路径。
 - changed-files、run record、activity、token metadata 等外围能力。
 
-### 15.2 新增 Generic ACP runner
+### 15.2 新增隐藏 ACP QA runner
 
-在 `CodingAgent` 增加 `Acp` variant，对外 wire name 为 `ACP`。第一阶段 Generic ACP
-profile 至少配置：
+不在生产 `CodingAgent`/`BaseCodingAgent` 中增加对用户可见的 `ACP` runner。通用核心
+通过 `test` 或 `qa-mode` 下的 `AcpQaExecutor` 接入，必要时使用仅 QA build 可见的
+`ACP_QA` wire value，以验证：
 
-- Agent ID。
-- Base command。
-- Additional params。
-- Approval policy。
-- model、thought level、mode 偏好。
-- 精确 config option values。
-- 是否开启 Client filesystem/terminal。
+- `StandardCodingAgentExecutor` 的 spawn/follow-up 契约。
+- Free Chat 与 Workflow 的 Session ID、事件、审批、取消和退出投影。
+- MCP、config options、FS/Terminal 和错误路径。
+- fake Agent 的能力组合、背压与确定性 drain。
 
-同时增加 `acp.json` schema 和 Agent Runtime 展示信息。模型列表以运行时 Session
-返回的 config options 为准；没有启动 Session 时不伪造模型列表。
+QA runner 的 command、Session 偏好和安全策略来自测试 fixture 或 QA 配置，不写入生产
+默认 profile，不进入 Agent Runtime 列表，也不生成 `acp.json` 或前端配置 UI。
 
 ### 15.3 现有成员配置映射
 
@@ -763,8 +768,8 @@ config option 时才实际应用。
 | `crates/executors/src/executors/acp/mcp.rs` | canonical MCP 解析、allowlist、协议转换和能力门控 |
 | `crates/executors/src/executors/acp/events.rs` | 唯一 ACP update 转换 |
 | `crates/executors/src/executors/acp/output.rs` | 三通道输出、有界队列、transcript、drain barrier |
+| `crates/executors/src/executors/acp/qa.rs` | `test`/`qa-mode` 隐藏 runner |
 | `crates/executors/src/executors/acp/tests.rs` | fake Agent 与协议一致性测试 |
-| `crates/server/shared/schemas/acp.json` | Generic ACP 配置 Schema |
 
 ### 16.2 重写或修改
 
@@ -775,16 +780,15 @@ config option 时才实际应用。
 | `crates/executors/src/executors/acp/client.rs` | 审批策略、FS、Terminal、认证回调 |
 | `crates/executors/src/executors/acp/session.rs` | 改为原生 Session 生命周期和 config options |
 | `crates/executors/src/executors/acp/normalize_logs.rs` | 只保留 OpenTeams 投影 |
-| `crates/executors/src/executors/mod.rs` | 增加 `CodingAgent::Acp` |
-| `crates/executors/src/model_sync.rs` | Generic ACP member model/thought mapping |
+| `crates/executors/src/executors/mod.rs` | 仅在 `qa-mode` 增加隐藏 `CodingAgent::AcpQa` |
+| `crates/executors/src/model_sync.rs` | Gemini/Qwen member model/thought 到 ACP 偏好的映射 |
 | `crates/executors/src/mcp_config.rs` | 提供不经过厂商 adapter 的 canonical MCP definitions |
-| `crates/executors/default_profiles.json` | 增加 ACP 默认配置，迁移厂商 approval 默认值 |
-| `crates/services/src/services/agent_runtime.rs` | ACP 配置、状态与 reasoning capability 展示 |
+| `crates/executors/default_profiles.json` | 迁移 Gemini/Qwen approval 默认值 |
+| `crates/services/src/services/agent_runtime.rs` | Gemini/Qwen ACP 配置与 reasoning capability 映射 |
 | `crates/services/src/services/member_execution.rs` | 将成员 MCP allowlist 合并到 effective ACP config |
 | `crates/executors/src/executors/gemini.rs` | 通用核心稳定后改为启动描述/兼容适配 |
 | `crates/executors/src/executors/qwen.rs` | 通用核心稳定后改为启动描述/兼容适配 |
-| `shared/types.ts` | 通过类型生成更新，禁止手工编辑 |
-| `frontend/src/pages/AgentsPage.tsx` 等 | 展示 ACP 启动、审批和 Session 偏好配置 |
+| `shared/types.ts` | Gemini/Qwen 公共配置变化时通过类型生成更新，禁止手工编辑 |
 
 ### 16.3 删除
 
@@ -831,7 +835,7 @@ Gemini/Qwen 迁移并通过回归后删除：
 - 实现 permission、FS、Terminal。
 - 实现统一事件映射。
 - 使用 fake ACP Agent 完成一致性测试。
-- 新增 Generic ACP runner；暂不迁移 Gemini/Qwen。
+- 新增仅供 test/`qa-mode` 使用的隐藏 ACP QA runner；不进入生产配置或 UI。
 
 ### 阶段 2：Gemini 适配
 
@@ -928,8 +932,10 @@ pnpm run frontend:check
 12. Run 完成使用 drain acknowledgement，不依赖固定 sleep，尾部事件无丢失。
 13. transcript 和 stderr 通过脱敏、限速、单条与总量限制测试。
 14. ACP 核心不存在 Gemini/Qwen/provider 硬编码。
-15. Gemini/Qwen 迁移后 Free Chat 与 Workflow 现有关键功能无回归。
-16. 删除清单中的旧代码已按前置条件清理，没有永久双路径。
+15. 隐藏 ACP QA runner 可覆盖 Free Chat 与 Workflow 集成，但在生产 Agent Runtime、
+    默认 profile、公共 wire types 和前端 UI 中均不可见。
+16. Gemini/Qwen 迁移后 Free Chat 与 Workflow 现有关键功能无回归。
+17. 删除清单中的旧代码已按前置条件清理，没有永久双路径。
 
 ## 20. 推迟事项
 
@@ -938,6 +944,7 @@ pnpm run frontend:check
 - ACP Registry 自动安装、升级和分发。
 - 远程 HTTP/WebSocket transport。
 - ACP v2 与双栈协商。
+- 面向用户的第三方 Generic ACP runner、启动命令配置和专用 UI。
 - Agent 私有 extension 的产品化展示。
 - 跨 Client 的 Session 浏览与高级管理 UI。
 

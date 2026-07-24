@@ -4,13 +4,13 @@ use async_trait::async_trait;
 use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use tokio::fs;
 use ts_rs::TS;
-use uuid::Uuid;
 use workspace_utils::msg_store::MsgStore;
 
-pub use super::acp::AcpAgentHarness;
+use super::acp::{
+    AcpAgentHarness, AcpApprovalPolicy,
+    mcp::{load_mcp_servers, write_mcp_isolation_settings},
+};
 use crate::{
     approvals::ExecutorApprovalService,
     command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
@@ -51,107 +51,54 @@ pub struct Gemini {
 
 impl Gemini {
     const BASE_COMMAND: &'static str = "npx -y @google/gemini-cli@0.45.0";
-    const MAX_RESUME_PROMPT_BYTES: usize = 160 * 1024;
-    const OPENTEAMS_MODEL_ALIAS: &'static str = "openteams-member";
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         let mut builder = CommandBuilder::new(Self::BASE_COMMAND);
-
-        if self.thinking_effort.as_deref().is_some_and(has_value) {
-            builder = builder.extend_params(["--model", Self::OPENTEAMS_MODEL_ALIAS]);
-        } else if let Some(model) = &self.model {
-            builder = builder.extend_params(["--model", model.as_str()]);
-        }
-
-        if self.yolo.unwrap_or(false) {
-            builder = builder.extend_params(["--yolo"]);
-            builder = builder.extend_params(["--allowed-tools", "run_shell_command"]);
-        }
 
         builder = builder.extend_params(["--acp"]);
 
         apply_overrides(builder, &self.cmd)
     }
 
-    async fn env_with_per_run_settings(
+    async fn acp_harness(&self) -> Result<AcpAgentHarness, ExecutorError> {
+        let mut harness =
+            AcpAgentHarness::new().with_approval_policy(if self.yolo.unwrap_or(false) {
+                AcpApprovalPolicy::AutoAllow
+            } else {
+                AcpApprovalPolicy::Ask
+            });
+        if let Some(model) = self
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            harness = harness.with_model(model);
+        }
+        if let Some(effort) = self
+            .thinking_effort
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            harness = harness.with_thought_level(effort);
+        }
+        let config_path = self.default_mcp_config_path();
+        let servers = load_mcp_servers(config_path.as_deref()).await?;
+        Ok(harness.with_mcp_servers(servers))
+    }
+
+    async fn acp_runtime_env(
         &self,
         current_dir: &Path,
         env: &ExecutionEnv,
     ) -> Result<ExecutionEnv, ExecutorError> {
-        let Some(effort) = self
-            .thinking_effort
-            .as_deref()
-            .filter(|value| has_value(value))
-        else {
-            return Ok(env.clone());
-        };
-
-        let settings_path = write_internal_settings(
-            current_dir,
-            "gemini-settings",
-            &gemini_thinking_settings(self.model.as_deref(), effort),
-        )
-        .await?;
-
-        let mut next_env = env.clone();
-        next_env.insert(
+        let path = write_mcp_isolation_settings(current_dir, "gemini-acp-settings").await?;
+        let mut runtime_env = env.clone();
+        runtime_env.insert(
             "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
-            settings_path.to_string_lossy().to_string(),
+            path.to_string_lossy().to_string(),
         );
-        Ok(next_env)
+        Ok(runtime_env)
     }
-}
-
-fn has_value(value: &str) -> bool {
-    !value.trim().is_empty()
-}
-
-fn gemini_thinking_settings(model: Option<&str>, effort: &str) -> serde_json::Value {
-    let mut model_config = json!({
-        "generateContentConfig": {
-            "thinkingConfig": gemini_thinking_config(effort),
-        }
-    });
-    if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
-        model_config["model"] = json!(model);
-    }
-
-    json!({
-        "modelConfigs": {
-            "aliases": {
-                "openteams-member": {
-                    "modelConfig": model_config,
-                }
-            }
-        }
-    })
-}
-
-fn gemini_thinking_config(effort: &str) -> serde_json::Value {
-    let normalized = effort.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "off" | "none" | "disabled" | "disable" => json!({ "thinkingBudget": 0 }),
-        "low" => json!({ "thinkingLevel": "LOW" }),
-        "medium" => json!({ "thinkingLevel": "MEDIUM" }),
-        "high" | "max" => json!({ "thinkingLevel": "HIGH" }),
-        _ => normalized
-            .parse::<i64>()
-            .map(|budget| json!({ "thinkingBudget": budget.max(0) }))
-            .unwrap_or_else(|_| json!({ "thinkingLevel": effort.trim().to_ascii_uppercase() })),
-    }
-}
-
-async fn write_internal_settings(
-    current_dir: &Path,
-    prefix: &str,
-    value: &serde_json::Value,
-) -> Result<std::path::PathBuf, ExecutorError> {
-    let dir = current_dir.join(".openteams").join("tmp");
-    fs::create_dir_all(&dir).await.map_err(ExecutorError::Io)?;
-    let path = dir.join(format!("{prefix}-{}.json", Uuid::new_v4()));
-    let body = serde_json::to_vec_pretty(value)?;
-    fs::write(&path, body).await.map_err(ExecutorError::Io)?;
-    Ok(path)
 }
 
 #[async_trait]
@@ -187,16 +134,10 @@ impl StandardCodingAgentExecutor for Gemini {
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let harness =
-            AcpAgentHarness::new().with_max_resume_prompt_bytes(Self::MAX_RESUME_PROMPT_BYTES);
+        let harness = self.acp_harness().await?;
+        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
         let gemini_command = self.build_command_builder()?.build_initial()?;
-        let runtime_env = self.env_with_per_run_settings(current_dir, env).await?;
-        let approvals = if self.yolo.unwrap_or(false) {
-            None
-        } else {
-            self.approvals.clone()
-        };
         harness
             .spawn_with_command(
                 current_dir,
@@ -204,7 +145,7 @@ impl StandardCodingAgentExecutor for Gemini {
                 gemini_command,
                 &runtime_env,
                 &self.cmd,
-                approvals,
+                self.approvals.clone(),
             )
             .await
     }
@@ -217,16 +158,10 @@ impl StandardCodingAgentExecutor for Gemini {
         _reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let harness =
-            AcpAgentHarness::new().with_max_resume_prompt_bytes(Self::MAX_RESUME_PROMPT_BYTES);
+        let harness = self.acp_harness().await?;
+        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
         let gemini_command = self.build_command_builder()?.build_follow_up(&[])?;
-        let runtime_env = self.env_with_per_run_settings(current_dir, env).await?;
-        let approvals = if self.yolo.unwrap_or(false) {
-            None
-        } else {
-            self.approvals.clone()
-        };
         harness
             .spawn_follow_up_with_command(
                 current_dir,
@@ -235,7 +170,7 @@ impl StandardCodingAgentExecutor for Gemini {
                 gemini_command,
                 &runtime_env,
                 &self.cmd,
-                approvals,
+                self.approvals.clone(),
             )
             .await
     }

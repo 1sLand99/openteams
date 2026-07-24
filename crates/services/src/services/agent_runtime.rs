@@ -717,6 +717,8 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
         CodingAgent::KimiCode(_) => "kimi".to_string(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => return None,
+        #[cfg(feature = "qa-mode")]
+        CodingAgent::AcpQa(config) => config.command.clone(),
     })
 }
 
@@ -735,6 +737,8 @@ fn cmd_overrides_for_executor(executor: &CodingAgent) -> Option<&CmdOverrides> {
         CodingAgent::KimiCode(config) => Some(&config.cmd),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => None,
+        #[cfg(feature = "qa-mode")]
+        CodingAgent::AcpQa(config) => Some(&config.cmd),
     }
 }
 
@@ -970,7 +974,7 @@ fn reasoning_capability_for_runner(
         | BaseCodingAgent::Copilot
         | BaseCodingAgent::KimiCode => None,
         #[cfg(feature = "qa-mode")]
-        BaseCodingAgent::QaMock => None,
+        BaseCodingAgent::QaMock | BaseCodingAgent::AcpQa => None,
     }
 }
 
@@ -1042,7 +1046,7 @@ fn model_name(config: &CodingAgent) -> Option<&str> {
         CodingAgent::Droid(config) => config.model.as_deref(),
         CodingAgent::KimiCode(config) => config.model.as_deref(),
         #[cfg(feature = "qa-mode")]
-        CodingAgent::QaMock(_) => None,
+        CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => None,
         _ => None,
     }
 }

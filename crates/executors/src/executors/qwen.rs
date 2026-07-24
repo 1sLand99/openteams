@@ -4,19 +4,19 @@ use async_trait::async_trait;
 use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use tokio::fs;
 use ts_rs::TS;
-use uuid::Uuid;
 use workspace_utils::msg_store::MsgStore;
 
+use super::acp::{
+    AcpAgentHarness, AcpApprovalPolicy,
+    mcp::{load_mcp_servers, write_mcp_isolation_settings},
+};
 use crate::{
     approvals::ExecutorApprovalService,
     command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
-        gemini::AcpAgentHarness,
     },
     model_discovery::{
         ProviderKind, cli_model_commands, discover_from_sources, runner_config_paths,
@@ -48,84 +48,53 @@ pub struct QwenCode {
 
 impl QwenCode {
     const BASE_COMMAND: &'static str = "npx -y @qwen-code/qwen-code@0.17.0";
-    const MAX_RESUME_PROMPT_BYTES: usize = 160 * 1024;
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         let mut builder = CommandBuilder::new(Self::BASE_COMMAND);
 
-        if let Some(model) = &self.model {
-            builder = builder.extend_params(["--model", model.as_str()]);
-        }
-
-        if self.yolo.unwrap_or(false) {
-            builder = builder.extend_params(["--yolo"]);
-        }
         builder = builder.extend_params(["--acp"]);
         apply_overrides(builder, &self.cmd)
     }
 
-    async fn env_with_per_run_settings(
+    async fn acp_harness(&self) -> Result<AcpAgentHarness, ExecutorError> {
+        let mut harness =
+            AcpAgentHarness::new().with_approval_policy(if self.yolo.unwrap_or(false) {
+                AcpApprovalPolicy::AutoAllow
+            } else {
+                AcpApprovalPolicy::Ask
+            });
+        if let Some(model) = self
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            harness = harness.with_model(model);
+        }
+        if let Some(effort) = self
+            .thinking_effort
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            harness = harness.with_thought_level(effort);
+        }
+        let config_path = self.default_mcp_config_path();
+        let servers = load_mcp_servers(config_path.as_deref()).await?;
+        Ok(harness.with_mcp_servers(servers))
+    }
+
+    async fn acp_runtime_env(
         &self,
         current_dir: &Path,
         env: &ExecutionEnv,
     ) -> Result<ExecutionEnv, ExecutorError> {
-        let Some(effort) = self
-            .thinking_effort
-            .as_deref()
-            .filter(|value| has_value(value))
-        else {
-            return Ok(env.clone());
-        };
-
-        let settings_path = write_internal_settings(
-            current_dir,
-            "qwen-settings",
-            &json!({
-                "model": {
-                    "generationConfig": {
-                        "reasoning": qwen_reasoning_config(effort),
-                    }
-                }
-            }),
-        )
-        .await?;
-
-        let mut next_env = env.clone();
-        next_env.insert(
+        let path = write_mcp_isolation_settings(current_dir, "qwen-acp-settings").await?;
+        let mut runtime_env = env.clone();
+        runtime_env.insert(
             "QWEN_CODE_SYSTEM_SETTINGS_PATH",
-            settings_path.to_string_lossy().to_string(),
+            path.to_string_lossy().to_string(),
         );
-        Ok(next_env)
+        Ok(runtime_env)
     }
-}
-
-fn has_value(value: &str) -> bool {
-    !value.trim().is_empty()
-}
-
-fn qwen_reasoning_config(effort: &str) -> serde_json::Value {
-    let normalized = effort.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "off" | "none" | "disabled" | "disable" => json!(false),
-        "low" | "medium" | "high" | "max" => json!({ "effort": normalized }),
-        _ => normalized
-            .parse::<i64>()
-            .map(|budget| json!({ "budget_tokens": budget.max(0) }))
-            .unwrap_or_else(|_| json!({ "effort": normalized })),
-    }
-}
-
-async fn write_internal_settings(
-    current_dir: &Path,
-    prefix: &str,
-    value: &serde_json::Value,
-) -> Result<std::path::PathBuf, ExecutorError> {
-    let dir = current_dir.join(".openteams").join("tmp");
-    fs::create_dir_all(&dir).await.map_err(ExecutorError::Io)?;
-    let path = dir.join(format!("{prefix}-{}.json", Uuid::new_v4()));
-    let body = serde_json::to_vec_pretty(value)?;
-    fs::write(&path, body).await.map_err(ExecutorError::Io)?;
-    Ok(path)
 }
 
 #[async_trait]
@@ -163,14 +132,8 @@ impl StandardCodingAgentExecutor for QwenCode {
     ) -> Result<SpawnedChild, ExecutorError> {
         let qwen_command = self.build_command_builder()?.build_initial()?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
-        let harness = AcpAgentHarness::with_session_namespace("qwen_sessions")
-            .with_max_resume_prompt_bytes(Self::MAX_RESUME_PROMPT_BYTES);
-        let runtime_env = self.env_with_per_run_settings(current_dir, env).await?;
-        let approvals = if self.yolo.unwrap_or(false) {
-            None
-        } else {
-            self.approvals.clone()
-        };
+        let harness = self.acp_harness().await?;
+        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
         harness
             .spawn_with_command(
                 current_dir,
@@ -178,7 +141,7 @@ impl StandardCodingAgentExecutor for QwenCode {
                 qwen_command,
                 &runtime_env,
                 &self.cmd,
-                approvals,
+                self.approvals.clone(),
             )
             .await
     }
@@ -193,14 +156,8 @@ impl StandardCodingAgentExecutor for QwenCode {
     ) -> Result<SpawnedChild, ExecutorError> {
         let qwen_command = self.build_command_builder()?.build_follow_up(&[])?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
-        let harness = AcpAgentHarness::with_session_namespace("qwen_sessions")
-            .with_max_resume_prompt_bytes(Self::MAX_RESUME_PROMPT_BYTES);
-        let runtime_env = self.env_with_per_run_settings(current_dir, env).await?;
-        let approvals = if self.yolo.unwrap_or(false) {
-            None
-        } else {
-            self.approvals.clone()
-        };
+        let harness = self.acp_harness().await?;
+        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
         harness
             .spawn_follow_up_with_command(
                 current_dir,
@@ -209,7 +166,7 @@ impl StandardCodingAgentExecutor for QwenCode {
                 qwen_command,
                 &runtime_env,
                 &self.cmd,
-                approvals,
+                self.approvals.clone(),
             )
             .await
     }
