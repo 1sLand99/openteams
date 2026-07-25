@@ -43,6 +43,7 @@ assert.ok(windowSource.includes("pendingActionType === 'stop-execution'"));
 assert.ok(windowSource.includes('side="bottom"'));
 assert.ok(windowSource.includes('align="end"'));
 assert.ok(windowSource.includes('workflow.controls.terminateExecution'));
+assert.ok(windowSource.includes('data-tooltip-nowrap'));
 assert.ok(windowSource.includes('workflow.confirm.terminateExecutionTitle'));
 assert.equal(windowSource.includes('onPauseAll'), false);
 assert.ok(windowSource.includes('<LoaderCircle'));

@@ -2964,6 +2964,7 @@ export function WorkflowWindow({
               title={t('workflow.reviewSettings.title', {
                 defaultValue: 'Review settings',
               })}
+              data-tooltip-nowrap
               aria-label={t('workflow.reviewSettings.close', {
                 defaultValue: 'Review settings',
               })}

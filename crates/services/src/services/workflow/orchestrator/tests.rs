@@ -1066,6 +1066,44 @@ fn retry_candidate_ignores_max_retry_budget() {
     assert!(WorkflowOrchestrator::validate_step_retry_candidate(&step).is_ok());
 }
 
+#[tokio::test]
+async fn beginning_manual_retry_publishes_active_state_before_agent_execution() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let runner = ChatRunner::new(fixture.db.clone());
+    WorkflowStep::update_status(
+        &fixture.db.pool,
+        fixture.running_step_id,
+        WorkflowStepStatus::Failed,
+    )
+    .await
+    .expect("fail retry target");
+    for step_id in [fixture.review_step_id, fixture.ready_step_id] {
+        WorkflowStep::update_status(&fixture.db.pool, step_id, WorkflowStepStatus::Completed)
+            .await
+            .expect("complete non-target step");
+    }
+    WorkflowExecution::update_status(
+        &fixture.db.pool,
+        fixture.execution.id,
+        WorkflowExecutionStatus::Failed,
+    )
+    .await
+    .expect("fail execution");
+
+    let (execution, step) =
+        WorkflowOrchestrator::begin_step_retry(&fixture.db, &runner, fixture.running_step_id)
+            .await
+            .expect("begin retry");
+
+    assert_eq!(execution.status, WorkflowExecutionStatus::Running);
+    assert_eq!(step.status, WorkflowStepStatus::Ready);
+    let persisted_step = WorkflowStep::find_by_id(&fixture.db.pool, step.id)
+        .await
+        .expect("load retry target")
+        .expect("retry target exists");
+    assert_eq!(persisted_step.status, WorkflowStepStatus::Ready);
+}
+
 #[test]
 fn completed_like_final_review_invariant_requires_only_completed_terminal_steps() {
     assert!(!WorkflowOrchestrator::all_steps_completed_like(&[]));

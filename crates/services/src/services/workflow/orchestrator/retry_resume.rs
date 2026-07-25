@@ -57,6 +57,18 @@ impl WorkflowOrchestrator {
         chat_runner: &ChatRunner,
         step_id: Uuid,
     ) -> Result<(WorkflowExecution, WorkflowStep), OrchestratorError> {
+        let (execution, ready_step) = Self::begin_step_retry(db, chat_runner, step_id).await?;
+        Self::execute_prepared_step_retry(db, chat_runner, &execution, &ready_step).await
+    }
+
+    /// Persist the retry transition before the potentially long-running agent
+    /// call starts. HTTP handlers can return this state immediately and run
+    /// `execute_prepared_step_retry` in the background.
+    pub async fn begin_step_retry(
+        db: &DBService,
+        chat_runner: &ChatRunner,
+        step_id: Uuid,
+    ) -> Result<(WorkflowExecution, WorkflowStep), OrchestratorError> {
         let pool = &db.pool;
         let (execution, ready_step) = Self::prepare_step_retry(pool, chat_runner, step_id).await?;
 
@@ -70,8 +82,19 @@ impl WorkflowOrchestrator {
 
         let execution =
             Self::activate_execution_for_step_retry(pool, chat_runner, &execution).await?;
+
+        Ok((execution, ready_step))
+    }
+
+    pub async fn execute_prepared_step_retry(
+        db: &DBService,
+        chat_runner: &ChatRunner,
+        execution: &WorkflowExecution,
+        ready_step: &WorkflowStep,
+    ) -> Result<(WorkflowExecution, WorkflowStep), OrchestratorError> {
+        let pool = &db.pool;
         let execution =
-            Self::retry_single_step_only(db, chat_runner, &execution, &ready_step).await?;
+            Self::retry_single_step_only(db, chat_runner, execution, ready_step).await?;
 
         let latest_execution = WorkflowExecution::find_by_id(pool, execution.id)
             .await?
@@ -177,6 +200,17 @@ impl WorkflowOrchestrator {
         chat_runner: &ChatRunner,
         step_id: Uuid,
     ) -> Result<(WorkflowExecution, WorkflowStep), OrchestratorError> {
+        let (execution, ready_step, result) =
+            Self::begin_step_review_retry(db, chat_runner, step_id).await?;
+        Self::execute_prepared_step_review_retry(db, chat_runner, &execution, &ready_step, result)
+            .await
+    }
+
+    pub async fn begin_step_review_retry(
+        db: &DBService,
+        chat_runner: &ChatRunner,
+        step_id: Uuid,
+    ) -> Result<(WorkflowExecution, WorkflowStep, WorkflowStepRunResult), OrchestratorError> {
         let pool = &db.pool;
         let step = WorkflowStep::find_by_id(pool, step_id)
             .await?
@@ -232,9 +266,19 @@ impl WorkflowOrchestrator {
         let execution =
             Self::activate_execution_for_step_retry(pool, chat_runner, &execution).await?;
 
-        // Run only the review phase
+        Ok((execution, ready_step, result))
+    }
+
+    pub async fn execute_prepared_step_review_retry(
+        db: &DBService,
+        chat_runner: &ChatRunner,
+        execution: &WorkflowExecution,
+        ready_step: &WorkflowStep,
+        result: WorkflowStepRunResult,
+    ) -> Result<(WorkflowExecution, WorkflowStep), OrchestratorError> {
+        let pool = &db.pool;
         let execution =
-            Self::retry_review_only(db, chat_runner, &execution, &ready_step, result).await?;
+            Self::retry_review_only(db, chat_runner, execution, ready_step, result).await?;
 
         let latest_execution = WorkflowExecution::find_by_id(pool, execution.id)
             .await?

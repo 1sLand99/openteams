@@ -1204,28 +1204,75 @@ pub async fn retry_step(
     let (_step, _execution) = load_step_for_session(pool, &session, step_id).await?;
 
     let retry_target = query.retry_target.as_deref().unwrap_or("task");
-    let (execution, step) = match retry_target {
-        "review" => WorkflowOrchestrator::retry_step_review(
-            deployment.db(),
-            deployment.chat_runner(),
-            step_id,
-        )
-        .await
-        .map_err(|err| ApiError::BadRequest(err.to_string()))?,
-        _ => WorkflowOrchestrator::retry_step(deployment.db(), deployment.chat_runner(), step_id)
+    let (_execution, step) = match retry_target {
+        "review" => {
+            let (execution, step, result) = WorkflowOrchestrator::begin_step_review_retry(
+                deployment.db(),
+                deployment.chat_runner(),
+                step_id,
+            )
             .await
-            .map_err(|err| ApiError::BadRequest(err.to_string()))?,
+            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+            let deployment_clone = deployment.clone();
+            let retry_execution = execution.clone();
+            let retry_step = step.clone();
+            tokio::spawn(async move {
+                if let Err(err) = WorkflowOrchestrator::execute_prepared_step_review_retry(
+                    deployment_clone.db(),
+                    deployment_clone.chat_runner(),
+                    &retry_execution,
+                    &retry_step,
+                    result,
+                )
+                .await
+                {
+                    tracing::error!(
+                        execution_id = %retry_execution.id,
+                        step_id = %retry_step.id,
+                        error = %err,
+                        "[workflow] background step review retry failed"
+                    );
+                }
+            });
+            (execution, step)
+        }
+        _ => {
+            let (execution, step) = WorkflowOrchestrator::begin_step_retry(
+                deployment.db(),
+                deployment.chat_runner(),
+                step_id,
+            )
+            .await
+            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+            let deployment_clone = deployment.clone();
+            let retry_execution = execution.clone();
+            let retry_step = step.clone();
+            tokio::spawn(async move {
+                if let Err(err) = WorkflowOrchestrator::execute_prepared_step_retry(
+                    deployment_clone.db(),
+                    deployment_clone.chat_runner(),
+                    &retry_execution,
+                    &retry_step,
+                )
+                .await
+                {
+                    tracing::error!(
+                        execution_id = %retry_execution.id,
+                        step_id = %retry_step.id,
+                        error = %err,
+                        "[workflow] background step retry failed"
+                    );
+                }
+            });
+            (execution, step)
+        }
     };
 
     Ok((
         StatusCode::OK,
         ResponseJson(ApiResponse::<StepActionResponse>::success(
             StepActionResponse {
-                status: if execution.status == WorkflowExecutionStatus::Failed {
-                    "failed".to_string()
-                } else {
-                    format!("{:?}", step.status).to_lowercase()
-                },
+                status: to_workflow_wire_value(&step.status),
             },
         )),
     )
