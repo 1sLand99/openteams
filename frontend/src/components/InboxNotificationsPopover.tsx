@@ -88,7 +88,7 @@ const inboxSeverityPillClass = (severity: InboxItem["severity"]): string => {
     return "border-red-400/20 bg-red-400/10 text-red-300";
   }
   if (value === "warning") {
-    return "border-amber-400/20 bg-amber-400/10 text-amber-300";
+    return "border-[var(--notification-warning-border)] bg-[var(--notification-warning-bg)] text-[var(--notification-warning)]";
   }
   return "border-white/[0.07] bg-white/[0.06] text-[var(--ink-subtle)]";
 };
@@ -99,6 +99,83 @@ const inboxSeverityLabel = (
 ): string => {
   const value = String(severity);
   return translate(`sidebar.inbox.severity.${value}`, value);
+};
+
+type WorkflowNotificationType =
+  | "input"
+  | "confirmation"
+  | "review"
+  | "finalReview"
+  | "approval"
+  | "permission";
+
+const workflowNotificationType = (
+  item: InboxItem,
+): WorkflowNotificationType | null => {
+  if (
+    item.source_type === "workflow_continue" ||
+    item.dedupe_key.startsWith("workflow_continue:")
+  ) {
+    return "confirmation";
+  }
+  if (
+    item.source_type === "workflow_input" ||
+    item.kind === "workflow_input"
+  ) {
+    return "input";
+  }
+  if (
+    item.source_type === "workflow_final_review" ||
+    item.kind === "workflow_final_review"
+  ) {
+    return "finalReview";
+  }
+  if (
+    item.source_type === "workflow_review" ||
+    item.kind === "workflow_review"
+  ) {
+    return "review";
+  }
+  if (
+    item.source_type === "workflow_permission" ||
+    item.kind === "workflow_permission" ||
+    item.dedupe_key.startsWith("workflow_permission:")
+  ) {
+    return "permission";
+  }
+  if (
+    item.source_type === "workflow_approval" ||
+    item.kind === "workflow_approval"
+  ) {
+    return "approval";
+  }
+  return null;
+};
+
+const workflowNotificationTypeFallback: Record<
+  WorkflowNotificationType,
+  string
+> = {
+  input: "Input",
+  confirmation: "Confirmation",
+  review: "Review",
+  finalReview: "Final review",
+  approval: "Approval",
+  permission: "Permission",
+};
+
+export const inboxNotificationLabel = (
+  item: InboxItem,
+  translate: Translate,
+): string => {
+  const notificationType = workflowNotificationType(item);
+  if (!notificationType) {
+    return inboxSeverityLabel(item.severity, translate);
+  }
+  return translate(
+    `sidebar.inbox.type.${notificationType}`,
+    workflowNotificationTypeFallback[notificationType],
+  );
 };
 
 export function InboxNotificationsPopover({
@@ -348,7 +425,7 @@ export function InboxNotificationsPopover({
                               item.severity,
                             )}`}
                           >
-                            {inboxSeverityLabel(item.severity, translate)}
+                            {inboxNotificationLabel(item, translate)}
                           </span>
                           <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--ink-tertiary)]">
                             {sessionTitle ??

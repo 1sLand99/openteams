@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -77,6 +77,35 @@ impl WorkflowEvent {
         .bind(&data.status_after)
         .bind(&data.detail_json)
         .fetch_one(pool)
+        .await
+    }
+
+    pub async fn create_in_transaction(
+        connection: &mut SqliteConnection,
+        data: &CreateWorkflowEvent,
+        id: Uuid,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            INSERT INTO chat_workflow_events (
+                id, execution_id, round_id, step_id, agent_session_id,
+                event_type, status_before, status_after, detail_json
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            RETURNING id, execution_id, round_id, step_id, agent_session_id,
+                      event_type, status_before, status_after, detail_json, created_at
+            "#,
+        )
+        .bind(id)
+        .bind(data.execution_id)
+        .bind(data.round_id)
+        .bind(data.step_id)
+        .bind(data.agent_session_id)
+        .bind(&data.event_type)
+        .bind(&data.status_before)
+        .bind(&data.status_after)
+        .bind(&data.detail_json)
+        .fetch_one(connection)
         .await
     }
 

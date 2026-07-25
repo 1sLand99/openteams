@@ -7,18 +7,178 @@ impl<'a> LoopExecutor<'a> {
         let active_loop = if workflow_loop.status == WorkflowLoopStatus::Running {
             workflow_loop.clone()
         } else {
-            WorkflowLoop::update_status(
+            WorkflowLoop::update_status_if_current(
                 self.pool,
                 workflow_loop.id,
+                workflow_loop.status.clone(),
                 WorkflowLoopStatus::Running,
                 workflow_loop.rejection_reason.clone(),
             )
             .await?
+            .ok_or_else(|| {
+                OrchestratorError::IllegalTransition(format!(
+                    "loop {} changed before review execution",
+                    workflow_loop.id
+                ))
+            })?
         };
 
-        match self.execute_loop_review(&active_loop, loop_def).await? {
+        let review_decision = match self.execute_loop_review(&active_loop, loop_def).await {
+            Ok(decision) => decision,
+            Err(OrchestratorError::Runtime(
+                crate::services::workflow_runtime::WorkflowRuntimeError::Interrupted(reason),
+            )) => {
+                let review_step =
+                    WorkflowStep::find_by_id(self.pool, active_loop.review_step_id)
+                        .await?
+                        .ok_or_else(|| {
+                            OrchestratorError::NotFound(format!(
+                                "loop review step {} not found",
+                                active_loop.review_step_id
+                            ))
+                        })?;
+                let interrupted_step = match review_step.status {
+                    WorkflowStepStatus::InterruptRequested => {
+                        WorkflowOrchestrator::transition_step_and_sync(
+                            self.pool,
+                            self.chat_runner,
+                            self.execution,
+                            &review_step,
+                            WorkflowStepStatus::Interrupted,
+                            "loop_review_interrupted",
+                        )
+                        .await?
+                    }
+                    WorkflowStepStatus::Running => {
+                        let requested = WorkflowOrchestrator::transition_step_and_sync(
+                            self.pool,
+                            self.chat_runner,
+                            self.execution,
+                            &review_step,
+                            WorkflowStepStatus::InterruptRequested,
+                            "loop_review_interrupt_recovered_by_work_item_guard",
+                        )
+                        .await?;
+                        WorkflowOrchestrator::transition_step_and_sync(
+                            self.pool,
+                            self.chat_runner,
+                            self.execution,
+                            &requested,
+                            WorkflowStepStatus::Interrupted,
+                            "loop_review_interrupted",
+                        )
+                        .await?
+                    }
+                    WorkflowStepStatus::Interrupted => review_step,
+                    _ => return Err(OrchestratorError::Runtime(
+                        crate::services::workflow_runtime::WorkflowRuntimeError::Interrupted(
+                            reason,
+                        ),
+                    )),
+                };
+                let _ = WorkflowOrchestrator::write_transcript(
+                    self.pool,
+                    self.execution.id,
+                    Some(interrupted_step.round_id),
+                    interrupted_step.assigned_workflow_agent_session_id,
+                    Some(interrupted_step.id),
+                    "system",
+                    "message",
+                    &format!(
+                        "Loop review \"{}\" interrupted: {}",
+                        active_loop.loop_key, reason
+                    ),
+                    None,
+                )
+                .await;
+                self.refresh_loop_projection(&active_loop, "loop_review_interrupted")
+                    .await?;
+                return Ok(LoopOutcome::Parked);
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                let review_step =
+                    WorkflowStep::find_by_id(self.pool, active_loop.review_step_id).await?;
+                let failed_step = if let Some(review_step) = review_step {
+                    if matches!(
+                        review_step.status,
+                        WorkflowStepStatus::Running | WorkflowStepStatus::Revising
+                    ) {
+                        Some(
+                            WorkflowOrchestrator::transition_step_and_sync(
+                                self.pool,
+                                self.chat_runner,
+                                self.execution,
+                                &review_step,
+                                WorkflowStepStatus::Failed,
+                                "loop_review_failed_by_work_item_guard",
+                            )
+                            .await?,
+                        )
+                    } else {
+                        Some(review_step)
+                    }
+                } else {
+                    None
+                };
+                if let Some(failed_step) = failed_step.as_ref() {
+                    let _ = WorkflowStep::record_execution_result(
+                        self.pool,
+                        failed_step.id,
+                        Uuid::new_v4(),
+                        Some(
+                            serde_json::to_string(&SummaryPayload {
+                                summary: reason.clone(),
+                                content: None,
+                                outputs: Vec::new(),
+                            })
+                            .unwrap_or_else(|_| reason.clone()),
+                        ),
+                        None,
+                    )
+                    .await;
+                }
+                let failed_loop = WorkflowLoop::update_status_if_current(
+                    self.pool,
+                    active_loop.id,
+                    WorkflowLoopStatus::Running,
+                    WorkflowLoopStatus::Failed,
+                    Some(reason.clone()),
+                )
+                .await?
+                .ok_or_else(|| {
+                    OrchestratorError::IllegalTransition(format!(
+                        "loop {} changed while settling review failure",
+                        active_loop.id
+                    ))
+                })?;
+                Self::emit_loop_event(
+                    self.pool,
+                    self.execution,
+                    &failed_loop,
+                    WorkflowEventType::LoopFailed,
+                    Some(serde_json::json!({
+                        "reason": "loop_review_work_item_error",
+                        "error": reason.clone(),
+                    })),
+                )
+                .await?;
+                self.refresh_loop_projection(&failed_loop, "loop_review_failed")
+                    .await?;
+                tracing::error!(
+                    execution_id = %self.execution.id,
+                    loop_id = %active_loop.id,
+                    step_id = %active_loop.review_step_id,
+                    error = %error,
+                    "loop review work-item guard converted an unhandled error into terminal state"
+                );
+                return Ok(LoopOutcome::Failed(reason));
+            }
+        };
+
+        match review_decision {
             LoopReviewDecision::Passed => {
-                if active_loop.user_review_required {
+                if requires_user_acceptance_checkpoint(&active_loop) {
                     self.park_for_loop_user_review(&active_loop).await?;
                     return Ok(LoopOutcome::Parked);
                 }
@@ -42,15 +202,104 @@ impl<'a> LoopExecutor<'a> {
                     .await?;
                 Ok(LoopOutcome::Completed)
             }
+            LoopReviewDecision::PassedByUserWaiver {
+                feedback,
+                review_step,
+            } => {
+                // A lead waiver match only settles the lead review. When this
+                // loop requires user review, final acceptance remains an
+                // explicit user decision exactly as in the normal Passed path.
+                if requires_user_acceptance_checkpoint(&active_loop) {
+                    self.park_for_loop_user_review(&active_loop).await?;
+                    return Ok(LoopOutcome::Parked);
+                }
+
+                let mut transaction = self.pool.begin().await?;
+                let completed_review_step = reducer::transition_step_in_transaction(
+                    &mut transaction,
+                    self.execution,
+                    &review_step,
+                    WorkflowStepStatus::Completed,
+                    Some(serde_json::json!({
+                        "reason": "loop_review_rejection_covered_by_user_waiver",
+                    })),
+                )
+                .await?
+                .entity;
+                let completed_loop = WorkflowLoop::update_status_if_current_in_transaction(
+                    &mut transaction,
+                    active_loop.id,
+                    WorkflowLoopStatus::Running,
+                    WorkflowLoopStatus::Completed,
+                    None,
+                )
+                .await?
+                .ok_or_else(|| {
+                    OrchestratorError::IllegalTransition(format!(
+                        "loop {} changed while applying skipped waiver",
+                        active_loop.id
+                    ))
+                })?;
+                WorkflowEvent::create_in_transaction(
+                    &mut transaction,
+                    &CreateWorkflowEvent {
+                        execution_id: self.execution.id,
+                        round_id: Some(completed_loop.round_id),
+                        step_id: Some(completed_review_step.id),
+                        agent_session_id: completed_review_step
+                            .assigned_workflow_agent_session_id,
+                        event_type: WorkflowEventType::LoopPassed,
+                        status_before: Some(to_workflow_wire_value(&WorkflowLoopStatus::Running)),
+                        status_after: Some(to_workflow_wire_value(&WorkflowLoopStatus::Completed)),
+                        detail_json: Some(
+                            serde_json::json!({
+                                "reason": "rejected_targets_covered_by_user_waiver",
+                                "feedback": feedback,
+                            })
+                            .to_string(),
+                        ),
+                    },
+                    Uuid::new_v4(),
+                )
+                .await?;
+                transaction.commit().await?;
+                if let Err(error) = self
+                    .refresh_loop_projection(&completed_loop, "loop_passed_by_user_waiver")
+                    .await
+                {
+                    tracing::error!(
+                        execution_id = %self.execution.id,
+                        loop_id = %completed_loop.id,
+                        error = %error,
+                        "waived loop completion committed but projection refresh failed"
+                    );
+                }
+                Ok(LoopOutcome::Completed)
+            }
             LoopReviewDecision::Rejected {
                 feedback,
-                step_feedbacks,
+                feedback_targets,
             } => {
+                let skipped_targets = feedback_targets
+                    .iter()
+                    .filter(|target| target.step.status == WorkflowStepStatus::Skipped)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !skipped_targets.is_empty() {
+                    self.park_for_skipped_retry_decision(
+                        &active_loop,
+                        &feedback,
+                        &feedback_targets,
+                        &skipped_targets,
+                    )
+                    .await?;
+                    return Ok(LoopOutcome::Parked);
+                }
                 self.inject_feedback_to_steps(
                     &active_loop,
                     WorkflowRevisionFeedbackSource::Lead,
                     &feedback,
-                    &step_feedbacks,
+                    &feedback_map_from_targets(&feedback_targets),
                 )
                 .await?;
                 let retry_loop = WorkflowLoop::increment_retry(
@@ -154,16 +403,21 @@ impl<'a> LoopExecutor<'a> {
                         | WorkflowStepStatus::Blocked
                         | WorkflowStepStatus::Revising
                 );
-            let mut step = if prepared_for_retry {
-                WorkflowStep::prepare_retry(self.pool, step.id).await?
+            let step = if prepared_for_retry {
+                reducer::prepare_step_retry(
+                    self.pool,
+                    self.execution,
+                    &step,
+                    Some(serde_json::json!({
+                        "reason": "loop_member_feedback_retry_prepared",
+                        "loop_id": workflow_loop.id,
+                    })),
+                )
+                .await?
+                .entity
             } else {
                 step
             };
-
-            if prepared_for_retry && step.status != WorkflowStepStatus::Pending {
-                step = WorkflowStep::update_status(self.pool, step.id, WorkflowStepStatus::Pending)
-                    .await?;
-            }
 
             reset_steps.push(step);
         }
@@ -176,22 +430,27 @@ impl<'a> LoopExecutor<'a> {
                     workflow_loop.review_step_id
                 ))
             })?;
-        if has_pending_loop_feedback && review_step.status != WorkflowStepStatus::Pending {
-            let mut review_step = if matches!(
+        if has_pending_loop_feedback
+            && matches!(
                 review_step.status,
                 WorkflowStepStatus::Completed
                     | WorkflowStepStatus::Failed
                     | WorkflowStepStatus::Interrupted
                     | WorkflowStepStatus::Blocked
                     | WorkflowStepStatus::Revising
-            ) {
-                WorkflowStep::prepare_retry(self.pool, review_step.id).await?
-            } else {
-                review_step
-            };
-            review_step =
-                WorkflowStep::update_status(self.pool, review_step.id, WorkflowStepStatus::Pending)
-                    .await?;
+            )
+        {
+            let review_step = reducer::prepare_step_retry(
+                self.pool,
+                self.execution,
+                &review_step,
+                Some(serde_json::json!({
+                    "reason": "loop_review_feedback_retry_prepared",
+                    "loop_id": workflow_loop.id,
+                })),
+            )
+            .await?
+            .entity;
             reset_steps.push(review_step);
         }
 
@@ -215,19 +474,27 @@ impl<'a> LoopExecutor<'a> {
         .await
     }
 
-    pub(crate) async fn inject_user_feedback_to_steps(
-        pool: &SqlitePool,
+    pub(crate) async fn record_user_skip_waiver_in_transaction(
+        connection: &mut SqliteConnection,
         workflow_loop: &WorkflowLoop,
+        step: &WorkflowStep,
+        issue_scope_id: &str,
         feedback: &str,
-    ) -> Result<(), OrchestratorError> {
-        inject_feedback_to_steps(
-            pool,
+    ) -> Result<WorkflowStep, OrchestratorError> {
+        let context = merge_loop_skip_waiver_context_for_issue(
+            step.revision_context.as_deref(),
             workflow_loop,
-            WorkflowRevisionFeedbackSource::User,
+            step,
+            issue_scope_id,
             feedback,
-            &HashMap::new(),
+        );
+        WorkflowStep::update_revision_context_in_transaction(
+            connection,
+            step.id,
+            Some(context),
         )
         .await
+        .map_err(OrchestratorError::Database)
     }
 
     pub(crate) async fn emit_loop_event(
@@ -378,6 +645,7 @@ impl<'a> LoopExecutor<'a> {
         let LoopReviewProtocolMessage::LoopReviewResult {
             verdict,
             feedback,
+            issue_id,
             step_feedbacks,
             ..
         } = review_message;
@@ -435,8 +703,46 @@ impl<'a> LoopExecutor<'a> {
                 if let Some(analytics) = self.chat_runner.analytics_service() {
                     analytics.record_event(event);
                 }
-                let terminal_review_status = if workflow_review_attempt_limit_reached(review_attempt)
-                {
+                let overall_issue_id = issue_id.unwrap_or_else(|| feedback_issue_id(&feedback));
+                let step_issue_ids = step_feedbacks
+                    .iter()
+                    .map(|item| (item.step_key.clone(), item.issue_id.clone()))
+                    .collect::<HashMap<_, _>>();
+                let step_feedbacks = step_feedbacks
+                    .into_iter()
+                    .map(|item| (item.step_key, item.feedback))
+                    .collect::<HashMap<_, _>>();
+                let feedback_targets = loop_feedback_targets(
+                    self.pool,
+                    workflow_loop,
+                    &step_feedbacks,
+                    &step_issue_ids,
+                    &feedback,
+                    &overall_issue_id,
+                )
+                .await?;
+                let disposition = rejected_loop_review_disposition(
+                    review_attempt,
+                    &feedback_targets,
+                );
+                match disposition {
+                    RejectedLoopReviewDisposition::PassedByUserWaiver => {
+                        return Ok(LoopReviewDecision::PassedByUserWaiver {
+                            feedback,
+                            review_step: Box::new(recorded_review_step),
+                        });
+                    }
+                    RejectedLoopReviewDisposition::NeedsSkippedDecision => {
+                        return Ok(LoopReviewDecision::Rejected {
+                            feedback,
+                            feedback_targets,
+                        });
+                    }
+                    RejectedLoopReviewDisposition::LimitReached
+                    | RejectedLoopReviewDisposition::Retry => {}
+                }
+                let limit_reached = disposition == RejectedLoopReviewDisposition::LimitReached;
+                let terminal_review_status = if limit_reached {
                     WorkflowStepStatus::Failed
                 } else {
                     WorkflowStepStatus::Completed
@@ -447,14 +753,14 @@ impl<'a> LoopExecutor<'a> {
                     self.execution,
                     &recorded_review_step,
                     terminal_review_status,
-                    if workflow_review_attempt_limit_reached(review_attempt) {
+                    if limit_reached {
                         "loop_review_limit_reached"
                     } else {
                         "loop_review_rejected"
                     },
                 )
                 .await?;
-                if workflow_review_attempt_limit_reached(review_attempt) {
+                if limit_reached {
                     return Ok(LoopReviewDecision::LimitReached {
                         feedback,
                         review_attempt,
@@ -469,10 +775,7 @@ impl<'a> LoopExecutor<'a> {
                 .await?;
                 Ok(LoopReviewDecision::Rejected {
                     feedback,
-                    step_feedbacks: step_feedbacks
-                        .into_iter()
-                        .map(|item| (item.step_key, item.feedback))
-                        .collect(),
+                    feedback_targets,
                 })
             }
         }
@@ -553,6 +856,192 @@ impl<'a> LoopExecutor<'a> {
             None,
         )
         .await?;
+        Ok(())
+    }
+
+    async fn park_for_skipped_retry_decision(
+        &self,
+        workflow_loop: &WorkflowLoop,
+        loop_feedback: &str,
+        feedback_targets: &[LoopFeedbackTarget],
+        skipped_targets: &[LoopFeedbackTarget],
+    ) -> Result<(), OrchestratorError> {
+        let review_step = WorkflowStep::find_by_id(self.pool, workflow_loop.review_step_id)
+            .await?
+            .ok_or_else(|| {
+                OrchestratorError::NotFound(format!(
+                    "loop review step {} not found",
+                    workflow_loop.review_step_id
+                ))
+            })?;
+        if review_step.status != WorkflowStepStatus::Running {
+            return Err(OrchestratorError::IllegalTransition(format!(
+                "loop review step {} is {:?}, expected running",
+                review_step.id, review_step.status
+            )));
+        }
+        let workflow_session = resolve_step_workflow_session(
+            self.execution,
+            self.workflow_agent_sessions,
+            &review_step,
+        )?;
+        let skipped_steps = skipped_targets
+            .iter()
+            .map(|target| {
+                serde_json::json!({
+                    "step_id": target.step.id,
+                    "step_key": target.step.step_key,
+                    "title": target.step.title,
+                    "issue_scope_id": target.issue_scope_id,
+                    "feedback": target.feedback,
+                })
+            })
+            .collect::<Vec<_>>();
+        let retryable_step_ids = feedback_targets
+            .iter()
+            .filter(|target| target.step.status != WorkflowStepStatus::Skipped)
+            .map(|target| target.step.id)
+            .collect::<Vec<_>>();
+        let skipped_titles = skipped_targets
+            .iter()
+            .map(|target| target.step.title.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let transcript_meta = serde_json::json!({
+            "resolved": false,
+            "review_kind": "loop_skipped_retry_decision",
+            "loop_id": workflow_loop.id,
+            "loop_key": workflow_loop.loop_key,
+            "feedback": loop_feedback,
+            "skipped_steps": skipped_steps,
+            "skipped_step_titles": skipped_titles,
+            "retryable_step_ids": retryable_step_ids,
+            "restart_effect": "rerun_skipped_steps_then_review",
+            "keep_effect": if feedback_targets.len() == skipped_targets.len() {
+                "waive_skipped_scope_and_complete_loop"
+            } else {
+                "waive_skipped_scope_and_retry_remaining_targets"
+            },
+        })
+        .to_string();
+
+        let mut transaction = self.pool.begin().await?;
+        inject_feedback_to_steps_in_transaction(
+            &mut transaction,
+            workflow_loop,
+            WorkflowRevisionFeedbackSource::Lead,
+            loop_feedback,
+            &feedback_map_from_targets(feedback_targets),
+        )
+        .await?;
+        let waiting_step = reducer::transition_step_in_transaction(
+            &mut transaction,
+            self.execution,
+            &review_step,
+            WorkflowStepStatus::WaitingInput,
+            Some(serde_json::json!({
+                "reason": "loop_waiting_skipped_retry_decision",
+            })),
+        )
+        .await?
+        .entity;
+        let waiting_loop = WorkflowLoop::update_status_if_current_in_transaction(
+            &mut transaction,
+            workflow_loop.id,
+            WorkflowLoopStatus::Running,
+            WorkflowLoopStatus::WaitingUser,
+            Some(loop_feedback.to_string()),
+        )
+        .await?
+        .ok_or_else(|| {
+            OrchestratorError::IllegalTransition(format!(
+                "loop {} changed before waiting_user transition",
+                workflow_loop.id
+            ))
+        })?;
+        WorkflowEvent::create_in_transaction(
+            &mut transaction,
+            &CreateWorkflowEvent {
+                execution_id: self.execution.id,
+                round_id: Some(waiting_loop.round_id),
+                step_id: Some(waiting_step.id),
+                agent_session_id: waiting_step.assigned_workflow_agent_session_id,
+                event_type: WorkflowEventType::LoopWaitingUser,
+                status_before: Some(to_workflow_wire_value(&WorkflowLoopStatus::Running)),
+                status_after: Some(to_workflow_wire_value(&WorkflowLoopStatus::WaitingUser)),
+                detail_json: Some(
+                    serde_json::json!({
+                        "loop_id": waiting_loop.id,
+                        "reason": "skipped_retry_decision",
+                        "skipped_step_ids": skipped_targets
+                            .iter()
+                            .map(|target| target.step.id)
+                            .collect::<Vec<_>>(),
+                    })
+                    .to_string(),
+                ),
+            },
+            Uuid::new_v4(),
+        )
+        .await?;
+        let transcript = WorkflowTranscript::create_in_transaction(
+            &mut transaction,
+            &CreateWorkflowTranscript {
+                execution_id: self.execution.id,
+                round_id: Some(waiting_step.round_id),
+                workflow_agent_session_id: Some(workflow_session.id),
+                step_id: Some(waiting_step.id),
+                sender_type: "control".to_string(),
+                entry_type: "loop_review".to_string(),
+                content: "workflow.loop_skipped_retry_decision.request".to_string(),
+                meta_json: Some(transcript_meta),
+            },
+            Uuid::new_v4(),
+        )
+        .await?;
+        transaction.commit().await?;
+        let inbox_message =
+            WorkflowOrchestrator::localized_loop_skipped_decision_inbox_message().await;
+        InboxService::new()
+            .notify_workflow_user_action(
+                self.pool,
+                self.execution,
+                &transcript,
+                Some(&inbox_message),
+            )
+            .await;
+        if let Err(error) = WorkflowOrchestrator::synchronize_runtime_state(
+            self.pool,
+            self.execution.id,
+            false,
+        )
+        .await
+        {
+            tracing::error!(
+                execution_id = %self.execution.id,
+                error = %error,
+                "skipped decision transaction committed but runtime synchronization failed"
+            );
+        }
+        if let Err(error) = WorkflowOrchestrator::refresh_execution_projection_with_reason(
+            self.pool,
+            self.chat_runner,
+            self.execution.id,
+            None,
+            "loop_waiting_skipped_retry_decision",
+            skipped_targets
+                .iter()
+                .map(|target| target.step.id.to_string())
+                .collect(),
+        )
+        .await
+        {
+            tracing::error!(
+                execution_id = %self.execution.id,
+                error = %error,
+                "skipped decision transaction committed but projection refresh failed"
+            );
+        }
         Ok(())
     }
 
@@ -696,6 +1185,7 @@ impl<'a> LoopExecutor<'a> {
                         .or_else(|| step.content.clone())
                         .unwrap_or_default(),
                     outputs: payload.outputs,
+                    user_skip_waiver: loop_skip_waiver(step, &loop_def.loop_key),
                 })
             })
             .collect()
@@ -716,6 +1206,330 @@ fn has_pending_feedback_for_loop(step: &WorkflowStep, workflow_loop: &WorkflowLo
                 && pending.get("loop_key").and_then(|value| value.as_str())
                     == Some(workflow_loop.loop_key.as_str())
         })
+}
+
+async fn loop_feedback_targets(
+    pool: &SqlitePool,
+    workflow_loop: &WorkflowLoop,
+    step_feedbacks: &HashMap<String, String>,
+    step_issue_ids: &HashMap<String, String>,
+    loop_feedback: &str,
+    loop_issue_id: &str,
+) -> Result<Vec<LoopFeedbackTarget>, OrchestratorError> {
+    let member_ids = parse_member_step_ids(&workflow_loop.member_step_ids_json)?;
+    let member_id_set = member_ids.into_iter().collect::<HashSet<_>>();
+    let all_steps = WorkflowStep::find_by_execution(pool, workflow_loop.execution_id).await?;
+    let feedback_by_step_id =
+        loop_feedback_by_step_id(&all_steps, &member_id_set, step_feedbacks, loop_feedback);
+
+    Ok(all_steps
+        .into_iter()
+        .filter_map(|step| {
+            let feedback = feedback_by_step_id.get(&step.id)?.clone();
+            let raw_issue_id = if step_feedbacks.is_empty() {
+                loop_issue_id
+            } else {
+                step_issue_ids.get(&step.step_key)?.as_str()
+            };
+            let issue_scope_id = loop_skip_issue_scope_id(workflow_loop, &step, raw_issue_id);
+            if has_matching_active_skip_waiver_for_issue(
+                &step,
+                workflow_loop,
+                &issue_scope_id,
+                &feedback,
+            ) {
+                None
+            } else {
+                Some(LoopFeedbackTarget {
+                    step,
+                    issue_scope_id,
+                    feedback,
+                })
+            }
+        })
+        .collect())
+}
+
+fn feedback_map_from_targets(
+    feedback_targets: &[LoopFeedbackTarget],
+) -> HashMap<String, String> {
+    feedback_targets
+        .iter()
+        .map(|target| (target.step.step_key.clone(), target.feedback.clone()))
+        .collect()
+}
+
+fn requires_user_acceptance_checkpoint(workflow_loop: &WorkflowLoop) -> bool {
+    workflow_loop.user_review_required
+}
+
+fn rejected_loop_review_disposition(
+    review_attempt: i32,
+    feedback_targets: &[LoopFeedbackTarget],
+) -> RejectedLoopReviewDisposition {
+    // A user waiver is authoritative only for its stable skipped-step issue
+    // scope. When it covers every target there is nothing left to fail, even
+    // on attempt five.
+    if feedback_targets.is_empty() {
+        return RejectedLoopReviewDisposition::PassedByUserWaiver;
+    }
+    if workflow_review_attempt_limit_reached(review_attempt) {
+        return RejectedLoopReviewDisposition::LimitReached;
+    }
+    if feedback_targets
+        .iter()
+        .any(|target| target.step.status == WorkflowStepStatus::Skipped)
+    {
+        return RejectedLoopReviewDisposition::NeedsSkippedDecision;
+    }
+    RejectedLoopReviewDisposition::Retry
+}
+
+pub(crate) fn loop_skip_waiver(step: &WorkflowStep, loop_key: &str) -> Option<String> {
+    if step.status != WorkflowStepStatus::Skipped {
+        return None;
+    }
+    let active_waivers = loop_skip_waivers(step.revision_context.as_deref())
+        .into_iter()
+        .filter(|waiver| {
+            waiver.get("loop_key").and_then(|value| value.as_str()) == Some(loop_key)
+                && waiver.get("step_id").and_then(|value| value.as_str())
+                    == Some(step.id.to_string().as_str())
+                && waiver.get("status").and_then(|value| value.as_str()) == Some("active")
+        })
+        .filter_map(|waiver| {
+            let feedback = waiver
+                .get("feedback")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let issue_scope_id = waiver
+                .get("issue_scope_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("legacy-waiver");
+            (!feedback.is_empty())
+                .then(|| format!("Issue scope `{issue_scope_id}` — {feedback}"))
+        })
+        .collect::<Vec<_>>();
+    (!active_waivers.is_empty()).then(|| active_waivers.join("\n"))
+}
+
+#[cfg(test)]
+pub(crate) fn merge_loop_skip_waiver_context(
+    existing_revision_context: Option<&str>,
+    workflow_loop: &WorkflowLoop,
+    step: &WorkflowStep,
+    feedback: &str,
+) -> String {
+    let issue_scope_id = loop_skip_issue_scope_id(
+        workflow_loop,
+        step,
+        &feedback_issue_id(feedback),
+    );
+    merge_loop_skip_waiver_context_for_issue(
+        existing_revision_context,
+        workflow_loop,
+        step,
+        &issue_scope_id,
+        feedback,
+    )
+}
+
+fn merge_loop_skip_waiver_context_for_issue(
+    existing_revision_context: Option<&str>,
+    workflow_loop: &WorkflowLoop,
+    step: &WorkflowStep,
+    issue_scope_id: &str,
+    feedback: &str,
+) -> String {
+    let mut context = existing_revision_context
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !context.is_object() {
+        context = serde_json::json!({});
+    }
+    let object = context.as_object_mut().expect("revision context object");
+    object.remove("pending_feedback");
+    let waivers = object
+        .entry("loop_skip_waivers")
+        .or_insert_with(|| serde_json::json!([]));
+    if !waivers.is_array() {
+        *waivers = serde_json::json!([]);
+    }
+    let waiver_items = waivers.as_array_mut().expect("loop skip waivers array");
+    let now = chrono::Utc::now().to_rfc3339();
+    for waiver in waiver_items.iter_mut().filter(|waiver| {
+        waiver.get("loop_id").and_then(|value| value.as_str())
+            == Some(workflow_loop.id.to_string().as_str())
+            && waiver.get("step_id").and_then(|value| value.as_str())
+                == Some(step.id.to_string().as_str())
+            && waiver
+                .get("issue_scope_id")
+                .and_then(|value| value.as_str())
+                == Some(issue_scope_id)
+            && waiver.get("status").and_then(|value| value.as_str()) == Some("active")
+    }) {
+        waiver["status"] = serde_json::json!("superseded");
+        waiver["superseded_at"] = serde_json::json!(now.clone());
+    }
+    waiver_items.push(serde_json::json!({
+            "loop_id": workflow_loop.id,
+            "loop_key": workflow_loop.loop_key,
+            "step_id": step.id,
+            "step_key": step.step_key,
+            "status": "active",
+            "scope_id": loop_skip_scope_id(workflow_loop, step),
+            "issue_scope_id": issue_scope_id,
+            "feedback": feedback.trim(),
+            "feedback_fingerprint": feedback_fingerprint(feedback),
+            "decided_at": now,
+        }));
+    context.to_string()
+}
+
+pub(crate) fn supersede_loop_skip_waiver_context(
+    existing_revision_context: Option<&str>,
+    workflow_loop: &WorkflowLoop,
+    step: &WorkflowStep,
+) -> Option<String> {
+    let mut context = existing_revision_context
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())?;
+    let waivers = context.get_mut("loop_skip_waivers")?.as_array_mut()?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut changed = false;
+    for waiver in waivers.iter_mut().filter(|waiver| {
+        waiver.get("loop_id").and_then(|value| value.as_str())
+            == Some(workflow_loop.id.to_string().as_str())
+            && waiver.get("step_id").and_then(|value| value.as_str())
+                == Some(step.id.to_string().as_str())
+            && waiver.get("status").and_then(|value| value.as_str()) == Some("active")
+    }) {
+        waiver["status"] = serde_json::json!("superseded");
+        waiver["superseded_at"] = serde_json::json!(now);
+        changed = true;
+    }
+    changed.then(|| context.to_string())
+}
+
+fn loop_skip_waivers(revision_context: Option<&str>) -> Vec<serde_json::Value> {
+    revision_context
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|context| context.get("loop_skip_waivers").cloned())
+        .and_then(|waivers| waivers.as_array().cloned())
+        .unwrap_or_default()
+}
+
+fn feedback_fingerprint(feedback: &str) -> String {
+    let normalized = feedback
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    format!("{:x}", Sha256::digest(normalized.as_bytes()))
+}
+
+pub(crate) fn has_matching_active_skip_waiver(
+    step: &WorkflowStep,
+    workflow_loop: &WorkflowLoop,
+    feedback: &str,
+) -> bool {
+    let issue_scope_id = loop_skip_issue_scope_id(
+        workflow_loop,
+        step,
+        &feedback_issue_id(feedback),
+    );
+    has_matching_active_skip_waiver_for_issue(
+        step,
+        workflow_loop,
+        &issue_scope_id,
+        feedback,
+    )
+}
+
+fn has_matching_active_skip_waiver_for_issue(
+    step: &WorkflowStep,
+    workflow_loop: &WorkflowLoop,
+    issue_scope_id: &str,
+    feedback: &str,
+) -> bool {
+    if step.status != WorkflowStepStatus::Skipped {
+        return false;
+    }
+    let expected_fingerprint = feedback_fingerprint(feedback);
+    loop_skip_waivers(step.revision_context.as_deref())
+        .into_iter()
+        .any(|waiver| {
+            let same_step = waiver.get("loop_id").and_then(|value| value.as_str())
+                == Some(workflow_loop.id.to_string().as_str())
+                && waiver.get("step_id").and_then(|value| value.as_str())
+                    == Some(step.id.to_string().as_str());
+            let same_issue = waiver
+                .get("issue_scope_id")
+                .and_then(|value| value.as_str())
+                .map(|stored| stored == issue_scope_id)
+                // Legacy waivers had no issue scope; keep them narrow by
+                // requiring the original feedback fingerprint.
+                .unwrap_or_else(|| {
+                    waiver
+                        .get("feedback_fingerprint")
+                        .and_then(|value| value.as_str())
+                        == Some(expected_fingerprint.as_str())
+                });
+            same_step
+                && same_issue
+                && waiver.get("status").and_then(|value| value.as_str()) == Some("active")
+        })
+}
+
+fn loop_skip_scope_id(workflow_loop: &WorkflowLoop, step: &WorkflowStep) -> String {
+    format!("loop:{}:step:{}", workflow_loop.id, step.id)
+}
+
+fn feedback_issue_id(feedback: &str) -> String {
+    format!("feedback-{}", feedback_fingerprint(feedback))
+}
+
+pub(crate) fn loop_skip_issue_scope_id_for_feedback(
+    workflow_loop: &WorkflowLoop,
+    step: &WorkflowStep,
+    feedback: &str,
+) -> String {
+    loop_skip_issue_scope_id(workflow_loop, step, &feedback_issue_id(feedback))
+}
+
+fn loop_skip_issue_scope_id(
+    workflow_loop: &WorkflowLoop,
+    step: &WorkflowStep,
+    raw_issue_id: &str,
+) -> String {
+    let prefix = format!("loop:{}:step:{}:issue:", workflow_loop.id, step.id);
+    if raw_issue_id.starts_with(&prefix) {
+        return raw_issue_id.to_string();
+    }
+    let normalized = raw_issue_id
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let normalized = normalized.trim_matches('-');
+    let compact = if normalized.is_empty() {
+        format!("issue-{}", &feedback_fingerprint(raw_issue_id)[..40])
+    } else if normalized.len() > 64 {
+        format!(
+            "{}-{}",
+            &normalized[..48],
+            &feedback_fingerprint(raw_issue_id)[..12]
+        )
+    } else {
+        normalized.to_string()
+    };
+    format!("{prefix}{compact}")
 }
 
 async fn inject_feedback_to_steps(
@@ -756,6 +1570,68 @@ async fn inject_feedback_to_steps(
             &workflow_loop.loop_key,
         );
         WorkflowStep::update_revision_context(pool, step.id, Some(context)).await?;
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn inject_feedback_to_steps_in_transaction(
+    connection: &mut SqliteConnection,
+    workflow_loop: &WorkflowLoop,
+    source: WorkflowRevisionFeedbackSource,
+    loop_feedback: &str,
+    step_feedbacks: &HashMap<String, String>,
+) -> Result<(), OrchestratorError> {
+    let member_ids = parse_member_step_ids(&workflow_loop.member_step_ids_json)?;
+    let member_id_set = member_ids.iter().copied().collect::<HashSet<_>>();
+    let all_steps = sqlx::query_as::<_, WorkflowStep>(
+        r#"
+        SELECT id, execution_id, round_id, compiled_revision_id, step_key,
+               step_type, title, instructions, assigned_workflow_agent_session_id,
+               status, retry_count, max_retry, round_index, display_order,
+               latest_run_id, summary_text, content, loop_id,
+               lead_review_required, user_review_required, revision_context,
+               created_at, updated_at, started_at, completed_at
+        FROM chat_workflow_steps
+        WHERE execution_id = ?1
+        "#,
+    )
+    .bind(workflow_loop.execution_id)
+    .fetch_all(&mut *connection)
+    .await?;
+    let feedback_by_step_id =
+        loop_feedback_by_step_id(&all_steps, &member_id_set, step_feedbacks, loop_feedback);
+
+    for step in all_steps
+        .iter()
+        .filter(|step| member_id_set.contains(&step.id))
+        .filter(|step| feedback_by_step_id.contains_key(&step.id))
+    {
+        let previous_payload =
+            parse_summary_payload(step.summary_text.as_deref()).unwrap_or(SummaryPayload {
+                summary: step.title.clone(),
+                content: None,
+                outputs: Vec::new(),
+            });
+        let feedback = feedback_by_step_id
+            .get(&step.id)
+            .cloned()
+            .unwrap_or_else(|| loop_feedback.to_string());
+        let context = merge_loop_revision_context(
+            step.revision_context.as_deref(),
+            source,
+            &feedback,
+            &previous_payload.summary,
+            &previous_payload.outputs,
+            workflow_loop.retry_count + 1,
+            &workflow_loop.loop_key,
+        );
+        WorkflowStep::update_revision_context_in_transaction(
+            &mut *connection,
+            step.id,
+            Some(context),
+        )
+        .await?;
     }
 
     Ok(())

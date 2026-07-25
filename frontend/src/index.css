@@ -32,6 +32,9 @@
   --inbox-bell-unread-filter: drop-shadow(0 0 6px rgba(248, 250, 252, 0.55));
   --inbox-bell-unread-badge-text: #f3f4f6;
   --inbox-bell-unread-badge-filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.75));
+  --notification-warning: color-mix(in srgb, #fb923c 65%, var(--ink));
+  --notification-warning-bg: color-mix(in srgb, #fb923c 10%, transparent);
+  --notification-warning-border: color-mix(in srgb, #fb923c 30%, transparent);
   --merge-conflict-highlight: rgba(86, 146, 98, 0.1);
   --merge-conflict-highlight-selected: rgba(92, 158, 106, 0.16);
   --merge-conflict-accepted-bg: rgba(104, 177, 119, 0.12);

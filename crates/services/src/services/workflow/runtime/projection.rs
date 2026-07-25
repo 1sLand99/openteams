@@ -848,16 +848,43 @@ fn build_pending_review_for_transcript(
         .iter()
         .find(|step| Some(step.id) == transcript.step_id)?;
     let meta = transcript_meta_value(transcript);
-    let context_summary = meta
-        .get("summary")
+    let review_kind = meta
+        .get("review_kind")
         .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| parse_summary_text_preview(step.summary_text.clone().unwrap_or_default()))
-        .unwrap_or_else(|| transcript.content.clone());
+        .unwrap_or_default();
+    let is_skipped_retry_decision = review_kind == "loop_skipped_retry_decision";
+    let context_summary = if is_skipped_retry_decision {
+        format!(
+            "workflow.loop_skipped_retry_decision.context:{}",
+            serde_json::json!({
+                "step_titles": meta
+                    .get("skipped_step_titles")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default(),
+                "feedback": meta
+                    .get("feedback")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default(),
+                "restart_effect": meta
+                    .get("restart_effect")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("rerun_skipped_steps_then_review"),
+                "keep_effect": meta
+                    .get("keep_effect")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("waive_skipped_scope_and_retry_remaining_targets"),
+            })
+        )
+    } else {
+        meta.get("summary")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| parse_summary_text_preview(step.summary_text.clone().unwrap_or_default()))
+            .unwrap_or_else(|| transcript.content.clone())
+    };
 
-    let meta = transcript_meta_value(transcript);
     let loop_target = if transcript.entry_type == "loop_review" {
         meta.get("loop_id")
             .and_then(|value| value.as_str())
@@ -866,7 +893,9 @@ fn build_pending_review_for_transcript(
     } else {
         None
     };
-    let review_type = if transcript.entry_type == "loop_review" {
+    let review_type = if is_skipped_retry_decision {
+        "loop_skipped_retry_decision"
+    } else if transcript.entry_type == "loop_review" {
         "loop_user_review"
     } else {
         "step_user_review"
@@ -878,13 +907,27 @@ fn build_pending_review_for_transcript(
         .map(|workflow_loop| workflow_loop.loop_key.clone())
         .unwrap_or_else(|| step.title.clone());
 
-    Some(WorkflowPendingReview {
-        review_id: transcript.id.to_string(),
-        review_type: review_type.to_string(),
-        target_id,
-        target_title,
-        context_summary,
-        prompt_template: WorkflowReviewPromptTemplate {
+    let prompt_template = if is_skipped_retry_decision {
+        WorkflowReviewPromptTemplate {
+            message: transcript.content.clone(),
+            fields: Vec::new(),
+            actions: vec![
+                WorkflowReviewAction {
+                    action: "restart_skipped".to_string(),
+                    label: "Restart skipped steps".to_string(),
+                    style: "primary".to_string(),
+                    requires_feedback: false,
+                },
+                WorkflowReviewAction {
+                    action: "keep_skipped".to_string(),
+                    label: "Keep skipped".to_string(),
+                    style: "secondary".to_string(),
+                    requires_feedback: false,
+                },
+            ],
+        }
+    } else {
+        WorkflowReviewPromptTemplate {
             message: transcript.content.clone(),
             fields: vec![WorkflowReviewField {
                 key: "feedback".to_string(),
@@ -908,7 +951,16 @@ fn build_pending_review_for_transcript(
                     requires_feedback: true,
                 },
             ],
-        },
+        }
+    };
+
+    Some(WorkflowPendingReview {
+        review_id: transcript.id.to_string(),
+        review_type: review_type.to_string(),
+        target_id,
+        target_title,
+        context_summary,
+        prompt_template,
     })
 }
 
@@ -919,4 +971,114 @@ fn parse_summary_text_preview(summary_text: String) -> Option<String> {
 
     let trimmed = summary_text.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use chrono::Utc;
+    use db::models::workflow_types::{
+        WorkflowLoopStatus, WorkflowStepStatus, WorkflowStepType,
+    };
+
+    use super::*;
+
+    #[test]
+    fn skipped_retry_decision_projects_dynamic_actions() {
+        let now = Utc::now();
+        let execution_id = Uuid::new_v4();
+        let round_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let review_step = WorkflowStep {
+            id: Uuid::new_v4(),
+            execution_id,
+            round_id,
+            compiled_revision_id: None,
+            step_key: "review".to_string(),
+            step_type: WorkflowStepType::Review,
+            title: "Review".to_string(),
+            instructions: String::new(),
+            assigned_workflow_agent_session_id: None,
+            status: WorkflowStepStatus::WaitingInput,
+            retry_count: 0,
+            max_retry: 1,
+            round_index: 1,
+            display_order: 2,
+            latest_run_id: None,
+            summary_text: None,
+            content: None,
+            loop_id: Some(loop_id),
+            lead_review_required: true,
+            user_review_required: true,
+            revision_context: None,
+            created_at: now,
+            updated_at: now,
+            started_at: Some(now),
+            completed_at: None,
+        };
+        let workflow_loop = WorkflowLoop {
+            id: loop_id,
+            execution_id,
+            round_id,
+            loop_key: "loop-a".to_string(),
+            review_step_id: review_step.id,
+            member_step_ids_json: "[]".to_string(),
+            status: WorkflowLoopStatus::WaitingUser,
+            retry_count: 1,
+            max_retry: 3,
+            user_review_required: true,
+            rejection_reason: Some("revise skipped work".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        let transcript = WorkflowTranscript {
+            id: Uuid::new_v4(),
+            execution_id,
+            round_id: Some(round_id),
+            workflow_agent_session_id: None,
+            step_id: Some(review_step.id),
+            sender_type: "control".to_string(),
+            entry_type: "loop_review".to_string(),
+            content: "Choose whether to restart skipped steps.".to_string(),
+            meta_json: Some(
+                serde_json::json!({
+                    "resolved": false,
+                    "review_kind": "loop_skipped_retry_decision",
+                    "loop_id": loop_id,
+                    "feedback": "Missing evidence",
+                    "skipped_step_titles": "Build, Test",
+                    "restart_effect": "rerun_skipped_steps_then_review",
+                    "keep_effect": "waive_skipped_scope_and_complete_loop",
+                })
+                .to_string(),
+            ),
+            created_at: now.to_rfc3339(),
+        };
+
+        let projected = build_pending_review_for_transcript(
+            &[review_step],
+            &[workflow_loop],
+            &transcript,
+        )
+        .expect("project pending decision");
+
+        assert_eq!(projected.review_type, "loop_skipped_retry_decision");
+        assert!(projected.prompt_template.fields.is_empty());
+        assert!(projected.context_summary.starts_with(
+            "workflow.loop_skipped_retry_decision.context:"
+        ));
+        assert!(projected.context_summary.contains("Build, Test"));
+        assert!(projected.context_summary.contains("Missing evidence"));
+        assert!(projected.context_summary.contains(
+            "waive_skipped_scope_and_complete_loop"
+        ));
+        assert_eq!(
+            projected
+                .prompt_template
+                .actions
+                .iter()
+                .map(|action| action.action.as_str())
+                .collect::<Vec<_>>(),
+            vec!["restart_skipped", "keep_skipped"]
+        );
+    }
 }

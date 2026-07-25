@@ -482,7 +482,7 @@ const localLabelGroups = projectWorkItemsToIssueGroups(
   [
     {
       ...item('55555555-5555-4555-8555-555555555555', 'open'),
-      labels_json: JSON.stringify(['bug', 'feature']),
+      labels_json: JSON.stringify(['bug', 'feature', 'enhancement']),
     },
   ],
   'all',
@@ -492,7 +492,15 @@ check(
   'local work item labels render as issue row chips',
   localLabelGroups[0]?.items[0]?.labels
     ?.map((label) => label.name)
-    .join(',') === 'bug,feature',
+    .join(',') === 'bug,feature,enhancement',
+  localLabelGroups[0]?.items[0]?.labels,
+);
+check(
+  'feature and improvement labels use different issue row colors',
+  localLabelGroups[0]?.items[0]?.labels
+    ?.filter((label) => label.name !== 'bug')
+    .map((label) => label.color)
+    .join(',') === 'purple,blue',
   localLabelGroups[0]?.items[0]?.labels,
 );
 check(

@@ -61,6 +61,17 @@ use super::{
     workflow_runtime::WorkflowRuntimeError,
 };
 
+const SCHEDULER_RECOVERY_MAX_ATTEMPTS: u32 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchedulerRecoveryOutcome {
+    Succeeded,
+    ExecutionMissing,
+    ExecutionTerminal,
+    PermanentFailure,
+    RetryLimitReached,
+}
+
 /// Orchestrator 错误
 #[derive(Debug, thiserror::Error)]
 pub enum OrchestratorError {
@@ -86,6 +97,67 @@ impl From<reducer::TransitionError> for OrchestratorError {
     fn from(e: reducer::TransitionError) -> Self {
         OrchestratorError::IllegalTransition(e.to_string())
     }
+}
+
+fn scheduler_recovery_delay(attempt: u32) -> std::time::Duration {
+    let seconds = 1_u64 << attempt.saturating_sub(1).min(4);
+    std::time::Duration::from_secs(seconds)
+}
+
+fn is_retryable_scheduler_error(error: &OrchestratorError) -> bool {
+    match error {
+        OrchestratorError::Database(error) => is_retryable_sqlx_error(error),
+        OrchestratorError::Runtime(WorkflowRuntimeError::Database(error)) => {
+            is_retryable_sqlx_error(error)
+        }
+        OrchestratorError::Runtime(WorkflowRuntimeError::Io(error)) => is_retryable_io_error(error),
+        OrchestratorError::Runtime(WorkflowRuntimeError::Executor(error)) => {
+            is_retryable_executor_error(error)
+        }
+        OrchestratorError::ChatRunner(ChatRunnerError::Database(error)) => {
+            is_retryable_sqlx_error(error)
+        }
+        OrchestratorError::ChatRunner(ChatRunnerError::Io(error)) => is_retryable_io_error(error),
+        OrchestratorError::ChatRunner(ChatRunnerError::Executor(error)) => {
+            is_retryable_executor_error(error)
+        }
+        _ => false,
+    }
+}
+
+fn is_retryable_executor_error(error: &executors::executors::ExecutorError) -> bool {
+    match error {
+        executors::executors::ExecutorError::Io(error)
+        | executors::executors::ExecutorError::SpawnError(error) => is_retryable_io_error(error),
+        _ => false,
+    }
+}
+
+fn is_retryable_sqlx_error(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::PoolTimedOut | sqlx::Error::WorkerCrashed => true,
+        sqlx::Error::Io(error) => is_retryable_io_error(error),
+        sqlx::Error::Database(error) => {
+            matches!(error.code().as_deref(), Some("5" | "6")) || {
+                let message = error.message().to_ascii_lowercase();
+                message.contains("database is locked")
+                    || message.contains("database table is locked")
+                    || message.contains("database is busy")
+            }
+        }
+        _ => false,
+    }
+}
+
+fn is_retryable_io_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+    )
 }
 
 /// Bootstrap 结果
@@ -624,7 +696,7 @@ impl WorkflowOrchestrator {
             execution = Self::synchronize_runtime_state(pool, execution.id, false).await?;
 
             if Self::has_unresolved_step_or_loop_reviews(pool, execution.id, None).await? {
-                Self::refresh_workflow_card(
+                Self::refresh_workflow_card_with_reason(
                     pool,
                     chat_runner,
                     &execution,
@@ -633,6 +705,8 @@ impl WorkflowOrchestrator {
                     &session_agents,
                     &agents,
                     None,
+                    "scheduler_blocked_by_review",
+                    Vec::new(),
                 )
                 .await?;
                 return Ok(());
@@ -970,7 +1044,7 @@ impl WorkflowOrchestrator {
 
             if parallel_work.is_empty() {
                 execution = Self::synchronize_runtime_state(pool, execution.id, false).await?;
-                Self::refresh_workflow_card(
+                Self::refresh_workflow_card_with_reason(
                     pool,
                     chat_runner,
                     &execution,
@@ -979,6 +1053,8 @@ impl WorkflowOrchestrator {
                     &session_agents,
                     &agents,
                     None,
+                    "scheduler_no_schedulable_work",
+                    Vec::new(),
                 )
                 .await?;
                 return Ok(());
@@ -1234,6 +1310,138 @@ impl WorkflowOrchestrator {
                     OrchestratorError::NotFound(format!("execution {} 未找到", execution.id))
                 })?;
         }
+    }
+
+    /// Run a bounded scheduler recovery task after a committed action. Only
+    /// transient storage/runtime failures are retried. Missing or terminal
+    /// executions and permanent state/compile errors stop immediately.
+    pub async fn wake_scheduler_with_recovery(
+        db: &DBService,
+        chat_runner: &ChatRunner,
+        execution_id: Uuid,
+    ) {
+        let outcome = Self::run_scheduler_recovery(
+            execution_id,
+            || async {
+                WorkflowExecution::find_by_id(&db.pool, execution_id)
+                    .await
+                    .map(|execution| execution.map(|execution| execution.status))
+                    .map_err(OrchestratorError::from)
+            },
+            || Self::wake_scheduler(db, chat_runner, execution_id),
+            tokio::time::sleep,
+        )
+        .await;
+        if matches!(
+            outcome,
+            SchedulerRecoveryOutcome::PermanentFailure
+                | SchedulerRecoveryOutcome::RetryLimitReached
+        ) {
+            tracing::error!(
+                execution_id = %execution_id,
+                outcome = ?outcome,
+                "workflow scheduler recovery task stopped without a successful pass"
+            );
+        }
+    }
+
+    async fn run_scheduler_recovery<Load, LoadFuture, Wake, WakeFuture, Sleep, SleepFuture>(
+        execution_id: Uuid,
+        mut load_status: Load,
+        mut wake: Wake,
+        mut sleep: Sleep,
+    ) -> SchedulerRecoveryOutcome
+    where
+        Load: FnMut() -> LoadFuture,
+        LoadFuture: std::future::Future<Output = Result<Option<WorkflowExecutionStatus>, OrchestratorError>>,
+        Wake: FnMut() -> WakeFuture,
+        WakeFuture: std::future::Future<Output = Result<(), OrchestratorError>>,
+        Sleep: FnMut(std::time::Duration) -> SleepFuture,
+        SleepFuture: std::future::Future<Output = ()>,
+    {
+        for attempt in 1..=SCHEDULER_RECOVERY_MAX_ATTEMPTS {
+            match load_status().await {
+                Ok(None) => {
+                    tracing::debug!(
+                        execution_id = %execution_id,
+                        "scheduler recovery stopped because execution no longer exists"
+                    );
+                    return SchedulerRecoveryOutcome::ExecutionMissing;
+                }
+                Ok(Some(WorkflowExecutionStatus::Completed | WorkflowExecutionStatus::Failed)) => {
+                    tracing::debug!(
+                        execution_id = %execution_id,
+                        "scheduler recovery stopped because execution is terminal"
+                    );
+                    return SchedulerRecoveryOutcome::ExecutionTerminal;
+                }
+                Ok(Some(_)) => {}
+                Err(error) => {
+                    if !is_retryable_scheduler_error(&error) {
+                        tracing::error!(
+                            execution_id = %execution_id,
+                            attempt,
+                            error = %error,
+                            "scheduler recovery preflight failed permanently"
+                        );
+                        return SchedulerRecoveryOutcome::PermanentFailure;
+                    }
+                    if attempt == SCHEDULER_RECOVERY_MAX_ATTEMPTS {
+                        tracing::error!(
+                            execution_id = %execution_id,
+                            attempt,
+                            error = %error,
+                            "scheduler recovery preflight exhausted retry limit"
+                        );
+                        return SchedulerRecoveryOutcome::RetryLimitReached;
+                    }
+                    let delay = scheduler_recovery_delay(attempt);
+                    tracing::warn!(
+                        execution_id = %execution_id,
+                        attempt,
+                        retry_delay_ms = delay.as_millis(),
+                        error = %error,
+                        "scheduler recovery preflight failed transiently; retrying"
+                    );
+                    sleep(delay).await;
+                    continue;
+                }
+            }
+
+            match wake().await {
+                Ok(()) => return SchedulerRecoveryOutcome::Succeeded,
+                Err(error) => {
+                    if !is_retryable_scheduler_error(&error) {
+                        tracing::error!(
+                            execution_id = %execution_id,
+                            attempt,
+                            error = %error,
+                            "scheduler recovery stopped after permanent failure"
+                        );
+                        return SchedulerRecoveryOutcome::PermanentFailure;
+                    }
+                    if attempt == SCHEDULER_RECOVERY_MAX_ATTEMPTS {
+                        tracing::error!(
+                            execution_id = %execution_id,
+                            attempt,
+                            error = %error,
+                            "scheduler recovery exhausted retry limit"
+                        );
+                        return SchedulerRecoveryOutcome::RetryLimitReached;
+                    }
+                    let delay = scheduler_recovery_delay(attempt);
+                    tracing::warn!(
+                        execution_id = %execution_id,
+                        attempt,
+                        retry_delay_ms = delay.as_millis(),
+                        error = %error,
+                        "scheduler recovery pass failed transiently; retrying from durable state"
+                    );
+                    sleep(delay).await;
+                }
+            }
+        }
+        SchedulerRecoveryOutcome::RetryLimitReached
     }
 
     // -----------------------------------------------------------------------

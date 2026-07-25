@@ -536,15 +536,12 @@ pub async fn generate_plan_and_run(
     let deployment_clone = deployment.clone();
     let execution_id = execution.id;
     tokio::spawn(async move {
-        if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+        WorkflowOrchestrator::wake_scheduler_with_recovery(
             deployment_clone.db(),
             deployment_clone.chat_runner(),
             execution_id,
         )
-        .await
-        {
-            tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed when running plan");
-        }
+        .await;
     });
 
     Ok((
@@ -733,15 +730,12 @@ pub async fn execute_plan(
     let deployment_clone = deployment.clone();
     let execution_id = bootstrap.execution.id;
     tokio::spawn(async move {
-        if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+        WorkflowOrchestrator::wake_scheduler_with_recovery(
             deployment_clone.db(),
             deployment_clone.chat_runner(),
             execution_id,
         )
-        .await
-        {
-            tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed when executing plan");
-        }
+        .await;
     });
 
     Ok((
@@ -863,15 +857,12 @@ pub async fn resume_execution(
 
     let deployment_clone = deployment.clone();
     tokio::spawn(async move {
-        if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+        WorkflowOrchestrator::wake_scheduler_with_recovery(
             deployment_clone.db(),
             deployment_clone.chat_runner(),
             execution_id,
         )
-        .await
-        {
-            tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed when resuming execution");
-        }
+        .await;
     });
 
     Ok((
@@ -1135,15 +1126,12 @@ pub async fn submit_step_input(
         let deployment_clone = deployment.clone();
         let execution_id = result.execution.id;
         tokio::spawn(async move {
-            if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+            WorkflowOrchestrator::wake_scheduler_with_recovery(
                 deployment_clone.db(),
                 deployment_clone.chat_runner(),
                 execution_id,
             )
-            .await
-            {
-                tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed after submitting step input");
-            }
+            .await;
         });
     }
 
@@ -1216,28 +1204,75 @@ pub async fn retry_step(
     let (_step, _execution) = load_step_for_session(pool, &session, step_id).await?;
 
     let retry_target = query.retry_target.as_deref().unwrap_or("task");
-    let (execution, step) = match retry_target {
-        "review" => WorkflowOrchestrator::retry_step_review(
-            deployment.db(),
-            deployment.chat_runner(),
-            step_id,
-        )
-        .await
-        .map_err(|err| ApiError::BadRequest(err.to_string()))?,
-        _ => WorkflowOrchestrator::retry_step(deployment.db(), deployment.chat_runner(), step_id)
+    let (_execution, step) = match retry_target {
+        "review" => {
+            let (execution, step, result) = WorkflowOrchestrator::begin_step_review_retry(
+                deployment.db(),
+                deployment.chat_runner(),
+                step_id,
+            )
             .await
-            .map_err(|err| ApiError::BadRequest(err.to_string()))?,
+            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+            let deployment_clone = deployment.clone();
+            let retry_execution = execution.clone();
+            let retry_step = step.clone();
+            tokio::spawn(async move {
+                if let Err(err) = WorkflowOrchestrator::execute_prepared_step_review_retry(
+                    deployment_clone.db(),
+                    deployment_clone.chat_runner(),
+                    &retry_execution,
+                    &retry_step,
+                    result,
+                )
+                .await
+                {
+                    tracing::error!(
+                        execution_id = %retry_execution.id,
+                        step_id = %retry_step.id,
+                        error = %err,
+                        "[workflow] background step review retry failed"
+                    );
+                }
+            });
+            (execution, step)
+        }
+        _ => {
+            let (execution, step) = WorkflowOrchestrator::begin_step_retry(
+                deployment.db(),
+                deployment.chat_runner(),
+                step_id,
+            )
+            .await
+            .map_err(|err| ApiError::BadRequest(err.to_string()))?;
+            let deployment_clone = deployment.clone();
+            let retry_execution = execution.clone();
+            let retry_step = step.clone();
+            tokio::spawn(async move {
+                if let Err(err) = WorkflowOrchestrator::execute_prepared_step_retry(
+                    deployment_clone.db(),
+                    deployment_clone.chat_runner(),
+                    &retry_execution,
+                    &retry_step,
+                )
+                .await
+                {
+                    tracing::error!(
+                        execution_id = %retry_execution.id,
+                        step_id = %retry_step.id,
+                        error = %err,
+                        "[workflow] background step retry failed"
+                    );
+                }
+            });
+            (execution, step)
+        }
     };
 
     Ok((
         StatusCode::OK,
         ResponseJson(ApiResponse::<StepActionResponse>::success(
             StepActionResponse {
-                status: if execution.status == WorkflowExecutionStatus::Failed {
-                    "failed".to_string()
-                } else {
-                    format!("{:?}", step.status).to_lowercase()
-                },
+                status: to_workflow_wire_value(&step.status),
             },
         )),
     )
@@ -1259,15 +1294,12 @@ pub async fn skip_step(
 
     let deployment_clone = deployment.clone();
     tokio::spawn(async move {
-        if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+        WorkflowOrchestrator::wake_scheduler_with_recovery(
             deployment_clone.db(),
             deployment_clone.chat_runner(),
             execution.id,
         )
-        .await
-        {
-            tracing::error!(execution_id = %execution.id, step_id = %step_id, error = %err, "workflow scheduler failed after skipping step");
-        }
+        .await;
     });
 
     Ok((
@@ -1388,15 +1420,12 @@ async fn resolve_step_action(
         let deployment_clone = deployment.clone();
         let execution_id = resolved.execution.id;
         tokio::spawn(async move {
-            if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+            WorkflowOrchestrator::wake_scheduler_with_recovery(
                 deployment_clone.db(),
                 deployment_clone.chat_runner(),
                 execution_id,
             )
-            .await
-            {
-                tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed after resolving step action");
-            }
+            .await;
         });
     }
 
@@ -1842,15 +1871,12 @@ pub async fn resolve_approval(
         let deployment_clone = deployment.clone();
         let execution_id = resolved.execution.id;
         tokio::spawn(async move {
-            if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+            WorkflowOrchestrator::wake_scheduler_with_recovery(
                 deployment_clone.db(),
                 deployment_clone.chat_runner(),
                 execution_id,
             )
-            .await
-            {
-                tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed after resolving approval action");
-            }
+            .await;
         });
     }
 

@@ -65,7 +65,6 @@ import type {
   JsonValue,
   McpConfig,
   OpenInExplorerResponse,
-  PauseAllResponse,
   ProjectDeliveryRecord,
   ProjectDeliveryStatsSummary,
   ProjectExecutionLinkType,
@@ -1730,16 +1729,6 @@ export const workflowApi = {
       { method: "GET" },
     );
     return handleApiResponse<WorkflowTranscriptEntry[]>(r);
-  },
-  pauseAll: async (
-    sessionId: string,
-    executionId: string,
-  ): Promise<PauseAllResponse> => {
-    const r = await makeRequest(
-      `/api/chat/sessions/${encodeURIComponent(sessionId)}/workflow/pause-all`,
-      { method: "POST", body: JSON.stringify({ execution_id: executionId }) },
-    );
-    return handleApiResponse<PauseAllResponse>(r);
   },
   interruptStep: async (
     sessionId: string,

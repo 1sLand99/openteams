@@ -48,7 +48,7 @@ const usedWorkflowKeys = () => {
 
   for (const file of sourceFiles) {
     const text = readTextForTest(file);
-    for (const match of text.matchAll(/["'](workflow\.[^"']+)["']/g)) {
+    for (const match of text.matchAll(/\bt\(\s*["'](workflow\.[^"']+)["']/g)) {
       keys.add(match[1]);
     }
   }

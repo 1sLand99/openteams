@@ -5,6 +5,10 @@ import { useQuery } from '@/lib/queryCompat';
 import { chatMessagesApi, workflowApi } from '@/lib/api';
 import { notifySourceControlRefreshRequested } from '@/lib/sourceControlEvents';
 import {
+  WORKFLOW_GRAPH_UPDATED_EVENT,
+  type WorkflowGraphUpdatedDetail,
+} from '@/lib/workflowEvents';
+import {
   shouldPollWorkflowProjection,
   WORKFLOW_CARD_REFETCH_INTERVAL_MS,
 } from '@/lib/workflowRequestPolicy';
@@ -70,6 +74,19 @@ const isWorkflowInboxActionTranscript = (
   entry.entry_type === 'approval_request' ||
   entry.entry_type === 'permission_request';
 
+const RESUME_START_TIMEOUT_MS = 15_000;
+const RESUME_REFETCH_INTERVAL_MS = 500;
+const RESUME_STARTED_REASONS = new Set([
+  'step_started',
+  'loop_review_started',
+]);
+
+type ResumePending = {
+  executionId: string;
+  requestToken: number;
+  phase: 'requesting' | 'accepted';
+};
+
 export function WorkflowCard({
   sessionId,
   messageId,
@@ -81,6 +98,7 @@ export function WorkflowCard({
     sessionsAsync,
     workflowRuntimeLinesByExecution,
     refreshSessionWorkflowStatus,
+    showToast,
   } = useWorkspace();
   const sessionTitle = useMemo(() => {
     const session = sessionsAsync.data.find((s) => s.id === sessionId);
@@ -96,6 +114,10 @@ export function WorkflowCard({
   const [pendingActionType, setPendingActionType] = useState<string | null>(
     null,
   );
+  const [resumePending, setResumePending] = useState<ResumePending | null>(
+    null,
+  );
+  const resumeRequestTokenRef = useRef(0);
   const [skipConfirmationStepId, setSkipConfirmationStepId] = useState<
     string | null
   >(null);
@@ -125,10 +147,12 @@ export function WorkflowCard({
       const data = await chatMessagesApi.getWorkflowCard(messageId, 'full');
       setProjection(data);
       void refreshSessionWorkflowStatus(sessionId);
+      return true;
     } catch {
       if (cardType === 'workflow_plan_generation') {
         setProjection(null);
       }
+      return false;
     }
   }, [
     cardType,
@@ -152,6 +176,133 @@ export function WorkflowCard({
   const refreshAll = async () => {
     await loadProjection();
   };
+
+  const clearResumePending = useCallback((requestToken?: number) => {
+    setResumePending((current) => {
+      if (!current) return null;
+      if (
+        requestToken !== undefined &&
+        current.requestToken !== requestToken
+      ) {
+        return current;
+      }
+      return null;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!resumePending) return undefined;
+    const intervalId = window.setInterval(() => {
+      void loadProjection();
+    }, RESUME_REFETCH_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [loadProjection, resumePending?.executionId]);
+
+  useEffect(() => {
+    if (!resumePending) return undefined;
+    const timeoutId = window.setTimeout(() => {
+      clearResumePending(resumePending.requestToken);
+      showToast(
+        t('workflow.resume.startTimeout', {
+          defaultValue:
+            'The workflow did not start in time. Check blocked reviews or retry.',
+        }),
+        'error',
+      );
+      void loadProjection();
+    }, RESUME_START_TIMEOUT_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    clearResumePending,
+    loadProjection,
+    resumePending?.executionId,
+    resumePending?.requestToken,
+    showToast,
+    t,
+  ]);
+
+  useEffect(() => {
+    if (!resumePending) return undefined;
+    const handleWorkflowGraphUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<WorkflowGraphUpdatedDetail>).detail;
+      if (
+        detail.sessionId !== sessionId ||
+        detail.executionId !== resumePending.executionId
+      ) {
+        return;
+      }
+
+      if (RESUME_STARTED_REASONS.has(detail.reason)) {
+        void loadProjection().then((loaded) => {
+          if (loaded) {
+            clearResumePending(resumePending.requestToken);
+          }
+        });
+        return;
+      }
+
+      if (detail.reason === 'scheduler_blocked_by_review') {
+        clearResumePending(resumePending.requestToken);
+        showToast(
+          t('workflow.resume.blockedByReview', {
+            defaultValue:
+              'Resolve the pending review before resuming the workflow.',
+          }),
+          'error',
+        );
+        void loadProjection();
+        return;
+      }
+
+      if (detail.reason === 'scheduler_no_schedulable_work') {
+        clearResumePending(resumePending.requestToken);
+        showToast(
+          t('workflow.resume.noSchedulableWork', {
+            defaultValue: 'No workflow node is ready to run.',
+          }),
+          'error',
+        );
+        void loadProjection();
+      }
+    };
+    window.addEventListener(
+      WORKFLOW_GRAPH_UPDATED_EVENT,
+      handleWorkflowGraphUpdated,
+    );
+    return () =>
+      window.removeEventListener(
+        WORKFLOW_GRAPH_UPDATED_EVENT,
+        handleWorkflowGraphUpdated,
+      );
+  }, [
+    clearResumePending,
+    loadProjection,
+    resumePending?.executionId,
+    resumePending?.requestToken,
+    sessionId,
+    showToast,
+    t,
+  ]);
+
+  useEffect(() => {
+    if (
+      !resumePending ||
+      resumePending.phase !== 'accepted' ||
+      projection?.execution_id !== resumePending.executionId
+    ) {
+      return;
+    }
+    const executionSettled =
+      projection.steps.some((step) => step.status === 'running') ||
+      projection.execution_status === 'waiting' ||
+      projection.execution_status === 'completed' ||
+      projection.state === 'waiting' ||
+      projection.state === 'completed' ||
+      projection.stopped_by_user;
+    if (executionSettled) {
+      clearResumePending(resumePending.requestToken);
+    }
+  }, [clearResumePending, projection, resumePending]);
 
   const withPending = async (
     id: string,
@@ -334,15 +485,35 @@ export function WorkflowCard({
     }
   };
 
-  const handlePauseAll = (executionId: string) =>
-    void withPending(executionId, 'pause-execution', () =>
-      workflowApi.pauseAll(sessionId, executionId),
-    );
-
-  const handleResume = (executionId: string) =>
-    void withPending(executionId, 'resume-execution', () =>
-      workflowApi.resumeExecution(sessionId, executionId),
-    );
+  const handleResume = async (executionId: string) => {
+    if (pendingActionId || resumePending) return;
+    const requestToken = resumeRequestTokenRef.current + 1;
+    resumeRequestTokenRef.current = requestToken;
+    setResumePending({
+      executionId,
+      requestToken,
+      phase: 'requesting',
+    });
+    try {
+      await workflowApi.resumeExecution(sessionId, executionId);
+      setResumePending((current) =>
+        current?.requestToken === requestToken
+          ? { ...current, phase: 'accepted' }
+          : current,
+      );
+      await refreshAll();
+    } catch (error) {
+      clearResumePending(requestToken);
+      showToast(
+        error instanceof Error
+          ? error.message
+          : t('workflow.resume.requestFailed', {
+              defaultValue: 'Unable to resume the workflow.',
+            }),
+        'error',
+      );
+    }
+  };
 
   const handleRetryStep = (stepId: string, retryTarget?: 'task' | 'review') =>
     void withPending(stepId, `retry-${retryTarget ?? 'task'}`, () =>
@@ -397,7 +568,7 @@ export function WorkflowCard({
 
   const handlePendingReview = (
     reviewId: string,
-    action: 'approve' | 'reject',
+    action: string,
     feedback?: string,
     expectedStepId?: string,
   ) =>
@@ -467,6 +638,12 @@ export function WorkflowCard({
     );
   };
 
+  const effectivePendingActionId =
+    resumePending?.executionId ?? pendingActionId;
+  const effectivePendingActionType = resumePending
+    ? 'resume-execution'
+    : pendingActionType;
+
   return (
     <>
       <div ref={workflowCardRef}>
@@ -474,7 +651,6 @@ export function WorkflowCard({
         message={message}
         projection={projection}
         onExecute={handleExecute}
-        onPauseAll={handlePauseAll}
         onResume={handleResume}
         onMarkExecutionCompleted={handleMarkExecutionCompleted}
         onRetryStep={handleRetryStep}
@@ -487,8 +663,8 @@ export function WorkflowCard({
         onRespondPendingReview={handlePendingReview}
         onSubmitStepInput={handleStepInput}
         onSubmitIterationFeedback={handleIterationFeedback}
-        pendingActionId={pendingActionId}
-        pendingActionType={pendingActionType}
+        pendingActionId={effectivePendingActionId}
+        pendingActionType={effectivePendingActionType}
       />
       </div>
 
@@ -502,7 +678,6 @@ export function WorkflowCard({
           isOpen={windowOpen}
           onClose={() => setWindowOpen(false)}
           onExecute={handleExecute}
-          onPauseAll={handlePauseAll}
           onResume={handleResume}
           onInterruptStep={handleInterruptStep}
           onStopStep={handleStopStep}
@@ -515,8 +690,8 @@ export function WorkflowCard({
           onApproval={handleApproval}
           onRespondPendingReview={handlePendingReview}
           onSubmitIterationFeedback={handleIterationFeedback}
-          pendingActionId={pendingActionId}
-          pendingActionType={pendingActionType}
+          pendingActionId={effectivePendingActionId}
+          pendingActionType={effectivePendingActionType}
         />
       )}
 

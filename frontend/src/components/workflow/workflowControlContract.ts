@@ -42,10 +42,6 @@ export function isWorkflowExecutionRecompiling(
   return projection.execution_status === 'recompiling';
 }
 
-export function canPauseWorkflowExecution(projection: WorkflowProjectionLike) {
-  return projection.execution_status === 'running';
-}
-
 export function canResumeWorkflowExecution(projection: WorkflowProjectionLike) {
   if (projection.execution_status === 'paused') return true;
   return (

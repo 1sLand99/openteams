@@ -12,13 +12,15 @@ use db::{
         workflow_loop::WorkflowLoop,
         workflow_plan::WorkflowPlan,
         workflow_step::WorkflowStep,
+        workflow_transcript::{CreateWorkflowTranscript, WorkflowTranscript},
         workflow_types::{
             CompiledLoopDef, ReviewVerdict, ReviewerType, WorkflowEventType, WorkflowLoopStatus,
             WorkflowStepStatus, to_workflow_wire_value,
         },
     },
 };
-use sqlx::SqlitePool;
+use sha2::{Digest, Sha256};
+use sqlx::{SqliteConnection, SqlitePool};
 use utils::assets::config_path;
 use uuid::Uuid;
 
@@ -26,7 +28,7 @@ use super::{
     chat_runner::ChatRunner,
     config, workflow_analytics,
     workflow_orchestrator::{
-        OrchestratorError, WorkflowOrchestrator, resolve_step_workflow_session,
+        OrchestratorError, WorkflowOrchestrator, reducer, resolve_step_workflow_session,
     },
     workflow_review::{
         LoopReviewPromptStepInput, LoopReviewProtocolMessage, build_loop_review_prompt,

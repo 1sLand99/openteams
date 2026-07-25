@@ -234,7 +234,15 @@ fn local_client_builder() -> reqwest::ClientBuilder {
 
 /// If the local executor server stops emitting any session activity while a request is still
 /// pending, fail the run so the session agent state does not stay stuck on `running` forever.
-const REQUEST_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(3600);
+///
+/// Do not also apply this duration as a reqwest request timeout. Session requests stay open for
+/// the entire agent turn and may legitimately run longer than this while SSE activity keeps
+/// resetting the watchdog in `run_request_with_control_timeout`.
+const REQUEST_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(600);
+/// `session.status: idle` may be immediately preceded or followed by a
+/// provider error. Keep consuming the control channel briefly so an idle
+/// notification cannot mask a terminal error that is already in flight.
+const IDLE_TERMINAL_DRAIN_TIMEOUT: Duration = Duration::from_millis(350);
 const SESSION_CREATE_TRANSIENT_RETRY_ATTEMPTS: usize = 4;
 const SESSION_CREATE_TRANSIENT_RETRY_DELAY_MS: u64 = 250;
 
@@ -521,7 +529,37 @@ where
         }
     }
 
-    Ok(())
+    drain_control_after_idle(control_rx, cancel).await
+}
+
+async fn drain_control_after_idle(
+    control_rx: &mut mpsc::UnboundedReceiver<ControlEvent>,
+    cancel: CancellationToken,
+) -> Result<(), ExecutorError> {
+    let deadline = tokio::time::sleep(IDLE_TERMINAL_DRAIN_TIMEOUT);
+    tokio::pin!(deadline);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            _ = &mut deadline => return Ok(()),
+            event = control_rx.recv() => match event {
+                Some(ControlEvent::Activity | ControlEvent::Idle) => {}
+                Some(ControlEvent::AuthRequired { message }) => {
+                    return Err(ExecutorError::AuthRequired(message));
+                }
+                Some(ControlEvent::SessionError { message }) => {
+                    return Err(ExecutorError::Io(io::Error::other(message)));
+                }
+                Some(ControlEvent::Disconnected) if !cancel.is_cancelled() => {
+                    return Err(ExecutorError::Io(io::Error::other(
+                        "OpenTeamsCli event stream disconnected after session became idle",
+                    )));
+                }
+                Some(ControlEvent::Disconnected) | None => return Ok(()),
+            }
+        }
+    }
 }
 
 pub async fn wait_for_health(
@@ -815,7 +853,6 @@ async fn prompt(
         .post(format!("{base_url}/session/{session_id}/message"))
         .query(&[("directory", directory)])
         .json(&req)
-        .timeout(REQUEST_ACTIVITY_TIMEOUT)
         .send()
         .await
         .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
@@ -927,7 +964,6 @@ pub async fn session_command(
         .post(format!("{base_url}/session/{session_id}/command"))
         .query(&[("directory", directory)])
         .json(&req)
-        .timeout(REQUEST_ACTIVITY_TIMEOUT)
         .send()
         .await
         .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
@@ -1014,7 +1050,6 @@ pub async fn session_summarize(
         .post(format!("{base_url}/session/{session_id}/summarize"))
         .query(&[("directory", directory)])
         .json(&req)
-        .timeout(REQUEST_ACTIVITY_TIMEOUT)
         .send()
         .await
         .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
@@ -1700,6 +1735,9 @@ async fn process_event_stream(
                     let _ = ctx.control_tx.send(ControlEvent::SessionError { message });
                     return Ok(EventStreamOutcome::Terminal);
                 }
+                if session_status_is_idle(&data) {
+                    let _ = ctx.control_tx.send(ControlEvent::Idle);
+                }
             }
             "session.idle" => {
                 let _ = ctx.control_tx.send(ControlEvent::Idle);
@@ -1878,6 +1916,13 @@ fn event_matches_session(event_type: &str, event: &Value, session_id: &str) -> b
     extracted == Some(session_id)
 }
 
+fn session_status_is_idle(event: &Value) -> bool {
+    event
+        .pointer("/properties/status/type")
+        .and_then(Value::as_str)
+        == Some("idle")
+}
+
 async fn request_permission_approval(
     auto_approve: bool,
     approvals: Option<Arc<dyn ExecutorApprovalService>>,
@@ -1920,7 +1965,7 @@ mod tests {
         ConfigProvidersResponse, ControlEvent, ProviderInfo, build_default_headers, create_session,
         event_matches_session, extract_retry_status, is_retryable_openteams_cli_db_init_error,
         local_client_builder, resolve_model_spec_from_config, resolve_session_id,
-        run_request_with_control, run_request_with_control_timeout,
+        run_request_with_control, run_request_with_control_timeout, session_status_is_idle,
     };
     use crate::executors::{
         ExecutorError,
@@ -1957,6 +2002,20 @@ mod tests {
         });
 
         assert!(extract_retry_status(&payload).is_none());
+    }
+
+    #[test]
+    fn session_status_idle_is_a_terminal_candidate() {
+        let payload = json!({
+            "type": "session.status",
+            "properties": {
+                "status": {
+                    "type": "idle"
+                }
+            }
+        });
+
+        assert!(session_status_is_idle(&payload));
     }
 
     #[test]
@@ -2104,6 +2163,29 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "idle should end the request wait");
+    }
+
+    #[tokio::test]
+    async fn run_request_with_control_prefers_error_arriving_just_after_idle() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(ControlEvent::Idle).expect("send idle");
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            tx.send(ControlEvent::SessionError {
+                message: "Insufficient balance".to_string(),
+            })
+            .expect("send late session error");
+        });
+
+        let result = run_request_with_control(
+            future::pending::<Result<(), ExecutorError>>(),
+            &mut rx,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        let err = result.expect_err("late provider error must win over idle");
+        assert!(err.to_string().contains("Insufficient balance"));
     }
 
     #[tokio::test]

@@ -6,7 +6,10 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
-import { InboxNotificationsPopover } from "./InboxNotificationsPopover";
+import {
+  InboxNotificationsPopover,
+  inboxNotificationLabel,
+} from "./InboxNotificationsPopover";
 import { InboxItemSeverity, type InboxItem } from "../../../shared/types";
 import type { Session } from "@/types";
 
@@ -58,6 +61,7 @@ const session: Session = {
   icon: "AW",
   active: true,
 };
+const typeKeyTranslate = (key: string) => key;
 
 const html = renderToStaticMarkup(
   <InboxNotificationsPopover
@@ -85,10 +89,12 @@ check(
 );
 
 check(
-  "renders unread badge as light-gray text over the Bell top-right",
+  "renders a theme-aware unread count over the Bell top-right",
   source.includes("relative inline-flex h-3.5 w-3.5") &&
     badgeSource.includes("-right-1 -top-1.5") &&
-    badgeSource.includes("text-[#f3f4f6]") &&
+    badgeSource.includes("inbox-bell-unread-badge") &&
+    styles.includes("--inbox-bell-unread-badge-text: #f3f4f6") &&
+    styles.includes("color: var(--inbox-bell-unread-badge-text)") &&
     !badgeSource.includes("rounded-full") &&
     !badgeSource.includes("bg-red-500") &&
     !badgeSource.includes("text-white"),
@@ -96,11 +102,14 @@ check(
 );
 
 check(
-  "highlights Bell trigger bright white and decorates it with a tiny red unread dot",
-  source.includes("text-[#f8fafc] drop-shadow-[0_0_6px_rgba(248,250,252,0.55)]") &&
+  "highlights the Bell trigger by theme and decorates it with a tiny red unread dot",
+  source.includes("inbox-bell-unread-icon inbox-bell-swing") &&
+    styles.includes("--inbox-bell-unread-icon: #f8fafc") &&
+    styles.includes("color: var(--inbox-bell-unread-icon)") &&
+    styles.includes("filter: var(--inbox-bell-unread-filter)") &&
     source.includes("-bottom-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-red-500") &&
     source.includes('aria-hidden="true"'),
-  source,
+  { source, styles },
 );
 
 check(
@@ -128,12 +137,74 @@ check(
 check(
   "unread list shows severity session title short body and relative time",
   source.includes("inboxSeverityPillClass") &&
-    source.includes("inboxSeverityLabel(item.severity, translate)") &&
+    source.includes("inboxNotificationLabel(item, translate)") &&
     source.includes("sessionTitleById.get(item.session_id)") &&
     source.includes("formatInboxRelativeTime(item.created_at, translate)") &&
     source.includes("{item.title}") &&
     source.includes("{item.body}"),
   source,
+);
+
+check(
+  "labels pending workflow actions by notification type instead of severity",
+  inboxNotificationLabel(
+    { ...unreadItem, kind: "workflow_input", source_type: "workflow_input" },
+    typeKeyTranslate,
+  ) === "sidebar.inbox.type.input" &&
+    inboxNotificationLabel(
+      {
+        ...unreadItem,
+        kind: "workflow_input",
+        source_type: "workflow_continue",
+      },
+      typeKeyTranslate,
+    ) === "sidebar.inbox.type.confirmation" &&
+    inboxNotificationLabel(unreadItem, typeKeyTranslate) ===
+      "sidebar.inbox.type.review" &&
+    inboxNotificationLabel(
+      {
+        ...unreadItem,
+        kind: "workflow_final_review",
+        source_type: "workflow_final_review",
+      },
+      typeKeyTranslate,
+    ) === "sidebar.inbox.type.finalReview" &&
+    inboxNotificationLabel(
+      {
+        ...unreadItem,
+        kind: "workflow_approval",
+        source_type: "workflow_approval",
+      },
+      typeKeyTranslate,
+    ) === "sidebar.inbox.type.approval" &&
+    inboxNotificationLabel(
+      {
+        ...unreadItem,
+        kind: "workflow_permission",
+        source_type: "workflow_permission",
+      },
+      typeKeyTranslate,
+    ) === "sidebar.inbox.type.permission" &&
+    inboxNotificationLabel(
+      {
+        ...unreadItem,
+        kind: "workflow_approval",
+        source_type: "workflow_approval",
+        dedupe_key: "workflow_permission:legacy",
+      },
+      typeKeyTranslate,
+    ) === "sidebar.inbox.type.permission",
+  source,
+);
+
+check(
+  "uses the softer orange warning palette for warning notifications",
+  source.includes("border-[var(--notification-warning-border)]") &&
+    source.includes("bg-[var(--notification-warning-bg)]") &&
+    source.includes("text-[var(--notification-warning)]") &&
+    styles.includes("--notification-warning: color-mix(in srgb, #fb923c 65%, var(--ink))") &&
+    !source.includes("border-amber-400/20 bg-amber-400/10 text-amber-300"),
+  { source, styles },
 );
 
 check(

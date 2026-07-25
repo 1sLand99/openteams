@@ -7,10 +7,12 @@ use db::models::{
     workflow_agent_session::WorkflowAgentSession,
     workflow_event::{CreateWorkflowEvent, WorkflowEvent},
     workflow_execution::WorkflowExecution,
+    workflow_loop::WorkflowLoop,
     workflow_step::WorkflowStep,
+    workflow_transcript::WorkflowTranscript,
     workflow_types::{to_workflow_wire_value, *},
 };
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -595,6 +597,183 @@ pub async fn guarded_transition_step(
         to = %to_str,
         "step 状态迁移完成 (guarded)"
     );
+
+    Ok(TransitionResult {
+        entity: updated,
+        event,
+    })
+}
+
+/// Transactional variant used by review resolution so the transcript claim,
+/// state transition and audit event commit or roll back together.
+pub async fn transition_step_in_transaction(
+    connection: &mut SqliteConnection,
+    execution: &WorkflowExecution,
+    step: &WorkflowStep,
+    to: WorkflowStepStatus,
+    detail: Option<serde_json::Value>,
+) -> Result<TransitionResult<WorkflowStep>, TransitionError> {
+    validate_step_transition(&step.status, &to)?;
+    if !validate_step_in_execution(&execution.status, &to) {
+        return Err(TransitionError::IllegalStepTransition {
+            from: format!("{:?}", step.status),
+            to: format!("{:?} (execution 状态 {:?} 下不允许)", to, execution.status),
+        });
+    }
+
+    let from_str = to_workflow_wire_value(&step.status);
+    let to_str = to_workflow_wire_value(&to);
+    let updated = WorkflowStep::update_status_if_current_in_transaction(
+        connection,
+        step.id,
+        step.status.clone(),
+        to,
+    )
+    .await?
+    .ok_or_else(|| TransitionError::StaleTransition {
+        entity_id: step.id.to_string(),
+    })?;
+    let event = WorkflowEvent::create_in_transaction(
+        connection,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id: Some(step.round_id),
+            step_id: Some(step.id),
+            agent_session_id: step.assigned_workflow_agent_session_id,
+            event_type: WorkflowEventType::StepStatusChanged,
+            status_before: Some(from_str),
+            status_after: Some(to_str),
+            detail_json: Some(
+                detail
+                    .unwrap_or_else(|| serde_json::json!({ "transactional": true }))
+                    .to_string(),
+            ),
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+
+    Ok(TransitionResult {
+        entity: updated,
+        event,
+    })
+}
+
+/// Atomically clears a completed/failed loop step for retry, moves it to
+/// `ready` through the reducer state machine, and records StepStatusChanged.
+pub async fn prepare_step_retry(
+    pool: &SqlitePool,
+    execution: &WorkflowExecution,
+    step: &WorkflowStep,
+    detail: Option<serde_json::Value>,
+) -> Result<TransitionResult<WorkflowStep>, TransitionError> {
+    validate_step_transition(&step.status, &WorkflowStepStatus::Ready)?;
+    if !validate_step_in_execution(&execution.status, &WorkflowStepStatus::Ready) {
+        return Err(TransitionError::IllegalStepTransition {
+            from: format!("{:?}", step.status),
+            to: format!("Ready (execution 状态 {:?} 下不允许)", execution.status),
+        });
+    }
+
+    let mut transaction = pool.begin().await?;
+    let prepared = WorkflowStep::prepare_retry_if_current_in_transaction(
+        &mut transaction,
+        step.id,
+        step.status.clone(),
+    )
+    .await?
+    .ok_or_else(|| TransitionError::StaleTransition {
+        entity_id: step.id.to_string(),
+    })?;
+    let transitioned = transition_step_in_transaction(
+        &mut transaction,
+        execution,
+        &prepared,
+        WorkflowStepStatus::Ready,
+        detail.or_else(|| Some(serde_json::json!({ "reason": "loop_step_retry_prepared" }))),
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(transitioned)
+}
+
+/// The only legal skipped -> pending transition. It is tied to a concrete,
+/// unresolved skipped-retry decision and verifies loop ownership before CAS.
+pub async fn reopen_skipped_step_by_user(
+    connection: &mut SqliteConnection,
+    execution: &WorkflowExecution,
+    workflow_loop: &WorkflowLoop,
+    step: &WorkflowStep,
+    decision_transcript: &WorkflowTranscript,
+    superseded_revision_context: Option<String>,
+) -> Result<TransitionResult<WorkflowStep>, TransitionError> {
+    if workflow_loop.status != WorkflowLoopStatus::WaitingUser
+        || step.status != WorkflowStepStatus::Skipped
+        || step.execution_id != execution.id
+        || step.loop_id != Some(workflow_loop.id)
+        || decision_transcript.execution_id != execution.id
+        || decision_transcript.entry_type != "loop_review"
+    {
+        return Err(TransitionError::IllegalStepTransition {
+            from: format!("{:?}", step.status),
+            to: "pending (invalid skipped retry decision context)".to_string(),
+        });
+    }
+    let meta = decision_transcript
+        .meta_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .unwrap_or_default();
+    if meta.get("review_kind").and_then(|value| value.as_str())
+        != Some("loop_skipped_retry_decision")
+        || meta.get("resolved").and_then(|value| value.as_bool()) == Some(true)
+    {
+        return Err(TransitionError::IllegalStepTransition {
+            from: "skipped".to_string(),
+            to: "pending (resolved or invalid decision transcript)".to_string(),
+        });
+    }
+    let member_ids = serde_json::from_str::<Vec<Uuid>>(&workflow_loop.member_step_ids_json)
+        .map_err(|error| TransitionError::Database(error.to_string()))?;
+    if !member_ids.contains(&step.id) {
+        return Err(TransitionError::IllegalStepTransition {
+            from: "skipped".to_string(),
+            to: "pending (step is not a loop member)".to_string(),
+        });
+    }
+
+    let updated = WorkflowStep::reopen_skipped_for_user_in_transaction(
+        connection,
+        step.id,
+        superseded_revision_context,
+    )
+    .await?
+    .ok_or_else(|| TransitionError::StaleTransition {
+        entity_id: step.id.to_string(),
+    })?;
+    let event = WorkflowEvent::create_in_transaction(
+        connection,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id: Some(step.round_id),
+            step_id: Some(step.id),
+            agent_session_id: step.assigned_workflow_agent_session_id,
+            event_type: WorkflowEventType::StepStatusChanged,
+            status_before: Some("skipped".to_string()),
+            status_after: Some("pending".to_string()),
+            detail_json: Some(
+                serde_json::json!({
+                    "reason": "loop_skipped_step_restarted_by_user",
+                    "loop_id": workflow_loop.id,
+                    "decision_transcript_id": decision_transcript.id,
+                    "guarded": true,
+                })
+                .to_string(),
+            ),
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
 
     Ok(TransitionResult {
         entity: updated,

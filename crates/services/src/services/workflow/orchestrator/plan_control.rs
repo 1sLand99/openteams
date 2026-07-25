@@ -612,7 +612,7 @@ impl WorkflowOrchestrator {
                 | WorkflowStepStatus::WaitingInput
                 | WorkflowStepStatus::WaitingReview => {
                     if step.status == WorkflowStepStatus::Running {
-                        cancel_running_step(step.id);
+                        cancel_running_step(step.id, step.retry_count);
                     }
                     let requested = Self::transition_step_and_sync(
                         pool,
@@ -696,7 +696,7 @@ impl WorkflowOrchestrator {
                     | WorkflowStepStatus::WaitingInput
             ) {
                 if step.status == WorkflowStepStatus::Running {
-                    cancel_running_step(step.id);
+                    cancel_running_step(step.id, step.retry_count);
                 }
                 let interrupt_requested = Self::transition_step_and_sync(
                     pool,
@@ -778,7 +778,7 @@ impl WorkflowOrchestrator {
         let steps = WorkflowStep::find_by_execution(pool, execution.id).await?;
         for step in &steps {
             if step.status == WorkflowStepStatus::Running {
-                cancel_running_step(step.id);
+                cancel_running_step(step.id, step.retry_count);
             }
         }
 
@@ -938,6 +938,32 @@ impl WorkflowOrchestrator {
         Ok(())
     }
 
+    pub(super) async fn acknowledge_step_interrupted(
+        pool: &SqlitePool,
+        chat_runner: &ChatRunner,
+        execution: &WorkflowExecution,
+        step_id: Uuid,
+        reason: &str,
+    ) -> Result<WorkflowStep, OrchestratorError> {
+        let step = WorkflowStep::find_by_id(pool, step_id)
+            .await?
+            .ok_or_else(|| OrchestratorError::NotFound(format!("step {} 未找到", step_id)))?;
+
+        if step.status == WorkflowStepStatus::InterruptRequested {
+            return Self::transition_step_and_sync(
+                pool,
+                chat_runner,
+                execution,
+                &step,
+                WorkflowStepStatus::Interrupted,
+                reason,
+            )
+            .await;
+        }
+
+        Ok(step)
+    }
+
     /// Interrupt a specific step.
     pub async fn interrupt_step(
         chat_runner: &ChatRunner,
@@ -967,8 +993,6 @@ impl WorkflowOrchestrator {
             )));
         }
 
-        cancel_running_step(step_id);
-
         let interrupt_requested = Self::transition_step_and_sync(
             pool,
             chat_runner,
@@ -979,6 +1003,32 @@ impl WorkflowOrchestrator {
         )
         .await?;
 
+        // Persist the request before cancelling the runtime. Otherwise a fast
+        // executor can acknowledge the cancellation while the database still
+        // says Running, after which this handler would overwrite it with a
+        // permanently unacknowledged InterruptRequested state.
+        let wait_for_runtime_ack = match step.status {
+            WorkflowStepStatus::Running => {
+                cancel_running_step(step_id, step.retry_count);
+                true
+            }
+            WorkflowStepStatus::WaitingReview => cancel_running_step(step_id, step.retry_count),
+            WorkflowStepStatus::WaitingInput => false,
+            _ => false,
+        };
+
+        workflow_analytics::track_runner_interrupted(
+            chat_runner.analytics_service(),
+            execution.session_id,
+            execution.id,
+            step_id,
+            "user",
+        );
+
+        if wait_for_runtime_ack {
+            return Ok(interrupt_requested);
+        }
+
         let interrupted_step = Self::transition_step_and_sync(
             pool,
             chat_runner,
@@ -988,14 +1038,6 @@ impl WorkflowOrchestrator {
             "step_interrupted",
         )
         .await?;
-
-        workflow_analytics::track_runner_interrupted(
-            chat_runner.analytics_service(),
-            execution.session_id,
-            execution.id,
-            step_id,
-            "user",
-        );
 
         Ok(interrupted_step)
     }

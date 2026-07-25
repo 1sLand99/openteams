@@ -43,9 +43,9 @@ const toneStyles = {
   },
   warning: {
     icon: TriangleAlert,
-    accent: 'text-amber-400',
-    background: 'bg-amber-400/10',
-    border: 'border-amber-400/30',
+    accent: 'text-[var(--notification-warning)]',
+    background: 'bg-[var(--notification-warning-bg)]',
+    border: 'border-[var(--notification-warning-border)]',
   },
   error: {
     icon: XCircle,

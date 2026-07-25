@@ -18,11 +18,13 @@ pub struct LoopReviewPromptStepInput {
     pub summary: String,
     pub content: String,
     pub outputs: Vec<String>,
+    pub user_skip_waiver: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoopReviewStepFeedback {
     pub step_key: String,
+    pub issue_id: String,
     pub feedback: String,
 }
 
@@ -34,6 +36,8 @@ pub enum LoopReviewProtocolMessage {
         execution_id: String,
         verdict: ReviewVerdict,
         feedback: String,
+        #[serde(default)]
+        issue_id: Option<String>,
         #[serde(default)]
         step_feedbacks: Vec<LoopReviewStepFeedback>,
     },
@@ -66,8 +70,18 @@ pub fn build_loop_review_prompt(
             } else {
                 step.outputs.join(", ")
             };
+            let user_skip_waiver = step
+                .user_skip_waiver
+                .as_deref()
+                .map(|waiver| {
+                    format!(
+                        "\n- User-approved skip waiver: {}\n- Review constraint: Do not reject this loop solely because of the waived skipped work.",
+                        waiver
+                    )
+                })
+                .unwrap_or_default();
             format!(
-                "#### [{}] {}\n- Instructions: {}\n- Acceptance criteria: {}\n- Execution summary: {}\n- Detailed content: {}\n- Outputs: {}",
+                "#### [{}] {}\n- Instructions: {}\n- Acceptance criteria: {}\n- Execution summary: {}\n- Detailed content: {}\n- Outputs: {}{}",
                 index + 1,
                 step.title,
                 step.instructions,
@@ -75,6 +89,7 @@ pub fn build_loop_review_prompt(
                 step.summary,
                 step.content,
                 outputs,
+                user_skip_waiver,
             )
         })
         .collect::<Vec<_>>()
@@ -84,7 +99,8 @@ pub fn build_loop_review_prompt(
         .iter()
         .map(|step| {
             format!(
-                r#"    {{ "step_key": "{}", "feedback": "Specific revision feedback for this step" }}"#,
+                r#"    {{ "step_key": "{}", "issue_id": "{}-stable-issue-slug", "feedback": "Specific revision feedback for this step" }}"#,
+                step.step_key,
                 step.step_key
             )
         })
@@ -121,6 +137,8 @@ Evaluate the loop's execution quality from an overall perspective:
 3. Whether outputs from one step correctly connect to the next step.
 4. Whether there are systemic issues that require broader rework.
 5. This workflow permits no more than {max_review_attempts} review attempts. Perform the complete review now. If rejecting, report every issue you can identify across the whole review scope in this single response, with concrete revision guidance. Do not hold back, defer, or drip-feed issues into later review attempts.
+6. A user-approved skip waiver is an explicit scope decision. Do not reject solely because the waived skipped step was not re-executed. Continue to review all non-waived work normally.
+7. Every rejection issue MUST have a stable issue_id. Reuse exactly the same issue_id when reporting the same underlying issue in a later review, even if wording changes. Use a new issue_id only for a genuinely different issue. When a skipped step shows a user-approved waiver issue scope, do not report that same issue scope again.
 
 ### Response Language Requirement
 {response_language_instruction}
@@ -143,6 +161,7 @@ If the entire loop needs rework, omit step_feedbacks or return an empty array.
   "loop_key": "{loop_key}",
   "execution_id": "{execution_id}",
   "verdict": "rejected",
+  "issue_id": "stable-overall-issue-slug",
   "feedback": "Detailed explanation of the overall issues and the concrete revision guidance for each step that needs changes",
   "step_feedbacks": [
 {rejected_feedback_template}
@@ -189,20 +208,26 @@ pub fn loop_review_protocol_json_schema(
             "execution_id": execution_id_schema,
             "verdict": { "enum": ["approved", "rejected"] },
             "feedback": { "type": "string", "minLength": 1 },
+            "issue_id": { "type": "string", "minLength": 1, "maxLength": 160 },
             "step_feedbacks": {
                 "type": "array",
                 "default": [],
                 "items": {
                     "type": "object",
-                    "required": ["step_key", "feedback"],
+                    "required": ["step_key", "issue_id", "feedback"],
                     "additionalProperties": false,
                     "properties": {
                         "step_key": { "enum": allowed_step_keys },
+                        "issue_id": { "type": "string", "minLength": 1, "maxLength": 160 },
                         "feedback": { "type": "string", "minLength": 1 }
                     }
                 }
             }
-        }
+        },
+        "allOf": [{
+            "if": { "properties": { "verdict": { "const": "rejected" } } },
+            "then": { "required": ["issue_id"] }
+        }]
     }))
     .unwrap_or_else(|_| "{}".to_string())
 }
@@ -331,6 +356,7 @@ pub fn parse_loop_review_output(
             execution_id: actual_execution_id,
             verdict,
             feedback,
+            issue_id,
             step_feedbacks,
         } => {
             if actual_loop_key != loop_key {
@@ -351,12 +377,19 @@ pub fn parse_loop_review_output(
                 ));
             }
             if matches!(verdict, ReviewVerdict::Rejected)
-                && step_feedbacks
-                    .iter()
-                    .any(|item| item.feedback.trim().is_empty())
+                && issue_id.as_deref().map(str::trim).is_none_or(str::is_empty)
             {
                 return Err(WorkflowRuntimeError::Validation(
-                    "loop review rejected 时 step_feedbacks.feedback 不能为空".to_string(),
+                    "loop review rejected 时 issue_id 不能为空".to_string(),
+                ));
+            }
+            if matches!(verdict, ReviewVerdict::Rejected)
+                && step_feedbacks
+                    .iter()
+                    .any(|item| item.feedback.trim().is_empty() || item.issue_id.trim().is_empty())
+            {
+                return Err(WorkflowRuntimeError::Validation(
+                    "loop review rejected 时 step_feedbacks.issue_id/feedback 不能为空".to_string(),
                 ));
             }
         }
@@ -429,6 +462,9 @@ mod tests {
                     summary: "Draft ready".to_string(),
                     content: "Produced a draft document".to_string(),
                     outputs: vec!["docs/draft.md".to_string()],
+                    user_skip_waiver: Some(
+                        "User chose to keep this skipped step after review feedback.".to_string(),
+                    ),
                 },
                 LoopReviewPromptStepInput {
                     step_key: "revise".to_string(),
@@ -438,12 +474,15 @@ mod tests {
                     summary: "Revision ready".to_string(),
                     content: "Added missing details".to_string(),
                     outputs: vec![],
+                    user_skip_waiver: None,
                 },
             ],
             "You MUST write human-readable JSON string values in Simplified Chinese.",
         );
 
         assert!(prompt.contains("## Loop Review Task"));
+        assert!(prompt.contains("User-approved skip waiver"));
+        assert!(prompt.contains("Do not reject this loop solely"));
         assert!(prompt.contains("Response Language Requirement"));
         assert!(
             prompt.contains(
@@ -460,6 +499,7 @@ mod tests {
         assert!(
             prompt.contains("report every issue you can identify across the whole review scope")
         );
+        assert!(prompt.contains("Every rejection issue MUST have a stable issue_id"));
     }
 
     #[test]
@@ -533,6 +573,7 @@ mod tests {
                 execution_id: execution_id.to_string(),
                 verdict: ReviewVerdict::Approved,
                 feedback: "整体通过".to_string(),
+                issue_id: None,
                 step_feedbacks: vec![],
             }
         );
@@ -547,9 +588,10 @@ mod tests {
   "loop_key": "loop-a",
   "execution_id": "{}",
   "verdict": "rejected",
+  "issue_id": "overall-missing-background",
   "feedback": "需要整体返工",
   "step_feedbacks": [
-    {{ "step_key": "draft", "feedback": "请补充背景" }}
+    {{ "step_key": "draft", "issue_id": "draft-missing-background", "feedback": "请补充背景" }}
   ]
 }}"#,
             execution_id
@@ -581,5 +623,24 @@ mod tests {
 
         let err = parse_loop_review_output(execution_id, "loop-a", &raw).expect_err("invalid");
         assert!(matches!(err, WorkflowRuntimeError::Validation(_)));
+    }
+
+    #[test]
+    fn parse_loop_review_output_requires_stable_issue_id_for_rejection() {
+        let execution_id = Uuid::new_v4();
+        let raw = format!(
+            r#"{{
+  "type": "loop_review_result",
+  "loop_key": "loop-a",
+  "execution_id": "{}",
+  "verdict": "rejected",
+  "feedback": "发现了新问题"
+}}"#,
+            execution_id
+        );
+
+        let error = parse_loop_review_output(execution_id, "loop-a", &raw)
+            .expect_err("missing issue_id must fail");
+        assert!(error.to_string().contains("issue_id"));
     }
 }

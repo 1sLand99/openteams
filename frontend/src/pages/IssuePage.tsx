@@ -87,7 +87,7 @@ import type {
 
 type IssueLabel = {
   name: string;
-  color: 'red' | 'blue' | 'cyan';
+  color: 'red' | 'purple' | 'blue' | 'cyan';
 };
 
 type IssueItem = {
@@ -185,6 +185,7 @@ const issueGroupTitleFallback: Record<IssueGroup['id'], string> = {
 
 const labelColorClass: Record<IssueLabel['color'], string> = {
   red: 'bg-[#ff5f59]',
+  purple: 'bg-[#b987ff]',
   blue: 'bg-[#4aa3ff]',
   cyan: 'bg-[#92ecec]',
 };
@@ -520,7 +521,10 @@ const githubLabelsToIssueLabels = (labels: string[]): IssueLabel[] =>
 const githubIssueLabelColor = (label: string): IssueLabel['color'] => {
   const normalized = label.trim().toLowerCase();
   if (normalized === 'bug' || normalized === 'urgent') return 'red';
-  if (normalized === 'enhancement' || normalized === 'feature') return 'blue';
+  if (normalized === 'feature') return 'purple';
+  if (normalized === 'enhancement' || normalized === 'improvement') {
+    return 'blue';
+  }
   return 'cyan';
 };
 

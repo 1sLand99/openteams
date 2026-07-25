@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -129,6 +129,60 @@ impl WorkflowLoop {
         .await
     }
 
+    pub async fn update_status_if_current(
+        pool: &SqlitePool,
+        id: Uuid,
+        expected_status: WorkflowLoopStatus,
+        status: WorkflowLoopStatus,
+        rejection_reason: Option<String>,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_loops
+            SET status = ?3,
+                rejection_reason = ?4,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1 AND status = ?2
+            RETURNING id, execution_id, round_id, loop_key, review_step_id,
+                      member_step_ids_json, status, retry_count, max_retry,
+                      user_review_required, rejection_reason, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(expected_status)
+        .bind(status)
+        .bind(rejection_reason)
+        .fetch_optional(pool)
+        .await
+    }
+
+    pub async fn update_status_if_current_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+        expected_status: WorkflowLoopStatus,
+        status: WorkflowLoopStatus,
+        rejection_reason: Option<String>,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_loops
+            SET status = ?3,
+                rejection_reason = ?4,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1 AND status = ?2
+            RETURNING id, execution_id, round_id, loop_key, review_step_id,
+                      member_step_ids_json, status, retry_count, max_retry,
+                      user_review_required, rejection_reason, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(expected_status)
+        .bind(status)
+        .bind(rejection_reason)
+        .fetch_optional(connection)
+        .await
+    }
+
     pub async fn update_user_review_required(
         pool: &SqlitePool,
         id: Uuid,
@@ -174,6 +228,34 @@ impl WorkflowLoop {
         .bind(status)
         .bind(rejection_reason)
         .fetch_one(pool)
+        .await
+    }
+
+    pub async fn increment_retry_if_current_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+        expected_status: WorkflowLoopStatus,
+        status: WorkflowLoopStatus,
+        rejection_reason: Option<String>,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_loops
+            SET retry_count = retry_count + 1,
+                status = ?3,
+                rejection_reason = ?4,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1 AND status = ?2
+            RETURNING id, execution_id, round_id, loop_key, review_step_id,
+                      member_step_ids_json, status, retry_count, max_retry,
+                      user_review_required, rejection_reason, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(expected_status)
+        .bind(status)
+        .bind(rejection_reason)
+        .fetch_optional(connection)
         .await
     }
 }

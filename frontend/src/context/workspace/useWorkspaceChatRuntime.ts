@@ -8,6 +8,7 @@ import { mapMessage, monogramFromName } from '@/lib/mappers';
 import { resolveMessageReferences } from '@/lib/messageReferences';
 import { notifyBuildStatsUsageUpdated } from '@/lib/buildStatsEvents';
 import { notifySourceControlRefreshRequested } from '@/lib/sourceControlEvents';
+import { notifyWorkflowGraphUpdated } from '@/lib/workflowEvents';
 import type { WorkspaceContextProps } from './workspaceContextContract';
 import type { ChatStreamEvent } from './workspaceChatStreamTypes';
 import type { RuntimeActiveRun } from './workspaceContextTypes';
@@ -480,6 +481,20 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
       ) {
         void refreshSessionRunningIndicators(sid);
         scheduleInboxRefresh();
+        return;
+      }
+
+      if (
+        parsed.type === 'workflow_graph_updated' &&
+        parsed.session_id === sid
+      ) {
+        notifyWorkflowGraphUpdated({
+          sessionId: parsed.session_id,
+          executionId: parsed.execution_id,
+          graphVersion: parsed.graph_version,
+          reason: parsed.reason,
+          changedStepIds: parsed.changed_step_ids,
+        });
         return;
       }
 

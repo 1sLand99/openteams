@@ -306,15 +306,26 @@ impl WorkflowOrchestrator {
             {
                 Ok((message, _raw_output)) => message,
                 Err(OrchestratorError::Runtime(WorkflowRuntimeError::Interrupted(reason))) => {
+                    let interrupted_step = Self::acknowledge_step_interrupted(
+                        pool,
+                        chat_runner,
+                        &active_execution,
+                        running_step.id,
+                        "step_interrupted",
+                    )
+                    .await?;
                     let _ = Self::write_transcript(
                         pool,
                         active_execution.id,
-                        running_step.round_id.into(),
+                        interrupted_step.round_id.into(),
                         Some(workflow_session.id),
-                        Some(running_step.id),
+                        Some(interrupted_step.id),
                         "system",
                         "message",
-                        &format!("Step \"{}\" interrupted: {}", running_step.title, reason),
+                        &format!(
+                            "Step \"{}\" interrupted: {}",
+                            interrupted_step.title, reason
+                        ),
                         None,
                     )
                     .await;
@@ -324,7 +335,7 @@ impl WorkflowOrchestrator {
                         active_execution.id,
                         None,
                         "step_input_interrupted",
-                        vec![running_step.id.to_string()],
+                        vec![interrupted_step.id.to_string()],
                     )
                     .await?;
                     return Ok(ResolvedTranscriptAction {

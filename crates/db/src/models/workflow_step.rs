@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -215,6 +215,42 @@ impl WorkflowStep {
         .await
     }
 
+    pub async fn update_status_if_current_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+        expected_status: WorkflowStepStatus,
+        status: WorkflowStepStatus,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_steps
+            SET status = ?3,
+                started_at = CASE
+                    WHEN ?3 = 'running' THEN COALESCE(started_at, datetime('now', 'subsec'))
+                    ELSE started_at
+                END,
+                completed_at = CASE
+                    WHEN ?3 IN ('completed', 'skipped') THEN datetime('now', 'subsec')
+                    WHEN ?3 IN ('pending', 'ready', 'running', 'revising') THEN NULL
+                    ELSE completed_at
+                END,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1 AND status = ?2
+            RETURNING id, execution_id, round_id, compiled_revision_id, step_key,
+                      step_type, title, instructions, assigned_workflow_agent_session_id,
+                      status, retry_count, max_retry, round_index, display_order,
+                      latest_run_id, summary_text, content, loop_id,
+                      lead_review_required, user_review_required, revision_context,
+                      created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(id)
+        .bind(expected_status)
+        .bind(status)
+        .fetch_optional(connection)
+        .await
+    }
+
     pub async fn mark_completed_if_current(
         pool: &SqlitePool,
         id: Uuid,
@@ -328,6 +364,31 @@ impl WorkflowStep {
         .await
     }
 
+    pub async fn update_revision_context_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+        revision_context: Option<String>,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_steps
+            SET revision_context = ?2,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1
+            RETURNING id, execution_id, round_id, compiled_revision_id, step_key,
+                      step_type, title, instructions, assigned_workflow_agent_session_id,
+                      status, retry_count, max_retry, round_index, display_order,
+                      latest_run_id, summary_text, content, loop_id,
+                      lead_review_required, user_review_required, revision_context,
+                      created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(id)
+        .bind(revision_context)
+        .fetch_one(connection)
+        .await
+    }
+
     pub async fn update_review_requirements(
         pool: &SqlitePool,
         id: Uuid,
@@ -381,6 +442,38 @@ impl WorkflowStep {
         .await
     }
 
+    /// Prepares an explicit user-triggered retry and starts a new lead-review attempt cycle.
+    /// Historical review rows remain available for audit.
+    pub async fn prepare_manual_retry(pool: &SqlitePool, id: Uuid) -> Result<Self, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_steps
+            SET retry_count = retry_count + 1,
+                lead_review_attempt_offset = (
+                    SELECT COUNT(*)
+                    FROM chat_workflow_step_reviews
+                    WHERE step_id = ?1 AND reviewer_type = 'lead'
+                ),
+                latest_run_id = NULL,
+                summary_text = NULL,
+                content = NULL,
+                started_at = NULL,
+                completed_at = NULL,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1
+            RETURNING id, execution_id, round_id, compiled_revision_id, step_key,
+                      step_type, title, instructions, assigned_workflow_agent_session_id,
+                      status, retry_count, max_retry, round_index, display_order,
+                      latest_run_id, summary_text, content, loop_id,
+                      lead_review_required, user_review_required, revision_context,
+                      created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+    }
+
     pub async fn prepare_retry(pool: &SqlitePool, id: Uuid) -> Result<Self, sqlx::Error> {
         sqlx::query_as::<_, Self>(
             r#"
@@ -406,6 +499,96 @@ impl WorkflowStep {
         .await
     }
 
+    pub async fn prepare_retry_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_steps
+            SET retry_count = retry_count + 1,
+                latest_run_id = NULL,
+                summary_text = NULL,
+                content = NULL,
+                started_at = NULL,
+                completed_at = NULL,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1
+            RETURNING id, execution_id, round_id, compiled_revision_id, step_key,
+                      step_type, title, instructions, assigned_workflow_agent_session_id,
+                      status, retry_count, max_retry, round_index, display_order,
+                      latest_run_id, summary_text, content, loop_id,
+                      lead_review_required, user_review_required, revision_context,
+                      created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(id)
+        .fetch_one(connection)
+        .await
+    }
+
+    pub async fn prepare_retry_if_current_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+        expected_status: WorkflowStepStatus,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_steps
+            SET retry_count = retry_count + 1,
+                latest_run_id = NULL,
+                summary_text = NULL,
+                content = NULL,
+                started_at = NULL,
+                completed_at = NULL,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1 AND status = ?2
+            RETURNING id, execution_id, round_id, compiled_revision_id, step_key,
+                      step_type, title, instructions, assigned_workflow_agent_session_id,
+                      status, retry_count, max_retry, round_index, display_order,
+                      latest_run_id, summary_text, content, loop_id,
+                      lead_review_required, user_review_required, revision_context,
+                      created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(id)
+        .bind(expected_status)
+        .fetch_optional(connection)
+        .await
+    }
+
+    pub async fn reopen_skipped_for_user_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+        revision_context: Option<String>,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_steps
+            SET status = 'pending',
+                retry_count = retry_count + 1,
+                latest_run_id = NULL,
+                summary_text = NULL,
+                content = NULL,
+                revision_context = ?2,
+                started_at = NULL,
+                completed_at = NULL,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1 AND status = 'skipped'
+            RETURNING id, execution_id, round_id, compiled_revision_id, step_key,
+                      step_type, title, instructions, assigned_workflow_agent_session_id,
+                      status, retry_count, max_retry, round_index, display_order,
+                      latest_run_id, summary_text, content, loop_id,
+                      lead_review_required, user_review_required, revision_context,
+                      created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(id)
+        .bind(revision_context)
+        .fetch_optional(connection)
+        .await
+    }
+
     /// Like `prepare_retry` but keeps the task outputs (summary_text, content, latest_run_id).
     /// Used when retrying only the review phase, not the task execution.
     pub async fn prepare_retry_review(pool: &SqlitePool, id: Uuid) -> Result<Self, sqlx::Error> {
@@ -413,6 +596,37 @@ impl WorkflowStep {
             r#"
             UPDATE chat_workflow_steps
             SET retry_count = retry_count + 1,
+                completed_at = NULL,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1
+            RETURNING id, execution_id, round_id, compiled_revision_id, step_key,
+                      step_type, title, instructions, assigned_workflow_agent_session_id,
+                      status, retry_count, max_retry, round_index, display_order,
+                      latest_run_id, summary_text, content, loop_id,
+                      lead_review_required, user_review_required, revision_context,
+                      created_at, updated_at, started_at, completed_at
+            "#,
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+    }
+
+    /// Prepares an explicit review-only retry and starts a new lead-review attempt cycle.
+    /// Task outputs and historical review rows are preserved.
+    pub async fn prepare_manual_retry_review(
+        pool: &SqlitePool,
+        id: Uuid,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_steps
+            SET retry_count = retry_count + 1,
+                lead_review_attempt_offset = (
+                    SELECT COUNT(*)
+                    FROM chat_workflow_step_reviews
+                    WHERE step_id = ?1 AND reviewer_type = 'lead'
+                ),
                 completed_at = NULL,
                 updated_at = datetime('now', 'subsec')
             WHERE id = ?1
@@ -510,7 +724,10 @@ mod tests {
             workflow_execution::{CreateWorkflowExecution, WorkflowExecution},
             workflow_plan::{CreateWorkflowPlan, WorkflowPlan},
             workflow_round::{CreateWorkflowRound, WorkflowRound},
-            workflow_types::{WorkflowStepType, WorkflowValidationStatus},
+            workflow_step_review::{CreateWorkflowStepReview, WorkflowStepReview},
+            workflow_types::{
+                ReviewVerdict, ReviewerType, WorkflowStepType, WorkflowValidationStatus,
+            },
         },
         run_migrations,
     };
@@ -851,5 +1068,110 @@ mod tests {
         assert!(after.content.is_none());
         assert_eq!(after.instructions, "");
         assert!(after.revision_context.is_none());
+    }
+
+    #[tokio::test]
+    async fn manual_retry_starts_new_lead_review_attempt_cycle() {
+        let pool = step_test_pool().await;
+        let (execution_id, round_id) = create_execution_and_round(&pool).await;
+        let step = WorkflowStep::create(
+            &pool,
+            &sample_step_data(execution_id, round_id, "reviewed"),
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create step");
+
+        for review_round in 1..=5 {
+            WorkflowStepReview::create(
+                &pool,
+                &CreateWorkflowStepReview {
+                    step_id: step.id,
+                    execution_id,
+                    reviewer_type: ReviewerType::Lead,
+                    reviewer_id: None,
+                    verdict: ReviewVerdict::Rejected,
+                    feedback: format!("lead review {review_round}"),
+                    review_round: Some(review_round),
+                },
+                Uuid::new_v4(),
+            )
+            .await
+            .expect("create lead review");
+        }
+        WorkflowStepReview::create(
+            &pool,
+            &CreateWorkflowStepReview {
+                step_id: step.id,
+                execution_id,
+                reviewer_type: ReviewerType::User,
+                reviewer_id: None,
+                verdict: ReviewVerdict::Rejected,
+                feedback: "user review".to_string(),
+                review_round: Some(1),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create user review");
+
+        assert_eq!(
+            WorkflowStepReview::count_lead_reviews_in_current_cycle(&pool, step.id)
+                .await
+                .expect("count lead reviews"),
+            5
+        );
+
+        WorkflowStep::prepare_manual_retry(&pool, step.id)
+            .await
+            .expect("prepare manual retry");
+
+        assert_eq!(
+            WorkflowStepReview::find_by_step(&pool, step.id)
+                .await
+                .expect("load historical reviews")
+                .len(),
+            6,
+            "manual retry must preserve historical reviews for audit"
+        );
+        assert_eq!(
+            WorkflowStepReview::count_lead_reviews_in_current_cycle(&pool, step.id)
+                .await
+                .expect("count reset lead reviews"),
+            0
+        );
+
+        WorkflowStepReview::create(
+            &pool,
+            &CreateWorkflowStepReview {
+                step_id: step.id,
+                execution_id,
+                reviewer_type: ReviewerType::Lead,
+                reviewer_id: None,
+                verdict: ReviewVerdict::Rejected,
+                feedback: "new cycle review".to_string(),
+                review_round: Some(6),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create new-cycle lead review");
+        assert_eq!(
+            WorkflowStepReview::count_lead_reviews_in_current_cycle(&pool, step.id)
+                .await
+                .expect("count current-cycle lead reviews"),
+            1
+        );
+
+        WorkflowStep::prepare_retry(&pool, step.id)
+            .await
+            .expect("prepare automatic revision retry");
+        assert_eq!(
+            WorkflowStepReview::count_lead_reviews_in_current_cycle(&pool, step.id)
+                .await
+                .expect("count after automatic retry"),
+            1,
+            "automatic revisions must not reset the review attempt budget"
+        );
     }
 }

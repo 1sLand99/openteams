@@ -105,15 +105,12 @@ pub async fn respond_to_review(
         let deployment_clone = deployment.clone();
         let execution_id = resolved.execution.id;
         tokio::spawn(async move {
-            if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+            WorkflowOrchestrator::wake_scheduler_with_recovery(
                 deployment_clone.db(),
                 deployment_clone.chat_runner(),
                 execution_id,
             )
-            .await
-            {
-                tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed after responding to review");
-            }
+            .await;
         });
     }
 
@@ -163,15 +160,12 @@ pub async fn submit_iteration_feedback(
         let deployment_clone = deployment.clone();
         let execution_id = outcome.execution.id;
         tokio::spawn(async move {
-            if let Err(err) = WorkflowOrchestrator::wake_scheduler(
+            WorkflowOrchestrator::wake_scheduler_with_recovery(
                 deployment_clone.db(),
                 deployment_clone.chat_runner(),
                 execution_id,
             )
-            .await
-            {
-                tracing::error!(execution_id = %execution_id, error = %err, "workflow scheduler failed after submitting iteration feedback");
-            }
+            .await;
         });
     }
 
@@ -217,6 +211,8 @@ fn normalize_review_action(entry_type: &str, action: &str) -> Result<&'static st
         ("step_review", "reject") | ("step_review", "rejected") => Ok("rejected"),
         ("loop_review", "approve") | ("loop_review", "approved") => Ok("approved"),
         ("loop_review", "reject") | ("loop_review", "rejected") => Ok("rejected"),
+        ("loop_review", "restart_skipped") => Ok("restart_skipped"),
+        ("loop_review", "keep_skipped") => Ok("keep_skipped"),
         ("final_review", _) => Err(ApiError::BadRequest(
             "final_review must be submitted through workflow iteration feedback.".to_string(),
         )),
@@ -252,6 +248,14 @@ mod tests {
         assert_eq!(
             normalize_review_action("loop_review", "reject").unwrap(),
             "rejected"
+        );
+        assert_eq!(
+            normalize_review_action("loop_review", "restart_skipped").unwrap(),
+            "restart_skipped"
+        );
+        assert_eq!(
+            normalize_review_action("loop_review", "keep_skipped").unwrap(),
+            "keep_skipped"
         );
     }
 
