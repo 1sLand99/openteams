@@ -1041,6 +1041,32 @@ Read this file before writing the final result. Do not rely on the workflow plan
                 .await
                 {
                     Ok(raw_output) => raw_output,
+                    Err(OrchestratorError::Runtime(WorkflowRuntimeError::Interrupted(reason))) => {
+                        let interrupted_step = Self::acknowledge_step_interrupted(
+                            pool,
+                            chat_runner,
+                            execution,
+                            waiting_review_step.id,
+                            "step_interrupted",
+                        )
+                        .await?;
+                        let _ = Self::write_transcript(
+                            pool,
+                            execution.id,
+                            Some(interrupted_step.round_id),
+                            Some(lead_workflow_session.id),
+                            Some(interrupted_step.id),
+                            "system",
+                            "message",
+                            &format!(
+                                "Lead review interrupted for step \"{}\": {}",
+                                interrupted_step.title, reason
+                            ),
+                            None,
+                        )
+                        .await;
+                        return Ok(StepOutcome::Interrupted);
+                    }
                     Err(err) => {
                         let failed_step = Self::transition_step_and_sync(
                             pool,
@@ -1780,6 +1806,159 @@ Before modifying files, you MUST use the `using-git-workspace` skill to create a
         current_steps: &[WorkflowStep],
         edges: &[WorkflowStepEdge],
     ) -> Result<StepOutcome, OrchestratorError> {
+        let result = Self::prepare_and_run_step_inner(
+            db,
+            pool,
+            chat_runner,
+            execution,
+            step,
+            workflow_agent_sessions,
+            session,
+            session_agents,
+            agents,
+            plan,
+            current_steps,
+            edges,
+        )
+        .await;
+
+        let Err(error) = result else {
+            return result;
+        };
+
+        let current_step = WorkflowStep::find_by_id(pool, step.id)
+            .await?
+            .ok_or_else(|| OrchestratorError::NotFound(format!("step {} 未找到", step.id)))?;
+        let interrupted_reason = match &error {
+            OrchestratorError::Runtime(WorkflowRuntimeError::Interrupted(reason)) => {
+                Some(reason.clone())
+            }
+            _ => None,
+        };
+
+        if current_step.status == WorkflowStepStatus::InterruptRequested {
+            let interrupted_step = Self::acknowledge_step_interrupted(
+                pool,
+                chat_runner,
+                execution,
+                current_step.id,
+                "step_interrupted_after_work_item_error",
+            )
+            .await?;
+            tracing::info!(
+                execution_id = %execution.id,
+                step_id = %interrupted_step.id,
+                error = %error,
+                "workflow work-item guard settled requested interrupt"
+            );
+            return Ok(StepOutcome::Interrupted);
+        }
+        if current_step.status == WorkflowStepStatus::Interrupted {
+            return Ok(StepOutcome::Interrupted);
+        }
+        if let Some(reason) = interrupted_reason
+            && current_step.status == WorkflowStepStatus::Running
+        {
+            let requested_step = Self::transition_step_and_sync(
+                pool,
+                chat_runner,
+                execution,
+                &current_step,
+                WorkflowStepStatus::InterruptRequested,
+                "step_interrupt_recovered_by_work_item_guard",
+            )
+            .await?;
+            let interrupted_step = Self::transition_step_and_sync(
+                pool,
+                chat_runner,
+                execution,
+                &requested_step,
+                WorkflowStepStatus::Interrupted,
+                "step_interrupted_by_work_item_guard",
+            )
+            .await?;
+            let _ = Self::write_transcript(
+                pool,
+                execution.id,
+                Some(interrupted_step.round_id),
+                interrupted_step.assigned_workflow_agent_session_id,
+                Some(interrupted_step.id),
+                "system",
+                "message",
+                &format!("Step \"{}\" interrupted: {reason}", interrupted_step.title),
+                None,
+            )
+            .await;
+            return Ok(StepOutcome::Interrupted);
+        }
+        if matches!(
+            current_step.status,
+            WorkflowStepStatus::Running | WorkflowStepStatus::Revising
+        ) {
+            let reason = error.to_string();
+            let failed_step = Self::transition_step_and_sync(
+                pool,
+                chat_runner,
+                execution,
+                &current_step,
+                WorkflowStepStatus::Failed,
+                "step_failed_by_work_item_guard",
+            )
+            .await?;
+            let _ = WorkflowStep::record_execution_result(
+                pool,
+                failed_step.id,
+                Uuid::new_v4(),
+                Some(
+                    serde_json::to_string(&SummaryPayload {
+                        summary: reason.clone(),
+                        content: None,
+                        outputs: Vec::new(),
+                    })
+                    .unwrap_or_else(|_| reason.clone()),
+                ),
+                None,
+            )
+            .await;
+            let _ = Self::write_transcript(
+                pool,
+                execution.id,
+                Some(failed_step.round_id),
+                failed_step.assigned_workflow_agent_session_id,
+                Some(failed_step.id),
+                "system",
+                "message",
+                &format!("Step \"{}\" failed: {reason}", failed_step.title),
+                None,
+            )
+            .await;
+            tracing::error!(
+                execution_id = %execution.id,
+                step_id = %failed_step.id,
+                error = %error,
+                "workflow work-item guard converted an unhandled error into a terminal step state"
+            );
+            return Ok(StepOutcome::Failed(reason));
+        }
+
+        Err(error)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_and_run_step_inner(
+        db: &DBService,
+        pool: &SqlitePool,
+        chat_runner: &ChatRunner,
+        execution: &WorkflowExecution,
+        step: &WorkflowStep,
+        workflow_agent_sessions: &[WorkflowAgentSession],
+        session: &ChatSession,
+        session_agents: &[ChatSessionAgent],
+        agents: &[ChatAgent],
+        plan: &WorkflowPlan,
+        current_steps: &[WorkflowStep],
+        edges: &[WorkflowStepEdge],
+    ) -> Result<StepOutcome, OrchestratorError> {
         let workflow_session =
             resolve_step_workflow_session(execution, workflow_agent_sessions, step)?;
         let session_agent = session_agents
@@ -1948,15 +2127,26 @@ Before modifying files, you MUST use the `using-git-workspace` skill to create a
                         .map(|item| item.absolute_path.as_path()),
                 )
                 .await;
+                let interrupted_step = Self::acknowledge_step_interrupted(
+                    pool,
+                    chat_runner,
+                    execution,
+                    running_step.id,
+                    "step_interrupted",
+                )
+                .await?;
                 let _ = Self::write_transcript(
                     pool,
                     execution.id,
-                    running_step.round_id.into(),
+                    interrupted_step.round_id.into(),
                     Some(workflow_session.id),
-                    Some(running_step.id),
+                    Some(interrupted_step.id),
                     "system",
                     "message",
-                    &format!("Step \"{}\" interrupted: {}", running_step.title, reason),
+                    &format!(
+                        "Step \"{}\" interrupted: {}",
+                        interrupted_step.title, reason
+                    ),
                     None,
                 )
                 .await;

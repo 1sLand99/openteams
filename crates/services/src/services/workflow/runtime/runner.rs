@@ -1,22 +1,48 @@
 /// Cancel the running agent process for the given step, if any.
 /// Called from the orchestrator's `interrupt_step` to truly stop execution.
-pub fn cancel_running_step(step_id: Uuid) {
-    STEP_CANCEL_REQUESTS.insert(step_id);
-    if let Some((_, token)) = RUNNING_STEPS.remove(&step_id) {
+pub fn cancel_running_step(step_id: Uuid, retry_count: i32) -> bool {
+    let key = RunningStepKey {
+        step_id,
+        retry_count,
+    };
+    STEP_CANCEL_REQUESTS.insert(key);
+    if let Some((_, token)) = RUNNING_STEPS.remove(&key) {
         token.cancel();
+        true
+    } else {
+        false
     }
 }
 
-fn register_running_step(step_id: Uuid, token: CancellationToken) {
-    if STEP_CANCEL_REQUESTS.contains(&step_id) {
+fn register_running_step(step_id: Uuid, retry_count: i32, token: CancellationToken) {
+    let key = RunningStepKey {
+        step_id,
+        retry_count,
+    };
+    if STEP_CANCEL_REQUESTS.contains(&key) {
         token.cancel();
     }
-    RUNNING_STEPS.insert(step_id, token);
+    RUNNING_STEPS.insert(key, token);
 }
 
-fn clear_running_step(step_id: Uuid) {
-    RUNNING_STEPS.remove(&step_id);
-    STEP_CANCEL_REQUESTS.remove(&step_id);
+fn clear_running_step(step_id: Uuid, retry_count: i32) {
+    let key = RunningStepKey {
+        step_id,
+        retry_count,
+    };
+    RUNNING_STEPS.remove(&key);
+    STEP_CANCEL_REQUESTS.remove(&key);
+}
+
+fn step_attempt_cancel_was_requested(
+    step_id: Uuid,
+    retry_count: i32,
+    cancel: Option<&CancellationToken>,
+) -> bool {
+    STEP_CANCEL_REQUESTS.contains(&RunningStepKey {
+        step_id,
+        retry_count,
+    }) || cancel.is_some_and(CancellationToken::is_cancelled)
 }
 
 struct WorkflowRuntimeRunRecord {
@@ -285,6 +311,7 @@ pub async fn run_workflow_agent_prompt(
         workflow_session,
         prompt,
         step_id,
+        0,
         false,
         None,
     )
@@ -310,6 +337,7 @@ pub async fn run_workflow_step_agent_prompt(
         workflow_session,
         prompt,
         step.id,
+        step.retry_count,
         false,
         Some(WorkflowRuntimeStreamContext {
             pool: db.pool.clone(),
@@ -343,6 +371,7 @@ pub async fn run_workflow_agent_follow_up(
         Some(workflow_session),
         prompt,
         step_id,
+        0,
         true,
         None,
     )
@@ -368,6 +397,7 @@ pub async fn run_workflow_step_agent_follow_up(
         Some(workflow_session),
         prompt,
         step.id,
+        step.retry_count,
         true,
         Some(WorkflowRuntimeStreamContext {
             pool: db.pool.clone(),
@@ -435,6 +465,7 @@ async fn run_workflow_agent_prompt_inner(
     workflow_session: Option<&WorkflowAgentSession>,
     prompt: &str,
     step_id: Uuid,
+    step_retry_count: i32,
     follow_up_requested: bool,
     stream_context: Option<WorkflowRuntimeStreamContext>,
 ) -> Result<WorkflowAgentRunOutput, WorkflowRuntimeError> {
@@ -606,11 +637,12 @@ async fn run_workflow_agent_prompt_inner(
 
     // Register the cancel token so interrupt_step can terminate this process.
     if let Some(cancel) = spawned.cancel.clone() {
-        register_running_step(step_id, cancel);
+        register_running_step(step_id, step_retry_count, cancel);
     }
 
     let msg_store = Arc::new(MsgStore::new());
     if let Err(error) = spawn_log_forwarders(&mut spawned.child, msg_store.clone()) {
+        clear_running_step(step_id, step_retry_count);
         let message = error.to_string();
         io_log.log_output("", Some(&message));
         let _ = finish_workflow_runtime_run_record(
@@ -666,32 +698,77 @@ async fn run_workflow_agent_prompt_inner(
     });
 
     let mut failed_by_signal = false;
+    let mut exit_signal_error: Option<String> = None;
     let mut interrupted = false;
     let mut status = None;
 
     if let Some(exit_signal) = spawned.exit_signal.take() {
-        match wait_for_executor_exit_or_cancel(exit_signal, spawned.cancel.clone()).await {
-            Ok(ExecutorWaitEvent::Exit(Ok(ExecutorExitResult::Success))) => {}
+        let mut exit_signal = exit_signal;
+        let wait_event = wait_for_executor_exit_or_cancel(
+            &mut spawned.child,
+            &mut exit_signal,
+            spawned.cancel.clone(),
+        )
+        .await;
+        // Some executors let their child process exit just before the task
+        // forwarding the structured exit result gets scheduled. Give that
+        // result a short chance to arrive so a concrete provider error is not
+        // reduced to a bare process exit code.
+        let wait_event = match wait_event {
+            Ok(ExecutorWaitEvent::ProcessExited(Ok(exit_status))) => {
+                match time::timeout(WORKFLOW_EXIT_SIGNAL_DRAIN_TIMEOUT, &mut exit_signal).await {
+                    Ok(result) => Ok(ExecutorWaitEvent::Exit(result)),
+                    Err(_) => Ok(ExecutorWaitEvent::ProcessExited(Ok(exit_status))),
+                }
+            }
+            other => other,
+        };
+        match wait_event {
+            Ok(ExecutorWaitEvent::Exit(Ok(ExecutorExitResult::Success))) => {
+                interrupted = step_attempt_cancel_was_requested(
+                    step_id,
+                    step_retry_count,
+                    spawned.cancel.as_ref(),
+                );
+            }
             Ok(ExecutorWaitEvent::Exit(Ok(ExecutorExitResult::Failure))) => {
                 // Check if this failure was caused by an interrupt cancellation.
-                if STEP_CANCEL_REQUESTS.contains(&step_id)
-                    || spawned.cancel.as_ref().is_some_and(|c| c.is_cancelled())
-                    || !RUNNING_STEPS.contains_key(&step_id)
-                {
+                if step_attempt_cancel_was_requested(
+                    step_id,
+                    step_retry_count,
+                    spawned.cancel.as_ref(),
+                ) {
                     interrupted = true;
                 } else {
                     failed_by_signal = true;
                 }
             }
-            Ok(ExecutorWaitEvent::Exit(Ok(ExecutorExitResult::FailureWithError(_)))) => {
-                failed_by_signal = true
+            Ok(ExecutorWaitEvent::Exit(Ok(ExecutorExitResult::FailureWithError(message)))) => {
+                if step_attempt_cancel_was_requested(
+                    step_id,
+                    step_retry_count,
+                    spawned.cancel.as_ref(),
+                ) {
+                    interrupted = true;
+                } else {
+                    failed_by_signal = true;
+                    exit_signal_error = Some(message);
+                }
             }
             Ok(ExecutorWaitEvent::Exit(Err(_))) => {
-                match wait_for_process_exit(&mut spawned, &agent.name).await {
+                if step_attempt_cancel_was_requested(
+                    step_id,
+                    step_retry_count,
+                    spawned.cancel.as_ref(),
+                ) {
+                    interrupted = true;
+                    terminate_child(&mut spawned).await;
+                } else {
+                    match wait_for_process_exit(&mut spawned, &agent.name).await {
                     Ok(exit_status) => status = Some(exit_status),
                     Err(error) => {
                         terminate_child(&mut spawned).await;
-                        clear_running_step(step_id);
+                        clear_running_step(step_id, step_retry_count);
                         finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
                         finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
                         let history = msg_store.get_history();
@@ -714,14 +791,52 @@ async fn run_workflow_agent_prompt_inner(
                         return Err(error);
                     }
                 }
+                }
+            }
+            Ok(ExecutorWaitEvent::ProcessExited(Ok(exit_status))) => {
+                interrupted = step_attempt_cancel_was_requested(
+                    step_id,
+                    step_retry_count,
+                    spawned.cancel.as_ref(),
+                );
+                status = Some(exit_status);
+            }
+            Ok(ExecutorWaitEvent::ProcessExited(Err(error))) => {
+                terminate_child(&mut spawned).await;
+                clear_running_step(step_id, step_retry_count);
+                finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
+                finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
+                let history = msg_store.get_history();
+                let latest_assistant =
+                    extract_latest_assistant_from_history(&history).unwrap_or_default();
+                let message = error.to_string();
+                finish_workflow_runtime_run_record(
+                    db,
+                    session,
+                    agent,
+                    session_agent,
+                    &workspace_path,
+                    runtime_run_record.as_ref(),
+                    &io_log,
+                    &latest_assistant,
+                    None,
+                    Some(&message),
+                )
+                .await?;
+                return Err(WorkflowRuntimeError::Io(error));
             }
             Ok(ExecutorWaitEvent::CancelRequested) => {
                 interrupted = true;
+                // Give SDK-backed executors (notably OpenTeams CLI) a short
+                // grace window to send their session abort request while the
+                // local server is still alive. Killing the server first can
+                // leave the persisted CLI session busy and break a retry.
+                let _ = time::timeout(WORKFLOW_REAP_TIMEOUT, &mut exit_signal).await;
                 terminate_child(&mut spawned).await;
             }
             Err(_) => {
                 terminate_child(&mut spawned).await;
-                clear_running_step(step_id);
+                clear_running_step(step_id, step_retry_count);
                 finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
                 finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
                 let history = msg_store.get_history();
@@ -750,7 +865,7 @@ async fn run_workflow_agent_prompt_inner(
             match time::timeout(WORKFLOW_REAP_TIMEOUT, spawned.child.wait()).await {
                 Ok(Ok(exit_status)) => status = Some(exit_status),
                 Ok(Err(err)) => {
-                    clear_running_step(step_id);
+                    clear_running_step(step_id, step_retry_count);
                     finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
                     finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
                     let history = msg_store.get_history();
@@ -780,7 +895,7 @@ async fn run_workflow_agent_prompt_inner(
             Ok(exit_status) => status = Some(exit_status),
             Err(error) => {
                 terminate_child(&mut spawned).await;
-                clear_running_step(step_id);
+                clear_running_step(step_id, step_retry_count);
                 finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
                 finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
                 let history = msg_store.get_history();
@@ -806,7 +921,7 @@ async fn run_workflow_agent_prompt_inner(
     }
 
     // Unregister from the running steps map.
-    clear_running_step(step_id);
+    clear_running_step(step_id, step_retry_count);
     finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
     finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
 
@@ -837,8 +952,10 @@ async fn run_workflow_agent_prompt_inner(
 
     if failed_by_signal {
         let history = msg_store.get_history();
-        let message =
-            workflow_executor_failure_message(&agent.name, "workflow 执行失败", &history);
+        let reason = exit_signal_error
+            .as_deref()
+            .unwrap_or("workflow 执行失败");
+        let message = workflow_executor_failure_message(&agent.name, reason, &history);
         let latest_assistant = extract_latest_assistant_from_history(&history).unwrap_or_default();
         finish_workflow_runtime_run_record(
             db,
@@ -859,30 +976,6 @@ async fn run_workflow_agent_prompt_inner(
     if let Some(exit_status) = status
         && !exit_status.success()
     {
-        // Check if the non-zero exit was caused by interrupt.
-        if spawned.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
-            let history = msg_store.get_history();
-            let latest_assistant =
-                extract_latest_assistant_from_history(&history).unwrap_or_default();
-            let message = format!(
-                "workflow step 被中断：{}",
-                agent.name
-            );
-            finish_workflow_runtime_run_record(
-                db,
-                session,
-                agent,
-                session_agent,
-                &workspace_path,
-                runtime_run_record.as_ref(),
-                &io_log,
-                &latest_assistant,
-                None,
-                Some(&message),
-            )
-            .await?;
-            return Err(WorkflowRuntimeError::Interrupted(message));
-        }
         let history = msg_store.get_history();
         let message =
             workflow_executor_failure_message(&agent.name, "workflow 执行失败", &history);
@@ -1518,23 +1611,30 @@ fn spawn_log_forwarders(
     Ok(())
 }
 
+#[derive(Debug)]
 enum ExecutorWaitEvent {
     Exit(Result<ExecutorExitResult, tokio::sync::oneshot::error::RecvError>),
+    ProcessExited(std::io::Result<std::process::ExitStatus>),
     CancelRequested,
 }
 
 async fn wait_for_executor_exit_or_cancel(
-    exit_signal: ExecutorExitSignal,
+    child: &mut command_group::AsyncGroupChild,
+    exit_signal: &mut ExecutorExitSignal,
     cancel: Option<CancellationToken>,
 ) -> Result<ExecutorWaitEvent, tokio::time::error::Elapsed> {
     time::timeout(WORKFLOW_EXECUTION_TIMEOUT, async move {
         if let Some(cancel) = cancel {
             tokio::select! {
-                result = exit_signal => ExecutorWaitEvent::Exit(result),
+                result = &mut *exit_signal => ExecutorWaitEvent::Exit(result),
+                result = child.wait() => ExecutorWaitEvent::ProcessExited(result),
                 _ = cancel.cancelled() => ExecutorWaitEvent::CancelRequested,
             }
         } else {
-            ExecutorWaitEvent::Exit(exit_signal.await)
+            tokio::select! {
+                result = &mut *exit_signal => ExecutorWaitEvent::Exit(result),
+                result = child.wait() => ExecutorWaitEvent::ProcessExited(result),
+            }
         }
     })
     .await

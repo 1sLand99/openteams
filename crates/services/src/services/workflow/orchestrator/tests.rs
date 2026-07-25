@@ -540,6 +540,37 @@ async fn workflow_stop_execution_transitions_to_terminal_failed() {
 }
 
 #[tokio::test]
+async fn workflow_interrupt_running_step_waits_for_runtime_ack_before_retryable_state() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let runner = ChatRunner::new(fixture.db.clone());
+
+    let requested = WorkflowOrchestrator::interrupt_step(
+        &runner,
+        &fixture.db.pool,
+        fixture.execution.id,
+        fixture.running_step_id,
+    )
+    .await
+    .expect("request running step interrupt");
+    assert_eq!(
+        requested.status,
+        WorkflowStepStatus::InterruptRequested,
+        "the step must not become retryable until the old runtime exits"
+    );
+
+    let interrupted = WorkflowOrchestrator::acknowledge_step_interrupted(
+        &fixture.db.pool,
+        &runner,
+        &fixture.execution,
+        fixture.running_step_id,
+        "step_interrupted",
+    )
+    .await
+    .expect("acknowledge runtime exit");
+    assert_eq!(interrupted.status, WorkflowStepStatus::Interrupted);
+}
+
+#[tokio::test]
 async fn workflow_mark_completed_finishes_execution_round_and_every_step() {
     let fixture = seed_workflow_stop_fixture().await;
     let runner = ChatRunner::new(fixture.db.clone());

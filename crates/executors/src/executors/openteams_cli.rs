@@ -380,7 +380,8 @@ impl OpenTeamsCli {
                     let _ = log_writer
                         .log_error(format!("OpenTeams CLI startup error: {err}"))
                         .await;
-                    let _ = exit_signal_tx.send(ExecutorExitResult::Failure);
+                    let _ =
+                        exit_signal_tx.send(ExecutorExitResult::FailureWithError(err.to_string()));
                     return;
                 }
             };
@@ -421,7 +422,7 @@ impl OpenTeamsCli {
                     let _ = log_writer
                         .log_error(format!("OpenTeams CLI executor error: {err}"))
                         .await;
-                    ExecutorExitResult::Failure
+                    ExecutorExitResult::FailureWithError(err.to_string())
                 }
             };
             let _ = exit_signal_tx.send(exit_result);

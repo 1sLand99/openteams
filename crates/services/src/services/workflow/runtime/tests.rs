@@ -1264,21 +1264,46 @@ mod tests {
     }
 
     #[test]
-    fn cancel_running_step_cancels_late_registered_executor_token() {
+    fn cancel_running_step_is_scoped_to_the_interrupted_attempt() {
         let step_id = Uuid::new_v4();
-        clear_running_step(step_id);
+        clear_running_step(step_id, 0);
+        clear_running_step(step_id, 1);
 
-        cancel_running_step(step_id);
+        cancel_running_step(step_id, 0);
 
         let token = executors::executors::CancellationToken::new();
-        register_running_step(step_id, token.clone());
+        register_running_step(step_id, 0, token.clone());
         assert!(token.is_cancelled());
 
-        clear_running_step(step_id);
         let next_token = executors::executors::CancellationToken::new();
-        register_running_step(step_id, next_token.clone());
+        register_running_step(step_id, 1, next_token.clone());
         assert!(!next_token.is_cancelled());
-        clear_running_step(step_id);
+
+        clear_running_step(step_id, 0);
+        assert!(!next_token.is_cancelled());
+        clear_running_step(step_id, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workflow_executor_wait_observes_child_exit_before_sdk_signal() {
+        use command_group::AsyncCommandGroup;
+
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "exit 17"]);
+        let mut child = command.group_spawn().expect("spawn test child");
+        let (_signal_tx, mut signal_rx) = tokio::sync::oneshot::channel();
+
+        let event = wait_for_executor_exit_or_cancel(&mut child, &mut signal_rx, None)
+            .await
+            .expect("wait for child exit");
+
+        match event {
+            ExecutorWaitEvent::ProcessExited(Ok(status)) => {
+                assert_eq!(status.code(), Some(17));
+            }
+            other => panic!("expected child exit, got {other:?}"),
+        }
     }
 
     #[test]

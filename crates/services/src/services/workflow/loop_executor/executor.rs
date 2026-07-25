@@ -23,7 +23,160 @@ impl<'a> LoopExecutor<'a> {
             })?
         };
 
-        match self.execute_loop_review(&active_loop, loop_def).await? {
+        let review_decision = match self.execute_loop_review(&active_loop, loop_def).await {
+            Ok(decision) => decision,
+            Err(OrchestratorError::Runtime(
+                crate::services::workflow_runtime::WorkflowRuntimeError::Interrupted(reason),
+            )) => {
+                let review_step =
+                    WorkflowStep::find_by_id(self.pool, active_loop.review_step_id)
+                        .await?
+                        .ok_or_else(|| {
+                            OrchestratorError::NotFound(format!(
+                                "loop review step {} not found",
+                                active_loop.review_step_id
+                            ))
+                        })?;
+                let interrupted_step = match review_step.status {
+                    WorkflowStepStatus::InterruptRequested => {
+                        WorkflowOrchestrator::transition_step_and_sync(
+                            self.pool,
+                            self.chat_runner,
+                            self.execution,
+                            &review_step,
+                            WorkflowStepStatus::Interrupted,
+                            "loop_review_interrupted",
+                        )
+                        .await?
+                    }
+                    WorkflowStepStatus::Running => {
+                        let requested = WorkflowOrchestrator::transition_step_and_sync(
+                            self.pool,
+                            self.chat_runner,
+                            self.execution,
+                            &review_step,
+                            WorkflowStepStatus::InterruptRequested,
+                            "loop_review_interrupt_recovered_by_work_item_guard",
+                        )
+                        .await?;
+                        WorkflowOrchestrator::transition_step_and_sync(
+                            self.pool,
+                            self.chat_runner,
+                            self.execution,
+                            &requested,
+                            WorkflowStepStatus::Interrupted,
+                            "loop_review_interrupted",
+                        )
+                        .await?
+                    }
+                    WorkflowStepStatus::Interrupted => review_step,
+                    _ => return Err(OrchestratorError::Runtime(
+                        crate::services::workflow_runtime::WorkflowRuntimeError::Interrupted(
+                            reason,
+                        ),
+                    )),
+                };
+                let _ = WorkflowOrchestrator::write_transcript(
+                    self.pool,
+                    self.execution.id,
+                    Some(interrupted_step.round_id),
+                    interrupted_step.assigned_workflow_agent_session_id,
+                    Some(interrupted_step.id),
+                    "system",
+                    "message",
+                    &format!(
+                        "Loop review \"{}\" interrupted: {}",
+                        active_loop.loop_key, reason
+                    ),
+                    None,
+                )
+                .await;
+                self.refresh_loop_projection(&active_loop, "loop_review_interrupted")
+                    .await?;
+                return Ok(LoopOutcome::Parked);
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                let review_step =
+                    WorkflowStep::find_by_id(self.pool, active_loop.review_step_id).await?;
+                let failed_step = if let Some(review_step) = review_step {
+                    if matches!(
+                        review_step.status,
+                        WorkflowStepStatus::Running | WorkflowStepStatus::Revising
+                    ) {
+                        Some(
+                            WorkflowOrchestrator::transition_step_and_sync(
+                                self.pool,
+                                self.chat_runner,
+                                self.execution,
+                                &review_step,
+                                WorkflowStepStatus::Failed,
+                                "loop_review_failed_by_work_item_guard",
+                            )
+                            .await?,
+                        )
+                    } else {
+                        Some(review_step)
+                    }
+                } else {
+                    None
+                };
+                if let Some(failed_step) = failed_step.as_ref() {
+                    let _ = WorkflowStep::record_execution_result(
+                        self.pool,
+                        failed_step.id,
+                        Uuid::new_v4(),
+                        Some(
+                            serde_json::to_string(&SummaryPayload {
+                                summary: reason.clone(),
+                                content: None,
+                                outputs: Vec::new(),
+                            })
+                            .unwrap_or_else(|_| reason.clone()),
+                        ),
+                        None,
+                    )
+                    .await;
+                }
+                let failed_loop = WorkflowLoop::update_status_if_current(
+                    self.pool,
+                    active_loop.id,
+                    WorkflowLoopStatus::Running,
+                    WorkflowLoopStatus::Failed,
+                    Some(reason.clone()),
+                )
+                .await?
+                .ok_or_else(|| {
+                    OrchestratorError::IllegalTransition(format!(
+                        "loop {} changed while settling review failure",
+                        active_loop.id
+                    ))
+                })?;
+                Self::emit_loop_event(
+                    self.pool,
+                    self.execution,
+                    &failed_loop,
+                    WorkflowEventType::LoopFailed,
+                    Some(serde_json::json!({
+                        "reason": "loop_review_work_item_error",
+                        "error": reason.clone(),
+                    })),
+                )
+                .await?;
+                self.refresh_loop_projection(&failed_loop, "loop_review_failed")
+                    .await?;
+                tracing::error!(
+                    execution_id = %self.execution.id,
+                    loop_id = %active_loop.id,
+                    step_id = %active_loop.review_step_id,
+                    error = %error,
+                    "loop review work-item guard converted an unhandled error into terminal state"
+                );
+                return Ok(LoopOutcome::Failed(reason));
+            }
+        };
+
+        match review_decision {
             LoopReviewDecision::Passed => {
                 if requires_user_acceptance_checkpoint(&active_loop) {
                     self.park_for_loop_user_review(&active_loop).await?;
