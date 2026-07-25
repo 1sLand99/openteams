@@ -554,9 +554,9 @@ fn workflow_action_notification_kind(entry_type: &str) -> Option<WorkflowActionN
             title: "Workflow needs approval",
         }),
         "permission_request" => Some(WorkflowActionNotificationKind {
-            kind: "workflow_approval",
+            kind: "workflow_permission",
             severity: InboxItemSeverity::Info,
-            source_type: "workflow_approval",
+            source_type: "workflow_permission",
             dedupe_prefix: "workflow_permission",
             title: "Workflow needs permission",
         }),
@@ -1157,9 +1157,9 @@ mod tests {
             Some("Need permission"),
         )
         .expect("permission notification");
-        assert_eq!(permission_item.kind, "workflow_approval");
+        assert_eq!(permission_item.kind, "workflow_permission");
         assert_eq!(permission_item.severity, InboxItemSeverity::Info);
-        assert_eq!(permission_item.source_type, "workflow_approval");
+        assert_eq!(permission_item.source_type, "workflow_permission");
         assert_eq!(
             permission_item.dedupe_key,
             format!("workflow_permission:{}", permission.id)

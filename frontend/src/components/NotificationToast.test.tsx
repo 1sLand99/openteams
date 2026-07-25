@@ -26,4 +26,13 @@ for (const [tone, iconClass] of Object.entries(expectedIconClass) as Array<
   assert.match(markup, new RegExp(`class="[^"]*${iconClass}`));
 }
 
+const warningMarkup = renderToStaticMarkup(
+  <NotificationToast message="Warning message" tone="warning" />,
+);
+
+assert.match(warningMarkup, /text-\[var\(--notification-warning\)\]/);
+assert.match(warningMarkup, /bg-\[var\(--notification-warning-bg\)\]/);
+assert.match(warningMarkup, /border-\[var\(--notification-warning-border\)\]/);
+assert.doesNotMatch(warningMarkup, /amber/);
+
 console.log('Notification toast icons: PASS');
