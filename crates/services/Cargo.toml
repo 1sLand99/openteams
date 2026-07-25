@@ -59,6 +59,12 @@ sys-locale = "0.3"
 which = "7.0"
 pathdiff = "0.2"
 
+[[test]]
+name = "acp_backend_qa"
+path = "tests/acp_backend_qa.rs"
+harness = false
+required-features = ["qa-mode"]
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 junction = "1.0"

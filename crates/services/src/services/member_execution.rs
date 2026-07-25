@@ -11,7 +11,7 @@ use db::models::{
 };
 use executors::{
     env::ExecutionEnv,
-    executors::{BaseCodingAgent, CodingAgent},
+    executors::{BaseCodingAgent, CodingAgent, acp::mcp::AcpMcpPolicy},
     model_sync::with_member_execution_overrides,
     profile::{ExecutorConfigs, ExecutorProfileId, canonical_variant_key},
 };
@@ -164,7 +164,38 @@ pub fn build_effective_member_executor(
         resolved.thinking_effort.as_deref(),
         resolved.model_variant.as_deref(),
     );
+    executor.set_acp_mcp_policy(resolve_acp_mcp_policy(&agent.tools_enabled.0));
     Ok((resolved, executor))
+}
+
+fn resolve_acp_mcp_policy(tools_enabled: &serde_json::Value) -> AcpMcpPolicy {
+    let Some(servers) = tools_enabled
+        .get("mcpServers")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return AcpMcpPolicy::default();
+    };
+    let mut allowed_server_names = std::collections::BTreeSet::new();
+    let mut disabled_server_names = std::collections::BTreeSet::new();
+    for (name, setting) in servers {
+        let enabled = match setting {
+            serde_json::Value::Bool(enabled) => *enabled,
+            serde_json::Value::Object(setting) => setting
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+            _ => false,
+        };
+        if enabled {
+            allowed_server_names.insert(name.clone());
+        } else {
+            disabled_server_names.insert(name.clone());
+        }
+    }
+    AcpMcpPolicy {
+        allowed_server_names: Some(allowed_server_names),
+        disabled_server_names,
+    }
 }
 
 pub fn parse_runner_type(raw: &str) -> Result<BaseCodingAgent> {
@@ -293,5 +324,32 @@ mod tests {
                 BaseCodingAgent::OpenTeamsCli
             );
         }
+    }
+
+    #[test]
+    fn member_mcp_settings_form_an_explicit_allowlist() {
+        let policy = resolve_acp_mcp_policy(&serde_json::json!({
+            "mcpServers": {
+                "filesystem": true,
+                "browser": {"enabled": true},
+                "disabled": false
+            }
+        }));
+        assert_eq!(
+            policy.allowed_server_names,
+            Some(
+                ["browser".to_string(), "filesystem".to_string()]
+                    .into_iter()
+                    .collect()
+            )
+        );
+        assert!(policy.disabled_server_names.contains("disabled"));
+    }
+
+    #[test]
+    fn missing_member_mcp_settings_preserve_configured_servers() {
+        let policy = resolve_acp_mcp_policy(&serde_json::json!({}));
+        assert!(policy.allowed_server_names.is_none());
+        assert!(policy.disabled_server_names.is_empty());
     }
 }

@@ -73,10 +73,20 @@ impl AcpOutput {
             AcpEvent::ApprovalResponse(response) => Some(response.tool_call_id.clone()),
             _ => None,
         };
+        let message_id = match &event {
+            AcpEvent::UserBlock(chunk) | AcpEvent::Message(chunk) | AcpEvent::Thought(chunk) => {
+                chunk
+                    .message_id
+                    .as_ref()
+                    .map(|message_id| message_id.0.to_string())
+            }
+            _ => None,
+        };
         let runtime_event = AcpRuntimeEvent {
             connection_id: state.connection_id.clone(),
             session_id: state.session_id.clone(),
             sequence: state.next_sequence,
+            message_id,
             tool_call_id,
             payload: event,
         };
@@ -91,6 +101,7 @@ impl AcpOutput {
 
 #[cfg(test)]
 mod tests {
+    use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
     use tokio::io::AsyncReadExt;
 
     use super::*;
@@ -104,6 +115,13 @@ mod tests {
             .await
             .expect("session event");
         output
+            .send(AcpEvent::Message(
+                ContentChunk::new(ContentBlock::Text(TextContent::new("message")))
+                    .message_id("message-id"),
+            ))
+            .await
+            .expect("message event");
+        output
             .send(AcpEvent::Done("\"end_turn\"".to_string()))
             .await
             .expect("done event");
@@ -116,10 +134,12 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<AcpRuntimeEvent>(line).expect("runtime event"))
             .collect::<Vec<_>>();
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert_eq!(events[0].sequence, 0);
         assert_eq!(events[1].sequence, 1);
-        assert_eq!(events[1].session_id.as_deref(), Some("session"));
-        assert!(matches!(events[1].payload, AcpEvent::Done(_)));
+        assert_eq!(events[1].message_id.as_deref(), Some("message-id"));
+        assert_eq!(events[2].sequence, 2);
+        assert_eq!(events[2].session_id.as_deref(), Some("session"));
+        assert!(matches!(events[2].payload, AcpEvent::Done(_)));
     }
 }

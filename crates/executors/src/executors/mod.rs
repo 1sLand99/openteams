@@ -135,6 +135,16 @@ pub enum CodingAgent {
 }
 
 impl CodingAgent {
+    pub fn set_acp_mcp_policy(&mut self, policy: acp::mcp::AcpMcpPolicy) {
+        match self {
+            Self::Gemini(config) => config.acp_mcp_policy = policy,
+            Self::QwenCode(config) => config.acp_mcp_policy = policy,
+            #[cfg(feature = "qa-mode")]
+            Self::AcpQa(config) => config.acp_mcp_policy = policy,
+            _ => {}
+        }
+    }
+
     pub fn get_mcp_config(&self) -> McpConfig {
         match self {
             Self::Codex(_) => McpConfig::new(

@@ -356,17 +356,19 @@ impl AcpClient {
         &self,
         request: ReleaseTerminalRequest,
     ) -> Result<ReleaseTerminalResponse, Error> {
-        let record = self
-            .terminals
-            .lock()
-            .await
-            .remove(request.terminal_id.0.as_ref());
+        let record = {
+            let mut terminals = self.terminals.lock().await;
+            let Some(record) = terminals.get(request.terminal_id.0.as_ref()) else {
+                return Ok(ReleaseTerminalResponse::new());
+            };
+            if record.session_id != request.session_id.0.as_ref() {
+                return Err(Error::invalid_params());
+            }
+            terminals.remove(request.terminal_id.0.as_ref())
+        };
         let Some(record) = record else {
             return Ok(ReleaseTerminalResponse::new());
         };
-        if record.session_id != request.session_id.0.as_ref() {
-            return Err(Error::invalid_params());
-        }
         let mut child = record.child.lock().await;
         if child
             .try_wait()
@@ -420,7 +422,9 @@ impl AcpClient {
     }
 
     async fn resolve_existing_path(&self, requested: &Path) -> Result<PathBuf, Error> {
-        reject_parent_components(requested)?;
+        if !self.services.full_access {
+            reject_parent_components(requested)?;
+        }
         let candidate = if requested.is_absolute() {
             requested.to_path_buf()
         } else {
@@ -429,16 +433,30 @@ impl AcpClient {
         let canonical = tokio::fs::canonicalize(candidate)
             .await
             .map_err(|_| Error::resource_not_found(None))?;
+        if self.services.full_access {
+            return Ok(canonical);
+        }
         self.require_allowed(&canonical).await
     }
 
     async fn resolve_write_path(&self, requested: &Path) -> Result<PathBuf, Error> {
-        reject_parent_components(requested)?;
+        if !self.services.full_access {
+            reject_parent_components(requested)?;
+        }
         let candidate = if requested.is_absolute() {
             requested.to_path_buf()
         } else {
             self.cwd.join(requested)
         };
+        if self.services.full_access {
+            return Ok(candidate);
+        }
+        if tokio::fs::symlink_metadata(&candidate).await.is_ok() {
+            let canonical = tokio::fs::canonicalize(&candidate)
+                .await
+                .map_err(|_| Error::resource_not_found(None))?;
+            return self.require_allowed(&canonical).await;
+        }
         let Some(parent) = candidate.parent() else {
             return Err(Error::invalid_params());
         };
@@ -695,6 +713,71 @@ mod tests {
             .await;
         assert!(result.is_err());
 
+        let outside_target = outside.join("write-target");
+        tokio::fs::write(&outside_target, "unchanged")
+            .await
+            .expect("outside target");
+        let write_link = root.join("write-link");
+        std::os::unix::fs::symlink(&outside_target, &write_link).expect("write symlink");
+        let workspace_client = AcpClient::new(
+            output.clone(),
+            None,
+            AcpApprovalPolicy::AutoReject,
+            CancellationToken::new(),
+            root.clone(),
+            Vec::new(),
+            AcpClientServicePolicy {
+                write_text_file: true,
+                ..AcpClientServicePolicy::default()
+            },
+            HashMap::new(),
+        );
+        let workspace_write = workspace_client
+            .write_text_file(WriteTextFileRequest::new(
+                SessionId::new("session"),
+                &write_link,
+                "blocked",
+            ))
+            .await;
+        assert!(workspace_write.is_err());
+        assert_eq!(
+            tokio::fs::read_to_string(&outside_target)
+                .await
+                .expect("outside content"),
+            "unchanged"
+        );
+
+        let full_access_client = AcpClient::new(
+            output.clone(),
+            None,
+            AcpApprovalPolicy::AutoReject,
+            CancellationToken::new(),
+            root.clone(),
+            Vec::new(),
+            AcpClientServicePolicy {
+                write_text_file: true,
+                full_access: true,
+                ..AcpClientServicePolicy::default()
+            },
+            HashMap::new(),
+        );
+        full_access_client
+            .write_text_file(WriteTextFileRequest::new(
+                SessionId::new("session"),
+                &write_link,
+                "allowed",
+            ))
+            .await
+            .expect("full access write");
+        assert_eq!(
+            tokio::fs::read_to_string(&outside_target)
+                .await
+                .expect("outside content"),
+            "allowed"
+        );
+
+        drop(full_access_client);
+        drop(workspace_client);
         drop(client);
         drop(output);
         output_task
@@ -736,6 +819,13 @@ mod tests {
             )
             .await
             .expect("create terminal");
+        let wrong_release = client
+            .release_terminal(ReleaseTerminalRequest::new(
+                SessionId::new("other-session"),
+                created.terminal_id.clone(),
+            ))
+            .await;
+        assert!(wrong_release.is_err());
         let waited = client
             .wait_for_terminal_exit(WaitForTerminalExitRequest::new(
                 session_id.clone(),

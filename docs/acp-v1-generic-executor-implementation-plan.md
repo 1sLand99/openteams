@@ -1,8 +1,8 @@
 # ACP v1 通用执行器实施计划
 
-状态：Proposed  
-设计真源：`docs/acp-v1-generic-executor-design.md`  
-实施范围：`crates/executors`、Gemini/Qwen Runtime、成员执行配置、Free Chat、Workflow  
+状态：Proposed
+设计真源：`docs/acp-v1-generic-executor-design.md`
+实施范围：`crates/executors`、Gemini/Qwen Runtime、成员执行配置、Free Chat、Workflow
 交付原则：先新增通用核心，再逐个迁移 Gemini/Qwen，最后删除旧路径
 
 ## 1. 交付目标
@@ -415,7 +415,9 @@ M3 和 M4 可以在 M2 的类型与 Session 接口稳定后并行开发；M6 只
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p executors acp
+cargo test -p executors --features qa-mode
+cargo test -p executors --features qa-mode --test acp_qa
+cargo test -p services --features qa-mode --test acp_backend_qa
 pnpm run backend:check
 ```
 
@@ -456,7 +458,7 @@ CLI 版本、capabilities 摘要和结果；不得记录账号、token、Prompt 
 | 三通道、有界队列、drain | M3 | saturation/tail update tests |
 | MCP 完整列表、撤销、脱敏 | M4 | new/load/resume MCP tests |
 | 审批确定性 | M5 | option combination tests |
-| FS/Terminal 安全 | M5 | path/process lifecycle tests |
+| FS/Terminal 访问策略 | M5 | workspace/full-access path/process lifecycle tests |
 | 隐藏 ACP QA 集成 | M6 | `qa-mode` Free Chat/Workflow tests |
 | 无厂商核心硬编码 | M7-M9 | code search + review |
 | Gemini/Qwen 无回归 | M7-M8 | regression + conformance |
@@ -482,7 +484,7 @@ CLI 版本、capabilities 摘要和结果；不得记录账号、token、Prompt 
 | Session ID 或历史丢失 | opaque 传递；迁移前验证现有 ID 能否原生 resume/load |
 | 背压造成协议回调死锁 | 控制请求与产品事件分通道；队列饱和集成测试 |
 | 最后一条 update 丢失 | drain barrier 和 prompt 边界测试 |
-| FS symlink/父目录逃逸 | 共享 root guard、canonical path 测试、写前复验 |
+| FS symlink/父目录边界不确定 | workspace 模式使用共享 root guard、canonical path 测试和写前复验；full-access 模式显式放行 |
 | Terminal 后代进程残留 | 进程组、connection drop 清理、超时强杀测试 |
 | MCP secret 泄漏 | allowlist 脱敏、日志快照扫描、错误文本测试 |
 | QA runner 意外出现在生产环境 | 使用编译条件隔离，并增加生产 runner 列表断言 |

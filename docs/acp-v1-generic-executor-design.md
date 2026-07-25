@@ -904,7 +904,9 @@ Gemini/Qwen 迁移并通过回归后删除：
 建议验证命令：
 
 ```bash
-cargo test -p executors acp
+cargo test -p executors --features qa-mode
+cargo test -p executors --features qa-mode --test acp_qa
+cargo test -p services --features qa-mode --test acp_backend_qa
 pnpm run backend:check
 pnpm run backend:lint
 pnpm run generate-types:check
@@ -922,7 +924,8 @@ pnpm run frontend:check
 3. 不调用 Agent 未声明的可选方法。
 4. model、thought level、mode 通过 Session config options 设置。
 5. 审批三种策略行为确定，不存在任意 option 回退。
-6. FS/Terminal 通过安全测试，不能逃逸 Session workspace。
+6. FS/Terminal 通过访问策略测试：workspace 模式不能逃逸 Session workspace，
+   `full_access` 模式按显式配置允许工作区外访问。
 7. Follow-up 使用原生 resume/load；不在通用核心注入历史 Prompt。
 8. new/load/resume 显式携带本次允许的完整 MCP server 列表，stdio、HTTP、SSE 按
    capabilities 正确门控，撤销和 secret 脱敏通过测试。

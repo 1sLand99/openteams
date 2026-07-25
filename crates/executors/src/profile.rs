@@ -458,6 +458,10 @@ impl ExecutorConfigs {
         &self,
         executor_profile_id: &ExecutorProfileId,
     ) -> CodingAgent {
+        #[cfg(feature = "qa-mode")]
+        if executor_profile_id.executor == BaseCodingAgent::AcpQa {
+            return CodingAgent::AcpQa(crate::executors::acp::AcpQaExecutor::from_qa_environment());
+        }
         self.get_coding_agent(executor_profile_id)
             .unwrap_or_else(|| {
                 let mut default_executor_profile_id = executor_profile_id.clone();

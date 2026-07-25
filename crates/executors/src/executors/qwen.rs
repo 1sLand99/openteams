@@ -9,7 +9,7 @@ use workspace_utils::msg_store::MsgStore;
 
 use super::acp::{
     AcpAgentHarness, AcpApprovalPolicy,
-    mcp::{load_mcp_servers, write_mcp_isolation_settings},
+    mcp::{AcpMcpPolicy, resolve_effective_mcp_config, write_mcp_isolation_settings},
 };
 use crate::{
     approvals::ExecutorApprovalService,
@@ -18,6 +18,7 @@ use crate::{
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
     },
+    mcp_config::{McpConfig, read_canonical_mcp_config},
     model_discovery::{
         ProviderKind, cli_model_commands, discover_from_sources, runner_config_paths,
     },
@@ -40,6 +41,10 @@ pub struct QwenCode {
     pub yolo: Option<bool>,
     #[serde(flatten)]
     pub cmd: CmdOverrides,
+    #[serde(skip)]
+    #[ts(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    pub acp_mcp_policy: AcpMcpPolicy,
     #[serde(skip)]
     #[ts(skip)]
     #[derivative(Debug = "ignore", PartialEq = "ignore")]
@@ -78,8 +83,17 @@ impl QwenCode {
             harness = harness.with_thought_level(effort);
         }
         let config_path = self.default_mcp_config_path();
-        let servers = load_mcp_servers(config_path.as_deref()).await?;
-        Ok(harness.with_mcp_servers(servers))
+        let canonical = match config_path {
+            Some(path) => read_canonical_mcp_config(&path, &McpConfig::canonical_acp()).await?,
+            None => serde_json::json!({ "mcpServers": {} }),
+        };
+        let effective = resolve_effective_mcp_config(&canonical, &self.acp_mcp_policy)?;
+        tracing::debug!(
+            server_count = effective.servers.len(),
+            config_hash = %effective.config_hash,
+            "resolved effective ACP MCP configuration"
+        );
+        Ok(harness.with_mcp_servers(effective.servers))
     }
 
     async fn acp_runtime_env(
@@ -216,6 +230,7 @@ mod tests {
             thinking_effort: None,
             yolo: Some(true),
             cmd: CmdOverrides::default(),
+            acp_mcp_policy: AcpMcpPolicy::default(),
             approvals: None,
         };
 

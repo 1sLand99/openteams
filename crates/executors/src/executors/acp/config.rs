@@ -36,6 +36,9 @@ pub struct AcpClientServicePolicy {
     pub read_text_file: bool,
     pub write_text_file: bool,
     pub terminal: bool,
+    /// Allow ACP Client file and terminal services to operate outside the
+    /// configured workspace roots.
+    pub full_access: bool,
     pub max_file_bytes: usize,
     pub max_terminals: usize,
     pub max_terminal_output_bytes: usize,
@@ -47,6 +50,7 @@ impl Default for AcpClientServicePolicy {
             read_text_file: false,
             write_text_file: false,
             terminal: false,
+            full_access: false,
             max_file_bytes: 1024 * 1024,
             max_terminals: 4,
             max_terminal_output_bytes: 1024 * 1024,
@@ -58,6 +62,7 @@ impl Default for AcpClientServicePolicy {
 #[derive(Debug, Clone)]
 pub struct AcpRunConfig {
     pub approval_policy: AcpApprovalPolicy,
+    pub auth_method_id: Option<String>,
     pub session: AcpSessionPreferences,
     pub client_services: AcpClientServicePolicy,
     pub additional_directories: Vec<PathBuf>,
@@ -68,6 +73,7 @@ impl Default for AcpRunConfig {
     fn default() -> Self {
         Self {
             approval_policy: AcpApprovalPolicy::Ask,
+            auth_method_id: None,
             session: AcpSessionPreferences::default(),
             client_services: AcpClientServicePolicy::default(),
             additional_directories: Vec::new(),

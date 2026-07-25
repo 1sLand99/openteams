@@ -9,15 +9,15 @@ use agent_client_protocol::{
     schema::{
         ProtocolVersion,
         v1::{
-            BooleanConfigOptionCapabilities, CancelNotification, ClientCapabilities,
-            ClientSessionCapabilities, CreateTerminalRequest, FileSystemCapabilities,
-            Implementation, InitializeRequest, KillTerminalRequest, LoadSessionRequest, McpServer,
-            NewSessionRequest, PromptRequest, ReadTextFileRequest, ReleaseTerminalRequest,
-            RequestPermissionRequest, ResumeSessionRequest, SessionConfigKind, SessionConfigOption,
-            SessionConfigOptionCategory, SessionConfigOptionValue,
-            SessionConfigOptionsCapabilities, SessionConfigSelectOptions, SessionId,
-            SessionNotification, SetSessionConfigOptionRequest, TerminalOutputRequest, TextContent,
-            WaitForTerminalExitRequest, WriteTextFileRequest,
+            AuthenticateRequest, BooleanConfigOptionCapabilities, CancelNotification,
+            ClientCapabilities, ClientSessionCapabilities, CreateTerminalRequest,
+            FileSystemCapabilities, Implementation, InitializeRequest, KillTerminalRequest,
+            LoadSessionRequest, McpServer, NewSessionRequest, PromptRequest, ReadTextFileRequest,
+            ReleaseTerminalRequest, RequestPermissionRequest, ResumeSessionRequest,
+            SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+            SessionConfigOptionValue, SessionConfigOptionsCapabilities, SessionConfigSelectOptions,
+            SessionId, SessionNotification, SetSessionConfigOptionRequest, TerminalOutputRequest,
+            TextContent, WaitForTerminalExitRequest, WriteTextFileRequest,
         },
     },
 };
@@ -67,6 +67,11 @@ impl AcpAgentHarness {
         self
     }
 
+    pub fn with_auth_method_id(mut self, method_id: impl Into<String>) -> Self {
+        self.config.auth_method_id = Some(method_id.into());
+        self
+    }
+
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.config.session.model = Some(model.into());
         self
@@ -94,6 +99,11 @@ impl AcpAgentHarness {
 
     pub fn with_client_services(mut self, services: super::AcpClientServicePolicy) -> Self {
         self.config.client_services = services;
+        self
+    }
+
+    pub fn with_full_access(mut self, full_access: bool) -> Self {
+        self.config.client_services.full_access = full_access;
         self
     }
 
@@ -430,10 +440,32 @@ async fn run_connection(
             )),
         );
     }
-    validate_mcp_servers(&config.mcp_servers, &initialize.agent_capabilities)
+    let negotiated = super::session::AcpNegotiatedState::from_initialize(&initialize);
+    if let Some(agent_info) = &negotiated.agent_info {
+        tracing::debug!(
+            agent_name = %agent_info.name,
+            agent_version = %agent_info.version,
+            "negotiated ACP Agent"
+        );
+    }
+    if let Some(method_id) = config.auth_method_id.as_deref() {
+        if !negotiated.advertises_auth_method(method_id) {
+            let message = format!("ACP authentication method `{method_id}` was not advertised");
+            send_startup(
+                &startup_tx,
+                Err(BootstrapError::AuthRequired(message.clone())),
+            );
+            return Err(agent_client_protocol::Error::auth_required().data(message));
+        }
+        connection
+            .send_request(AuthenticateRequest::new(method_id.to_string()))
+            .block_task()
+            .await?;
+    }
+    validate_mcp_servers(&config.mcp_servers, &negotiated.agent_capabilities)
         .map_err(|message| agent_client_protocol::Error::invalid_params().data(message))?;
     if !config.additional_directories.is_empty()
-        && initialize
+        && negotiated
             .agent_capabilities
             .session_capabilities
             .additional_directories
@@ -460,7 +492,7 @@ async fn run_connection(
         }
         Some(existing) => {
             let session_id = SessionId::new(existing);
-            if initialize
+            if negotiated
                 .agent_capabilities
                 .session_capabilities
                 .resume
@@ -475,7 +507,7 @@ async fn run_connection(
                     .block_task()
                     .await?;
                 (session_id, response.config_options.unwrap_or_default())
-            } else if initialize.agent_capabilities.load_session {
+            } else if negotiated.agent_capabilities.load_session {
                 let response = connection
                     .send_request(
                         LoadSessionRequest::new(session_id.clone(), cwd)

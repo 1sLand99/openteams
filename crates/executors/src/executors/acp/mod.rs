@@ -7,7 +7,10 @@ pub mod normalize_logs;
 pub mod output;
 #[cfg(feature = "qa-mode")]
 pub mod qa;
+#[cfg(feature = "qa-mode")]
+pub mod qa_agent;
 pub mod runtime;
+pub mod session;
 
 use std::{fmt::Display, str::FromStr};
 
@@ -21,16 +24,17 @@ pub use normalize_logs::*;
 #[cfg(feature = "qa-mode")]
 pub use qa::AcpQaExecutor;
 use serde::{Deserialize, Serialize};
+pub use session::AcpNegotiatedState;
 use workspace_utils::approvals::ApprovalStatus;
 
 /// Parsed event types for internal processing
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AcpEvent {
     User(String),
-    UserBlock(agent_client_protocol::schema::v1::ContentBlock),
+    UserBlock(agent_client_protocol::schema::v1::ContentChunk),
     SessionStart(String),
-    Message(agent_client_protocol::schema::v1::ContentBlock),
-    Thought(agent_client_protocol::schema::v1::ContentBlock),
+    Message(agent_client_protocol::schema::v1::ContentChunk),
+    Thought(agent_client_protocol::schema::v1::ContentChunk),
     ToolCall(agent_client_protocol::schema::v1::ToolCall),
     ToolUpdate(agent_client_protocol::schema::v1::ToolCallUpdate),
     Plan(agent_client_protocol::schema::v1::Plan),

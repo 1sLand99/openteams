@@ -71,10 +71,13 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         streaming.assistant_text = None;
                         streaming.thinking_text = None;
                     }
-                    AcpEvent::Message(content) => {
+                    AcpEvent::Message(chunk) => {
                         streaming.thinking_text = None;
-                        if let acp::ContentBlock::Text(text) = content {
-                            let is_new = streaming.assistant_text.is_none();
+                        if let acp::ContentBlock::Text(text) = chunk.content {
+                            let message_id =
+                                chunk.message_id.map(|message_id| message_id.0.to_string());
+                            let is_new =
+                                starts_new_message(streaming.assistant_text.as_ref(), &message_id);
                             if is_new {
                                 if text.text == "\n" {
                                     continue;
@@ -83,6 +86,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                                 streaming.assistant_text = Some(StreamingText {
                                     index: idx,
                                     content: String::new(),
+                                    message_id,
                                 });
                             }
                             if let Some(ref mut s) = streaming.assistant_text {
@@ -102,15 +106,19 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                             }
                         }
                     }
-                    AcpEvent::Thought(content) => {
+                    AcpEvent::Thought(chunk) => {
                         streaming.assistant_text = None;
-                        if let acp::ContentBlock::Text(text) = content {
-                            let is_new = streaming.thinking_text.is_none();
+                        if let acp::ContentBlock::Text(text) = chunk.content {
+                            let message_id =
+                                chunk.message_id.map(|message_id| message_id.0.to_string());
+                            let is_new =
+                                starts_new_message(streaming.thinking_text.as_ref(), &message_id);
                             if is_new {
                                 let idx = entry_index.next();
                                 streaming.thinking_text = Some(StreamingText {
                                     index: idx,
                                     content: String::new(),
+                                    message_id,
                                 });
                             }
                             if let Some(ref mut s) = streaming.thinking_text {
@@ -301,8 +309,11 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         };
                         msg_store.push_patch(ConversationPatch::add_normalized_entry(idx, entry));
                     }
-                    AcpEvent::User(_)
-                    | AcpEvent::UserBlock(_)
+                    AcpEvent::User(_) => {
+                        streaming.assistant_text = None;
+                        streaming.thinking_text = None;
+                    }
+                    AcpEvent::UserBlock(_)
                     | AcpEvent::ConfigOptions(_)
                     | AcpEvent::SessionInfo(_)
                     | AcpEvent::Other(_) => (),
@@ -782,6 +793,14 @@ struct StreamingState {
 struct StreamingText {
     index: usize,
     content: String,
+    message_id: Option<String>,
+}
+
+fn starts_new_message(current: Option<&StreamingText>, incoming_id: &Option<String>) -> bool {
+    match current {
+        None => true,
+        Some(current) => current.message_id != *incoming_id,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -794,4 +813,42 @@ struct EditInput {
     old_string: Option<String>,
     #[serde(default)]
     new_string: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn streaming(message_id: Option<&str>) -> StreamingText {
+        StreamingText {
+            index: 0,
+            content: String::new(),
+            message_id: message_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn message_id_change_starts_a_new_message() {
+        let current = streaming(Some("message-a"));
+        assert!(!starts_new_message(
+            Some(&current),
+            &Some("message-a".to_string())
+        ));
+        assert!(starts_new_message(
+            Some(&current),
+            &Some("message-b".to_string())
+        ));
+    }
+
+    #[test]
+    fn missing_message_id_only_aggregates_with_missing_message_id() {
+        let without_id = streaming(None);
+        let with_id = streaming(Some("message"));
+        assert!(!starts_new_message(Some(&without_id), &None));
+        assert!(starts_new_message(
+            Some(&without_id),
+            &Some("message".to_string())
+        ));
+        assert!(starts_new_message(Some(&with_id), &None));
+    }
 }

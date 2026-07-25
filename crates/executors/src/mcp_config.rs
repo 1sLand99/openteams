@@ -54,6 +54,39 @@ impl McpConfig {
     pub fn set_servers(&mut self, servers: HashMap<String, serde_json::Value>) {
         self.servers = servers;
     }
+
+    pub fn canonical_acp() -> Self {
+        Self::new(
+            vec!["mcpServers".to_string()],
+            serde_json::json!({ "mcpServers": {} }),
+            serde_json::json!({}),
+            false,
+        )
+    }
+}
+
+/// Read an Agent configuration through the shared config layer and return only
+/// canonical MCP definitions. ACP adapters consume this value instead of
+/// parsing vendor files themselves.
+pub async fn read_canonical_mcp_config(
+    config_path: &Path,
+    mcp_config: &McpConfig,
+) -> Result<Value, ExecutorError> {
+    let raw = read_agent_config(config_path, mcp_config).await?;
+    let mut current = &raw;
+    for part in &mcp_config.servers_path {
+        let Some(next) = current.get(part) else {
+            return Ok(serde_json::json!({ "mcpServers": {} }));
+        };
+        current = next;
+    }
+    let Some(servers) = current.as_object() else {
+        return Err(ExecutorError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid MCP config: server definitions must be an object",
+        )));
+    };
+    Ok(serde_json::json!({ "mcpServers": servers }))
 }
 
 pub async fn read_agent_config(

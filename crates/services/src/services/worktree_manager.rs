@@ -692,7 +692,7 @@ impl WorktreeManager {
         // into the user's Application Support directory.
         #[cfg(all(target_os = "macos", not(test)))]
         {
-            return utils::path::get_openteams_data_dir().join("worktrees");
+            utils::path::get_openteams_data_dir().join("worktrees")
         }
 
         #[cfg(any(not(target_os = "macos"), test))]

@@ -1,12 +1,32 @@
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{BTreeSet, HashSet},
+    path::Path,
+};
 
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, EnvVariable, HttpHeader, McpServer, McpServerHttp, McpServerSse,
     McpServerStdio,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::executors::ExecutorError;
+
+/// Runtime restrictions applied to canonical MCP definitions before they are
+/// converted into ACP session parameters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcpMcpPolicy {
+    /// `None` allows every configured server. `Some(empty)` allows none.
+    pub allowed_server_names: Option<BTreeSet<String>>,
+    pub disabled_server_names: BTreeSet<String>,
+}
+
+/// Secret-safe result of resolving canonical MCP definitions for one run.
+#[derive(Debug, Clone)]
+pub struct EffectiveAcpMcpConfig {
+    pub servers: Vec<McpServer>,
+    pub config_hash: String,
+}
 
 /// Validate a complete ACP MCP list against the negotiated Agent capabilities.
 pub fn validate_mcp_servers(
@@ -37,32 +57,24 @@ pub fn validate_mcp_servers(
 }
 
 /// Load the complete MCP list that OpenTeams will pass on ACP session requests.
-pub async fn load_mcp_servers(path: Option<&Path>) -> Result<Vec<McpServer>, ExecutorError> {
-    let Some(path) = path else {
-        return Ok(Vec::new());
-    };
-    let content = match tokio::fs::read_to_string(path).await {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(ExecutorError::Io(error)),
-    };
-    if content.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let value = match jsonc_parser::parse_to_serde_value(
-        &content,
-        &jsonc_parser::ParseOptions::default(),
-    ) {
-        Ok(Some(value)) => value,
-        Ok(None) => Value::Object(Default::default()),
-        Err(error) => {
-            return Err(ExecutorError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("invalid MCP config: {error}"),
-            )));
-        }
-    };
-    parse_mcp_servers(&value)
+pub fn resolve_effective_mcp_config(
+    canonical_config: &Value,
+    policy: &AcpMcpPolicy,
+) -> Result<EffectiveAcpMcpConfig, ExecutorError> {
+    let effective_value = filter_canonical_servers(canonical_config, policy)?;
+    let effective_servers = effective_value
+        .get("mcpServers")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    let config_hash = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&effective_servers)?)
+    );
+    let servers = parse_mcp_servers(&effective_value)?;
+    Ok(EffectiveAcpMcpConfig {
+        servers,
+        config_hash,
+    })
 }
 
 /// Create a per-run system settings file that prevents the Agent from also
@@ -133,6 +145,33 @@ fn parse_mcp_servers(value: &Value) -> Result<Vec<McpServer>, ExecutorError> {
         ));
     }
     Ok(result)
+}
+
+fn filter_canonical_servers(value: &Value, policy: &AcpMcpPolicy) -> Result<Value, ExecutorError> {
+    let Some(root) = value.as_object() else {
+        return Err(ExecutorError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid MCP config: root must be an object",
+        )));
+    };
+    let mut effective_root = root.clone();
+    let Some(servers) = root.get("mcpServers").and_then(Value::as_object) else {
+        effective_root.insert("mcpServers".to_string(), Value::Object(Default::default()));
+        return Ok(Value::Object(effective_root));
+    };
+    let effective_servers = servers
+        .iter()
+        .filter(|(name, _)| {
+            !policy.disabled_server_names.contains(*name)
+                && policy
+                    .allowed_server_names
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(*name))
+        })
+        .map(|(name, server)| (name.clone(), server.clone()))
+        .collect();
+    effective_root.insert("mcpServers".to_string(), Value::Object(effective_servers));
+    Ok(Value::Object(effective_root))
 }
 
 fn parse_headers(value: Option<&Value>, name: &str) -> Result<Vec<HttpHeader>, ExecutorError> {
@@ -259,5 +298,43 @@ mod tests {
         assert_eq!(servers.len(), 2);
         assert!(matches!(servers[0], McpServer::Stdio(_)));
         assert!(matches!(servers[1], McpServer::Http(_)));
+    }
+
+    #[test]
+    fn effective_policy_filters_servers_before_validation() {
+        let value = serde_json::json!({
+            "mcpServers": {
+                "allowed": {"command": "/bin/echo"},
+                "revoked": {"command": "definitely-not-installed"}
+            }
+        });
+        let policy = AcpMcpPolicy {
+            allowed_server_names: Some(["allowed".to_string()].into_iter().collect()),
+            disabled_server_names: Default::default(),
+        };
+        let effective = filter_canonical_servers(&value, &policy).expect("effective config");
+        let servers = parse_mcp_servers(&effective).expect("allowed server");
+        assert_eq!(servers.len(), 1);
+        assert!(matches!(&servers[0], McpServer::Stdio(server) if server.name == "allowed"));
+    }
+
+    #[test]
+    fn explicit_empty_allowlist_revokes_all_servers() {
+        let value = serde_json::json!({
+            "mcpServers": {
+                "server": {"command": "/bin/echo"}
+            }
+        });
+        let policy = AcpMcpPolicy {
+            allowed_server_names: Some(Default::default()),
+            disabled_server_names: Default::default(),
+        };
+        let effective = filter_canonical_servers(&value, &policy).expect("effective config");
+        assert!(
+            effective["mcpServers"]
+                .as_object()
+                .expect("server map")
+                .is_empty()
+        );
     }
 }
