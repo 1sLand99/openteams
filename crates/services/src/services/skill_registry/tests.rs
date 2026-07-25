@@ -37,6 +37,19 @@ mod tests {
     }
 
     #[test]
+    fn brainstorming_builtin_skill_writes_markdown_design_docs() {
+        let skill = find_builtin_skill_by_name("brainstorming").expect("built-in brainstorming skill");
+
+        assert!(
+            skill
+                .content
+                .contains(".openteams/specs/YYYY-MM-DD-<topic>-design.md")
+        );
+        assert!(!skill.content.contains("design.html"));
+        assert!(!skill.content.contains("write the solution as an HTML file"));
+    }
+
+    #[test]
     fn global_skill_roots_use_slugified_skill_name() {
         let home_dir = Path::new("/tmp/test-home");
         let roots = global_skill_roots(home_dir, "Apify Automation");
