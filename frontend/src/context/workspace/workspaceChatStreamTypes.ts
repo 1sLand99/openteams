@@ -67,6 +67,14 @@ export type ChatStreamEvent =
       execution_id: string;
     }
   | {
+      type: 'workflow_graph_updated';
+      session_id: string;
+      execution_id: string;
+      graph_version: string;
+      reason: string;
+      changed_step_ids: string[];
+    }
+  | {
       type: 'file_change_refresh';
       session_id: string;
       session_agent_id: string;
@@ -82,4 +90,3 @@ export type ChatStreamEvent =
       session_agent_id: string;
       queue: MemberQueueSnapshot;
     };
-

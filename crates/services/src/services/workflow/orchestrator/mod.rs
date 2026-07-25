@@ -696,7 +696,7 @@ impl WorkflowOrchestrator {
             execution = Self::synchronize_runtime_state(pool, execution.id, false).await?;
 
             if Self::has_unresolved_step_or_loop_reviews(pool, execution.id, None).await? {
-                Self::refresh_workflow_card(
+                Self::refresh_workflow_card_with_reason(
                     pool,
                     chat_runner,
                     &execution,
@@ -705,6 +705,8 @@ impl WorkflowOrchestrator {
                     &session_agents,
                     &agents,
                     None,
+                    "scheduler_blocked_by_review",
+                    Vec::new(),
                 )
                 .await?;
                 return Ok(());
@@ -1042,7 +1044,7 @@ impl WorkflowOrchestrator {
 
             if parallel_work.is_empty() {
                 execution = Self::synchronize_runtime_state(pool, execution.id, false).await?;
-                Self::refresh_workflow_card(
+                Self::refresh_workflow_card_with_reason(
                     pool,
                     chat_runner,
                     &execution,
@@ -1051,6 +1053,8 @@ impl WorkflowOrchestrator {
                     &session_agents,
                     &agents,
                     None,
+                    "scheduler_no_schedulable_work",
+                    Vec::new(),
                 )
                 .await?;
                 return Ok(());

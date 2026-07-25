@@ -13,11 +13,18 @@ import { useCommandPresentation } from './ShortcutProvider';
 type Props = {
   commandId: string;
   children: ReactElement<Record<string, unknown>>;
+  side?: 'top' | 'bottom';
+  align?: 'center' | 'start' | 'end';
 };
 
 const TOOLTIP_HOVER_DELAY_MS = 1_200;
 
-export function CommandTooltip({ commandId, children }: Props) {
+export function CommandTooltip({
+  commandId,
+  children,
+  side = 'top',
+  align = 'center',
+}: Props) {
   const presentation = useCommandPresentation(commandId);
   const [open, setOpen] = useState(false);
   const hoverTimeoutRef = useRef<number | null>(null);
@@ -29,6 +36,14 @@ export function CommandTooltip({ commandId, children }: Props) {
       : undefined;
   const describedBy = [existingDescribedBy, tooltipId].filter(Boolean).join(' ');
   const disabledButton = child.type === 'button' && child.props.disabled === true;
+  const sideClassName =
+    side === 'bottom' ? 'top-full mt-2' : 'bottom-full mb-2';
+  const alignClassName =
+    align === 'start'
+      ? 'left-0'
+      : align === 'end'
+        ? 'right-0'
+        : 'left-1/2 -translate-x-1/2';
   const triggerProps = {
     'aria-describedby': describedBy,
     'aria-keyshortcuts': presentation.ariaKeyShortcuts || undefined,
@@ -86,7 +101,7 @@ export function CommandTooltip({ commandId, children }: Props) {
         <span
           id={tooltipId}
           role="tooltip"
-          className="app-tooltip command-tooltip absolute bottom-full left-1/2 z-[80] mb-2 -translate-x-1/2 whitespace-nowrap px-2 py-1"
+          className={`app-tooltip command-tooltip absolute z-[80] whitespace-nowrap px-2 py-1 ${sideClassName} ${alignClassName}`}
         >
           <span>{presentation.title}</span>
           {presentation.sequence.length > 0 && (

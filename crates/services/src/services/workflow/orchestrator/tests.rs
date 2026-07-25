@@ -790,6 +790,38 @@ async fn workflow_stop_execution_cannot_resume() {
     );
 }
 
+#[tokio::test]
+async fn workflow_paused_execution_without_recoverable_steps_cannot_resume() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let runner = ChatRunner::new(fixture.db.clone());
+    for step_id in [
+        fixture.running_step_id,
+        fixture.review_step_id,
+        fixture.ready_step_id,
+    ] {
+        WorkflowStep::update_status(&fixture.db.pool, step_id, WorkflowStepStatus::Completed)
+            .await
+            .expect("complete fixture step");
+    }
+    WorkflowExecution::update_status(
+        &fixture.db.pool,
+        fixture.execution.id,
+        WorkflowExecutionStatus::Paused,
+    )
+    .await
+    .expect("pause execution");
+
+    let error =
+        WorkflowOrchestrator::resume_execution(&fixture.db.pool, &runner, fixture.execution.id)
+            .await
+            .expect_err("paused workflow without recoverable steps must not resume");
+
+    assert_eq!(
+        error.to_string(),
+        "状态迁移非法: workflow has no recoverable steps to resume",
+    );
+}
+
 #[derive(Clone, Copy)]
 enum SimulatedLeadVerdict {
     Approved,

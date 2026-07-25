@@ -1,7 +1,6 @@
 import {
   ArrowClockwiseIcon,
   PlayIcon,
-  PauseIcon,
 } from '@phosphor-icons/react';
 import {
   BadgeCheck,
@@ -23,7 +22,6 @@ import { WorkflowGraphBoard } from './WorkflowGraphBoard';
 import { type WorkflowFinalReviewActionData } from './WorkflowFinalReviewCard';
 import {
   canMarkWorkflowExecutionCompleted,
-  canPauseWorkflowExecution,
   canResumeWorkflowExecution,
   isWorkflowExecutionRecompiling,
 } from './workflowControlContract';
@@ -302,7 +300,6 @@ type ChatWorkflowCardProps = {
   message: ChatMessage;
   projection?: WorkflowCardProjection | null;
   onExecute?: (projection: WorkflowCardProjection) => void;
-  onPauseAll?: (executionId: string) => void;
   onResume?: (executionId: string, projection: WorkflowCardProjection) => void;
   onMarkExecutionCompleted?: (executionId: string) => void;
   onRetryStep?: (stepId: string, retryTarget?: 'task' | 'review') => void;
@@ -336,7 +333,6 @@ export function ChatWorkflowCard({
   message,
   projection: projectionProp,
   onExecute,
-  onPauseAll,
   onResume,
   onMarkExecutionCompleted,
   onRetryStep,
@@ -443,7 +439,6 @@ export function ChatWorkflowCard({
     projection.state === 'preview_invalid';
   const isInvalid = projection.state === 'preview_invalid';
   const isExecutionRecompiling = isWorkflowExecutionRecompiling(projection);
-  const canPauseExecution = canPauseWorkflowExecution(projection);
   const canResumeExecution = canResumeWorkflowExecution(projection);
   const executionStatus = projection.execution_status;
   const executionStatusLabel = workflowExecutionStatusLabel(executionStatus, t);
@@ -514,8 +509,6 @@ export function ChatWorkflowCard({
   );
   const executionActionPending =
     !!projection.execution_id && pendingActionId === projection.execution_id;
-  const pauseActionPending =
-    executionActionPending && pendingActionType === 'pause-execution';
   const resumeActionPending =
     executionActionPending && pendingActionType === 'resume-execution';
   const completeActionPending =
@@ -712,35 +705,15 @@ export function ChatWorkflowCard({
           </div>
           <div className="ml-auto flex shrink-0 items-center gap-2">
             {onOpenWindow && !isPlanGenerationCard && (
-            <button
-              type="button"
-              onClick={onOpenWindow}
-              className={openButtonClassName}
-            >
+              <button
+                type="button"
+                onClick={onOpenWindow}
+                className={openButtonClassName}
+              >
                 <BookOpen className="size-3.5" />
                 {t('workflow.card.buttons.open', { defaultValue: 'Open' })}
               </button>
             )}
-            {canPauseExecution &&
-              projection.execution_id &&
-              onPauseAll && (
-                <button
-                  type="button"
-                  onClick={() => onPauseAll(projection.execution_id!)}
-                  disabled={executionActionPending}
-                  aria-busy={pauseActionPending}
-                  className={`${quietButtonClassName} disabled:cursor-not-allowed disabled:opacity-50`}
-                >
-                  {pauseActionPending ? (
-                    <LoaderCircle className="size-3.5 animate-spin" />
-                  ) : (
-                    <PauseIcon className="size-3.5" weight="bold" />
-                  )}
-                  {t('workflow.card.buttons.pauseAll', {
-                    defaultValue: 'Pause All',
-                  })}
-                </button>
-              )}
             {canMarkExecutionCompleted && (
               <button
                 type="button"
@@ -759,22 +732,26 @@ export function ChatWorkflowCard({
                 })}
               </button>
             )}
-            {canResumeExecution && projection.execution_id && onResume && (
-              <button
-                type="button"
-                onClick={() => onResume(projection.execution_id!, projection)}
-                disabled={executionActionPending}
-                aria-busy={resumeActionPending}
-                className={`${primaryButtonClassName} disabled:cursor-not-allowed disabled:opacity-50`}
-              >
-                {resumeActionPending ? (
-                  <LoaderCircle className="size-3.5 animate-spin" />
-                ) : (
-                  <PlayIcon className="size-3.5" weight="bold" />
-                )}
-                {t('workflow.card.buttons.resume', { defaultValue: 'Resume' })}
-              </button>
-            )}
+            {(canResumeExecution || resumeActionPending) &&
+              projection.execution_id &&
+              onResume && (
+                <button
+                  type="button"
+                  onClick={() => onResume(projection.execution_id!, projection)}
+                  disabled={executionActionPending}
+                  aria-busy={resumeActionPending}
+                  className={`${primaryButtonClassName} disabled:cursor-not-allowed disabled:opacity-50`}
+                >
+                  {resumeActionPending ? (
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                  ) : (
+                    <PlayIcon className="size-3.5" weight="bold" />
+                  )}
+                  {t('workflow.card.buttons.resume', {
+                    defaultValue: 'Resume',
+                  })}
+                </button>
+              )}
           </div>
         </div>
       ) : null}
@@ -818,24 +795,6 @@ export function ChatWorkflowCard({
               })}
             </button>
         )}
-        {canPauseExecution &&
-          projection.execution_id &&
-          onPauseAll && (
-          <button
-            type="button"
-            onClick={() => onPauseAll(projection.execution_id!)}
-            disabled={executionActionPending}
-            aria-busy={pauseActionPending}
-            className={`${quietButtonClassName} disabled:cursor-not-allowed disabled:opacity-50`}
-          >
-            {pauseActionPending ? (
-              <LoaderCircle className="size-3.5 animate-spin" />
-            ) : (
-              <PauseIcon className="size-3.5" weight="bold" />
-            )}
-            {t('workflow.card.buttons.pauseAll', { defaultValue: 'Pause All' })}
-          </button>
-          )}
         {canMarkExecutionCompleted && (
           <button
             type="button"
@@ -854,22 +813,24 @@ export function ChatWorkflowCard({
             })}
           </button>
         )}
-        {canResumeExecution && projection.execution_id && onResume && (
-          <button
-            type="button"
-            onClick={() => onResume(projection.execution_id!, projection)}
-            disabled={executionActionPending}
-            aria-busy={resumeActionPending}
-            className={`${primaryButtonClassName} disabled:cursor-not-allowed disabled:opacity-50`}
-          >
-            {resumeActionPending ? (
-              <LoaderCircle className="size-3.5 animate-spin" />
-            ) : (
-              <PlayIcon className="size-3.5" weight="bold" />
-            )}
-            {t('workflow.card.buttons.resume', { defaultValue: 'Resume' })}
-          </button>
-        )}
+        {(canResumeExecution || resumeActionPending) &&
+          projection.execution_id &&
+          onResume && (
+            <button
+              type="button"
+              onClick={() => onResume(projection.execution_id!, projection)}
+              disabled={executionActionPending}
+              aria-busy={resumeActionPending}
+              className={`${primaryButtonClassName} disabled:cursor-not-allowed disabled:opacity-50`}
+            >
+              {resumeActionPending ? (
+                <LoaderCircle className="size-3.5 animate-spin" />
+              ) : (
+                <PlayIcon className="size-3.5" weight="bold" />
+              )}
+              {t('workflow.card.buttons.resume', { defaultValue: 'Resume' })}
+            </button>
+          )}
         {showRetryPlanGenerationButton && (
           <button
             type="button"

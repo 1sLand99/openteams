@@ -737,13 +737,9 @@ impl WorkflowOrchestrator {
                     })
         });
 
-        if execution.status == WorkflowExecutionStatus::Failed
-            && !has_ready_step
-            && !has_failed_step
-            && !has_promotable_pending
-        {
+        if !has_ready_step && !has_failed_step && !has_promotable_pending {
             return Err(OrchestratorError::IllegalTransition(
-                "failed workflow has no recoverable steps to resume".to_string(),
+                "workflow has no recoverable steps to resume".to_string(),
             ));
         }
 

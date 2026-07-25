@@ -7,7 +7,6 @@ import {
   ChevronRight,
   Box,
   Play,
-  Pause,
   Square,
   X,
   Send,
@@ -70,7 +69,6 @@ import {
   canMarkWorkflowExecutionCompleted,
   canSkipWorkflowStep,
   canRetryWorkflowStepReview,
-  canPauseWorkflowExecution,
   canResumeWorkflowExecution,
   isRetryableWorkflowStepStatus,
   isWorkflowExecutionRecompiling,
@@ -726,7 +724,6 @@ export type WorkflowWindowProps = {
   isOpen: boolean;
   onClose: () => void;
   onExecute?: (projection: WorkflowWindowProjection) => void;
-  onPauseAll?: (executionId: string) => void;
   onResume?: (
     executionId: string,
     projection: WorkflowWindowProjection
@@ -1845,7 +1842,6 @@ export function WorkflowWindow({
   isOpen,
   onClose,
   onExecute,
-  onPauseAll,
   onResume,
   onInterruptStep,
   onStopStep,
@@ -1963,7 +1959,6 @@ export function WorkflowWindow({
   const isPreview =
     projection.state === 'preview_ready' ||
     projection.state === 'preview_invalid';
-  const canPauseExecution = canPauseWorkflowExecution(projection);
   const canResumeExecution = canResumeWorkflowExecution(projection);
   const isExecutionRecompiling = isWorkflowExecutionRecompiling(projection);
   const executionStatusLabel = workflowExecutionStatusLabel(
@@ -1986,8 +1981,6 @@ export function WorkflowWindow({
     pendingActionId === 'execute-plan' && pendingActionType === 'execute-plan';
   const executionActionPending =
     !!projection.execution_id && pendingActionId === projection.execution_id;
-  const pauseActionPending =
-    executionActionPending && pendingActionType === 'pause-execution';
   const resumeActionPending =
     executionActionPending && pendingActionType === 'resume-execution';
   const completeActionPending =
@@ -2166,8 +2159,7 @@ export function WorkflowWindow({
     );
   }, [projection.completed_step_count, projection.total_step_count]);
 
-  const isRunning =
-    projection.execution_status === 'running' || canPauseExecution;
+  const isRunning = projection.execution_status === 'running';
   const runningStatusSummary = [
     executionStatusLabel,
     `${progressPercent}%`,
@@ -2746,7 +2738,13 @@ export function WorkflowWindow({
   });
   useCommandHandler('workflow.stop', {
     scope: 'focused-component',
-    enabled: Boolean(isOpen && projection.execution_id && onStopExecution),
+    enabled: Boolean(
+      isOpen &&
+        isRunning &&
+        projection.execution_id &&
+        onStopExecution &&
+        !executionActionPending
+    ),
     execute: () => {
       if (projection.execution_id) {
         setStopConfirmation({
@@ -2867,60 +2865,44 @@ export function WorkflowWindow({
           <div className="flex items-center gap-1">
             {isPreview && projection.plan_id && onExecute && (
               <CommandTooltip commandId="workflow.start">
-              <button
-                type="button"
-                onClick={() => onExecute(projection)}
-                disabled={executeActionPending}
-                aria-busy={executeActionPending}
-                className="p-1.5 rounded-md transition-all text-[#5E6AD2] hover:text-[#4850B8] hover:bg-[rgba(94,106,210,0.1)] disabled:cursor-not-allowed disabled:opacity-50"
-                aria-label={t('workflow.controls.executePlan', {
-                  defaultValue: 'Execute Plan',
-                })}
-              >
-                {executeActionPending ? (
-                  <LoaderCircle className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Play className="w-4 h-4 fill-current" />
-                )}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => onExecute(projection)}
+                  disabled={executeActionPending}
+                  aria-busy={executeActionPending}
+                  className="p-1.5 rounded-md transition-all text-[#5E6AD2] hover:text-[#4850B8] hover:bg-[rgba(94,106,210,0.1)] disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label={t('workflow.controls.executePlan', {
+                    defaultValue: 'Execute Plan',
+                  })}
+                >
+                  {executeActionPending ? (
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Play className="w-4 h-4 fill-current" />
+                  )}
+                </button>
               </CommandTooltip>
             )}
-            {canResumeExecution && projection.execution_id && onResume && (
-              <button
-                type="button"
-                onClick={() => onResume(projection.execution_id!, projection)}
-                disabled={executionActionPending}
-                aria-busy={resumeActionPending}
-                className="p-1.5 rounded-md transition-all text-[#5E6AD2] hover:text-[#4850B8] hover:bg-[rgba(94,106,210,0.1)] disabled:cursor-not-allowed disabled:opacity-50"
-                title={t('workflow.controls.resume', {
-                  defaultValue: 'Resume',
-                })}
-              >
-                {resumeActionPending ? (
-                  <LoaderCircle className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Play className="w-4 h-4 fill-current" />
-                )}
-              </button>
-            )}
-            {canPauseExecution && projection.execution_id && onPauseAll && (
-              <button
-                type="button"
-                onClick={() => onPauseAll(projection.execution_id!)}
-                disabled={executionActionPending}
-                aria-busy={pauseActionPending}
-                className="p-1.5 rounded-md transition-all text-[var(--ink-subtle)] hover:text-[var(--ink)] hover:bg-[var(--surface-3)] disabled:cursor-not-allowed disabled:opacity-50"
-                title={t('workflow.controls.pauseAll', {
-                  defaultValue: 'Pause All',
-                })}
-              >
-                {pauseActionPending ? (
-                  <LoaderCircle className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Pause className="w-4 h-4" />
-                )}
-              </button>
-            )}
+            {(canResumeExecution || resumeActionPending) &&
+              projection.execution_id &&
+              onResume && (
+                <button
+                  type="button"
+                  onClick={() => onResume(projection.execution_id!, projection)}
+                  disabled={executionActionPending}
+                  aria-busy={resumeActionPending}
+                  className="p-1.5 rounded-md transition-all text-[#5E6AD2] hover:text-[#4850B8] hover:bg-[rgba(94,106,210,0.1)] disabled:cursor-not-allowed disabled:opacity-50"
+                  title={t('workflow.controls.resume', {
+                    defaultValue: 'Resume',
+                  })}
+                >
+                  {resumeActionPending ? (
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Play className="w-4 h-4 fill-current" />
+                  )}
+                </button>
+              )}
             {canMarkExecutionCompleted && projection.execution_id && (
               <button
                 type="button"
@@ -2945,26 +2927,32 @@ export function WorkflowWindow({
               </button>
             )}
             {projection.execution_id && onStopExecution && isRunning && (
-              <CommandTooltip commandId="workflow.stop">
-              <button
-                type="button"
-                onClick={() =>
-                  setStopConfirmation({
-                    kind: 'execution',
-                    executionId: projection.execution_id!,
-                  })
-                }
-                disabled={executionActionPending}
-                aria-busy={stopActionPending}
-                className="p-1.5 rounded-md transition-all text-[var(--ink-subtle)] hover:text-[var(--ink)] hover:bg-[var(--surface-3)] disabled:cursor-not-allowed disabled:opacity-50"
-                aria-label={t('workflow.controls.stop', { defaultValue: 'Stop' })}
+              <CommandTooltip
+                commandId="workflow.stop"
+                side="bottom"
+                align="end"
               >
-                {stopActionPending ? (
-                  <LoaderCircle className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Square className="w-4 h-4" />
-                )}
-              </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setStopConfirmation({
+                      kind: 'execution',
+                      executionId: projection.execution_id!,
+                    })
+                  }
+                  disabled={executionActionPending}
+                  aria-busy={stopActionPending}
+                  className="p-1.5 rounded-md transition-all text-[var(--ink-subtle)] hover:text-[var(--ink)] hover:bg-[var(--surface-3)] disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label={t('workflow.controls.terminateExecution', {
+                    defaultValue: 'Terminate workflow',
+                  })}
+                >
+                  {stopActionPending ? (
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Square className="w-4 h-4" />
+                  )}
+                </button>
               </CommandTooltip>
             )}
           </div>
@@ -3314,17 +3302,33 @@ export function WorkflowWindow({
         <ConfirmationDialog
           title={
             stopConfirmation.kind === 'execution'
-              ? t('workflow.confirm.stopExecutionTitle', {
-                  defaultValue: 'Stop workflow?',
+              ? t('workflow.confirm.terminateExecutionTitle', {
+                  defaultValue: 'Terminate workflow?',
                 })
-              : t('workflow.confirm.stopStepTitle', {
-                  defaultValue: 'Stop step?',
+              : t('workflow.confirm.terminateStepTitle', {
+                  defaultValue: 'Terminate step?',
                 })
           }
-          description={t('workflow.confirm.stopDescription', {
-            defaultValue: 'This action cannot be resumed automatically.',
-          })}
-          confirmLabel={t('workflow.controls.stop', { defaultValue: 'Stop' })}
+          description={
+            stopConfirmation.kind === 'execution'
+              ? t('workflow.confirm.terminateExecutionDescription', {
+                  defaultValue:
+                    'All active or waiting nodes will be terminated and the workflow cannot be resumed. This action cannot be undone.',
+                })
+              : t('workflow.confirm.terminateStepDescription', {
+                  defaultValue:
+                    'This step will be interrupted and must be retried or skipped before the workflow can continue.',
+                })
+          }
+          confirmLabel={
+            stopConfirmation.kind === 'execution'
+              ? t('workflow.controls.terminateExecution', {
+                  defaultValue: 'Terminate workflow',
+                })
+              : t('workflow.inspector.terminate', {
+                  defaultValue: 'Terminate',
+                })
+          }
           cancelLabel={t('cancel', { defaultValue: 'Cancel' })}
           escLabel={t('escToCancel', { defaultValue: 'Esc to cancel' })}
           tone="danger"
