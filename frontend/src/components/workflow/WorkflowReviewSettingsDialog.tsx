@@ -3,6 +3,10 @@ import { useAppTranslation } from '@/hooks/useAppTranslation';
 import { Bell, ListTodo, RefreshCw, X } from 'lucide-react';
 import type { WorkflowCardData } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import {
+  buildPlanLoopReviewSettingsRows,
+  type LoopReviewSettingsRow,
+} from './workflowReviewSettings';
 import './WorkflowReviewSettingsDialog.css';
 
 export type WorkflowReviewSettingOverride = {
@@ -34,12 +38,6 @@ type ReviewSettingDraft = Record<
     userReview: boolean;
   }
 >;
-
-type LoopReviewSettingsRow = {
-  stepId: string;
-  title: string;
-  userReview: boolean;
-};
 
 function buildReviewSettingsDraft(
   taskRows: Array<{
@@ -222,33 +220,8 @@ export function WorkflowReviewSettingsDialog({
   );
 
   const planLoopReviewSettingsRows = useMemo(
-    () =>
-      (projection.plan.loops ?? []).flatMap(
-        (planLoop): LoopReviewSettingsRow[] => {
-          const reviewStepKey =
-            planLoop.reviewStep ?? planLoop.review_step_key ?? null;
-          if (!reviewStepKey) return [];
-          const reviewStep = stepByKey.get(reviewStepKey);
-          const reviewNode = planNodeById.get(reviewStepKey);
-          const loopTitle =
-            planLoop.loopKey ??
-            planLoop.loop_key ??
-            reviewNode?.data.title ??
-            reviewStep?.title ??
-            reviewStepKey;
-          return [
-            {
-              stepId: reviewStepKey,
-              title: loopTitle,
-              userReview:
-                planLoop.userReviewRequired ??
-                planLoop.user_review_required ??
-                true,
-            },
-          ];
-        }
-      ),
-    [planNodeById, projection.plan.loops, stepByKey]
+    () => buildPlanLoopReviewSettingsRows(projection),
+    [projection.plan.loops, projection.plan.nodes, projection.steps]
   );
 
   const runtimeLoopReviewSettingsRows = useMemo(
