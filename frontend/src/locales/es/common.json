@@ -13,6 +13,7 @@
   "agent.stopRequested": "Se solicitó detener el agente",
   "agent.runFailed": "La ejecución del agente falló",
   "agent.stopped": "El agente se detuvo",
+  "agent.permissionRejected": "Operación rechazada/no ejecutada",
   "agentOpenState": "Filtro de miembros de equipo",
   "agentSearchPlaceholder": "Buscar un colaborador IA...",
   "agentTriggerLabel": "Trigger de selección enfocado",

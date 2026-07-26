@@ -2039,6 +2039,8 @@ impl ChatRunner {
                                 visible_error_content,
                                 error_type.as_ref(),
                                 matches!(completion_status, RunCompletionStatus::Stopped),
+                                matches!(completion_status, RunCompletionStatus::Succeeded)
+                                    && acp_permission_rejected,
                                 Some(&token_usage),
                                 run_model.as_deref(),
                                 protocol_retry_attempt,

@@ -2501,6 +2501,7 @@ async fn process_agent_protocol_output_requests_retry_for_first_json_shape_failu
             None,
             None,
             false,
+            false,
             None,
             None,
             0,
@@ -2548,6 +2549,7 @@ async fn process_agent_protocol_output_uses_raw_output_after_retry_exhaustion() 
             None,
             None,
             false,
+            false,
             None,
             None,
             MAX_PROTOCOL_PARSE_RETRIES,
@@ -2592,6 +2594,7 @@ async fn process_agent_protocol_output_uses_conclusion_when_no_send() {
             r#"[{"type":"record","content":"shared fact"},{"type":"conclusion","content":"done"}]"#,
             None,
             None,
+            false,
             false,
             None,
             None,
@@ -2640,6 +2643,7 @@ async fn process_agent_protocol_output_persists_run_model_on_send_message() {
             None,
             None,
             false,
+            false,
             None,
             Some("gpt-5.5"),
             0,
@@ -2681,6 +2685,7 @@ async fn process_agent_protocol_output_uses_record_when_no_send_or_conclusion() 
             r#"[{"type":"record","content":"shared fact"}]"#,
             None,
             None,
+            false,
             false,
             None,
             None,
@@ -2725,6 +2730,7 @@ async fn process_agent_protocol_output_persists_error_when_output_empty() {
             Some("CLI failed before writing output"),
             None,
             false,
+            false,
             None,
             None,
             0,
@@ -2768,6 +2774,7 @@ async fn process_agent_protocol_output_persists_failure_hint_when_output_empty()
             None,
             None,
             false,
+            false,
             None,
             None,
             0,
@@ -2784,6 +2791,105 @@ async fn process_agent_protocol_output_persists_failure_hint_when_output_empty()
     assert_eq!(messages[0].content, "Agent运行失败");
     assert_eq!(messages[0].meta["protocol"]["output_is_empty"], json!(true));
     assert_eq!(messages[0].meta["i18n"]["key"], json!("agent.runFailed"));
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_persists_permission_rejected_hint_when_output_empty() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "simplified_chinese",
+                code: "zh-Hans",
+                instruction: "You MUST respond in Simplified Chinese.",
+            },
+            "",
+            None,
+            None,
+            false,
+            true,
+            None,
+            None,
+            0,
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].sender_type, ChatSenderType::Agent);
+    assert_eq!(messages[0].content, "操作已拒绝/未执行");
+    assert_eq!(messages[0].meta["protocol"]["output_is_empty"], json!(true));
+    assert_eq!(
+        messages[0].meta["protocol"]["terminal_reason"],
+        json!("permission_rejected")
+    );
+    assert_eq!(
+        messages[0].meta["i18n"]["key"],
+        json!("agent.permissionRejected")
+    );
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_keeps_model_output_after_permission_rejection() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "english",
+                code: "en",
+                instruction: "You MUST respond in English.",
+            },
+            r#"[{"type":"send","to":"you","content":"The tool was rejected, so I did not modify the file."}]"#,
+            None,
+            None,
+            false,
+            true,
+            None,
+            None,
+            0,
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].content,
+        "@you The tool was rejected, so I did not modify the file."
+    );
+    assert!(messages[0].meta["protocol"]["terminal_reason"].is_null());
+    assert!(messages[0].meta["i18n"].is_null());
 }
 
 #[tokio::test]
@@ -2811,6 +2917,7 @@ async fn process_agent_protocol_output_persists_stopped_hint_when_stopped_empty(
             "",
             None,
             None,
+            true,
             true,
             None,
             None,

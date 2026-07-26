@@ -13,6 +13,7 @@
   "agent.stopRequested": "エージェント停止をリクエストしました",
   "agent.runFailed": "エージェントの実行に失敗しました",
   "agent.stopped": "エージェントは停止しました",
+  "agent.permissionRejected": "操作は拒否され、実行されませんでした",
   "agentOpenState": "エージェントの一覧（フィルタ付）",
   "agentSearchPlaceholder": "チームに入れたいメンバーを設定...",
   "agentTriggerLabel": "割当フィールド（獲得フォーカス時）",

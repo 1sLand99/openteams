@@ -13,6 +13,7 @@
   "agent.stopRequested": "Agent stop requested",
   "agent.runFailed": "Agent run failed",
   "agent.stopped": "Agent stopped",
+  "agent.permissionRejected": "Operation rejected / not executed",
   "agentOpenState": "Open state",
   "agentSearchPlaceholder": "Filter agents…",
   "agentTriggerLabel": "Trigger (focused)",

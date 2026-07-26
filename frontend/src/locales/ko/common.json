@@ -13,6 +13,7 @@
   "agent.stopRequested": "에이전트 중지를 요청했습니다",
   "agent.runFailed": "에이전트 실행에 실패했습니다",
   "agent.stopped": "에이전트 실행이 중지되었습니다",
+  "agent.permissionRejected": "작업이 거부되어 실행되지 않았습니다",
   "agentOpenState": "배치 타겟 목록 (필터 자동 제공)",
   "agentSearchPlaceholder": "협업에 투입할 에이전트 이름 검색...",
   "agentTriggerLabel": "배치 영역 지정 (입력 초점 획득 시)",

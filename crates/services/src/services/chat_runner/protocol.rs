@@ -21,17 +21,29 @@ struct PlanGenerationPreviousPlanContext {
 const AGENT_EMPTY_OUTPUT_FALLBACK_MESSAGE: &str = "Agent运行失败";
 const AGENT_EMPTY_OUTPUT_FALLBACK_I18N_KEY: &str = "agent.runFailed";
 const AGENT_STOPPED_OUTPUT_I18N_KEY: &str = "agent.stopped";
+const AGENT_PERMISSION_REJECTED_MESSAGE: &str = "操作已拒绝/未执行";
+const AGENT_PERMISSION_REJECTED_I18N_KEY: &str = "agent.permissionRejected";
+const AGENT_PERMISSION_REJECTED_TERMINAL_REASON: &str = "permission_rejected";
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AgentEmptyOutputFallback {
     message: &'static str,
     i18n_key: Option<&'static str>,
+    terminal_reason: Option<&'static str>,
 }
 
 const DEFAULT_AGENT_EMPTY_OUTPUT_FALLBACK: AgentEmptyOutputFallback = AgentEmptyOutputFallback {
     message: AGENT_EMPTY_OUTPUT_FALLBACK_MESSAGE,
     i18n_key: Some(AGENT_EMPTY_OUTPUT_FALLBACK_I18N_KEY),
+    terminal_reason: None,
 };
+
+const PERMISSION_REJECTED_EMPTY_OUTPUT_FALLBACK: AgentEmptyOutputFallback =
+    AgentEmptyOutputFallback {
+        message: AGENT_PERMISSION_REJECTED_MESSAGE,
+        i18n_key: Some(AGENT_PERMISSION_REJECTED_I18N_KEY),
+        terminal_reason: Some(AGENT_PERMISSION_REJECTED_TERMINAL_REASON),
+    };
 
 impl ChatRunner {
     fn localized_agent_stopped_message(language_code: &str) -> &'static str {
@@ -49,6 +61,7 @@ impl ChatRunner {
         AgentEmptyOutputFallback {
             message: Self::localized_agent_stopped_message(language_code),
             i18n_key: Some(AGENT_STOPPED_OUTPUT_I18N_KEY),
+            terminal_reason: None,
         }
     }
 
@@ -238,6 +251,11 @@ impl ChatRunner {
                 "key": i18n_key,
                 "params": {}
             });
+        }
+        if used_empty_output_fallback
+            && let Some(terminal_reason) = empty_output_fallback.terminal_reason
+        {
+            meta["protocol"]["terminal_reason"] = serde_json::json!(terminal_reason);
         }
 
         let message = chat::create_message(
@@ -621,6 +639,7 @@ impl ChatRunner {
         error_content: Option<&str>,
         error_type: Option<&NormalizedEntryError>,
         completion_was_stopped: bool,
+        acp_permission_rejected: bool,
         token_usage: Option<&TokenUsageInfo>,
         run_model: Option<&str>,
         protocol_retry_attempt: u32,
@@ -630,6 +649,8 @@ impl ChatRunner {
         let error_info = error_content.map(|ec| (ec, error_type));
         let empty_output_fallback = if completion_was_stopped {
             Self::stopped_empty_output_fallback(prompt_language.code)
+        } else if acp_permission_rejected {
+            PERMISSION_REJECTED_EMPTY_OUTPUT_FALLBACK
         } else {
             DEFAULT_AGENT_EMPTY_OUTPUT_FALLBACK
         };

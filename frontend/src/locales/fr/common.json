@@ -13,6 +13,7 @@
   "agent.stopRequested": "Arrêt de l’agent demandé",
   "agent.runFailed": "L’exécution de l’agent a échoué",
   "agent.stopped": "L’agent a été arrêté",
+  "agent.permissionRejected": "Opération refusée/non exécutée",
   "agentOpenState": "Liste d'agents filtrable",
   "agentSearchPlaceholder": "Rechercher un membre d'équipe...",
   "agentTriggerLabel": "Déclencheur d'attribution ciblé",
