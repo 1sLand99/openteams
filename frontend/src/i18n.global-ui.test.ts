@@ -7,6 +7,13 @@ import { readSplitLocaleForTest, testLocales } from "./i18n.test-utils";
 
 const locales = testLocales;
 const requiredKeys = [
+  "approvals.option.allowAlways",
+  "approvals.option.allowOnce",
+  "approvals.option.rejectAlways",
+  "approvals.option.rejectOnce",
+  "approvals.requestAction",
+  "approvals.summary",
+  "approvals.title",
   "chatMarkdown.copied",
   "chatMarkdown.copy",
   "globalSearch.clear",
