@@ -164,7 +164,7 @@ impl ChatSessionAgent {
 
     pub async fn find_all_active(pool: &SqlitePool) -> Result<Vec<Self>, sqlx::Error> {
         sqlx::query_as::<_, ChatSessionAgent>(&format!(
-            "{CHAT_SESSION_AGENT_SELECT}\nWHERE state IN ('running', 'stopping')\nORDER BY created_at ASC"
+            "{CHAT_SESSION_AGENT_SELECT}\nWHERE state IN ('running', 'stopping', 'waitingapproval')\nORDER BY created_at ASC"
         ))
         .fetch_all(pool)
         .await

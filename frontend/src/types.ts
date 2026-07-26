@@ -1205,6 +1205,10 @@ export interface AgentRuntimeDiagnostics {
   availability: AvailabilityInfo;
   config_path: string;
   install_indicator_path: string | null;
+  resolved_command: string | null;
+  command_source: string | null;
+  acp_probe: AcpCapabilityProbe | null;
+  acp_probe_error: string | null;
   discovered_models: string[];
   model_source: AgentRuntimeModelSource;
   version: string | null;
@@ -1213,6 +1217,26 @@ export interface AgentRuntimeDiagnostics {
   run_mode: AgentRunMode;
   env_summary: AgentRuntimeEnvSummary[];
   executor_options: JsonValue;
+}
+
+export interface AcpAuthMethodInfo {
+  id: string;
+  name: string;
+  description: string | null;
+}
+
+export interface AcpCapabilityProbe {
+  protocol_version: string;
+  agent_name: string | null;
+  agent_version: string | null;
+  auth_methods: AcpAuthMethodInfo[];
+  supports_session_list: boolean;
+  supports_session_resume: boolean;
+  supports_session_close: boolean;
+  supports_session_delete: boolean;
+  supports_additional_directories: boolean;
+  agent_capabilities: JsonValue;
+  config_options: JsonValue[];
 }
 
 export type ExecutorVariantConfig = Record<

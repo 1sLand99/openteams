@@ -27,7 +27,6 @@ use db::{
     },
 };
 use executors::{
-    approvals::NoopExecutorApprovalService,
     env::{ExecutionEnv, RepoContext},
     executors::{
         BaseCodingAgent, CancellationToken, ExecutorError, ExecutorExitSignal,
@@ -60,9 +59,11 @@ use utils::{
 use uuid::Uuid;
 
 use crate::services::{
+    approvals::executor_approvals::{ExecutorApprovalBridge, ExecutorApprovalScope},
     inbox::InboxService,
     member_execution::{
-        build_effective_member_executor, refresh_session_agent_execution_config_before_run,
+        build_effective_member_executor, executor_acp_full_access_enabled,
+        refresh_session_agent_execution_config_before_run,
         resolve_effective_member_execution_config,
     },
     queued_message::{

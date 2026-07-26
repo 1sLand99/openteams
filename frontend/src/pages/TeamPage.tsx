@@ -245,6 +245,12 @@ const runtimeConfiguredModel = (
 };
 
 type MemberFormState = {
+  acpAccessMode: string;
+  acpAdditionalDirectories: string;
+  acpAdditionalDirectoriesOverride: boolean;
+  acpApprovalMode: string;
+  acpAuthMode: string;
+  acpAuthMethodId: string;
   allowedSkillIds: string[];
   isLeader: boolean;
   memberName: string;
@@ -271,6 +277,18 @@ const resolveMemberFormState = (
     "CODEX";
 
   return {
+    acpAccessMode: config.acp?.access_mode ?? "",
+    acpAdditionalDirectories:
+      config.acp?.additional_directories?.join("\n") ?? "",
+    acpAdditionalDirectoriesOverride:
+      config.acp?.additional_directories !== undefined &&
+      config.acp?.additional_directories !== null,
+    acpApprovalMode: config.acp?.approval_mode ?? "",
+    acpAuthMode: config.acp?.auth?.type ?? "",
+    acpAuthMethodId:
+      config.acp?.auth?.type === "method_id"
+        ? config.acp.auth.method_id
+        : "",
     allowedSkillIds: member.allowed_skill_ids ?? [],
     isLeader: member.role === "lead",
     memberName: member.member_name?.trim() ?? "",
@@ -295,6 +313,13 @@ const sameMemberFormState = (
   right: MemberFormState,
 ) =>
   left.workspacePath === right.workspacePath &&
+  left.acpAccessMode === right.acpAccessMode &&
+  left.acpAdditionalDirectories === right.acpAdditionalDirectories &&
+  left.acpAdditionalDirectoriesOverride ===
+    right.acpAdditionalDirectoriesOverride &&
+  left.acpApprovalMode === right.acpApprovalMode &&
+  left.acpAuthMode === right.acpAuthMode &&
+  left.acpAuthMethodId === right.acpAuthMethodId &&
   left.memberName === right.memberName &&
   left.isLeader === right.isLeader &&
   left.runnerType === right.runnerType &&
@@ -373,6 +398,15 @@ export function TeamPage() {
   );
   const [selectedMemberId, setSelectedMemberId] = useState<string>("");
   const [workspacePath, setWorkspacePath] = useState("");
+  const [acpAccessMode, setAcpAccessMode] = useState("");
+  const [acpApprovalMode, setAcpApprovalMode] = useState("");
+  const [acpAuthMode, setAcpAuthMode] = useState("");
+  const [acpAuthMethodId, setAcpAuthMethodId] = useState("");
+  const [acpAdditionalDirectories, setAcpAdditionalDirectories] = useState("");
+  const [
+    acpAdditionalDirectoriesOverride,
+    setAcpAdditionalDirectoriesOverride,
+  ] = useState(false);
   const [memberNameValue, setMemberNameValue] = useState("");
   const [isLeader, setIsLeader] = useState(false);
   const [allowedSkillIds, setAllowedSkillIds] = useState<string[]>([]);
@@ -506,6 +540,12 @@ export function TeamPage() {
     (capability?.kind === "variant" ? modelVariant : thinkingEffort) ||
     defaultOptionId;
   latestMemberDraftRef.current = {
+    acpAccessMode,
+    acpAdditionalDirectories,
+    acpAdditionalDirectoriesOverride,
+    acpApprovalMode,
+    acpAuthMode,
+    acpAuthMethodId,
     allowedSkillIds,
     isLeader,
     memberName: memberNameValue,
@@ -524,6 +564,14 @@ export function TeamPage() {
   const memberDirty =
     memberFormState !== null &&
     (workspacePath !== memberFormState.workspacePath ||
+      acpAccessMode !== memberFormState.acpAccessMode ||
+      acpApprovalMode !== memberFormState.acpApprovalMode ||
+      acpAuthMode !== memberFormState.acpAuthMode ||
+      acpAuthMethodId !== memberFormState.acpAuthMethodId ||
+      acpAdditionalDirectories !==
+        memberFormState.acpAdditionalDirectories ||
+      acpAdditionalDirectoriesOverride !==
+        memberFormState.acpAdditionalDirectoriesOverride ||
       memberNameValue !== memberFormState.memberName ||
       isLeader !== memberFormState.isLeader ||
       runnerType !== memberFormState.runnerType ||
@@ -750,6 +798,14 @@ export function TeamPage() {
 
     if (!sameMember || !localDirty) {
       setWorkspacePath(memberFormState.workspacePath);
+      setAcpAccessMode(memberFormState.acpAccessMode);
+      setAcpApprovalMode(memberFormState.acpApprovalMode);
+      setAcpAuthMode(memberFormState.acpAuthMode);
+      setAcpAuthMethodId(memberFormState.acpAuthMethodId);
+      setAcpAdditionalDirectories(memberFormState.acpAdditionalDirectories);
+      setAcpAdditionalDirectoriesOverride(
+        memberFormState.acpAdditionalDirectoriesOverride,
+      );
       setMemberNameValue(memberFormState.memberName);
       setIsLeader(memberFormState.isLeader);
       setAllowedSkillIds(memberFormState.allowedSkillIds);
@@ -874,6 +930,31 @@ export function TeamPage() {
               capability?.kind === "variant"
                 ? trimOrNull(draft.modelVariant)
                 : null,
+            acp:
+              draft.runnerType === "GEMINI" ||
+              draft.runnerType === "QWEN_CODE"
+                ? {
+                    access_mode: draft.acpAccessMode || null,
+                    approval_mode: draft.acpApprovalMode || null,
+                    auth:
+                      draft.acpAuthMode === "auto"
+                        ? { type: "auto" }
+                        : draft.acpAuthMode === "method_id" &&
+                            draft.acpAuthMethodId.trim()
+                          ? {
+                              type: "method_id",
+                              method_id: draft.acpAuthMethodId.trim(),
+                            }
+                          : null,
+                    additional_directories:
+                      draft.acpAdditionalDirectoriesOverride
+                        ? draft.acpAdditionalDirectories
+                            .split(/\r?\n/u)
+                            .map((path) => path.trim())
+                            .filter(Boolean)
+                        : null,
+                  }
+                : null,
           },
         } as never,
       );
@@ -931,6 +1012,16 @@ export function TeamPage() {
           state: savedFormState,
         };
         setWorkspacePath(savedFormState.workspacePath);
+        setAcpAccessMode(savedFormState.acpAccessMode);
+        setAcpApprovalMode(savedFormState.acpApprovalMode);
+        setAcpAuthMode(savedFormState.acpAuthMode);
+        setAcpAuthMethodId(savedFormState.acpAuthMethodId);
+        setAcpAdditionalDirectories(
+          savedFormState.acpAdditionalDirectories,
+        );
+        setAcpAdditionalDirectoriesOverride(
+          savedFormState.acpAdditionalDirectoriesOverride,
+        );
         setMemberNameValue(savedFormState.memberName);
         setIsLeader(savedFormState.isLeader);
         setAllowedSkillIds(savedFormState.allowedSkillIds);
@@ -1112,6 +1203,12 @@ export function TeamPage() {
     };
   }, [
     allowedSkillIds,
+    acpAccessMode,
+    acpAdditionalDirectories,
+    acpAdditionalDirectoriesOverride,
+    acpApprovalMode,
+    acpAuthMode,
+    acpAuthMethodId,
     isLeader,
     memberDirty,
     memberNameValue,
@@ -1437,6 +1534,14 @@ export function TeamPage() {
           <main className="min-h-0 overflow-y-auto bg-[var(--surface-2)] text-[var(--ink)] ot-scroll-area-styled">
             <TeamConfigTabs
               allowedSkillIds={allowedSkillIds}
+              acpAccessMode={acpAccessMode}
+              acpAdditionalDirectories={acpAdditionalDirectories}
+              acpAdditionalDirectoriesOverride={
+                acpAdditionalDirectoriesOverride
+              }
+              acpApprovalMode={acpApprovalMode}
+              acpAuthMode={acpAuthMode}
+              acpAuthMethodId={acpAuthMethodId}
               capability={capability}
               configuredMcpServerKeys={configuredMcpServerKeys}
               isLeader={isLeader}
@@ -1479,6 +1584,14 @@ export function TeamPage() {
               onTeamProtocolChange={handleTeamProtocolChange}
               onToggleMcpServer={toggleMcpServer}
               setAllowedSkillIds={setAllowedSkillIds}
+              setAcpAccessMode={setAcpAccessMode}
+              setAcpAdditionalDirectories={setAcpAdditionalDirectories}
+              setAcpAdditionalDirectoriesOverride={
+                setAcpAdditionalDirectoriesOverride
+              }
+              setAcpApprovalMode={setAcpApprovalMode}
+              setAcpAuthMode={setAcpAuthMode}
+              setAcpAuthMethodId={setAcpAuthMethodId}
               setIsLeader={setIsLeader}
               setMemberName={setMemberNameValue}
               setModelName={setModelName}

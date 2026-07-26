@@ -9,6 +9,7 @@ import { resolveMessageReferences } from '@/lib/messageReferences';
 import { notifyBuildStatsUsageUpdated } from '@/lib/buildStatsEvents';
 import { notifySourceControlRefreshRequested } from '@/lib/sourceControlEvents';
 import { notifyWorkflowGraphUpdated } from '@/lib/workflowEvents';
+import { notifyExecutorApprovalChanged } from '@/lib/executorApprovalEvents';
 import type { WorkspaceContextProps } from './workspaceContextContract';
 import type { ChatStreamEvent } from './workspaceChatStreamTypes';
 import type { RuntimeActiveRun } from './workspaceContextTypes';
@@ -516,6 +517,19 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
 
       if (parsed.type === 'queue_updated' && parsed.session_id === sid) {
         mergeMemberQueueSnapshot(parsed.queue);
+        return;
+      }
+
+      if (
+        (parsed.type === 'executor_approval_requested' ||
+          parsed.type === 'executor_approval_resolved' ||
+          parsed.type === 'executor_approval_cancelled' ||
+          parsed.type === 'executor_approval_expired') &&
+        parsed.session_id === sid
+      ) {
+        notifyExecutorApprovalChanged(sid);
+        void refreshMembers();
+        scheduleInboxRefresh();
         return;
       }
 

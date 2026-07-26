@@ -1,4 +1,4 @@
-use executors::executors::BaseCodingAgent;
+use executors::executors::{BaseCodingAgent, acp::AcpExecutionOptions};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -13,6 +13,8 @@ pub struct MemberExecutionConfig {
     pub thinking_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_variant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp: Option<AcpExecutionOptions>,
 }
 
 impl MemberExecutionConfig {
@@ -21,6 +23,7 @@ impl MemberExecutionConfig {
             || is_present(self.model_name.as_deref())
             || is_present(self.thinking_effort.as_deref())
             || is_present(self.model_variant.as_deref())
+            || self.acp.is_some()
     }
 
     pub fn normalized(mut self) -> Self {

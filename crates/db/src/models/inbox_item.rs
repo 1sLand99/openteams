@@ -256,6 +256,25 @@ impl InboxItem {
         .fetch_optional(pool)
         .await
     }
+
+    pub async fn archive_by_source(
+        pool: &SqlitePool,
+        source_type: &str,
+        source_id: &str,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE inbox_items \
+             SET read_at = COALESCE(read_at, datetime('now', 'subsec')), \
+                 archived_at = COALESCE(archived_at, datetime('now', 'subsec')), \
+                 updated_at = datetime('now', 'subsec') \
+             WHERE source_type = ?1 AND source_id = ?2 AND archived_at IS NULL",
+        )
+        .bind(source_type)
+        .bind(source_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
 }
 
 #[cfg(test)]

@@ -189,6 +189,9 @@ const isHiddenConfigField = (
   (runner === "OPEN_TEAMS_CLI" &&
     (fieldKey === "variant" || fieldKey === "agent"));
 
+const isAcpRunner = (runner: BaseCodingAgent): boolean =>
+  runner === "GEMINI" || runner === "QWEN_CODE";
+
 const formatRunnerKey = (runner: BaseCodingAgent): string =>
   runner.toLowerCase().replaceAll("_", " ");
 
@@ -539,6 +542,165 @@ function DetailRow({ label, value }: { label: string; value: string }) {
       <p className="break-all font-mono text-[12px] leading-[1.55] text-[var(--ink-muted)]">
         {value}
       </p>
+    </div>
+  );
+}
+
+function AcpRuntimeConfigField({
+  value,
+  onChange,
+  onCommit,
+}: {
+  value: JsonValue | undefined;
+  onChange: (key: string, value: JsonValue | undefined) => void;
+  onCommit: () => void | Promise<void>;
+}) {
+  const config = isObjectRecord(value) ? value : {};
+  const accessMode =
+    typeof config.access_mode === "string"
+      ? config.access_mode
+      : "workspace_only";
+  const approvalMode =
+    typeof config.approval_mode === "string" ? config.approval_mode : "ask";
+  const auth = isObjectRecord(config.auth) ? config.auth : {};
+  const authMode = typeof auth.type === "string" ? auth.type : "auto";
+  const authMethodId =
+    typeof auth.method_id === "string" ? auth.method_id : "";
+  const directories = Array.isArray(config.additional_directories)
+    ? config.additional_directories.map(String)
+    : [];
+
+  const merge = (patch: Record<string, JsonValue>) => {
+    const next: Record<string, JsonValue> = {};
+    for (const [key, entry] of Object.entries(config)) {
+      if (entry !== undefined) next[key] = entry;
+    }
+    Object.assign(next, patch);
+    return next;
+  };
+  const update = (patch: Record<string, JsonValue>) => {
+    onChange("acp", merge(patch));
+    window.setTimeout(() => void onCommit(), 0);
+  };
+  const inputClass =
+    "h-8 w-full border-x-0 border-b border-t-0 border-transparent bg-transparent px-0 font-mono text-[12px] text-[var(--ink)] outline-none hover:border-white/10 focus:border-white/20";
+
+  return (
+    <div className="my-3 space-y-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
+      <div>
+        <p className="text-[12px] font-semibold text-[var(--ink)]">
+          ACP 权限与审批
+        </p>
+        <p className="mt-1 text-[11px] text-[var(--ink-tertiary)]">
+          Gemini/Qwen 原生 CLI 的全局默认配置，成员配置可覆盖这些值。
+        </p>
+      </div>
+      <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 text-[12px] text-[var(--ink-subtle)]">
+        文件权限
+        <select
+          value={accessMode}
+          className={inputClass}
+          onChange={(event) => {
+            const next = event.target.value;
+            if (
+              next === "full_access" &&
+              !window.confirm(
+                "Full Access 允许 Agent 访问工作区之外的文件和终端路径。确认启用？",
+              )
+            ) {
+              return;
+            }
+            update({ access_mode: next });
+          }}
+        >
+          <option value="workspace_only">仅工作区</option>
+          <option value="full_access">Full Access（高风险）</option>
+        </select>
+      </label>
+      <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 text-[12px] text-[var(--ink-subtle)]">
+        审批策略
+        <select
+          value={approvalMode}
+          className={inputClass}
+          onChange={(event) => {
+            const next = event.target.value;
+            if (
+              next === "auto_allow" &&
+              !window.confirm(
+                "自动允许会跳过 ACP 工具确认。确认对该 Agent 启用？",
+              )
+            ) {
+              return;
+            }
+            update({ approval_mode: next });
+          }}
+        >
+          <option value="ask">每次询问</option>
+          <option value="auto_allow">自动允许（高风险）</option>
+          <option value="auto_reject">自动拒绝</option>
+        </select>
+      </label>
+      <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 text-[12px] text-[var(--ink-subtle)]">
+        认证方式
+        <select
+          value={authMode}
+          className={inputClass}
+          onChange={(event) =>
+            update({
+              auth:
+                event.target.value === "auto"
+                  ? { type: "auto" }
+                  : { type: "method_id", method_id: authMethodId },
+            })
+          }
+        >
+          <option value="auto">自动（CLI 登录态）</option>
+          <option value="method_id">指定方法 ID</option>
+        </select>
+      </label>
+      {authMode === "method_id" && (
+        <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 text-[12px] text-[var(--ink-subtle)]">
+          认证方法 ID
+          <input
+            value={authMethodId}
+            className={inputClass}
+            placeholder="auth_method_id"
+            onChange={(event) =>
+              onChange(
+                "acp",
+                merge({
+                auth: {
+                  type: "method_id",
+                  method_id: event.target.value,
+                },
+                }),
+              )
+            }
+            onBlur={() => void onCommit()}
+          />
+        </label>
+      )}
+      <label className="grid grid-cols-[128px_minmax(0,1fr)] items-start gap-3 text-[12px] text-[var(--ink-subtle)]">
+        附加目录
+        <textarea
+          value={directories.join("\n")}
+          rows={3}
+          className={`${inputClass} h-auto resize-y py-1.5`}
+          placeholder="/absolute/path，每行一个"
+          onChange={(event) =>
+            onChange(
+              "acp",
+              merge({
+                additional_directories: event.target.value
+                  .split(/\r?\n/u)
+                  .map((path) => path.trim())
+                  .filter(Boolean),
+              }),
+            )
+          }
+          onBlur={() => void onCommit()}
+        />
+      </label>
     </div>
   );
 }
@@ -1029,7 +1191,9 @@ function AgentConfigSidebar({
   const onDiagnosticsLoadedRef = useRef(onDiagnosticsLoaded);
   onDiagnosticsLoadedRef.current = onDiagnosticsLoaded;
   const schemaFields = Object.entries(schema.properties ?? {}).filter(
-    ([fieldKey]) => !isHiddenConfigField(runner.runner_type, fieldKey),
+    ([fieldKey]) =>
+      !isHiddenConfigField(runner.runner_type, fieldKey) &&
+      !(fieldKey === "acp" && isAcpRunner(runner.runner_type)),
   );
   const currentDiagnostics =
     diagnostics?.runner_type === runner.runner_type ? diagnostics : null;
@@ -1236,7 +1400,7 @@ function AgentConfigSidebar({
     return () => {
       active = false;
     };
-  }, [runner.runner_type]);
+  }, [runner.runner_type, runner.last_checked_at]);
 
   const handleConfigFieldChange = (
     key: string,
@@ -1340,7 +1504,76 @@ function AgentConfigSidebar({
               label={t("agents.details.cliVersion")}
               value={cliVersion}
             />
+            {currentDiagnostics?.resolved_command && (
+              <DetailRow
+                label="Resolved command"
+                value={currentDiagnostics.resolved_command}
+              />
+            )}
+            {currentDiagnostics?.command_source && (
+              <DetailRow
+                label="Command source"
+                value={currentDiagnostics.command_source}
+              />
+            )}
+            {currentDiagnostics?.acp_probe && (
+              <>
+                <DetailRow
+                  label="ACP protocol"
+                  value={currentDiagnostics.acp_probe.protocol_version}
+                />
+                <DetailRow
+                  label="ACP agent"
+                  value={[
+                    currentDiagnostics.acp_probe.agent_name,
+                    currentDiagnostics.acp_probe.agent_version,
+                  ]
+                    .filter(Boolean)
+                    .join(" ") || "Unknown"}
+                />
+                <DetailRow
+                  label="ACP auth methods"
+                  value={
+                    currentDiagnostics.acp_probe.auth_methods
+                      .map((method) => `${method.name} (${method.id})`)
+                      .join(", ") || "CLI login state"
+                  }
+                />
+                <DetailRow
+                  label="ACP session capabilities"
+                  value={[
+                    currentDiagnostics.acp_probe.supports_session_list &&
+                      "list",
+                    currentDiagnostics.acp_probe.supports_session_resume &&
+                      "resume",
+                    currentDiagnostics.acp_probe.supports_session_close &&
+                      "close",
+                    currentDiagnostics.acp_probe.supports_session_delete &&
+                      "delete",
+                    currentDiagnostics.acp_probe
+                      .supports_additional_directories &&
+                      "additionalDirectories",
+                  ]
+                    .filter(Boolean)
+                    .join(", ") || "None"}
+                />
+                <DetailRow
+                  label="ACP config options"
+                  value={
+                    currentDiagnostics.acp_probe.config_options.length > 0
+                      ? `${currentDiagnostics.acp_probe.config_options.length} advertised`
+                      : "None advertised"
+                  }
+                />
+              </>
+            )}
           </div>
+          {currentDiagnostics?.acp_probe_error && (
+            <div className="mt-3 flex items-start gap-2 rounded-[8px] border border-amber-500/20 bg-amber-500/5 p-3 text-[14px] leading-relaxed text-amber-400">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              ACP probe failed: {currentDiagnostics.acp_probe_error}
+            </div>
+          )}
           {diagnosticsError && (
             <div className="mt-3 flex items-start gap-2 rounded-[8px] border border-amber-500/20 bg-amber-500/5 p-3 text-[14px] leading-relaxed text-amber-400">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -1417,6 +1650,13 @@ function AgentConfigSidebar({
                   onModelSaved={handleModelSaved}
                   t={t}
                 />
+                {isAcpRunner(runner.runner_type) && (
+                  <AcpRuntimeConfigField
+                    value={formData.acp}
+                    onChange={handleConfigFieldChange}
+                    onCommit={runAutoSave}
+                  />
+                )}
                 {schemaFields.map(([fieldKey, property]) => (
                   <ConfigSchemaField
                     key={fieldKey}

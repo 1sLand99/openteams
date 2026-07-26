@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod executor_approvals;
 pub mod messages;
 pub mod presets;
 pub mod queues;
@@ -32,6 +33,11 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/unpin", axum::routing::post(sessions::unpin_session))
         .route("/stream", get(sessions::stream_session_ws))
         .route("/runtime", get(runtime::get_session_runtime_snapshot))
+        .route("/executor-approvals", get(executor_approvals::list_pending))
+        .route(
+            "/executor-approvals/{request_id}/resolve",
+            axum::routing::post(executor_approvals::resolve),
+        )
         .route("/workspaces", get(sessions::get_session_workspaces))
         .route(
             "/workspaces/changes",

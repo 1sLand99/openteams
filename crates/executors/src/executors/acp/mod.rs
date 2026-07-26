@@ -11,13 +11,15 @@ pub mod qa;
 pub mod qa_agent;
 pub mod runtime;
 pub mod session;
+mod usage;
 
 use std::{fmt::Display, str::FromStr};
 
 pub use client::AcpClient;
 pub use config::{
-    AcpApprovalPolicy, AcpClientServicePolicy, AcpConfigSelection, AcpRunConfig,
-    AcpSessionPreferences,
+    AcpAccessMode, AcpApprovalMode, AcpApprovalPolicy, AcpAuthMethodInfo, AcpAuthSelection,
+    AcpCapabilityProbe, AcpClientServicePolicy, AcpConfigSelection, AcpExecutionOptions,
+    AcpRunConfig, AcpSessionPreferences,
 };
 pub use harness::AcpAgentHarness;
 pub use normalize_logs::*;
@@ -43,6 +45,7 @@ pub enum AcpEvent {
     ConfigOptions(Vec<agent_client_protocol::schema::v1::SessionConfigOption>),
     SessionInfo(agent_client_protocol::schema::v1::SessionInfoUpdate),
     Usage(agent_client_protocol::schema::v1::UsageUpdate),
+    TokenUsage(crate::logs::TokenUsageInfo),
     RequestPermission(agent_client_protocol::schema::v1::RequestPermissionRequest),
     ApprovalResponse(ApprovalResponse),
     Warning(String),

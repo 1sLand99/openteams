@@ -838,6 +838,29 @@ impl ChatRunner {
         }
     }
 
+    fn patch_has_acp_permission_rejection(patch: &json_patch::Patch) -> bool {
+        let Some((_, entry)) = extract_normalized_entry_from_patch(patch) else {
+            return false;
+        };
+        entry
+            .metadata
+            .as_ref()
+            .and_then(|metadata| {
+                metadata.get(executors::executors::acp::ACP_TURN_SIGNAL_KEY)
+            })
+            .and_then(serde_json::Value::as_str)
+            == Some(executors::executors::acp::ACP_PERMISSION_REJECTED_SIGNAL)
+    }
+
+    fn history_has_acp_permission_rejection(history: &[LogMsg]) -> bool {
+        history.iter().any(|message| {
+            matches!(
+                message,
+                LogMsg::JsonPatch(patch) if Self::patch_has_acp_permission_rejection(patch)
+            )
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn apply_stream_patch_to_state(
         patch: &json_patch::Patch,
@@ -1315,6 +1338,7 @@ impl ChatRunner {
         track_source_message: bool,
         startup_timing: Arc<startup_timing::RunStartupTiming>,
         suppress_codex_tool_runtime_details: bool,
+        acp_full_access: bool,
     ) {
         let db = self.db.clone();
         let sender = self.sender_for(session_id);
@@ -1358,6 +1382,7 @@ impl ChatRunner {
             let mut saw_raw_stdout = false;
             let mut saw_activity_line = false;
             let mut saw_assistant_delta = false;
+            let mut acp_permission_rejected = false;
 
             while let Some(item) = stream.next().await {
                 match item {
@@ -1400,6 +1425,8 @@ impl ChatRunner {
                         );
                     }
                     Ok(LogMsg::JsonPatch(patch)) => {
+                        acp_permission_rejected |=
+                            Self::patch_has_acp_permission_rejection(&patch);
                         let activity_lines = activity_state.drain_patch_lines(&patch, true);
                         let first_activity_line =
                             !saw_activity_line && !activity_lines.is_empty();
@@ -1541,6 +1568,8 @@ impl ChatRunner {
                                     );
                                 }
                                 Ok(LogMsg::JsonPatch(patch)) => {
+                                    acp_permission_rejected |=
+                                        Self::patch_has_acp_permission_rejection(&patch);
                                     let activity_lines =
                                         activity_state.drain_patch_lines(&patch, true);
                                     let first_activity_line =
@@ -1632,9 +1661,12 @@ impl ChatRunner {
                             error_update_count,
                             error_type: error_type.clone(),
                         };
+                        let history = msg_store.get_history();
+                        acp_permission_rejected |=
+                            Self::history_has_acp_permission_rejection(&history);
                         Self::reconcile_run_stream_state_from_history(
                             &mut reconciled_state,
-                            &msg_store.get_history(),
+                            &history,
                             stream_filter,
                         );
                         agent_session_id = reconciled_state.agent_session_id;
@@ -1812,6 +1844,7 @@ impl ChatRunner {
                             "log_truncated": spool_snapshot.log_truncated,
                             "log_capture_degraded": spool_snapshot.log_capture_degraded,
                             "startup_timing_path": startup_timing.artifact_path_string(),
+                            "acp_full_access": acp_full_access,
                         });
 
                         meta["token_usage"] = serde_json::json!({
@@ -3346,7 +3379,9 @@ impl ChatRunner {
 
         if !matches!(
             session_agent.state,
-            ChatSessionAgentState::Running | ChatSessionAgentState::Stopping
+            ChatSessionAgentState::Running
+                | ChatSessionAgentState::WaitingApproval
+                | ChatSessionAgentState::Stopping
         ) {
             tracing::info!(
                 session_id = %session_id,
@@ -3429,6 +3464,42 @@ mod tests {
         let text = "ERROR codex_core::session: some other failure\n";
 
         assert_eq!(filter_benign_executor_stderr(text), Some(text.to_string()));
+    }
+
+    #[test]
+    fn acp_permission_rejection_is_detected_from_protocol_metadata() {
+        let patch = ConversationPatch::add_normalized_entry(
+            0,
+            NormalizedEntry {
+                timestamp: None,
+                entry_type: NormalizedEntryType::UserFeedback {
+                    denied_tool: "write_file".to_string(),
+                },
+                content: "User denied this tool use request".to_string(),
+                metadata: Some(serde_json::json!({
+                    "acp_turn_signal": "permission_rejected"
+                })),
+            },
+        );
+
+        assert!(ChatRunner::patch_has_acp_permission_rejection(&patch));
+    }
+
+    #[test]
+    fn ordinary_user_feedback_is_not_an_acp_permission_rejection() {
+        let patch = ConversationPatch::add_normalized_entry(
+            0,
+            NormalizedEntry {
+                timestamp: None,
+                entry_type: NormalizedEntryType::UserFeedback {
+                    denied_tool: "write_file".to_string(),
+                },
+                content: "User denied this tool use request".to_string(),
+                metadata: None,
+            },
+        );
+
+        assert!(!ChatRunner::patch_has_acp_permission_rejection(&patch));
     }
 
     #[test]

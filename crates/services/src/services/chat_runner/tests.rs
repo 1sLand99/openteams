@@ -546,6 +546,7 @@ async fn refreshes_workflow_member_execution_config_before_run() {
         model_name: Some("new-model".to_string()),
         thinking_effort: Some("high".to_string()),
         model_variant: None,
+        acp: None,
     };
     let member = ProjectMember::create(
         &db.pool,
@@ -578,6 +579,7 @@ async fn refreshes_workflow_member_execution_config_before_run() {
                 model_name: Some("old-model".to_string()),
                 thinking_effort: None,
                 model_variant: None,
+                acp: None,
             },
         },
         Uuid::new_v4(),
@@ -736,6 +738,7 @@ async fn leaves_non_project_session_execution_config_unchanged_before_run() {
                 model_name: Some("standalone-model".to_string()),
                 thinking_effort: None,
                 model_variant: None,
+                acp: None,
             },
         },
         Uuid::new_v4(),
@@ -2049,6 +2052,54 @@ async fn stop_agent_cancels_pre_registered_run_control() {
 }
 
 #[tokio::test]
+async fn stop_agent_cancels_run_while_waiting_for_approval() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session_agent_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+            INSERT INTO chat_session_agents (
+                id, session_id, agent_id, state, workspace_path,
+                pty_session_key, agent_session_id, agent_message_id,
+                allowed_skill_ids
+            )
+            VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, NULL, ?5)
+            "#,
+    )
+    .bind(session_agent_id)
+    .bind(session_id)
+    .bind(agent_id)
+    .bind(ChatSessionAgentState::WaitingApproval)
+    .bind("[]")
+    .execute(&db.pool)
+    .await
+    .expect("insert approval-waiting session agent");
+
+    let stop = runner.register_run_control(session_agent_id, Uuid::new_v4());
+    runner
+        .stop_agent(session_id, session_agent_id)
+        .await
+        .expect("stop approval-waiting agent");
+
+    assert!(stop.is_cancelled());
+    let session_agent = ChatSessionAgent::find_by_id(&db.pool, session_agent_id)
+        .await
+        .expect("lookup session agent")
+        .expect("session agent exists");
+    assert_eq!(session_agent.state, ChatSessionAgentState::Stopping);
+}
+
+#[test]
+fn waiting_for_approval_keeps_new_messages_on_the_member_queue() {
+    assert!(super::member_state_accepts_queued_messages(
+        &ChatSessionAgentState::WaitingApproval
+    ));
+}
+
+#[tokio::test]
 async fn stop_agent_without_run_control_recovers_agent_to_idle() {
     let db = setup_chat_runner_db().await;
     let runner = ChatRunner::new(db.clone());
@@ -2125,11 +2176,16 @@ async fn recover_orphaned_session_agents_resets_active_agents() {
     let runner = ChatRunner::new(db.clone());
     let running_session_agent_id = Uuid::new_v4();
     let stopping_session_agent_id = Uuid::new_v4();
+    let waiting_session_agent_id = Uuid::new_v4();
     let idle_session_agent_id = Uuid::new_v4();
 
     for (session_agent_id, state) in [
         (running_session_agent_id, ChatSessionAgentState::Running),
         (stopping_session_agent_id, ChatSessionAgentState::Stopping),
+        (
+            waiting_session_agent_id,
+            ChatSessionAgentState::WaitingApproval,
+        ),
         (idle_session_agent_id, ChatSessionAgentState::Idle),
     ] {
         sqlx::query(
@@ -2165,7 +2221,7 @@ async fn recover_orphaned_session_agents_resets_active_agents() {
         .recover_orphaned_session_agents()
         .await
         .expect("recover orphaned session agents");
-    assert_eq!(recovered, 2);
+    assert_eq!(recovered, 3);
 
     let running = ChatSessionAgent::find_by_id(&db.pool, running_session_agent_id)
         .await
@@ -2184,6 +2240,15 @@ async fn recover_orphaned_session_agents_resets_active_agents() {
     assert_eq!(stopping.pty_session_key, None);
     assert_eq!(stopping.agent_session_id, None);
     assert_eq!(stopping.agent_message_id, None);
+
+    let waiting = ChatSessionAgent::find_by_id(&db.pool, waiting_session_agent_id)
+        .await
+        .expect("lookup approval-waiting agent")
+        .expect("approval-waiting agent exists");
+    assert_eq!(waiting.state, ChatSessionAgentState::Idle);
+    assert_eq!(waiting.pty_session_key, None);
+    assert_eq!(waiting.agent_session_id, None);
+    assert_eq!(waiting.agent_message_id, None);
 
     let idle = ChatSessionAgent::find_by_id(&db.pool, idle_session_agent_id)
         .await

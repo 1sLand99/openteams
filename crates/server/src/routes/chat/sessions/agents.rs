@@ -240,6 +240,12 @@ pub async fn delete_session_agent(
         ));
     }
 
+    services::services::approvals::executor_approvals::ExecutorApprovalBridge::cancel_for_session_agent(
+        &deployment.db().pool,
+        existing.id,
+    )
+    .await?;
+
     let rows = ChatSessionAgent::delete(&deployment.db().pool, existing.id).await?;
     if rows == 0 {
         return Err(ApiError::BadRequest(

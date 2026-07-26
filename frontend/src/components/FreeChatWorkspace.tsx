@@ -74,6 +74,7 @@ import {
   type ChatComposerSubmit,
   type ChatComposerSubmitResult,
 } from "@/components/chat/ChatComposer";
+import { FreeChatApprovalTray } from "@/components/approvals/FreeChatApprovalTray";
 import {
   formatFileSize,
   isImageChatAttachment,
@@ -1771,6 +1772,12 @@ export const FreeChatWorkspace: React.FC<FreeChatWorkspaceProps> = ({
             <div ref={chatEndRef} />
           </ScrollArea>
           </div>
+
+          <FreeChatApprovalTray
+            sessionId={activeSessionId}
+            members={members}
+            onError={showToast}
+          />
 
           <ChatComposer
             key={activeSessionId}

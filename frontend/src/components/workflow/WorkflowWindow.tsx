@@ -36,6 +36,7 @@ import {
 } from '@/lib/buildStatsUtils';
 import { ChatMarkdown } from '@/components/conversation/ChatMarkdown';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
+import { FreeChatApprovalTray } from '@/components/approvals/FreeChatApprovalTray';
 import { CommandTooltip } from '@/shortcuts/CommandTooltip';
 import { useWorkspace } from '@/context/WorkspaceContext';
 import {
@@ -1858,7 +1859,7 @@ export function WorkflowWindow({
   pendingActionType,
 }: WorkflowWindowProps) {
   const { t } = useAppTranslation();
-  const { showToast } = useWorkspace();
+  const { showToast, members } = useWorkspace();
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const [isChatVisible, setIsChatVisible] = useState(false);
   const [openedReviewNotificationId, setOpenedReviewNotificationId] = useState<
@@ -2974,6 +2975,15 @@ export function WorkflowWindow({
           )}
         </div>
       </header>
+
+      {sessionId && projection.execution_id && (
+        <FreeChatApprovalTray
+          sessionId={sessionId}
+          members={members}
+          workflowExecutionId={projection.execution_id}
+          onError={showToast}
+        />
+      )}
 
       {/* Main Content Area */}
       <div ref={reviewCardRef} className="relative flex-1 overflow-hidden flex">

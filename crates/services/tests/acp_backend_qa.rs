@@ -405,7 +405,7 @@ async fn verify_workflow(
         .await
     });
     sleep(Duration::from_millis(500)).await;
-    cancel_running_step(step.id);
+    cancel_running_step(step.id, 0);
     let interrupted = timeout(Duration::from_secs(10), interrupt_task)
         .await
         .context("Workflow interrupt timed out")??;
@@ -623,6 +623,17 @@ fn assert_run_usage(run: &ChatRun, expected: u32) -> Result<()> {
         "expected {expected} tokens, got {:?}",
         summary.total_tokens
     );
+    let usage = summary
+        .token_usage
+        .as_ref()
+        .context("run token usage missing")?;
+    ensure!(
+        usage.input_tokens == Some(30) && usage.output_tokens == Some(7),
+        "expected canonical ACP input/output usage, got {:?}/{:?}",
+        usage.input_tokens,
+        usage.output_tokens
+    );
+    ensure!(!usage.is_estimated, "ACP token usage must not be estimated");
     Ok(())
 }
 

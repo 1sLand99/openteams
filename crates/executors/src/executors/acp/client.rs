@@ -7,12 +7,12 @@ use std::{
 
 use agent_client_protocol::schema::v1::{
     CreateTerminalRequest, CreateTerminalResponse, Error, KillTerminalRequest,
-    KillTerminalResponse, PermissionOptionKind, ReadTextFileRequest, ReadTextFileResponse,
-    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionNotification, TerminalExitStatus, TerminalId, TerminalOutputRequest,
-    TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
-    WriteTextFileRequest, WriteTextFileResponse,
+    KillTerminalResponse, PermissionOptionKind, PromptResponse, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionNotification, TerminalExitStatus, TerminalId,
+    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use tokio::{
@@ -25,11 +25,15 @@ use tracing::{debug, warn};
 use workspace_utils::approvals::ApprovalStatus;
 
 use crate::{
-    approvals::{ExecutorApprovalError, ExecutorApprovalService},
+    approvals::{
+        ExecutorApprovalError, ExecutorApprovalOption, ExecutorApprovalRequest,
+        ExecutorApprovalService,
+    },
     executors::acp::{
         AcpApprovalPolicy, AcpClientServicePolicy, AcpEvent, ApprovalResponse, events,
-        output::AcpOutput,
+        output::AcpOutput, usage::AcpTokenUsageAccumulator,
     },
+    logs::TokenUsageInfo,
 };
 
 /// State shared by stable ACP client callbacks.
@@ -44,6 +48,7 @@ pub struct AcpClient {
     services: AcpClientServicePolicy,
     terminal_env: HashMap<String, String>,
     terminals: Arc<Mutex<HashMap<String, TerminalRecord>>>,
+    token_usage: Arc<Mutex<AcpTokenUsageAccumulator>>,
 }
 
 impl AcpClient {
@@ -71,6 +76,7 @@ impl AcpClient {
                 .filter(|(name, _)| !is_sensitive_env_name(name))
                 .collect(),
             terminals: Arc::new(Mutex::new(HashMap::new())),
+            token_usage: Arc::new(Mutex::new(AcpTokenUsageAccumulator::default())),
         }
     }
 
@@ -88,9 +94,37 @@ impl AcpClient {
         &self,
         notification: SessionNotification,
     ) -> Result<(), Error> {
+        self.token_usage
+            .lock()
+            .await
+            .observe_session_update(&notification.update);
         self.send_event(events::event_from_notification(notification))
             .await;
         Ok(())
+    }
+
+    pub async fn set_token_usage_identity(
+        &self,
+        runtime_agent: Option<String>,
+        runtime_model_id: Option<String>,
+        runtime_thread_id: String,
+    ) {
+        self.token_usage.lock().await.set_runtime_identity(
+            runtime_agent,
+            runtime_model_id,
+            runtime_thread_id,
+        );
+    }
+
+    pub async fn finish_turn_token_usage(
+        &self,
+        response: &PromptResponse,
+    ) -> Option<TokenUsageInfo> {
+        self.token_usage.lock().await.finish_turn(response)
+    }
+
+    pub async fn begin_token_usage_turn(&self) {
+        self.token_usage.lock().await.begin_turn();
     }
 
     pub async fn request_permission(
@@ -130,16 +164,32 @@ impl AcpClient {
             ));
         };
 
-        let status = match approval_service
-            .request_tool_approval(
-                request.tool_call.fields.title.as_deref().unwrap_or("tool"),
-                serde_json::json!({ "tool_call": request.tool_call }),
-                &tool_call_id,
+        let selected_option_id = match approval_service
+            .request_acp_tool_approval(
+                ExecutorApprovalRequest {
+                    tool_name: request
+                        .tool_call
+                        .fields
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| "tool".to_string()),
+                    tool_input: serde_json::json!({ "tool_call": request.tool_call }),
+                    tool_call_id: tool_call_id.clone(),
+                    options: request
+                        .options
+                        .iter()
+                        .map(|option| ExecutorApprovalOption {
+                            option_id: option.option_id.0.to_string(),
+                            kind: permission_option_kind_wire(option.kind).to_string(),
+                            label: option.name.clone(),
+                        })
+                        .collect(),
+                },
                 self.cancel.clone(),
             )
             .await
         {
-            Ok(status) => status,
+            Ok(option_id) => option_id,
             Err(ExecutorApprovalError::Cancelled) => {
                 return Ok(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Cancelled,
@@ -151,25 +201,26 @@ impl AcpClient {
             }
         };
 
-        let outcome = match &status {
-            ApprovalStatus::Approved => select_option(
-                &request,
-                &[
-                    PermissionOptionKind::AllowOnce,
-                    PermissionOptionKind::AllowAlways,
-                ],
-            ),
-            ApprovalStatus::Denied { .. } => select_option(
-                &request,
-                &[
-                    PermissionOptionKind::RejectOnce,
-                    PermissionOptionKind::RejectAlways,
-                ],
-            ),
-            ApprovalStatus::TimedOut | ApprovalStatus::Pending => {
-                RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
-            }
+        let Some(selected) = request
+            .options
+            .iter()
+            .find(|option| option.option_id.0.as_ref() == selected_option_id)
+        else {
+            return Err(Error::invalid_params()
+                .data("approval service selected an option not advertised by the ACP Agent"));
         };
+        let status = match selected.kind {
+            PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways => {
+                ApprovalStatus::Approved
+            }
+            PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways => {
+                ApprovalStatus::Denied { reason: None }
+            }
+            _ => return Err(Error::invalid_params()),
+        };
+        let outcome = RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+            SelectedPermissionOutcome::new(selected.option_id.clone()),
+        ));
 
         self.send_event(AcpEvent::ApprovalResponse(ApprovalResponse {
             tool_call_id,
@@ -480,6 +531,16 @@ impl AcpClient {
             }
         }
         Err(Error::invalid_params().data("path is outside the ACP workspace roots"))
+    }
+}
+
+fn permission_option_kind_wire(kind: PermissionOptionKind) -> &'static str {
+    match kind {
+        PermissionOptionKind::AllowOnce => "allow_once",
+        PermissionOptionKind::AllowAlways => "allow_always",
+        PermissionOptionKind::RejectOnce => "reject_once",
+        PermissionOptionKind::RejectAlways => "reject_always",
+        _ => "other",
     }
 }
 

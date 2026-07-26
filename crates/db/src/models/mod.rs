@@ -2,6 +2,7 @@ pub mod analytics;
 pub mod chat_agent;
 pub mod chat_agent_skill;
 pub mod chat_artifact;
+pub mod chat_executor_approval_request;
 pub mod chat_message;
 pub mod chat_message_queue;
 pub mod chat_message_target;

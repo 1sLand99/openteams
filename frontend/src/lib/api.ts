@@ -145,6 +145,7 @@ import type {
   UpdateProjectMemberRequest,
   UpdateTeamPresetRequest,
   ChatRunFilesResponse,
+  ChatExecutorApprovalRequest,
   InboxItem,
   InboxItemResponse,
   InboxItemsArchivedResponse,
@@ -1143,6 +1144,32 @@ export const chatSessionsApi = {
    */
   streamUrl: (sessionId: string): string =>
     `/api/chat/sessions/${encodeURIComponent(sessionId)}/stream`,
+};
+
+export const executorApprovalsApi = {
+  listPending: async (
+    sessionId: string,
+  ): Promise<ChatExecutorApprovalRequest[]> => {
+    const r = await makeRequest(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/executor-approvals?status=pending`,
+      { cache: "no-store" },
+    );
+    return handleApiResponse<ChatExecutorApprovalRequest[]>(r);
+  },
+  resolve: async (
+    sessionId: string,
+    requestId: string,
+    optionId: string,
+  ): Promise<ChatExecutorApprovalRequest> => {
+    const r = await makeRequest(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/executor-approvals/${encodeURIComponent(requestId)}/resolve`,
+      {
+        method: "POST",
+        body: jsonBody({ option_id: optionId }),
+      },
+    );
+    return handleApiResponse<ChatExecutorApprovalRequest>(r);
+  },
 };
 
 export const chatSearchApi = {

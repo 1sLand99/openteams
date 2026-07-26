@@ -35,7 +35,6 @@ use db::{
     },
 };
 use executors::{
-    approvals::NoopExecutorApprovalService,
     env::{ExecutionEnv, RepoContext},
     executors::{
         CancellationToken, ExecutorError, ExecutorExitResult, ExecutorExitSignal, SpawnedChild,
@@ -64,8 +63,10 @@ use super::{
 use crate::services::{
     analytics::AnalyticsService,
     analytics_events::{AnalyticsEvent, AnalyticsEventPayload, duration_bucket},
+    approvals::executor_approvals::{ExecutorApprovalBridge, ExecutorApprovalScope},
     member_execution::{
-        build_effective_member_executor, refresh_session_agent_execution_config_before_run,
+        build_effective_member_executor, executor_acp_full_access_enabled,
+        refresh_session_agent_execution_config_before_run,
     },
     session_worktree::{EnsureOutcome, EnsureWorktreeInput, SessionWorktreeService},
     workspace_change_capture::{

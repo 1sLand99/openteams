@@ -18,7 +18,7 @@ export type CreateProjectMember = { member_type: ProjectMemberType, user_id: str
 
 export type UpdateProjectMember = { member_type: ProjectMemberType | null, user_id: string | null, agent_id: string | null, member_name?: string | null, role: string | null, display_order: bigint | null, default_workspace_path: string | null, allowed_skill_ids: Array<string> | null, execution_config: MemberExecutionConfig | null, is_default: boolean | null, };
 
-export type MemberExecutionConfig = { runner_type?: BaseCodingAgent | null, model_name?: string | null, thinking_effort?: string | null, model_variant?: string | null, };
+export type MemberExecutionConfig = { runner_type?: BaseCodingAgent | null, model_name?: string | null, thinking_effort?: string | null, model_variant?: string | null, acp?: AcpExecutionOptions | null, };
 
 export type ProjectPath = { id: string, project_id: string, path: string, label: string | null, kind: ProjectPathKind, is_default: boolean, created_at: Date, updated_at: Date, };
 
@@ -565,7 +565,11 @@ export type AgentRuntimeRefreshError = { runner_type: BaseCodingAgent, message: 
 
 export type AgentRuntimeRefreshResponse = { runners: Array<AgentRuntimeStatus>, errors: Array<AgentRuntimeRefreshError>, };
 
-export type AgentRuntimeDiagnostics = { runner_type: BaseCodingAgent, installed: boolean, executable: boolean, availability: AvailabilityInfo, config_path: string, install_indicator_path: string | null, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, };
+export type AgentRuntimeDiagnostics = { runner_type: BaseCodingAgent, installed: boolean, executable: boolean, availability: AvailabilityInfo, config_path: string, install_indicator_path: string | null, resolved_command: string | null, command_source: string | null, acp_probe: AcpCapabilityProbe | null, acp_probe_error: string | null, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, };
+
+export type AcpAuthMethodInfo = { id: string, name: string, description: string | null, };
+
+export type AcpCapabilityProbe = { protocol_version: string, agent_name: string | null, agent_version: string | null, auth_methods: Array<AcpAuthMethodInfo>, supports_session_list: boolean, supports_session_resume: boolean, supports_session_close: boolean, supports_session_delete: boolean, supports_additional_directories: boolean, agent_capabilities: JsonValue, config_options: Array<JsonValue>, };
 
 export type ChatStreamEvent = { "type": "message_new", message: ChatMessage, } | { "type": "message_updated", message: ChatMessage, } | { "type": "work_item_new", work_item: ChatWorkItem, } | { "type": "agent_delta", session_id: string, session_agent_id: string, agent_id: string, run_id: string, stream_type: ChatStreamDeltaType, content: string, delta: boolean, is_final: boolean, } | { "type": "agent_run_started", session_id: string, session_agent_id: string, agent_id: string, agent_name: string, model: string | null, run_id: string,
 /**
@@ -594,6 +598,24 @@ client_message_id: string | null, session_agent_id: string | null, project_membe
  * Source message whose processing triggered this run.
  */
 message_id: string, changed_files: Array<FileChangeEntry>, ts: string, };
+
+export type ChatExecutorApprovalOption = { option_id: string, kind: string, label: string, };
+
+export enum ChatExecutorApprovalStatus { pending = "pending", selected = "selected", cancelled = "cancelled", expired = "expired" }
+
+export type ChatExecutorApprovalRequest = { id: string, session_id: string, session_agent_id: string, run_id: string, workflow_execution_id: string | null, workflow_step_id: string | null, runner: string, tool_call_id: string, tool_name: string, display_input: JsonValue, options: Array<ChatExecutorApprovalOption>, status: ChatExecutorApprovalStatus, selected_option_id: string | null, processed_by: string | null, expires_at: Date, resolved_at: Date | null, created_at: Date, updated_at: Date, };
+
+export enum AcpAccessMode { workspace_only = "workspace_only", full_access = "full_access" }
+
+export enum AcpApprovalMode { ask = "ask", auto_allow = "auto_allow", auto_reject = "auto_reject" }
+
+export type AcpAuthSelection = { "type": "auto" } | { "type": "method_id", method_id: string, };
+
+export type AcpExecutionOptions = { access_mode?: AcpAccessMode | null, approval_mode?: AcpApprovalMode | null, auth?: AcpAuthSelection | null,
+/**
+ * `Some` replaces lower-priority directories, including with an empty list.
+ */
+additional_directories?: Array<string> | null, };
 
 export type ChatStreamDeltaType = "assistant" | "thinking" | "error";
 
@@ -1337,7 +1359,7 @@ export enum BaseAgentCapability { SESSION_FORK = "SESSION_FORK", SETUP_HELPER = 
 
 export type ClaudeCode = { append_prompt: AppendPrompt, claude_code_router?: boolean | null, plan?: boolean | null, approvals?: boolean | null, model?: string | null, effort?: string | null, dangerously_skip_permissions?: boolean | null, disable_api_key?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
-export type Gemini = { append_prompt: AppendPrompt, model?: string | null, thinking_effort?: string | null, yolo?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+export type Gemini = { append_prompt: AppendPrompt, model?: string | null, thinking_effort?: string | null, yolo?: boolean | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Amp = { append_prompt: AppendPrompt, model?: string | null, dangerously_allow_all?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
@@ -1377,7 +1399,7 @@ auto_approve: boolean,
  */
 auto_compact: boolean, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
-export type QwenCode = { append_prompt: AppendPrompt, model?: string | null, thinking_effort?: string | null, yolo?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+export type QwenCode = { append_prompt: AppendPrompt, model?: string | null, thinking_effort?: string | null, yolo?: boolean | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Droid = { append_prompt: AppendPrompt, autonomy: Autonomy, model?: string | null, reasoning_effort?: DroidReasoningEffort | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 

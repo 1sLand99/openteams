@@ -5,10 +5,11 @@ use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
-use workspace_utils::msg_store::MsgStore;
+use workspace_utils::{msg_store::MsgStore, shell::resolve_executable_path_blocking};
 
 use super::acp::{
-    AcpAgentHarness, AcpApprovalPolicy,
+    AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
+    AcpCapabilityProbe, AcpClientServicePolicy, AcpExecutionOptions,
     mcp::{AcpMcpPolicy, resolve_effective_mcp_config, write_mcp_isolation_settings},
 };
 use crate::{
@@ -42,6 +43,8 @@ pub struct Gemini {
     pub thinking_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yolo: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp: Option<AcpExecutionOptions>,
     #[serde(flatten)]
     pub cmd: CmdOverrides,
     #[serde(skip)]
@@ -55,7 +58,7 @@ pub struct Gemini {
 }
 
 impl Gemini {
-    const BASE_COMMAND: &'static str = "npx -y @google/gemini-cli@0.45.0";
+    const BASE_COMMAND: &'static str = "gemini";
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         let mut builder = CommandBuilder::new(Self::BASE_COMMAND);
@@ -66,12 +69,36 @@ impl Gemini {
     }
 
     async fn acp_harness(&self) -> Result<AcpAgentHarness, ExecutorError> {
-        let mut harness =
-            AcpAgentHarness::new().with_approval_policy(if self.yolo.unwrap_or(false) {
-                AcpApprovalPolicy::AutoAllow
+        let options = self.acp.clone().unwrap_or_default();
+        let approval_policy = match options.approval_mode.unwrap_or_else(|| {
+            if self.yolo.unwrap_or(false) {
+                AcpApprovalMode::AutoAllow
             } else {
-                AcpApprovalPolicy::Ask
+                AcpApprovalMode::Ask
+            }
+        }) {
+            AcpApprovalMode::Ask => AcpApprovalPolicy::Ask,
+            AcpApprovalMode::AutoAllow => AcpApprovalPolicy::AutoAllow,
+            AcpApprovalMode::AutoReject => AcpApprovalPolicy::AutoReject,
+        };
+        let additional_directories = options
+            .validated_directories()
+            .await
+            .map_err(ExecutorError::Io)?;
+        let full_access = options.access_mode.unwrap_or_default() == AcpAccessMode::FullAccess;
+        let mut harness = AcpAgentHarness::new()
+            .with_approval_policy(approval_policy)
+            .with_additional_directories(additional_directories)
+            .with_client_services(AcpClientServicePolicy {
+                read_text_file: true,
+                write_text_file: true,
+                terminal: true,
+                full_access,
+                ..AcpClientServicePolicy::default()
             });
+        if let Some(AcpAuthSelection::MethodId { method_id }) = options.auth {
+            harness = harness.with_auth_method_id(method_id);
+        }
         if let Some(model) = self
             .model
             .as_deref()
@@ -140,6 +167,22 @@ impl StandardCodingAgentExecutor for Gemini {
             &[ProviderKind::Google],
         )
         .await
+    }
+
+    async fn probe_acp(
+        &self,
+        current_dir: &Path,
+        env: &ExecutionEnv,
+    ) -> Result<Option<AcpCapabilityProbe>, ExecutorError> {
+        Ok(Some(
+            super::acp::runtime::probe_acp_command(
+                self.build_command_builder()?.build_initial()?,
+                current_dir,
+                env,
+                &self.cmd,
+            )
+            .await?,
+        ))
     }
 
     async fn spawn(
@@ -212,27 +255,14 @@ impl StandardCodingAgentExecutor for Gemini {
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
-        if let Some(timestamp) = dirs::home_dir()
-            .and_then(|home| std::fs::metadata(home.join(".gemini").join("oauth_creds.json")).ok())
-            .and_then(|m| m.modified().ok())
-            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-        {
-            return AvailabilityInfo::LoginDetected {
-                last_auth_timestamp: timestamp,
-            };
-        }
-
-        let mcp_config_found = self
-            .default_mcp_config_path()
-            .map(|p| p.exists())
-            .unwrap_or(false);
-
-        let installation_indicator_found = dirs::home_dir()
-            .map(|home| home.join(".gemini").join("installation_id").exists())
-            .unwrap_or(false);
-
-        if mcp_config_found || installation_indicator_found {
+        let command = self
+            .cmd
+            .base_command_override
+            .as_deref()
+            .and_then(|value| shlex::split(value))
+            .and_then(|parts| parts.into_iter().next())
+            .unwrap_or_else(|| Self::BASE_COMMAND.to_string());
+        if resolve_executable_path_blocking(&command).is_some() {
             AvailabilityInfo::InstallationFound
         } else {
             AvailabilityInfo::NotFound
@@ -251,18 +281,20 @@ mod tests {
             model: Some("gemini-3-pro-preview".to_string()),
             thinking_effort: None,
             yolo: Some(true),
+            acp: None,
             cmd: CmdOverrides::default(),
             acp_mcp_policy: AcpMcpPolicy::default(),
             approvals: None,
         };
 
-        let (_program, args) = gemini
+        let (program, args) = gemini
             .build_command_builder()
             .expect("build command")
             .build_initial()
             .expect("build initial")
             .into_parts_for_test();
 
+        assert_eq!(program, "gemini");
         assert!(args.iter().any(|arg| arg == "--acp"));
         assert!(!args.iter().any(|arg| arg == "--experimental-acp"));
     }

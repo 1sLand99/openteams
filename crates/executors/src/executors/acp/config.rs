@@ -1,6 +1,131 @@
 use std::path::PathBuf;
 
 use agent_client_protocol::schema::v1::{McpServer, SessionConfigOptionValue};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct AcpAuthMethodInfo {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+pub struct AcpCapabilityProbe {
+    pub protocol_version: String,
+    pub agent_name: Option<String>,
+    pub agent_version: Option<String>,
+    pub auth_methods: Vec<AcpAuthMethodInfo>,
+    pub supports_session_list: bool,
+    pub supports_session_resume: bool,
+    pub supports_session_close: bool,
+    pub supports_session_delete: bool,
+    pub supports_additional_directories: bool,
+    #[ts(type = "JsonValue")]
+    pub agent_capabilities: serde_json::Value,
+    #[ts(type = "Array<JsonValue>")]
+    pub config_options: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[ts(use_ts_enum)]
+pub enum AcpAccessMode {
+    #[default]
+    WorkspaceOnly,
+    FullAccess,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[ts(use_ts_enum)]
+pub enum AcpApprovalMode {
+    #[default]
+    Ask,
+    AutoAllow,
+    AutoReject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AcpAuthSelection {
+    Auto,
+    MethodId { method_id: String },
+}
+
+impl Default for AcpAuthSelection {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+/// Partial ACP settings. `None` means inherit from the lower-priority layer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
+pub struct AcpExecutionOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_mode: Option<AcpAccessMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<AcpApprovalMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AcpAuthSelection>,
+    /// `Some` replaces lower-priority directories, including with an empty list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_directories: Option<Vec<String>>,
+}
+
+impl AcpExecutionOptions {
+    pub fn overlay(&self, higher_priority: &Self) -> Self {
+        Self {
+            access_mode: higher_priority.access_mode.or(self.access_mode),
+            approval_mode: higher_priority.approval_mode.or(self.approval_mode),
+            auth: higher_priority.auth.clone().or_else(|| self.auth.clone()),
+            additional_directories: higher_priority
+                .additional_directories
+                .clone()
+                .or_else(|| self.additional_directories.clone()),
+        }
+    }
+
+    pub async fn validated_directories(&self) -> Result<Vec<PathBuf>, std::io::Error> {
+        let mut resolved = Vec::new();
+        for raw in self.additional_directories.clone().unwrap_or_default() {
+            let path = PathBuf::from(raw);
+            if !path.is_absolute() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "ACP additional directory must be absolute: {}",
+                        path.display()
+                    ),
+                ));
+            }
+            let canonical = tokio::fs::canonicalize(&path).await.map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "invalid ACP additional directory `{}`: {error}",
+                        path.display()
+                    ),
+                )
+            })?;
+            if !canonical.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "ACP additional directory is not a directory: {}",
+                        canonical.display()
+                    ),
+                ));
+            }
+            if !resolved.contains(&canonical) {
+                resolved.push(canonical);
+            }
+        }
+        Ok(resolved)
+    }
+}
 
 /// How OpenTeams resolves ACP permission requests.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -79,5 +204,45 @@ impl Default for AcpRunConfig {
             additional_directories: Vec::new(),
             mcp_servers: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn member_overlay_replaces_directories_without_expanding_them() {
+        let global = AcpExecutionOptions {
+            access_mode: Some(AcpAccessMode::WorkspaceOnly),
+            approval_mode: Some(AcpApprovalMode::Ask),
+            auth: Some(AcpAuthSelection::Auto),
+            additional_directories: Some(vec!["/global".to_string()]),
+        };
+        let member = AcpExecutionOptions {
+            approval_mode: Some(AcpApprovalMode::AutoReject),
+            additional_directories: Some(Vec::new()),
+            ..Default::default()
+        };
+
+        let effective = global.overlay(&member);
+        assert_eq!(effective.access_mode, Some(AcpAccessMode::WorkspaceOnly));
+        assert_eq!(effective.approval_mode, Some(AcpApprovalMode::AutoReject));
+        assert_eq!(effective.additional_directories, Some(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn additional_directories_reject_relative_paths() {
+        let options = AcpExecutionOptions {
+            additional_directories: Some(vec!["relative/path".to_string()]),
+            ..Default::default()
+        };
+
+        let error = options
+            .validated_directories()
+            .await
+            .expect_err("relative ACP directory must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("must be absolute"));
     }
 }

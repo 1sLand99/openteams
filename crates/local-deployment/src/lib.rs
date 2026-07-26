@@ -127,6 +127,17 @@ impl Deployment for LocalDeployment {
             );
             DBService::new_with_after_connect(hook).await?
         };
+        let expired_executor_approvals =
+            services::services::approvals::executor_approvals::ExecutorApprovalBridge::expire_orphaned(
+                &db.pool,
+            )
+            .await?;
+        if expired_executor_approvals > 0 {
+            tracing::warn!(
+                expired_executor_approvals,
+                "Expired executor approvals left pending across restart"
+            );
+        }
         let analytics = AnalyticsConfig::new().map(|analytics_config| {
             AnalyticsService::with_persistence(
                 analytics_config,

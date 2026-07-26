@@ -9,8 +9,13 @@ import React, {
 import { createPortal } from "react-dom";
 import { Bell, Check, LoaderCircle } from "lucide-react";
 import { useAppScale } from "@/context/AppScaleContext";
+import { executorApprovalsApi } from "@/lib/api";
 import type { Session } from "@/types";
-import type { InboxItem, InboxSummary } from "../../../shared/types";
+import type {
+  ChatExecutorApprovalRequest,
+  InboxItem,
+  InboxSummary,
+} from "../../../shared/types";
 
 type Translate = (
   key: string,
@@ -177,6 +182,83 @@ export const inboxNotificationLabel = (
     workflowNotificationTypeFallback[notificationType],
   );
 };
+
+function ExecutorApprovalInboxActions({
+  item,
+  onResolved,
+}: {
+  item: InboxItem;
+  onResolved?: () => Promise<void>;
+}) {
+  const [request, setRequest] =
+    useState<ChatExecutorApprovalRequest | null>(null);
+  const [resolving, setResolving] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!item.session_id || !item.source_id) return;
+    let active = true;
+    void executorApprovalsApi
+      .listPending(item.session_id)
+      .then((requests) => {
+        if (active) {
+          setRequest(
+            requests.find((candidate) => candidate.id === item.source_id) ??
+              null,
+          );
+        }
+      })
+      .catch(() => {
+        if (active) setRequest(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [item.session_id, item.source_id]);
+
+  if (!request || !item.session_id) return null;
+
+  return (
+    <div
+      className="mt-2 flex flex-wrap gap-1.5"
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      {request.options.map((option) => (
+        <button
+          key={option.option_id}
+          type="button"
+          disabled={resolving}
+          onClick={() => {
+            setResolving(true);
+            setResolveError(null);
+            void executorApprovalsApi
+              .resolve(item.session_id!, request.id, option.option_id)
+              .then(() => onResolved?.())
+              .catch((error) => {
+                setResolveError(
+                  error instanceof Error ? error.message : String(error),
+                );
+              })
+              .finally(() => setResolving(false));
+          }}
+          className={`rounded border px-2 py-1 text-[10px] font-medium transition disabled:opacity-50 ${
+            option.kind.startsWith("reject")
+              ? "border-red-400/30 text-red-300 hover:bg-red-400/10"
+              : option.kind === "allow_always"
+                ? "border-amber-400/30 text-amber-300 hover:bg-amber-400/10"
+                : "border-[var(--primary)]/40 text-[var(--primary)] hover:bg-[var(--primary)]/10"
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
+      {resolveError && (
+        <p className="w-full text-[10px] text-red-300">{resolveError}</p>
+      )}
+    </div>
+  );
+}
 
 export function InboxNotificationsPopover({
   triggerClassName,
@@ -443,6 +525,13 @@ export function InboxNotificationsPopover({
                           <div className="mt-0.5 line-clamp-1 text-[11px] leading-[1.5] text-[var(--ink-muted)]">
                             {item.body}
                           </div>
+                        )}
+                        {(item.kind === "executor_approval" ||
+                          item.source_type === "executor_approval") && (
+                          <ExecutorApprovalInboxActions
+                            item={item}
+                            onResolved={onRefresh}
+                          />
                         )}
                         {onMarkItemRead && (
                           <button

@@ -15,7 +15,7 @@ use executors::{
     env::ExecutionEnv,
     executors::{
         AvailabilityInfo, BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor,
-        opencode::Opencode,
+        acp::AcpCapabilityProbe, opencode::Opencode,
     },
     model_sync::with_model,
     profile::{ExecutorConfig, ExecutorConfigs, ProfileError, canonical_variant_key},
@@ -158,6 +158,10 @@ pub struct AgentRuntimeDiagnostics {
     pub availability: AvailabilityInfo,
     pub config_path: String,
     pub install_indicator_path: Option<String>,
+    pub resolved_command: Option<String>,
+    pub command_source: Option<String>,
+    pub acp_probe: Option<AcpCapabilityProbe>,
+    pub acp_probe_error: Option<String>,
     pub discovered_models: Vec<String>,
     pub model_source: AgentRuntimeModelSource,
     pub version: Option<String>,
@@ -373,12 +377,11 @@ async fn discover_runner_runtime(
         return Ok(RunnerDiscoveryOutcome::Skipped);
     };
 
+    let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+    apply_config_to_executor_and_env(runner, &mut base, &mut env, store)?;
     if !base.get_availability_info().is_available() {
         return Ok(RunnerDiscoveryOutcome::Skipped);
     }
-
-    let mut env = ExecutionEnv::new(Default::default(), false, String::new());
-    apply_config_to_executor_and_env(runner, &mut base, &mut env, store)?;
 
     let (detected_version, discovered_models) = tokio::join!(
         detect_refresh_version(&base, &env),
@@ -430,6 +433,17 @@ pub fn update_runtime_config(
         config.env_json = env_json;
     }
     if let Some(executor_options) = payload.executor_options {
+        let mut executor = profiles
+            .executors
+            .get(&runner)
+            .and_then(|entry| {
+                entry
+                    .get_default()
+                    .or_else(|| entry.configurations.values().next())
+            })
+            .cloned()
+            .ok_or_else(|| AgentRuntimeError::UnknownRunner(runner.to_string()))?;
+        apply_executor_options(runner, &mut executor, &executor_options)?;
         config.executor_options = executor_options;
     }
     config.updated_at = Utc::now();
@@ -544,6 +558,33 @@ pub async fn runtime_diagnostics(
         write_store(&path, &store)?;
     }
     let version = detected_version.or(status.version);
+    let resolved_command = resolve_runtime_command(&runtime_executor).await;
+    let command_source = resolved_command.as_ref().map(|_| {
+        if cmd_overrides_for_executor(&runtime_executor)
+            .and_then(|cmd| cmd.base_command_override.as_deref())
+            .is_some_and(|command| !command.trim().is_empty())
+        {
+            "override".to_string()
+        } else {
+            match &runtime_executor {
+                CodingAgent::Gemini(_) | CodingAgent::QwenCode(_) => "native",
+                _ => "default",
+            }
+            .to_string()
+        }
+    });
+    let (acp_probe, acp_probe_error) = if matches!(
+        runtime_executor,
+        CodingAgent::Gemini(_) | CodingAgent::QwenCode(_)
+    ) {
+        let probe_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        match runtime_executor.probe_acp(&probe_dir, &env).await {
+            Ok(probe) => (probe, None),
+            Err(error) => (None, Some(error.to_string())),
+        }
+    } else {
+        (None, None)
+    };
 
     Ok(AgentRuntimeDiagnostics {
         runner_type: status.runner_type,
@@ -554,6 +595,10 @@ pub async fn runtime_diagnostics(
             .clone()
             .unwrap_or_else(|| path.display().to_string()),
         install_indicator_path: cli_config_path,
+        resolved_command,
+        command_source,
+        acp_probe,
+        acp_probe_error,
         discovered_models: status.discovered_models,
         model_source: status.model_source,
         version,
@@ -563,6 +608,18 @@ pub async fn runtime_diagnostics(
         env_summary: status.env_summary,
         executor_options: status.executor_options,
     })
+}
+
+async fn resolve_runtime_command(executor: &CodingAgent) -> Option<String> {
+    let base = version_command_base(executor)?;
+    let parts = CommandBuilder::new(base).build_initial().ok()?;
+    let (executable, args) = parts.into_resolved().await.ok()?;
+    let mut rendered = executable.display().to_string();
+    for argument in args {
+        rendered.push(' ');
+        rendered.push_str(&argument);
+    }
+    Some(rendered)
 }
 
 pub fn apply_agent_runtime_config(
@@ -704,14 +761,14 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
             }
         }
         CodingAgent::Amp(_) => "npx -y @sourcegraph/amp@0.0.1780464815-g688406".to_string(),
-        CodingAgent::Gemini(_) => "npx -y @google/gemini-cli@0.45.0".to_string(),
+        CodingAgent::Gemini(_) => "gemini".to_string(),
         CodingAgent::Codex(_) => "npx -y @openai/codex@0.144.1".to_string(),
         CodingAgent::Opencode(_) => {
             format!("npx -y opencode-ai@{}", Opencode::PACKAGE_VERSION)
         }
         CodingAgent::OpenTeamsCli(_) => openteams_cli_binary_base(),
         CodingAgent::CursorAgent(_) => "cursor-agent".to_string(),
-        CodingAgent::QwenCode(_) => "npx -y @qwen-code/qwen-code@0.17.0".to_string(),
+        CodingAgent::QwenCode(_) => "qwen".to_string(),
         CodingAgent::Copilot(_) => "npx -y @github/copilot@1.0.59".to_string(),
         CodingAgent::Droid(_) => "droid".to_string(),
         CodingAgent::KimiCode(_) => "kimi".to_string(),
@@ -896,12 +953,18 @@ fn build_statuses(
 fn runtime_discovery_needs_refresh(profiles: &ExecutorConfigs, store: &AgentRuntimeStore) -> bool {
     let now = Utc::now();
     profiles.executors.iter().any(|(runner, executor_config)| {
-        let Some(base) = executor_config
+        let Some(mut base) = executor_config
             .get_default()
             .or_else(|| executor_config.configurations.values().next())
+            .cloned()
         else {
             return false;
         };
+        if let Some(config) = store.configs.get(runner)
+            && apply_executor_options(*runner, &mut base, &config.executor_options).is_err()
+        {
+            return true;
+        }
         if !base.get_availability_info().is_available() {
             return false;
         }
@@ -925,7 +988,17 @@ fn build_status(
         .cloned()
         .unwrap_or_else(|| default_config(runner));
     let discovery = store.discoveries.get(&runner);
-    let availability = base.get_availability_info();
+    let mut configured_base = base.clone();
+    if let Err(error) =
+        apply_executor_options(runner, &mut configured_base, &config.executor_options)
+    {
+        tracing::warn!(
+            runner = %runner,
+            error = %error,
+            "failed to apply runtime config while checking availability"
+        );
+    }
+    let availability = configured_base.get_availability_info();
     let installed = availability.is_available();
     let executable = installed && config.run_mode != AgentRunMode::Disabled;
 

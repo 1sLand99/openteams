@@ -5,6 +5,7 @@ import type {
   ChatSessionAgentState,
 } from "@/types";
 import type { ProjectMemberWithRuntime } from "../../../../shared/types";
+import type { AcpExecutionOptions } from "../../../../shared/types";
 import { getRunnerLabel } from "../agent-runtime/agentRuntimeViewModel";
 
 export type MemberExecutionConfig = {
@@ -12,6 +13,7 @@ export type MemberExecutionConfig = {
   model_name?: string | null;
   thinking_effort?: string | null;
   model_variant?: string | null;
+  acp?: AcpExecutionOptions | null;
 };
 
 export type ProjectMemberWithExecution = ProjectMemberWithRuntime & {

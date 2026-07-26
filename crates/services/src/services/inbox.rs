@@ -262,6 +262,18 @@ impl InboxService {
         )
         .await
     }
+
+    pub async fn resolve_executor_approval(&self, pool: &SqlitePool, request_id: Uuid) {
+        if let Err(error) =
+            InboxItem::archive_by_source(pool, "executor_approval", &request_id.to_string()).await
+        {
+            tracing::warn!(
+                request_id = %request_id,
+                error = %error,
+                "failed to archive resolved executor approval inbox item"
+            );
+        }
+    }
 }
 
 async fn project_id_for_session(pool: &SqlitePool, session_id: Uuid) -> Option<Uuid> {

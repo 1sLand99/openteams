@@ -1496,10 +1496,7 @@ impl ChatRunner {
             }
         }
 
-        let member_is_active = matches!(
-            session_agent.state,
-            ChatSessionAgentState::Running | ChatSessionAgentState::Stopping
-        );
+        let member_is_active = member_state_accepts_queued_messages(&session_agent.state);
         let member_has_inflight_queue = if claimed_queue_id.is_some() {
             false
         } else {
@@ -2017,7 +2014,26 @@ impl ChatRunner {
             let (effective_execution, mut executor) =
                 build_effective_member_executor(&agent, &session_agent, &mut env)
                     .map_err(|err| ChatRunnerError::Io(std::io::Error::other(err.to_string())))?;
-            executor.use_approvals(Arc::new(NoopExecutorApprovalService));
+            let acp_full_access = executor_acp_full_access_enabled(&executor);
+            if acp_full_access {
+                tracing::warn!(
+                    session_id = %session_id,
+                    session_agent_id = %session_agent_id,
+                    run_id = %run_id,
+                    "ACP Full Access enabled for chat run"
+                );
+            }
+            executor.use_approvals(ExecutorApprovalBridge::new(
+                self.db.clone(),
+                ExecutorApprovalScope {
+                    session_id,
+                    session_agent_id,
+                    run_id,
+                    runner: effective_execution.runner_type.to_string(),
+                    workflow_execution_id: None,
+                    workflow_step_id: None,
+                },
+            ));
             startup_timing.mark(
                 startup_timing::StartupMilestoneName::ExecutorConfigured,
                 Some(effective_execution.analytics_profile_label()),
@@ -2145,6 +2161,7 @@ impl ChatRunner {
                 track_source_message,
                 startup_timing.clone(),
                 effective_execution.runner_type == BaseCodingAgent::Codex,
+                acp_full_access,
             );
 
             self.spawn_exit_watcher(
@@ -2245,4 +2262,13 @@ impl ChatRunner {
 
         result.map(|()| DispatchOutcome::Started { run_id })
     }
+}
+
+pub(super) fn member_state_accepts_queued_messages(state: &ChatSessionAgentState) -> bool {
+    matches!(
+        state,
+        ChatSessionAgentState::Running
+            | ChatSessionAgentState::WaitingApproval
+            | ChatSessionAgentState::Stopping
+    )
 }

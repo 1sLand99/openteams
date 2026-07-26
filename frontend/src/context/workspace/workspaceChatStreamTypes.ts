@@ -89,4 +89,14 @@ export type ChatStreamEvent =
       session_id: string;
       session_agent_id: string;
       queue: MemberQueueSnapshot;
+    }
+  | {
+      type:
+        | 'executor_approval_requested'
+        | 'executor_approval_resolved'
+        | 'executor_approval_cancelled'
+        | 'executor_approval_expired';
+      session_id: string;
+      request_id: string;
+      session_agent_id: string;
     };

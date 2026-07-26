@@ -7,6 +7,21 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use workspace_utils::approvals::ApprovalStatus;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecutorApprovalOption {
+    pub option_id: String,
+    pub kind: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExecutorApprovalRequest {
+    pub tool_name: String,
+    pub tool_input: Value,
+    pub tool_call_id: String,
+    pub options: Vec<ExecutorApprovalOption>,
+}
+
 /// Errors emitted by executor approval services.
 #[derive(Debug, Error)]
 pub enum ExecutorApprovalError {
@@ -40,6 +55,37 @@ pub trait ExecutorApprovalService: Send + Sync {
         tool_call_id: &str,
         cancel: CancellationToken,
     ) -> Result<ApprovalStatus, ExecutorApprovalError>;
+
+    /// Requests an ACP permission decision while preserving the Agent's opaque
+    /// option IDs. Non-ACP backends keep working through the compatibility
+    /// implementation below.
+    async fn request_acp_tool_approval(
+        &self,
+        request: ExecutorApprovalRequest,
+        cancel: CancellationToken,
+    ) -> Result<String, ExecutorApprovalError> {
+        let status = self
+            .request_tool_approval(
+                &request.tool_name,
+                request.tool_input,
+                &request.tool_call_id,
+                cancel,
+            )
+            .await?;
+        let accepted_kinds: &[&str] = match status {
+            ApprovalStatus::Approved => &["allow_once", "allow_always"],
+            ApprovalStatus::Denied { .. } => &["reject_once", "reject_always"],
+            ApprovalStatus::TimedOut | ApprovalStatus::Pending => {
+                return Err(ExecutorApprovalError::Cancelled);
+            }
+        };
+        request
+            .options
+            .iter()
+            .find(|option| accepted_kinds.contains(&option.kind.as_str()))
+            .map(|option| option.option_id.clone())
+            .ok_or(ExecutorApprovalError::Cancelled)
+    }
 }
 
 #[derive(Debug, Default)]

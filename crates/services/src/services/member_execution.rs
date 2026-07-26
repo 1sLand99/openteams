@@ -11,7 +11,10 @@ use db::models::{
 };
 use executors::{
     env::ExecutionEnv,
-    executors::{BaseCodingAgent, CodingAgent, acp::mcp::AcpMcpPolicy},
+    executors::{
+        BaseCodingAgent, CodingAgent,
+        acp::{AcpAccessMode, AcpExecutionOptions, mcp::AcpMcpPolicy},
+    },
     model_sync::with_member_execution_overrides,
     profile::{ExecutorConfigs, ExecutorProfileId, canonical_variant_key},
 };
@@ -29,6 +32,7 @@ pub struct EffectiveMemberExecutionConfig {
     pub model_name: Option<String>,
     pub thinking_effort: Option<String>,
     pub model_variant: Option<String>,
+    pub acp: Option<AcpExecutionOptions>,
     pub has_member_config: bool,
 }
 
@@ -145,6 +149,7 @@ pub fn resolve_effective_member_execution_config(
         } else {
             None
         },
+        acp: member_config.acp,
         has_member_config,
     })
 }
@@ -164,8 +169,37 @@ pub fn build_effective_member_executor(
         resolved.thinking_effort.as_deref(),
         resolved.model_variant.as_deref(),
     );
+    if let Some(member_acp) = &resolved.acp {
+        match &mut executor {
+            CodingAgent::Gemini(config) => {
+                let inherited = config.acp.clone().unwrap_or_default();
+                config.acp = Some(inherited.overlay(member_acp));
+            }
+            CodingAgent::QwenCode(config) => {
+                let inherited = config.acp.clone().unwrap_or_default();
+                config.acp = Some(inherited.overlay(member_acp));
+            }
+            _ => {}
+        }
+    }
     executor.set_acp_mcp_policy(resolve_acp_mcp_policy(&agent.tools_enabled.0));
     Ok((resolved, executor))
+}
+
+pub fn executor_acp_full_access_enabled(executor: &CodingAgent) -> bool {
+    match executor {
+        CodingAgent::Gemini(config) => config
+            .acp
+            .as_ref()
+            .and_then(|acp| acp.access_mode)
+            .is_some_and(|mode| mode == AcpAccessMode::FullAccess),
+        CodingAgent::QwenCode(config) => config
+            .acp
+            .as_ref()
+            .and_then(|acp| acp.access_mode)
+            .is_some_and(|mode| mode == AcpAccessMode::FullAccess),
+        _ => false,
+    }
 }
 
 fn resolve_acp_mcp_policy(tools_enabled: &serde_json::Value) -> AcpMcpPolicy {
@@ -305,6 +339,7 @@ mod tests {
                 model_name: Some("gemini-3-pro-preview".to_string()),
                 thinking_effort: Some("high".to_string()),
                 model_variant: None,
+                acp: None,
             }),
         )
         .expect("resolve config");

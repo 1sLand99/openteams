@@ -22,7 +22,7 @@ use agent_client_protocol::{
             PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
             ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionNotification,
             SessionResumeCapabilities, SessionUpdate, StopReason, TextContent, ToolCallUpdate,
-            ToolCallUpdateFields, UsageUpdate, WriteTextFileRequest,
+            ToolCallUpdateFields, Usage, UsageUpdate, WriteTextFileRequest,
         },
     },
 };
@@ -271,7 +271,9 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                                 .message_id("qa-message"),
                         ),
                     ))?;
-                    responder.respond(PromptResponse::new(StopReason::EndTurn))
+                    responder.respond(
+                        PromptResponse::new(StopReason::EndTurn).usage(Usage::new(37, 30, 7)),
+                    )
                 })?;
                 Ok(())
             },

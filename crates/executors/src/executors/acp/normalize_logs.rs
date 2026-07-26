@@ -23,6 +23,25 @@ use crate::{
     },
 };
 
+pub const ACP_TURN_SIGNAL_KEY: &str = "acp_turn_signal";
+pub const ACP_PERMISSION_REJECTED_SIGNAL: &str = "permission_rejected";
+
+fn denied_approval_entry(tool_name: String, reason: Option<String>) -> NormalizedEntry {
+    NormalizedEntry {
+        timestamp: None,
+        entry_type: NormalizedEntryType::UserFeedback {
+            denied_tool: tool_name,
+        },
+        content: reason
+            .unwrap_or_else(|| "User denied this tool use request".to_string())
+            .trim()
+            .to_string(),
+        metadata: Some(serde_json::json!({
+            ACP_TURN_SIGNAL_KEY: ACP_PERMISSION_REJECTED_SIGNAL,
+        })),
+    }
+}
+
 pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
     // stderr normalization
     let entry_index = EntryIndexProvider::start_from(&msg_store);
@@ -249,20 +268,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                                 })
                                 .unwrap_or_default();
                             let idx = entry_index.next();
-                            let entry = NormalizedEntry {
-                                timestamp: None,
-                                entry_type: NormalizedEntryType::UserFeedback {
-                                    denied_tool: tool_name,
-                                },
-                                content: reason
-                                    .clone()
-                                    .unwrap_or_else(|| {
-                                        "User denied this tool use request".to_string()
-                                    })
-                                    .trim()
-                                    .to_string(),
-                                metadata: None,
-                            };
+                            let entry = denied_approval_entry(tool_name, reason);
                             msg_store
                                 .push_patch(ConversationPatch::add_normalized_entry(idx, entry));
                         }
@@ -295,6 +301,20 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                                 },
                             ),
                             content: format!("Context usage: {used} / {size}"),
+                            metadata: None,
+                        };
+                        msg_store.push_patch(ConversationPatch::add_normalized_entry(idx, entry));
+                    }
+                    AcpEvent::TokenUsage(usage) => {
+                        let idx = entry_index.next();
+                        let entry = NormalizedEntry {
+                            timestamp: None,
+                            content: format!(
+                                "Token usage: {} input / {} output",
+                                usage.input_tokens.unwrap_or_default(),
+                                usage.output_tokens.unwrap_or_default()
+                            ),
+                            entry_type: NormalizedEntryType::TokenUsageInfo(usage),
                             metadata: None,
                         };
                         msg_store.push_patch(ConversationPatch::add_normalized_entry(idx, entry));
@@ -850,5 +870,23 @@ mod tests {
             &Some("message".to_string())
         ));
         assert!(starts_new_message(Some(&with_id), &None));
+    }
+
+    #[test]
+    fn denied_approval_carries_shared_acp_turn_signal() {
+        let entry = denied_approval_entry("write_file".to_string(), None);
+
+        assert!(matches!(
+            entry.entry_type,
+            NormalizedEntryType::UserFeedback { ref denied_tool }
+                if denied_tool == "write_file"
+        ));
+        assert_eq!(entry.content, "User denied this tool use request");
+        assert_eq!(
+            entry.metadata,
+            Some(serde_json::json!({
+                "acp_turn_signal": "permission_rejected"
+            }))
+        );
     }
 }

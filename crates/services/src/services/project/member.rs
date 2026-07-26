@@ -1110,6 +1110,7 @@ mod tests {
                         model_name: Some("gpt-5.2-codex".to_string()),
                         thinking_effort: Some("high".to_string()),
                         model_variant: None,
+                        acp: None,
                     }),
                 },
             )

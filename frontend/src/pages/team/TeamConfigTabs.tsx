@@ -43,6 +43,12 @@ type TranslateFn = (
 ) => string;
 
 type TeamConfigTabsProps = {
+  acpAccessMode: string;
+  acpAdditionalDirectories: string;
+  acpAdditionalDirectoriesOverride: boolean;
+  acpApprovalMode: string;
+  acpAuthMode: string;
+  acpAuthMethodId: string;
   allowedSkillIds: string[];
   capability: AgentRuntimeReasoningCapability | null;
   configuredMcpServerKeys: string[];
@@ -85,6 +91,12 @@ type TeamConfigTabsProps = {
   onTeamProtocolChange: (value: string) => void;
   onToggleMcpServer: (serverKey: string) => void;
   setAllowedSkillIds: (ids: string[]) => void;
+  setAcpAccessMode: (value: string) => void;
+  setAcpAdditionalDirectories: (value: string) => void;
+  setAcpAdditionalDirectoriesOverride: (value: boolean) => void;
+  setAcpApprovalMode: (value: string) => void;
+  setAcpAuthMode: (value: string) => void;
+  setAcpAuthMethodId: (value: string) => void;
   setIsLeader: (value: boolean | ((current: boolean) => boolean)) => void;
   setMemberName: (value: string) => void;
   setModelName: (value: string) => void;
@@ -494,6 +506,12 @@ function SkillMarkdownPanel({
 }
 
 function ConfigTab({
+  acpAccessMode,
+  acpAdditionalDirectories,
+  acpAdditionalDirectoriesOverride,
+  acpApprovalMode,
+  acpAuthMode,
+  acpAuthMethodId,
   capability,
   isLeader,
   modelOptions,
@@ -505,6 +523,12 @@ function ConfigTab({
   selectedReasoningValue,
   workspacePath,
   setIsLeader,
+  setAcpAccessMode,
+  setAcpAdditionalDirectories,
+  setAcpAdditionalDirectoriesOverride,
+  setAcpApprovalMode,
+  setAcpAuthMode,
+  setAcpAuthMethodId,
   setMemberName,
   setModelName,
   setModelVariant,
@@ -668,6 +692,123 @@ function ConfigTab({
             </button>
           </SettingRow>
         </ConfigSection>
+
+        {(runnerType === "GEMINI" || runnerType === "QWEN_CODE") && (
+          <ConfigSection
+            title="ACP 权限与审批"
+            description="成员设置会覆盖 Agents 页面中的全局默认值。"
+            className="!pb-0"
+            bodyClassName="space-y-4 p-4"
+          >
+            <SettingRow
+              title="文件权限"
+              description="Full Access 允许访问工作区和附加目录之外的路径。"
+            >
+              <select
+                value={acpAccessMode}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (
+                    value === "full_access" &&
+                    !window.confirm(
+                      "Full Access 允许此成员访问工作区外的文件和终端路径。确认启用？",
+                    )
+                  ) {
+                    return;
+                  }
+                  setAcpAccessMode(value);
+                }}
+                className={inputClassName}
+              >
+                <option value="">继承全局设置</option>
+                <option value="workspace_only">仅工作区</option>
+                <option value="full_access">Full Access（高风险）</option>
+              </select>
+            </SettingRow>
+
+            <SettingRow
+              title="审批策略"
+              description="自动允许会跳过用户确认，请仅用于可信成员。"
+            >
+              <select
+                value={acpApprovalMode}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (
+                    value === "auto_allow" &&
+                    !window.confirm(
+                      "自动允许会跳过所有可允许的 ACP 工具审批。确认启用？",
+                    )
+                  ) {
+                    return;
+                  }
+                  setAcpApprovalMode(value);
+                }}
+                className={inputClassName}
+              >
+                <option value="">继承全局设置</option>
+                <option value="ask">每次询问</option>
+                <option value="auto_allow">自动允许（高风险）</option>
+                <option value="auto_reject">自动拒绝</option>
+              </select>
+            </SettingRow>
+
+            <SettingRow
+              title="认证方法"
+              description="留空时自动使用 CLI 已有登录状态；指定值必须由 ACP Agent 公布。"
+            >
+              <div className="space-y-2">
+                <select
+                  value={acpAuthMode}
+                  onChange={(event) => setAcpAuthMode(event.target.value)}
+                  className={inputClassName}
+                >
+                  <option value="">继承全局设置</option>
+                  <option value="auto">自动（使用 CLI 登录态）</option>
+                  <option value="method_id">指定 auth_method_id</option>
+                </select>
+                {acpAuthMode === "method_id" && (
+                  <input
+                    value={acpAuthMethodId}
+                    onChange={(event) =>
+                      setAcpAuthMethodId(event.target.value)
+                    }
+                    placeholder="auth_method_id"
+                    className={inputClassName}
+                  />
+                )}
+              </div>
+            </SettingRow>
+
+            <SettingRow
+              title="附加目录"
+              description="启用覆盖后，每行一个绝对目录；空列表会显式清除全局附加目录。"
+            >
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 text-xs text-[var(--ink-subtle)]">
+                  <input
+                    type="checkbox"
+                    checked={acpAdditionalDirectoriesOverride}
+                    onChange={(event) =>
+                      setAcpAdditionalDirectoriesOverride(event.target.checked)
+                    }
+                  />
+                  覆盖全局附加目录
+                </label>
+                <textarea
+                  value={acpAdditionalDirectories}
+                  disabled={!acpAdditionalDirectoriesOverride}
+                  onChange={(event) =>
+                    setAcpAdditionalDirectories(event.target.value)
+                  }
+                  rows={4}
+                  placeholder={"/absolute/path/one\n/absolute/path/two"}
+                  className={`${inputClassName} h-auto resize-y font-mono text-xs disabled:opacity-50`}
+                />
+              </div>
+            </SettingRow>
+          </ConfigSection>
+        )}
 
         <ConfigSection
           title={t("teamPage.systemPrompt.title")}

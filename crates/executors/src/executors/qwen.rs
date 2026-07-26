@@ -5,10 +5,11 @@ use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
-use workspace_utils::msg_store::MsgStore;
+use workspace_utils::{msg_store::MsgStore, shell::resolve_executable_path_blocking};
 
 use super::acp::{
-    AcpAgentHarness, AcpApprovalPolicy,
+    AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
+    AcpCapabilityProbe, AcpClientServicePolicy, AcpExecutionOptions,
     mcp::{AcpMcpPolicy, resolve_effective_mcp_config, write_mcp_isolation_settings},
 };
 use crate::{
@@ -39,6 +40,8 @@ pub struct QwenCode {
     pub thinking_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub yolo: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp: Option<AcpExecutionOptions>,
     #[serde(flatten)]
     pub cmd: CmdOverrides,
     #[serde(skip)]
@@ -52,22 +55,72 @@ pub struct QwenCode {
 }
 
 impl QwenCode {
-    const BASE_COMMAND: &'static str = "npx -y @qwen-code/qwen-code@0.17.0";
+    const BASE_COMMAND: &'static str = "qwen";
+
+    fn effective_approval_mode(&self) -> AcpApprovalMode {
+        self.acp
+            .as_ref()
+            .and_then(|options| options.approval_mode)
+            .unwrap_or_else(|| {
+                if self.yolo.unwrap_or(false) {
+                    AcpApprovalMode::AutoAllow
+                } else {
+                    AcpApprovalMode::Ask
+                }
+            })
+    }
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        let mut builder = CommandBuilder::new(Self::BASE_COMMAND);
+        if self
+            .cmd
+            .additional_params
+            .as_ref()
+            .is_some_and(|params| params.iter().any(|value| value.contains("--approval-mode")))
+        {
+            return Err(CommandBuildError::InvalidShellParams(
+                "Qwen --approval-mode is controlled by structured ACP approval settings"
+                    .to_string(),
+            ));
+        }
 
-        builder = builder.extend_params(["--acp"]);
+        let qwen_approval_mode = match self.effective_approval_mode() {
+            AcpApprovalMode::Ask | AcpApprovalMode::AutoAllow | AcpApprovalMode::AutoReject => {
+                "default"
+            }
+        };
+        let builder = CommandBuilder::new(Self::BASE_COMMAND).extend_params([
+            "--acp",
+            "--approval-mode",
+            qwen_approval_mode,
+        ]);
         apply_overrides(builder, &self.cmd)
     }
 
     async fn acp_harness(&self) -> Result<AcpAgentHarness, ExecutorError> {
-        let mut harness =
-            AcpAgentHarness::new().with_approval_policy(if self.yolo.unwrap_or(false) {
-                AcpApprovalPolicy::AutoAllow
-            } else {
-                AcpApprovalPolicy::Ask
+        let options = self.acp.clone().unwrap_or_default();
+        let approval_policy = match self.effective_approval_mode() {
+            AcpApprovalMode::Ask => AcpApprovalPolicy::Ask,
+            AcpApprovalMode::AutoAllow => AcpApprovalPolicy::AutoAllow,
+            AcpApprovalMode::AutoReject => AcpApprovalPolicy::AutoReject,
+        };
+        let additional_directories = options
+            .validated_directories()
+            .await
+            .map_err(ExecutorError::Io)?;
+        let full_access = options.access_mode.unwrap_or_default() == AcpAccessMode::FullAccess;
+        let mut harness = AcpAgentHarness::new()
+            .with_approval_policy(approval_policy)
+            .with_additional_directories(additional_directories)
+            .with_client_services(AcpClientServicePolicy {
+                read_text_file: true,
+                write_text_file: true,
+                terminal: true,
+                full_access,
+                ..AcpClientServicePolicy::default()
             });
+        if let Some(AcpAuthSelection::MethodId { method_id }) = options.auth {
+            harness = harness.with_auth_method_id(method_id);
+        }
         if let Some(model) = self
             .model
             .as_deref()
@@ -138,6 +191,22 @@ impl StandardCodingAgentExecutor for QwenCode {
         .await
     }
 
+    async fn probe_acp(
+        &self,
+        current_dir: &Path,
+        env: &ExecutionEnv,
+    ) -> Result<Option<AcpCapabilityProbe>, ExecutorError> {
+        Ok(Some(
+            super::acp::runtime::probe_acp_command(
+                self.build_command_builder()?.build_initial()?,
+                current_dir,
+                env,
+                &self.cmd,
+            )
+            .await?,
+        ))
+    }
+
     async fn spawn(
         &self,
         current_dir: &Path,
@@ -201,16 +270,14 @@ impl StandardCodingAgentExecutor for QwenCode {
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
-        let mcp_config_found = self
-            .default_mcp_config_path()
-            .map(|p| p.exists())
-            .unwrap_or(false);
-
-        let installation_indicator_found = dirs::home_dir()
-            .map(|home| home.join(".qwen").join("installation_id").exists())
-            .unwrap_or(false);
-
-        if mcp_config_found || installation_indicator_found {
+        let command = self
+            .cmd
+            .base_command_override
+            .as_deref()
+            .and_then(|value| shlex::split(value))
+            .and_then(|parts| parts.into_iter().next())
+            .unwrap_or_else(|| Self::BASE_COMMAND.to_string());
+        if resolve_executable_path_blocking(&command).is_some() {
             AvailabilityInfo::InstallationFound
         } else {
             AvailabilityInfo::NotFound
@@ -222,26 +289,72 @@ impl StandardCodingAgentExecutor for QwenCode {
 mod tests {
     use super::*;
 
-    #[test]
-    fn command_builder_uses_current_acp_flag() {
-        let qwen = QwenCode {
+    fn qwen_with_approval(approval_mode: Option<AcpApprovalMode>, yolo: Option<bool>) -> QwenCode {
+        QwenCode {
             append_prompt: AppendPrompt::default(),
             model: Some("qwen3-coder-plus".to_string()),
             thinking_effort: None,
-            yolo: Some(true),
+            yolo,
+            acp: Some(AcpExecutionOptions {
+                approval_mode,
+                ..Default::default()
+            }),
             cmd: CmdOverrides::default(),
             acp_mcp_policy: AcpMcpPolicy::default(),
             approvals: None,
-        };
+        }
+    }
 
-        let (_program, args) = qwen
-            .build_command_builder()
+    fn command_parts(qwen: &QwenCode) -> (String, Vec<String>) {
+        qwen.build_command_builder()
             .expect("build command")
             .build_initial()
             .expect("build initial")
-            .into_parts_for_test();
+            .into_parts_for_test()
+    }
 
-        assert!(args.iter().any(|arg| arg == "--acp"));
-        assert!(!args.iter().any(|arg| arg == "--experimental-acp"));
+    #[test]
+    fn all_structured_approval_modes_keep_qwen_permission_requests_enabled() {
+        for mode in [
+            AcpApprovalMode::Ask,
+            AcpApprovalMode::AutoReject,
+            AcpApprovalMode::AutoAllow,
+        ] {
+            let (program, args) = command_parts(&qwen_with_approval(Some(mode), None));
+            assert_eq!(program, "qwen");
+            assert_eq!(args.iter().filter(|arg| *arg == "--acp").count(), 1);
+            assert_eq!(
+                args.iter().filter(|arg| *arg == "--approval-mode").count(),
+                1
+            );
+            let approval_index = args
+                .iter()
+                .position(|arg| arg == "--approval-mode")
+                .expect("approval mode flag");
+            assert_eq!(
+                args.get(approval_index + 1).map(String::as_str),
+                Some("default")
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_acp_mode_takes_priority_over_legacy_yolo() {
+        let qwen = qwen_with_approval(Some(AcpApprovalMode::AutoReject), Some(true));
+        assert_eq!(qwen.effective_approval_mode(), AcpApprovalMode::AutoReject);
+
+        let legacy = qwen_with_approval(None, Some(true));
+        assert_eq!(legacy.effective_approval_mode(), AcpApprovalMode::AutoAllow);
+    }
+
+    #[test]
+    fn additional_params_cannot_override_qwen_approval_mode() {
+        let mut qwen = qwen_with_approval(Some(AcpApprovalMode::Ask), None);
+        qwen.cmd.additional_params = Some(vec!["--approval-mode yolo".to_string()]);
+
+        let error = qwen
+            .build_command_builder()
+            .expect_err("approval override must be rejected");
+        assert!(error.to_string().contains("controlled by structured ACP"));
     }
 }

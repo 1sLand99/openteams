@@ -270,6 +270,14 @@ pub trait StandardCodingAgentExecutor {
         Ok(None)
     }
 
+    async fn probe_acp(
+        &self,
+        _current_dir: &Path,
+        _env: &ExecutionEnv,
+    ) -> Result<Option<acp::AcpCapabilityProbe>, ExecutorError> {
+        Ok(None)
+    }
+
     async fn spawn(
         &self,
         current_dir: &Path,

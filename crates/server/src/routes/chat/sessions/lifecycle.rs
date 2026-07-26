@@ -72,6 +72,12 @@ pub async fn delete_session(
     Extension(session): Extension<ChatSession>,
     State(deployment): State<DeploymentImpl>,
 ) -> Result<ResponseJson<ApiResponse<()>>, ApiError> {
+    services::services::approvals::executor_approvals::ExecutorApprovalBridge::cancel_for_session(
+        &deployment.db().pool,
+        session.id,
+    )
+    .await?;
+
     let had_messages = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE session_id = ? LIMIT 1)",
     )
@@ -227,9 +233,13 @@ pub async fn stream_session_ws(
     State(deployment): State<DeploymentImpl>,
 ) -> Result<impl IntoResponse, ApiError> {
     let rx = deployment.chat_runner().subscribe(session.id);
+    let approval_rx =
+        services::services::approvals::executor_approvals::ExecutorApprovalBridge::subscribe(
+            session.id,
+        );
 
     Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(err) = handle_chat_stream_ws(socket, rx).await {
+        if let Err(err) = handle_chat_stream_ws(socket, rx, approval_rx).await {
             tracing::warn!("chat stream ws closed: {}", err);
         }
     }))
@@ -238,6 +248,9 @@ pub async fn stream_session_ws(
 async fn handle_chat_stream_ws(
     socket: WebSocket,
     mut rx: tokio::sync::broadcast::Receiver<services::services::chat_runner::ChatStreamEvent>,
+    mut approval_rx: tokio::sync::broadcast::Receiver<
+        services::services::approvals::executor_approvals::ExecutorApprovalEvent,
+    >,
 ) -> anyhow::Result<()> {
     use futures_util::{SinkExt, StreamExt};
 
@@ -245,15 +258,20 @@ async fn handle_chat_stream_ws(
     tokio::spawn(async move { while let Some(Ok(_)) = receiver.next().await {} });
 
     loop {
-        match rx.recv().await {
-            Ok(event) => {
-                let json = serde_json::to_string(&event)?;
-                if sender.send(Message::Text(json.into())).await.is_err() {
-                    break;
-                }
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        let json = tokio::select! {
+            event = rx.recv() => match event {
+                Ok(event) => serde_json::to_string(&event)?,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            },
+            event = approval_rx.recv() => match event {
+                Ok(event) => serde_json::to_string(&event)?,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            },
+        };
+        if sender.send(Message::Text(json.into())).await.is_err() {
+            break;
         }
     }
 

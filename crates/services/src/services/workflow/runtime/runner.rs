@@ -59,6 +59,7 @@ struct WorkflowRuntimeRunRecord {
     started_at: chrono::DateTime<Utc>,
     analytics: Option<AnalyticsService>,
     analytics_started: bool,
+    acp_full_access: bool,
 }
 
 struct WorkflowNodeIoLogContext {
@@ -168,6 +169,7 @@ async fn start_workflow_runtime_run_record(
         started_at: Utc::now(),
         analytics: context.chat_runner.analytics_service().cloned(),
         analytics_started: false,
+        acp_full_access: false,
     }))
 }
 
@@ -212,6 +214,7 @@ async fn finish_workflow_runtime_run_record(
         "workflow_step_id": record.step_id,
         "workflow_step_key": record.step_key.clone(),
         "workspace_observed_paths": workspace_observed_paths,
+        "acp_full_access": record.acp_full_access,
     });
 
     if let Some(error_summary) = error_summary {
@@ -574,7 +577,7 @@ async fn run_workflow_agent_prompt_inner(
         env.insert("VK_CHAT_RUN_ID", record.run_id.to_string());
         env.insert("VK_WORKFLOW_RUN_ID", record.run_id.to_string());
     }
-    let (_effective_execution, mut executor) =
+    let (effective_execution, mut executor) =
         match build_effective_member_executor(agent, &effective_session_agent, &mut env) {
             Ok(value) => value,
             Err(error) => {
@@ -597,7 +600,35 @@ async fn run_workflow_agent_prompt_inner(
                 return Err(error);
             }
         };
-    executor.use_approvals(Arc::new(NoopExecutorApprovalService));
+    if let Some(record) = runtime_run_record.as_mut() {
+        record.acp_full_access = executor_acp_full_access_enabled(&executor);
+        if record.acp_full_access {
+            tracing::warn!(
+                session_id = %session.id,
+                session_agent_id = %effective_session_agent.id,
+                workflow_execution_id = %record.execution_id,
+                workflow_step_id = %step_id,
+                run_id = %record.run_id,
+                "ACP Full Access enabled for workflow run"
+            );
+        }
+    }
+    let Some(run_record) = runtime_run_record.as_ref() else {
+        return Err(WorkflowRuntimeError::Validation(
+            "workflow executor approval requires a persisted run record".to_string(),
+        ));
+    };
+    executor.use_approvals(ExecutorApprovalBridge::new(
+        db.clone(),
+        ExecutorApprovalScope {
+            session_id: session.id,
+            session_agent_id: effective_session_agent.id,
+            run_id: run_record.run_id,
+            runner: effective_execution.runner_type.to_string(),
+            workflow_execution_id: Some(run_record.execution_id),
+            workflow_step_id: Some(step_id),
+        },
+    ));
 
     let spawn_result = match resume_session_id {
         Some(session_id) => {

@@ -2,6 +2,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex as StdMutex},
+    time::Duration,
 };
 
 use agent_client_protocol::{
@@ -10,14 +11,15 @@ use agent_client_protocol::{
         ProtocolVersion,
         v1::{
             AuthenticateRequest, BooleanConfigOptionCapabilities, CancelNotification,
-            ClientCapabilities, ClientSessionCapabilities, CreateTerminalRequest,
-            FileSystemCapabilities, Implementation, InitializeRequest, KillTerminalRequest,
-            LoadSessionRequest, McpServer, NewSessionRequest, PromptRequest, ReadTextFileRequest,
-            ReleaseTerminalRequest, RequestPermissionRequest, ResumeSessionRequest,
-            SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-            SessionConfigOptionValue, SessionConfigOptionsCapabilities, SessionConfigSelectOptions,
-            SessionId, SessionNotification, SetSessionConfigOptionRequest, TerminalOutputRequest,
-            TextContent, WaitForTerminalExitRequest, WriteTextFileRequest,
+            ClientCapabilities, ClientSessionCapabilities, CloseSessionRequest,
+            CreateTerminalRequest, DeleteSessionRequest, FileSystemCapabilities, Implementation,
+            InitializeRequest, KillTerminalRequest, LoadSessionRequest, McpServer,
+            NewSessionRequest, PromptRequest, ReadTextFileRequest, ReleaseTerminalRequest,
+            RequestPermissionRequest, ResumeSessionRequest, SessionConfigKind, SessionConfigOption,
+            SessionConfigOptionCategory, SessionConfigOptionValue,
+            SessionConfigOptionsCapabilities, SessionConfigSelectOptions, SessionId,
+            SessionNotification, SetSessionConfigOptionRequest, TerminalOutputRequest, TextContent,
+            WaitForTerminalExitRequest, WriteTextFileRequest,
         },
     },
 };
@@ -27,8 +29,8 @@ use tokio::{io::AsyncWriteExt, process::Command};
 use tokio_util::{compat::TokioAsyncReadCompatExt, sync::CancellationToken};
 
 use super::{
-    AcpApprovalPolicy, AcpClient, AcpEvent, AcpRunConfig, AcpSessionPreferences,
-    mcp::validate_mcp_servers, output::AcpOutput,
+    AcpApprovalPolicy, AcpAuthMethodInfo, AcpCapabilityProbe, AcpClient, AcpEvent, AcpRunConfig,
+    AcpSessionPreferences, mcp::validate_mcp_servers, output::AcpOutput,
 };
 use crate::{
     approvals::ExecutorApprovalService,
@@ -404,6 +406,153 @@ impl AcpAgentHarness {
     }
 }
 
+pub async fn probe_acp_command(
+    command_parts: CommandParts,
+    current_dir: &Path,
+    env: &ExecutionEnv,
+    cmd_overrides: &CmdOverrides,
+) -> Result<AcpCapabilityProbe, ExecutorError> {
+    let (program_path, args) = command_parts.into_resolved().await?;
+    let mut command = Command::new(program_path);
+    command
+        .kill_on_drop(true)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .current_dir(current_dir)
+        .args(args);
+    env.clone()
+        .with_profile(cmd_overrides)
+        .apply_to_command(&mut command);
+    let mut child = command.group_spawn()?;
+    let stdout =
+        child.inner().stdout.take().ok_or_else(|| {
+            ExecutorError::Io(std::io::Error::other("ACP probe stdout unavailable"))
+        })?;
+    let stdin =
+        child.inner().stdin.take().ok_or_else(|| {
+            ExecutorError::Io(std::io::Error::other("ACP probe stdin unavailable"))
+        })?;
+    let (probe_tx, probe_rx) = tokio::sync::oneshot::channel();
+    let probe_cwd = current_dir.to_path_buf();
+
+    tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build ACP probe runtime");
+        runtime.block_on(async move {
+            let incoming = futures::io::BufReader::new(stdout.compat()).lines();
+            let outgoing = sink::unfold(stdin, |mut stdin, line: String| async move {
+                stdin.write_all(line.as_bytes()).await?;
+                stdin
+                    .write_all(if cfg!(windows) { b"\r\n" } else { b"\n" })
+                    .await?;
+                stdin.flush().await?;
+                Ok::<_, std::io::Error>(stdin)
+            });
+            let transport = Lines::new(outgoing, incoming);
+            let _ = agent_client_protocol::Client
+                .builder()
+                .connect_with(transport, async move |connection: ConnectionTo<Agent>| {
+                    let initialize = connection
+                        .send_request(
+                            InitializeRequest::new(ProtocolVersion::V1)
+                                .client_capabilities(ClientCapabilities::new())
+                                .client_info(Implementation::new(
+                                    "openteams-probe",
+                                    env!("CARGO_PKG_VERSION"),
+                                )),
+                        )
+                        .block_task()
+                        .await?;
+                    let session = &initialize.agent_capabilities.session_capabilities;
+                    let config_options = if session.close.is_some() || session.delete.is_some() {
+                        match connection
+                            .send_request(
+                                NewSessionRequest::new(probe_cwd)
+                                    .additional_directories(Vec::new())
+                                    .mcp_servers(Vec::new()),
+                            )
+                            .block_task()
+                            .await
+                        {
+                            Ok(response) => {
+                                let options = response
+                                    .config_options
+                                    .unwrap_or_default()
+                                    .iter()
+                                    .filter_map(|option| serde_json::to_value(option).ok())
+                                    .collect();
+                                if session.close.is_some() {
+                                    let _ = connection
+                                        .send_request(CloseSessionRequest::new(response.session_id))
+                                        .block_task()
+                                        .await;
+                                } else {
+                                    let _ = connection
+                                        .send_request(DeleteSessionRequest::new(
+                                            response.session_id,
+                                        ))
+                                        .block_task()
+                                        .await;
+                                }
+                                options
+                            }
+                            Err(_) => Vec::new(),
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    let probe = AcpCapabilityProbe {
+                        protocol_version: initialize.protocol_version.to_string(),
+                        agent_name: initialize.agent_info.as_ref().map(|info| info.name.clone()),
+                        agent_version: initialize
+                            .agent_info
+                            .as_ref()
+                            .map(|info| info.version.clone()),
+                        auth_methods: initialize
+                            .auth_methods
+                            .iter()
+                            .map(|method| AcpAuthMethodInfo {
+                                id: method.id().to_string(),
+                                name: method.name().to_string(),
+                                description: method.description().map(str::to_string),
+                            })
+                            .collect(),
+                        supports_session_list: session.list.is_some(),
+                        supports_session_resume: session.resume.is_some(),
+                        supports_session_close: session.close.is_some(),
+                        supports_session_delete: session.delete.is_some(),
+                        supports_additional_directories: session.additional_directories.is_some(),
+                        agent_capabilities: serde_json::to_value(&initialize.agent_capabilities)
+                            .unwrap_or(serde_json::Value::Null),
+                        config_options,
+                    };
+                    let _ = probe_tx.send(probe);
+                    Ok(())
+                })
+                .await;
+        });
+    });
+
+    let result = tokio::time::timeout(Duration::from_secs(12), probe_rx)
+        .await
+        .map_err(|_| {
+            ExecutorError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "ACP initialize probe timed out",
+            ))
+        })?
+        .map_err(|_| {
+            ExecutorError::Io(std::io::Error::other(
+                "ACP initialize probe exited without a response",
+            ))
+        });
+    let _ = child.kill().await;
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_connection(
     connection: &ConnectionTo<Agent>,
@@ -533,6 +682,16 @@ async fn run_connection(
         .send(AcpEvent::SessionStart(session_id.0.to_string()))
         .await
         .map_err(|_| agent_client_protocol::Error::internal_error())?;
+    client
+        .set_token_usage_identity(
+            negotiated
+                .agent_info
+                .as_ref()
+                .map(|agent| agent.name.clone()),
+            config.session.model.clone(),
+            session_id.0.to_string(),
+        )
+        .await;
     apply_session_preferences(
         connection,
         &session_id,
@@ -541,6 +700,7 @@ async fn run_connection(
         &output,
     )
     .await?;
+    client.begin_token_usage_turn().await;
     client.record_user_prompt_event(&prompt).await;
     send_startup(&startup_tx, Ok(()));
 
@@ -562,6 +722,12 @@ async fn run_connection(
                 .map_err(|_| agent_client_protocol::Error::request_cancelled())??
         }
     };
+    if let Some(usage) = client.finish_turn_token_usage(&response).await {
+        output
+            .send(AcpEvent::TokenUsage(usage))
+            .await
+            .map_err(|_| agent_client_protocol::Error::internal_error())?;
+    }
     output
         .send(AcpEvent::Done(
             serde_json::to_string(&response.stop_reason).unwrap_or_default(),
