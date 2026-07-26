@@ -1613,7 +1613,7 @@ async fn source_control_uses_worktree_path_for_active_worktree() {
 }
 
 #[tokio::test]
-async fn source_control_uses_base_workspace_after_merge() {
+async fn source_control_keeps_worktree_after_merge_until_discarded() {
     let pool = setup_pool().await;
     let (_tempdir, repo_path) = setup_git_workspace();
     let project = seed_project(&pool, &repo_path).await;
@@ -1623,8 +1623,8 @@ async fn source_control_uses_base_workspace_after_merge() {
     let worktree_path = worktree_dir.path();
     fs::create_dir_all(worktree_path).unwrap();
 
-    // Seed a merged worktree: source-control should switch back to the base
-    // workspace while preserving the worktree row for explicit discard.
+    // A merged worktree remains the source-control workspace until explicit
+    // discard removes it.
     seed_worktree_row(
         &pool,
         session_id,
@@ -1643,7 +1643,7 @@ async fn source_control_uses_base_workspace_after_merge() {
     match status {
         SessionSourceControlStatus::Git { workspace_path, .. }
         | SessionSourceControlStatus::Plain { workspace_path, .. } => {
-            assert_eq!(workspace_path, repo_path.to_string_lossy());
+            assert_eq!(workspace_path, worktree_path.to_string_lossy());
         }
     }
 }

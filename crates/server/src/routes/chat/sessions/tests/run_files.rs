@@ -37,6 +37,25 @@
         assert_eq!(resolved.as_deref(), Some("E:/workspace/base"));
     }
 
+    #[test]
+    fn worktree_workspace_request_keeps_merged_worktree_until_discarded() {
+        let mut session = test_session(Some("E:/workspace/base"));
+        session.worktree_mode = ChatSessionWorktreeMode::Isolated;
+        let worktree = test_worktree(
+            session.id,
+            SessionWorktreeStatus::Merged,
+            "E:/workspace/base",
+            "E:/workspace/base/.openteams/worktrees/session",
+        );
+
+        let resolved = worktree_workspace_for_request(&session, &worktree, "E:/workspace/base");
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some("E:/workspace/base/.openteams/worktrees/session")
+        );
+    }
+
     fn test_run(
         session_id: Uuid,
         session_agent_id: Uuid,
@@ -568,4 +587,3 @@ new file mode 100644
                 .expect("check missing workspace")
         );
     }
-

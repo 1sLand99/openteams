@@ -788,7 +788,10 @@ impl SessionWorktreeService {
         )
         .await?;
         SessionWorktree::record_merged_at(&self.pool, updated.id).await?;
-        self.sync_session_agent_workspace_paths(session_id, &updated.base_workspace_path)
+        // Keep agents in the physical worktree after a successful merge. The
+        // user can inspect or continue work there until an explicit discard
+        // removes it and restores the base workspace path.
+        self.sync_session_agent_workspace_paths(session_id, &updated.worktree_path)
             .await?;
         Ok(updated)
     }

@@ -18,8 +18,8 @@ impl ChatRunner {
         //    even if a historical worktree row exists.
         let worktree_service = SessionWorktreeService::new(self.db.pool.clone());
         if session.worktree_mode == ChatSessionWorktreeMode::Isolated {
-            // First check for an existing worktree row. Merged rows switch
-            // back to the recorded base workspace.
+            // First check for an existing worktree row. Merged rows remain
+            // active until the user explicitly discards the worktree.
             if let Some(worktree) = worktree_service.get_latest_for_session(session_id).await? {
                 if worktree.status.is_active_for_workspace() {
                     return Ok(worktree.worktree_path);

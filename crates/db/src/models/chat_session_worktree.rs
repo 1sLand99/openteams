@@ -102,10 +102,10 @@ impl SessionWorktreeStatus {
     /// new runs must fall back to the base workspace instead of recreating an
     /// empty directory.
     ///
-    /// Post-merge and terminal/audit states (`merged`, `archived`,
-    /// `cleanup_failed`) return
-    /// `false` — the caller should switch to the worktree row's
-    /// `base_workspace_path` instead.
+    /// `merged` remains active until the user explicitly discards it. The
+    /// terminal/cleanup states (`cleanup_pending`, `archived`,
+    /// `cleanup_failed`) return `false` — the caller should switch to the
+    /// worktree row's `base_workspace_path` instead.
     pub fn is_active_for_workspace(self) -> bool {
         matches!(
             self,
@@ -114,6 +114,7 @@ impl SessionWorktreeStatus {
                 | Self::Dirty
                 | Self::Merging
                 | Self::NeedsConflictResolution
+                | Self::Merged
         )
     }
 

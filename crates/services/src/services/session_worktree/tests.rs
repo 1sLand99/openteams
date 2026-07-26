@@ -532,17 +532,24 @@ fn is_safe_for_auto_cleanup_blocks_unmerged_runtime_states() {
 }
 
 #[test]
-fn is_active_for_workspace_excludes_cleanup_and_terminal_states() {
+fn is_active_for_workspace_keeps_merged_worktrees_active_until_discarded() {
     use SessionWorktreeStatus::*;
     // These statuses use the worktree path as the active workspace.
-    for active in [Creating, Active, Dirty, Merging, NeedsConflictResolution] {
+    for active in [
+        Creating,
+        Active,
+        Dirty,
+        Merging,
+        NeedsConflictResolution,
+        Merged,
+    ] {
         assert!(
             active.is_active_for_workspace(),
             "{active:?} should be active for workspace selection"
         );
     }
     // Cleanup and terminal/audit statuses switch back to base_workspace_path.
-    for inactive in [Merged, CleanupPending, Archived, CleanupFailed] {
+    for inactive in [CleanupPending, Archived, CleanupFailed] {
         assert!(
             !inactive.is_active_for_workspace(),
             "{inactive:?} should NOT be active for workspace selection"
@@ -959,7 +966,7 @@ async fn service_merge_records_intent_only_in_skeleton() {
 }
 
 #[tokio::test]
-async fn service_mark_merged_restores_session_agent_workspace_paths() {
+async fn service_mark_merged_keeps_session_agent_workspace_paths() {
     let pool = setup_pool().await;
     let service = SessionWorktreeService::new(pool.clone());
     let session_id = Uuid::new_v4();
@@ -990,8 +997,8 @@ async fn service_mark_merged_restores_session_agent_workspace_paths() {
             .bind(session_agent_id)
             .fetch_one(&pool)
             .await
-            .expect("read restored workspace path");
-    assert_eq!(workspace_path, merging.base_workspace_path);
+            .expect("read retained workspace path");
+    assert_eq!(workspace_path, merging.worktree_path);
 }
 
 #[tokio::test]

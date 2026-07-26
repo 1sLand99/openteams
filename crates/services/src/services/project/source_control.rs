@@ -1438,7 +1438,7 @@ async fn resolve_workspace_context(
             })?;
         if let Some(wt) = latest {
             // Source-control follows the same workspace routing as runners:
-            // merged worktrees switch back to the recorded base workspace.
+            // merged worktrees remain active until explicitly discarded.
             if wt.status.is_active_for_workspace() {
                 let workspace_path = PathBuf::from(&wt.worktree_path);
                 ensure_workspace_accessible(&workspace_path)?;
@@ -1450,7 +1450,7 @@ async fn resolve_workspace_context(
                     workspace_path,
                 });
             }
-            // Terminal/audit states switch back to the worktree row's
+            // Cleanup/terminal states switch back to the worktree row's
             // base_workspace_path, not the (possibly changed) project default.
             let workspace_path = PathBuf::from(&wt.base_workspace_path);
             ensure_workspace_accessible(&workspace_path)?;
