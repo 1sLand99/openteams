@@ -26,6 +26,36 @@ use crate::{
 pub const ACP_TURN_SIGNAL_KEY: &str = "acp_turn_signal";
 pub const ACP_PERMISSION_REJECTED_SIGNAL: &str = "permission_rejected";
 
+#[derive(Debug, Default)]
+struct AcpCurrentTurnBoundary {
+    started: bool,
+}
+
+impl AcpCurrentTurnBoundary {
+    fn should_ignore(&mut self, event: &AcpEvent) -> bool {
+        if matches!(event, AcpEvent::User(_)) {
+            self.started = true;
+            return false;
+        }
+
+        !self.started
+            && matches!(
+                event,
+                AcpEvent::UserBlock(_)
+                    | AcpEvent::Message(_)
+                    | AcpEvent::Thought(_)
+                    | AcpEvent::ToolCall(_)
+                    | AcpEvent::ToolUpdate(_)
+                    | AcpEvent::Plan(_)
+                    | AcpEvent::Usage(_)
+                    | AcpEvent::TokenUsage(_)
+                    | AcpEvent::RequestPermission(_)
+                    | AcpEvent::ApprovalResponse(_)
+                    | AcpEvent::Done(_)
+            )
+    }
+}
+
 fn denied_approval_entry(tool_name: String, reason: Option<String>) -> NormalizedEntry {
     NormalizedEntry {
         timestamp: None,
@@ -54,6 +84,7 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
         type ToolStates = std::collections::HashMap<String, PartialToolCallData>;
 
         let mut stored_session_id = false;
+        let mut current_turn_boundary = AcpCurrentTurnBoundary::default();
         let mut streaming: StreamingState = StreamingState::default();
         let mut tool_states: ToolStates = HashMap::new();
 
@@ -63,6 +94,12 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
         while let Some(Ok(line)) = stdout_lines.next().await {
             if let Some(parsed) = AcpEventParser::parse_line(&line) {
                 tracing::trace!("Parsed ACP line: {:?}", parsed);
+                // Resume/load may replay the prior conversation before OpenTeams emits the
+                // synthetic User event for this prompt. Those events belong to history, not
+                // the current run, and must not become its final assistant output or activity.
+                if current_turn_boundary.should_ignore(&parsed) {
+                    continue;
+                }
                 match parsed {
                     AcpEvent::SessionStart(id) => {
                         if !stored_session_id {
@@ -837,7 +874,13 @@ struct EditInput {
 
 #[cfg(test)]
 mod tests {
+    use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
+
     use super::*;
+
+    fn text_chunk(text: &str) -> ContentChunk {
+        ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
+    }
 
     fn streaming(message_id: Option<&str>) -> StreamingText {
         StreamingText {
@@ -888,5 +931,32 @@ mod tests {
                 "acp_turn_signal": "permission_rejected"
             }))
         );
+    }
+
+    #[test]
+    fn current_turn_boundary_ignores_replayed_assistant_content() {
+        let mut boundary = AcpCurrentTurnBoundary::default();
+
+        assert!(boundary.should_ignore(&AcpEvent::UserBlock(text_chunk("previous prompt"))));
+        assert!(boundary.should_ignore(&AcpEvent::Thought(text_chunk("previous thought"))));
+        assert!(boundary.should_ignore(&AcpEvent::Message(text_chunk("previous response"))));
+    }
+
+    #[test]
+    fn current_turn_boundary_allows_content_after_current_prompt() {
+        let mut boundary = AcpCurrentTurnBoundary::default();
+
+        assert!(!boundary.should_ignore(&AcpEvent::SessionStart("session".to_string())));
+        assert!(!boundary.should_ignore(&AcpEvent::User("current prompt".to_string())));
+        assert!(!boundary.should_ignore(&AcpEvent::Thought(text_chunk("current thought"))));
+        assert!(!boundary.should_ignore(&AcpEvent::Message(text_chunk("current response"))));
+    }
+
+    #[test]
+    fn current_turn_boundary_keeps_bootstrap_errors() {
+        let mut boundary = AcpCurrentTurnBoundary::default();
+
+        assert!(!boundary.should_ignore(&AcpEvent::Warning("warning".to_string())));
+        assert!(!boundary.should_ignore(&AcpEvent::Error("startup failed".to_string())));
     }
 }
