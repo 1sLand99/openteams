@@ -31,8 +31,6 @@ import type {
 import type { ProjectMemberWithRuntime } from '../../../shared/types';
 import { parseStructuredAgentReply } from './parseStructuredReply';
 
-const AGENT_EMPTY_OUTPUT_FALLBACK = 'Agent运行失败';
-
 // -----------------------------------------------------------------------------
 // Avatar / monogram derivation
 // -----------------------------------------------------------------------------
@@ -324,7 +322,7 @@ export const mapMessage = (
   const i18n = i18nFromMeta(backend.meta);
   const visibleContent =
     !isUser && backend.sender_type === 'agent' && !backend.content.trim()
-      ? (errorContentFromMeta(backend.meta) ?? AGENT_EMPTY_OUTPUT_FALLBACK)
+      ? (errorContentFromMeta(backend.meta) ?? backend.content)
       : backend.content;
 
   // Agent/system replies may use the structured {send|artifact|conclusion|

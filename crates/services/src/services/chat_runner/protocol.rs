@@ -20,6 +20,9 @@ struct PlanGenerationPreviousPlanContext {
 
 const AGENT_EMPTY_OUTPUT_FALLBACK_MESSAGE: &str = "Agent运行失败";
 const AGENT_EMPTY_OUTPUT_FALLBACK_I18N_KEY: &str = "agent.runFailed";
+const AGENT_COMPLETED_NO_OUTPUT_MESSAGE: &str = "Agent运行完成（未返回文本）";
+const AGENT_COMPLETED_NO_OUTPUT_I18N_KEY: &str = "agent.runCompletedNoOutput";
+const AGENT_COMPLETED_NO_OUTPUT_TERMINAL_REASON: &str = "completed_without_output";
 const AGENT_STOPPED_OUTPUT_I18N_KEY: &str = "agent.stopped";
 const AGENT_PERMISSION_REJECTED_MESSAGE: &str = "操作已拒绝/未执行";
 const AGENT_PERMISSION_REJECTED_I18N_KEY: &str = "agent.permissionRejected";
@@ -37,6 +40,13 @@ const DEFAULT_AGENT_EMPTY_OUTPUT_FALLBACK: AgentEmptyOutputFallback = AgentEmpty
     i18n_key: Some(AGENT_EMPTY_OUTPUT_FALLBACK_I18N_KEY),
     terminal_reason: None,
 };
+
+const COMPLETED_AGENT_EMPTY_OUTPUT_FALLBACK: AgentEmptyOutputFallback =
+    AgentEmptyOutputFallback {
+        message: AGENT_COMPLETED_NO_OUTPUT_MESSAGE,
+        i18n_key: Some(AGENT_COMPLETED_NO_OUTPUT_I18N_KEY),
+        terminal_reason: Some(AGENT_COMPLETED_NO_OUTPUT_TERMINAL_REASON),
+    };
 
 const PERMISSION_REJECTED_EMPTY_OUTPUT_FALLBACK: AgentEmptyOutputFallback =
     AgentEmptyOutputFallback {
@@ -638,7 +648,7 @@ impl ChatRunner {
         latest_assistant: &str,
         error_content: Option<&str>,
         error_type: Option<&NormalizedEntryError>,
-        completion_was_stopped: bool,
+        completion_status: RunCompletionStatus,
         acp_permission_rejected: bool,
         token_usage: Option<&TokenUsageInfo>,
         run_model: Option<&str>,
@@ -647,12 +657,15 @@ impl ChatRunner {
         let output_is_empty = latest_assistant.trim().is_empty();
         let has_error = error_content.is_some_and(|e| !e.is_empty());
         let error_info = error_content.map(|ec| (ec, error_type));
-        let empty_output_fallback = if completion_was_stopped {
-            Self::stopped_empty_output_fallback(prompt_language.code)
-        } else if acp_permission_rejected {
-            PERMISSION_REJECTED_EMPTY_OUTPUT_FALLBACK
-        } else {
-            DEFAULT_AGENT_EMPTY_OUTPUT_FALLBACK
+        let empty_output_fallback = match completion_status {
+            RunCompletionStatus::Stopped => {
+                Self::stopped_empty_output_fallback(prompt_language.code)
+            }
+            RunCompletionStatus::Failed => DEFAULT_AGENT_EMPTY_OUTPUT_FALLBACK,
+            RunCompletionStatus::Succeeded if acp_permission_rejected => {
+                PERMISSION_REJECTED_EMPTY_OUTPUT_FALLBACK
+            }
+            RunCompletionStatus::Succeeded => COMPLETED_AGENT_EMPTY_OUTPUT_FALLBACK,
         };
 
         tracing::debug!(

@@ -167,7 +167,7 @@ export const AgentMessageContent: React.FC<AgentMessageContentProps> = ({
   const displayReplyText =
     hasReplyText || isRunning || hasFileRows || hasWorkflowCard
       ? replyText
-      : t("agent.runFailed");
+      : t("agent.runCompletedNoOutput");
 
   return (
     <div className="min-w-0 max-w-full space-y-2">
