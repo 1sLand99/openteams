@@ -259,9 +259,11 @@ async fn session_worktree_routes_cover_main_merge_conflict_and_cleanup_flows() -
     );
     assert!(base.join("session.txt").exists());
     assert_eq!(git(&base, &["ls-files", ".openteams"])?, "");
+    // Merged worktrees stay active until an explicit discard, so the session
+    // source-control workspace remains the worktree path.
     assert_eq!(
         source_workspace(&app, project_id, clean_id).await?,
-        base_string
+        clean_path.to_string_lossy()
     );
 
     let (status, cleanup_response) = api(
