@@ -53,31 +53,38 @@ struct TokenStoreFile {
 #[derive(Debug, Clone)]
 pub struct LocalEncryptedGitHubTokenStore {
     path: PathBuf,
+    legacy_path: Option<PathBuf>,
 }
 
 impl LocalEncryptedGitHubTokenStore {
     pub fn new_default() -> Result<Self, GitHubTokenStoreError> {
-        let base = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("openteams");
-        Ok(Self {
-            path: base.join(STORE_FILE),
-        })
+        let path = default_store_path()?;
+        let legacy_path = legacy_store_path().filter(|legacy_path| legacy_path != &path);
+        Ok(Self { path, legacy_path })
     }
 
     pub fn new_for_path(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            legacy_path: None,
+        }
     }
 
     pub fn store(&self, token: GitHubStoredToken) -> Result<(), GitHubTokenStoreError> {
-        if let Some(parent) = self.path.parent() {
+        Self::store_at_path(&self.path, token)?;
+        self.clear_legacy_store_best_effort();
+        Ok(())
+    }
+
+    fn store_at_path(path: &Path, token: GitHubStoredToken) -> Result<(), GitHubTokenStoreError> {
+        if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
 
         let file = TokenStoreFile {
             version: 1,
             ciphertext: STANDARD.encode(protect_token(
-                &self.path,
+                path,
                 token.access_token.expose_secret().as_bytes(),
             )?),
             scopes: token.scopes,
@@ -85,21 +92,42 @@ impl LocalEncryptedGitHubTokenStore {
         };
         let body =
             serde_json::to_vec_pretty(&file).map_err(|_| GitHubTokenStoreError::InvalidStore)?;
-        fs::write(&self.path, body)?;
+        fs::write(path, body)?;
         Ok(())
     }
 
     pub fn load(&self) -> Result<Option<GitHubStoredToken>, GitHubTokenStoreError> {
-        if !self.path.exists() {
+        if self.path.exists() {
+            return Self::load_from_path(&self.path);
+        }
+
+        let Some(legacy_path) = self
+            .legacy_path
+            .as_deref()
+            .filter(|legacy_path| legacy_path.exists())
+        else {
+            return Ok(None);
+        };
+        let Some(token) = Self::load_from_path(legacy_path)? else {
+            return Ok(None);
+        };
+
+        Self::store_at_path(&self.path, token.clone())?;
+        self.clear_legacy_store_best_effort();
+        Ok(Some(token))
+    }
+
+    fn load_from_path(path: &Path) -> Result<Option<GitHubStoredToken>, GitHubTokenStoreError> {
+        if !path.exists() {
             return Ok(None);
         }
-        let raw = fs::read(&self.path)?;
+        let raw = fs::read(path)?;
         let file: TokenStoreFile =
             serde_json::from_slice(&raw).map_err(|_| GitHubTokenStoreError::InvalidStore)?;
         let encrypted = STANDARD
             .decode(file.ciphertext)
             .map_err(|_| GitHubTokenStoreError::InvalidStore)?;
-        let decrypted = unprotect_token(&self.path, &encrypted)?;
+        let decrypted = unprotect_token(path, &encrypted)?;
         let access_token =
             String::from_utf8(decrypted).map_err(|_| GitHubTokenStoreError::InvalidStore)?;
 
@@ -111,14 +139,54 @@ impl LocalEncryptedGitHubTokenStore {
     }
 
     pub fn clear(&self) -> Result<(), GitHubTokenStoreError> {
-        let file_result = match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err.into()),
-        };
-        clear_secure_token(&self.path)?;
-        file_result
+        let primary_result = clear_store_path(&self.path);
+        let legacy_result = self
+            .legacy_path
+            .as_deref()
+            .map(clear_store_path)
+            .unwrap_or(Ok(()));
+
+        primary_result.and(legacy_result)
     }
+
+    fn clear_legacy_store_best_effort(&self) {
+        let Some(legacy_path) = self
+            .legacy_path
+            .as_deref()
+            .filter(|legacy_path| legacy_path.exists())
+        else {
+            return;
+        };
+
+        if let Err(error) = clear_store_path(legacy_path) {
+            tracing::warn!(
+                path = %legacy_path.display(),
+                %error,
+                "failed to remove legacy GitHub token store after migration"
+            );
+        }
+    }
+}
+
+fn default_store_path() -> Result<PathBuf, GitHubTokenStoreError> {
+    directories::ProjectDirs::from("ai", "openteams-lab", "openteams")
+        .map(|dirs| dirs.data_dir().join(STORE_FILE))
+        .ok_or(GitHubTokenStoreError::SecureStorageUnavailable)
+}
+
+fn legacy_store_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|base| base.join("openteams").join(STORE_FILE))
+}
+
+fn clear_store_path(path: &Path) -> Result<(), GitHubTokenStoreError> {
+    let file_result = match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    };
+    let secure_token_result = clear_secure_token(path);
+
+    file_result.and(secure_token_result)
 }
 
 #[cfg(windows)]
@@ -308,7 +376,35 @@ mod tests {
     use secrecy::ExposeSecret;
     use tempfile::tempdir;
 
-    use super::{GitHubStoredAccount, GitHubStoredToken, LocalEncryptedGitHubTokenStore};
+    use super::{
+        GitHubStoredAccount, GitHubStoredToken, LocalEncryptedGitHubTokenStore, STORE_FILE,
+        default_store_path,
+    };
+
+    fn stored_token(token: &str) -> GitHubStoredToken {
+        GitHubStoredToken {
+            access_token: token.to_string().into(),
+            scopes: vec!["repo".to_string()],
+            account: Some(GitHubStoredAccount {
+                login: "octo".to_string(),
+                id: 1,
+                avatar_url: None,
+                html_url: None,
+                scopes: vec!["repo".to_string()],
+                connected_at: Utc::now(),
+            }),
+        }
+    }
+
+    #[test]
+    fn default_store_uses_shared_application_data_directory() {
+        let expected = directories::ProjectDirs::from("ai", "openteams-lab", "openteams")
+            .expect("project directory")
+            .data_dir()
+            .join(STORE_FILE);
+
+        assert_eq!(default_store_path().expect("default store path"), expected);
+    }
 
     #[test]
     fn token_store_roundtrips_without_plaintext_file_content() {
@@ -317,24 +413,35 @@ mod tests {
         let store = LocalEncryptedGitHubTokenStore::new_for_path(path.clone());
         let token = "gho_secret_token_value";
 
-        store
-            .store(GitHubStoredToken {
-                access_token: token.to_string().into(),
-                scopes: vec!["repo".to_string()],
-                account: Some(GitHubStoredAccount {
-                    login: "octo".to_string(),
-                    id: 1,
-                    avatar_url: None,
-                    html_url: None,
-                    scopes: vec!["repo".to_string()],
-                    connected_at: Utc::now(),
-                }),
-            })
-            .expect("store token");
+        store.store(stored_token(token)).expect("store token");
 
         let raw = std::fs::read_to_string(&path).expect("read token file");
         assert!(!raw.contains(token));
         let loaded = store.load().expect("load token").expect("token exists");
         assert_eq!(loaded.access_token.expose_secret(), token);
+    }
+
+    #[test]
+    fn legacy_token_store_migrates_on_load() {
+        let dir = tempdir().expect("tempdir");
+        let legacy_path = dir.path().join("legacy").join(STORE_FILE);
+        let current_path = dir.path().join("current").join(STORE_FILE);
+        let token = "gho_legacy_secret_token_value";
+        let legacy_store = LocalEncryptedGitHubTokenStore::new_for_path(legacy_path.clone());
+        legacy_store
+            .store(stored_token(token))
+            .expect("store legacy token");
+
+        let store = LocalEncryptedGitHubTokenStore {
+            path: current_path.clone(),
+            legacy_path: Some(legacy_path.clone()),
+        };
+        let loaded = store.load().expect("migrate token").expect("token exists");
+
+        assert_eq!(loaded.access_token.expose_secret(), token);
+        assert!(current_path.exists());
+        assert!(!legacy_path.exists());
+        let reloaded = store.load().expect("reload token").expect("token exists");
+        assert_eq!(reloaded.access_token.expose_secret(), token);
     }
 }
