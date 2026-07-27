@@ -569,7 +569,19 @@ export type AgentRuntimeDiagnostics = { runner_type: BaseCodingAgent, installed:
 
 export type AcpAuthMethodInfo = { id: string, name: string, description: string | null, };
 
-export type AcpCapabilityProbe = { protocol_version: string, agent_name: string | null, agent_version: string | null, auth_methods: Array<AcpAuthMethodInfo>, supports_session_list: boolean, supports_session_resume: boolean, supports_session_close: boolean, supports_session_delete: boolean, supports_additional_directories: boolean, agent_capabilities: JsonValue, config_options: Array<JsonValue>, };
+export type AcpConfigValue = { "type": "value_id", value: string, } | { "type": "boolean", value: boolean, };
+
+export type AcpConfigOverride = { option_id: string, value: AcpConfigValue, label_snapshot?: string | null, category_snapshot?: string | null, };
+
+export type AcpConfigChoice = { value: string, name: string, description: string | null, };
+
+export type AcpConfigOptionKind = { "type": "select", current_value: string, options: Array<AcpConfigChoice>, } | { "type": "boolean", current_value: boolean, };
+
+export type AcpConfigOptionSnapshot = { id: string, name: string, description: string | null, category: string | null, } & ({ "type": "select", current_value: string, options: Array<AcpConfigChoice>, } | { "type": "boolean", current_value: boolean, });
+
+export enum AcpConfigSource { none = "none", stable = "stable", legacy_model = "legacy_model" }
+
+export type AcpCapabilityProbe = { protocol_version: string, agent_name: string | null, agent_version: string | null, auth_methods: Array<AcpAuthMethodInfo>, supports_session_list: boolean, supports_session_resume: boolean, supports_session_close: boolean, supports_session_delete: boolean, supports_additional_directories: boolean, agent_capabilities: JsonValue, config_source: AcpConfigSource, config_options: Array<AcpConfigOptionSnapshot>, };
 
 export type ChatStreamEvent = { "type": "message_new", message: ChatMessage, } | { "type": "message_updated", message: ChatMessage, } | { "type": "work_item_new", work_item: ChatWorkItem, } | { "type": "agent_delta", session_id: string, session_agent_id: string, agent_id: string, run_id: string, stream_type: ChatStreamDeltaType, content: string, delta: boolean, is_final: boolean, } | { "type": "agent_run_started", session_id: string, session_agent_id: string, agent_id: string, agent_name: string, model: string | null, run_id: string,
 /**
@@ -615,7 +627,11 @@ export type AcpExecutionOptions = { access_mode?: AcpAccessMode | null, approval
 /**
  * `Some` replaces lower-priority directories, including with an empty list.
  */
-additional_directories?: Array<string> | null, };
+additional_directories?: Array<string> | null,
+/**
+ * Exact option IDs and typed values advertised by the ACP Agent.
+ */
+config_overrides?: Array<AcpConfigOverride> | null, };
 
 export type ChatStreamDeltaType = "assistant" | "thinking" | "error";
 

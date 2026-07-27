@@ -5,6 +5,81 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AcpConfigValue {
+    ValueId { value: String },
+    Boolean { value: bool },
+}
+
+impl AcpConfigValue {
+    pub fn to_protocol(&self) -> SessionConfigOptionValue {
+        match self {
+            Self::ValueId { value } => SessionConfigOptionValue::value_id(value.clone()),
+            Self::Boolean { value } => SessionConfigOptionValue::boolean(*value),
+        }
+    }
+
+    pub fn from_protocol(value: &SessionConfigOptionValue) -> Self {
+        match value {
+            SessionConfigOptionValue::ValueId { value } => Self::ValueId {
+                value: value.0.to_string(),
+            },
+            SessionConfigOptionValue::Boolean { value } => Self::Boolean { value: *value },
+            _ => unreachable!("unsupported ACP config value variant"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
+pub struct AcpConfigOverride {
+    pub option_id: String,
+    pub value: AcpConfigValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_snapshot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_snapshot: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct AcpConfigChoice {
+    pub value: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AcpConfigOptionKind {
+    Select {
+        current_value: String,
+        options: Vec<AcpConfigChoice>,
+    },
+    Boolean {
+        current_value: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+pub struct AcpConfigOptionSnapshot {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    #[serde(flatten)]
+    pub kind: AcpConfigOptionKind,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(use_ts_enum)]
+pub enum AcpConfigSource {
+    #[default]
+    None,
+    Stable,
+    LegacyModel,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct AcpAuthMethodInfo {
     pub id: String,
@@ -25,8 +100,8 @@ pub struct AcpCapabilityProbe {
     pub supports_additional_directories: bool,
     #[ts(type = "JsonValue")]
     pub agent_capabilities: serde_json::Value,
-    #[ts(type = "Array<JsonValue>")]
-    pub config_options: Vec<serde_json::Value>,
+    pub config_source: AcpConfigSource,
+    pub config_options: Vec<AcpConfigOptionSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
@@ -70,6 +145,9 @@ pub struct AcpExecutionOptions {
     /// `Some` replaces lower-priority directories, including with an empty list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_directories: Option<Vec<String>>,
+    /// Exact option IDs and typed values advertised by the ACP Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_overrides: Option<Vec<AcpConfigOverride>>,
 }
 
 impl AcpExecutionOptions {
@@ -82,6 +160,10 @@ impl AcpExecutionOptions {
                 .additional_directories
                 .clone()
                 .or_else(|| self.additional_directories.clone()),
+            config_overrides: higher_priority
+                .config_overrides
+                .clone()
+                .or_else(|| self.config_overrides.clone()),
         }
     }
 
@@ -215,6 +297,14 @@ mod tests {
             approval_mode: Some(AcpApprovalMode::Ask),
             auth: Some(AcpAuthSelection::Auto),
             additional_directories: Some(vec!["/global".to_string()]),
+            config_overrides: Some(vec![AcpConfigOverride {
+                option_id: "model".to_string(),
+                value: AcpConfigValue::ValueId {
+                    value: "global-model".to_string(),
+                },
+                label_snapshot: None,
+                category_snapshot: Some("model".to_string()),
+            }]),
         };
         let member = AcpExecutionOptions {
             approval_mode: Some(AcpApprovalMode::AutoReject),
@@ -226,6 +316,10 @@ mod tests {
         assert_eq!(effective.access_mode, Some(AcpAccessMode::WorkspaceOnly));
         assert_eq!(effective.approval_mode, Some(AcpApprovalMode::AutoReject));
         assert_eq!(effective.additional_directories, Some(Vec::new()));
+        assert_eq!(
+            effective.config_overrides, global.config_overrides,
+            "unset member config must inherit exact ACP selections"
+        );
     }
 
     #[tokio::test]

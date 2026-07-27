@@ -103,6 +103,73 @@
           "items": {
             "type": "string"
           }
+        },
+        "config_overrides": {
+          "description": "Exact option IDs and typed values advertised by the ACP Agent.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "option_id": {
+                "type": "string"
+              },
+              "value": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "value": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string",
+                        "const": "value_id"
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "value"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "value": {
+                        "type": "boolean"
+                      },
+                      "type": {
+                        "type": "string",
+                        "const": "boolean"
+                      }
+                    },
+                    "required": [
+                      "type",
+                      "value"
+                    ]
+                  }
+                ]
+              },
+              "label_snapshot": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "category_snapshot": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "option_id",
+              "value"
+            ]
+          }
         }
       }
     },

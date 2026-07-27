@@ -4,8 +4,14 @@ import type {
   BaseCodingAgent,
   ChatSessionAgentState,
 } from "@/types";
-import type { ProjectMemberWithRuntime } from "../../../../shared/types";
-import type { AcpExecutionOptions } from "../../../../shared/types";
+import type {
+  AcpConfigChoice,
+  AcpConfigOptionSnapshot,
+  AcpConfigOverride,
+  AcpConfigValue,
+  AcpExecutionOptions,
+  ProjectMemberWithRuntime,
+} from "../../../../shared/types";
 import { getRunnerLabel } from "../agent-runtime/agentRuntimeViewModel";
 
 export type MemberExecutionConfig = {
@@ -62,6 +68,149 @@ export const normalizeRunnerType = (
 export const trimOrNull = (value: string): string | null => {
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+};
+
+export const canonicalRuntimeModelId = (modelId: string): string => {
+  let canonical = modelId.trim();
+  let previous = "";
+  while (canonical !== previous) {
+    previous = canonical;
+    canonical = canonical
+      .replace(/\([^()\r\n]+\)$/u, "")
+      .replace(/\[[^[\]\r\n]+\]$/u, "")
+      .trimEnd();
+  }
+  return canonical;
+};
+
+const semanticModelKey = (modelId: string) =>
+  canonicalRuntimeModelId(modelId)
+    .toLocaleLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .join("\u0000");
+
+const bareModelId = (modelId: string) =>
+  canonicalRuntimeModelId(modelId).split("/").at(-1) ?? "";
+
+const modelIdMatchScore = (
+  expected: string,
+  candidate: string,
+): number | null => {
+  const left = expected.trim();
+  const right = candidate.trim();
+  if (!left || !right) return null;
+  if (left === right) return 100;
+  if (left.toLocaleLowerCase() === right.toLocaleLowerCase()) return 95;
+
+  const leftCanonical = canonicalRuntimeModelId(left);
+  const rightCanonical = canonicalRuntimeModelId(right);
+  if (leftCanonical === rightCanonical) return 90;
+  if (
+    leftCanonical.toLocaleLowerCase() === rightCanonical.toLocaleLowerCase()
+  ) {
+    return 85;
+  }
+  if (
+    bareModelId(leftCanonical).toLocaleLowerCase() ===
+    bareModelId(rightCanonical).toLocaleLowerCase()
+  ) {
+    return 80;
+  }
+  const leftKey = semanticModelKey(leftCanonical);
+  const rightKey = semanticModelKey(rightCanonical);
+  if (leftKey && leftKey === rightKey) {
+    return 70;
+  }
+  const leftBareKey = semanticModelKey(bareModelId(leftCanonical));
+  const rightBareKey = semanticModelKey(bareModelId(rightCanonical));
+  if (leftBareKey && leftBareKey === rightBareKey) {
+    return 60;
+  }
+  return null;
+};
+
+export const resolveUniqueAcpChoice = (
+  desired: string,
+  choices: AcpConfigChoice[],
+): AcpConfigChoice | null => {
+  const exact = choices.find((choice) => choice.value === desired);
+  if (exact) return exact;
+
+  let best: { choice: AcpConfigChoice; score: number } | null = null;
+  let ambiguous = false;
+  for (const choice of choices) {
+    const valueScore = modelIdMatchScore(desired, choice.value);
+    const nameScore = modelIdMatchScore(desired, choice.name);
+    const score =
+      valueScore ??
+      (nameScore === null ? null : Math.max(0, nameScore - 10));
+    if (score === null) continue;
+    if (!best || score > best.score) {
+      best = { choice, score };
+      ambiguous = false;
+    } else if (score === best.score) {
+      ambiguous = true;
+    }
+  }
+  return ambiguous ? null : (best?.choice ?? null);
+};
+
+export const acpOptionSemanticCategory = (
+  option: AcpConfigOptionSnapshot,
+): string | null => {
+  if (option.category) return option.category;
+  const keys = [option.id, option.name].map((value) =>
+    value
+      .toLocaleLowerCase()
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter(Boolean)
+      .join(""),
+  );
+  if (keys.some((key) => key === "model" || key.endsWith("model"))) {
+    return "model";
+  }
+  if (
+    keys.some(
+      (key) => key === "thoughtlevel" || key.endsWith("thoughtlevel"),
+    )
+  ) {
+    return "thought_level";
+  }
+  if (keys.some((key) => key === "mode" || key.endsWith("mode"))) {
+    return "mode";
+  }
+  return null;
+};
+
+export const effectiveAcpConfigValue = (
+  option: AcpConfigOptionSnapshot,
+  overrides: AcpConfigOverride[],
+  legacyModelName: string,
+  legacyThinkingEffort: string,
+): AcpConfigValue => {
+  const persisted = overrides.find(
+    (override) => override.option_id === option.id,
+  );
+  if (persisted) return persisted.value;
+  if (option.type === "boolean") {
+    return { type: "boolean", value: option.current_value };
+  }
+
+  const semanticCategory = acpOptionSemanticCategory(option);
+  const legacyValue =
+    semanticCategory === "model"
+      ? legacyModelName
+      : semanticCategory === "thought_level"
+        ? legacyThinkingEffort
+        : "";
+  const migrated = legacyValue
+    ? resolveUniqueAcpChoice(legacyValue, option.options)
+    : null;
+  return {
+    type: "value_id",
+    value: migrated?.value ?? option.current_value,
+  };
 };
 
 export const compactRunnerLabel = (

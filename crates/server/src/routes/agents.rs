@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use axum::{
     Json, Router,
-    extract::Path,
+    extract::{Path, Query},
     response::Json as ResponseJson,
     routing::{get, patch, post},
 };
@@ -42,6 +42,12 @@ struct AddRuntimeModelRequest {
 struct UpdateRuntimeModelRequest {
     old_model_name: String,
     new_model_name: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RuntimeDiagnosticsQuery {
+    workspace_path: Option<PathBuf>,
+    auth_method_id: Option<String>,
 }
 
 async fn get_runtime() -> Result<ResponseJson<ApiResponse<AgentRuntimeListResponse>>, ApiError> {
@@ -85,8 +91,12 @@ async fn put_runtime_model(
 
 async fn get_runtime_diagnostics(
     Path(runner): Path<BaseCodingAgent>,
+    Query(query): Query<RuntimeDiagnosticsQuery>,
 ) -> Result<ResponseJson<ApiResponse<AgentRuntimeDiagnostics>>, ApiError> {
-    let response = runtime_diagnostics(runner)
+    let probe_dir = query
+        .workspace_path
+        .unwrap_or(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let response = runtime_diagnostics(runner, &probe_dir, query.auth_method_id.as_deref())
         .await
         .map_err(api_error_from_runtime)?;
     Ok(ResponseJson(ApiResponse::success(response)))

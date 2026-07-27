@@ -105,10 +105,23 @@ impl Gemini {
         if let Some(AcpAuthSelection::MethodId { method_id }) = options.auth {
             harness = harness.with_auth_method_id(method_id);
         }
+        let config_overrides = options.config_overrides.as_deref().unwrap_or_default();
+        let has_model_override = config_overrides.iter().any(|selection| {
+            selection.category_snapshot.as_deref() == Some("model")
+                || selection.option_id.eq_ignore_ascii_case("model")
+        });
+        let has_thought_override = config_overrides.iter().any(|selection| {
+            selection.category_snapshot.as_deref() == Some("thought_level")
+                || selection
+                    .option_id
+                    .replace(['-', '_', ' '], "")
+                    .eq_ignore_ascii_case("thoughtlevel")
+        });
         if let Some(model) = self
             .model
             .as_deref()
             .filter(|value| !value.trim().is_empty())
+            .filter(|_| !has_model_override)
         {
             harness = harness.with_model(model);
         }
@@ -116,8 +129,12 @@ impl Gemini {
             .thinking_effort
             .as_deref()
             .filter(|value| !value.trim().is_empty())
+            .filter(|_| !has_thought_override)
         {
             harness = harness.with_thought_level(effort);
+        }
+        for selection in config_overrides {
+            harness = harness.with_config_override(selection);
         }
         let config_path = self.default_mcp_config_path();
         let canonical = match config_path {
@@ -195,14 +212,22 @@ impl StandardCodingAgentExecutor for Gemini {
         &self,
         current_dir: &Path,
         env: &ExecutionEnv,
+        auth_method_id: Option<&str>,
     ) -> Result<Option<AcpCapabilityProbe>, ExecutorError> {
         let runtime_env = Self::workspace_trusted_env(env);
+        let configured_auth_method_id = self.acp.as_ref().and_then(|options| match &options.auth {
+            Some(AcpAuthSelection::MethodId { method_id }) => Some(method_id.clone()),
+            _ => None,
+        });
         Ok(Some(
             super::acp::runtime::probe_acp_command(
                 self.build_command_builder()?.build_initial()?,
                 current_dir,
                 &runtime_env,
                 &self.cmd,
+                auth_method_id
+                    .map(str::to_string)
+                    .or(configured_auth_method_id),
             )
             .await?,
         ))

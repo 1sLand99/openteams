@@ -27,6 +27,8 @@ use crate::{
 #[derivative(Debug, PartialEq)]
 pub struct AcpQaExecutor {
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default)]
     pub full_access: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,6 +53,7 @@ impl Default for AcpQaExecutor {
     fn default() -> Self {
         Self {
             command: "acp-qa-agent".to_string(),
+            model: None,
             full_access: false,
             auth_method_id: None,
             mcp_config_path: None,
@@ -159,6 +162,9 @@ impl AcpQaExecutor {
             .with_client_services(self.client_services());
         if let Some(method_id) = &self.auth_method_id {
             harness = harness.with_auth_method_id(method_id);
+        }
+        if let Some(model) = &self.model {
+            harness = harness.with_model(model);
         }
         let canonical = match &self.mcp_config_path {
             Some(path) => read_canonical_mcp_config(path, &McpConfig::canonical_acp()).await?,

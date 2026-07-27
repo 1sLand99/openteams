@@ -573,9 +573,21 @@ export const agentRuntimeApi = {
   },
   getDiagnostics: async (
     runner: BaseCodingAgent,
+    options?: {
+      workspacePath?: string;
+      authMethodId?: string;
+    },
   ): Promise<AgentRuntimeDiagnostics> => {
+    const query = new URLSearchParams();
+    if (options?.workspacePath) {
+      query.set("workspace_path", options.workspacePath);
+    }
+    if (options?.authMethodId) {
+      query.set("auth_method_id", options.authMethodId);
+    }
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
     const r = await makeRequest(
-      `/api/agents/runtime/${encodeURIComponent(runner)}/diagnostics`,
+      `/api/agents/runtime/${encodeURIComponent(runner)}/diagnostics${suffix}`,
       { cache: "no-store" },
     );
     return handleApiResponse<AgentRuntimeDiagnostics>(r);

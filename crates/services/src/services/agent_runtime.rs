@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        Arc, LazyLock,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -34,6 +34,7 @@ const RUNTIME_DISCOVERY_CONCURRENCY: usize = 4;
 static BACKGROUND_RUNTIME_REFRESH_RUNNING: AtomicBool = AtomicBool::new(false);
 static RUNTIME_REFRESH_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
+static RUNTIME_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Error)]
 pub enum AgentRuntimeError {
@@ -226,9 +227,8 @@ async fn refresh_runtime_discovery_unlocked(
     current_dir: &Path,
 ) -> Result<AgentRuntimeRefreshResponse, AgentRuntimeError> {
     let path = store_path();
-    let mut store = read_store(&path)?;
+    let store = read_store(&path)?;
     let profiles = ExecutorConfigs::get_cached();
-    let mut errors = Vec::new();
     let current_dir = current_dir.to_path_buf();
     let store_snapshot = Arc::new(store.clone());
     let discovery_inputs = profiles
@@ -252,63 +252,10 @@ async fn refresh_runtime_discovery_unlocked(
     .collect::<Vec<_>>()
     .await;
 
-    for outcome in outcomes {
-        match outcome? {
-            RunnerDiscoveryOutcome::Skipped => {}
-            RunnerDiscoveryOutcome::ModelsDiscovered {
-                runner,
-                models,
-                detected_version,
-            } => {
-                let version = version_for_discovery_update(&store, runner, detected_version);
-                store.discoveries.insert(
-                    runner,
-                    AgentRuntimeDiscovery {
-                        models,
-                        version,
-                        last_checked_at: Utc::now(),
-                        last_error: None,
-                    },
-                );
-            }
-            RunnerDiscoveryOutcome::VersionOnly {
-                runner,
-                detected_version,
-            } => {
-                cache_version_only_discovery(&mut store, runner, detected_version);
-            }
-            RunnerDiscoveryOutcome::Failed {
-                runner,
-                message,
-                detected_version,
-                preserved_models,
-            } => {
-                store
-                    .discoveries
-                    .entry(runner)
-                    .and_modify(|entry| {
-                        entry.last_checked_at = Utc::now();
-                        entry.last_error = Some(message.clone());
-                        if let Some(version) = detected_version.clone() {
-                            entry.version = Some(version);
-                        }
-                    })
-                    .or_insert_with(|| AgentRuntimeDiscovery {
-                        models: Vec::new(),
-                        version: detected_version.clone(),
-                        last_checked_at: Utc::now(),
-                        last_error: Some(message.clone()),
-                    });
-                errors.push(AgentRuntimeRefreshError {
-                    runner_type: runner,
-                    message,
-                    preserved_models,
-                });
-            }
-        }
-    }
-
-    write_store(&path, &store)?;
+    let outcomes = outcomes.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let (store, errors) = update_store(&path, |latest| {
+        Ok(apply_discovery_outcomes(latest, outcomes))
+    })?;
     Ok(AgentRuntimeRefreshResponse {
         runners: build_statuses(&profiles, &store),
         errors,
@@ -363,6 +310,69 @@ enum RunnerDiscoveryOutcome {
     },
 }
 
+fn apply_discovery_outcomes(
+    store: &mut AgentRuntimeStore,
+    outcomes: Vec<RunnerDiscoveryOutcome>,
+) -> Vec<AgentRuntimeRefreshError> {
+    let mut errors = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            RunnerDiscoveryOutcome::Skipped => {}
+            RunnerDiscoveryOutcome::ModelsDiscovered {
+                runner,
+                models,
+                detected_version,
+            } => {
+                let version = version_for_discovery_update(store, runner, detected_version);
+                store.discoveries.insert(
+                    runner,
+                    AgentRuntimeDiscovery {
+                        models,
+                        version,
+                        last_checked_at: Utc::now(),
+                        last_error: None,
+                    },
+                );
+            }
+            RunnerDiscoveryOutcome::VersionOnly {
+                runner,
+                detected_version,
+            } => {
+                cache_version_only_discovery(store, runner, detected_version);
+            }
+            RunnerDiscoveryOutcome::Failed {
+                runner,
+                message,
+                detected_version,
+                preserved_models,
+            } => {
+                store
+                    .discoveries
+                    .entry(runner)
+                    .and_modify(|entry| {
+                        entry.last_checked_at = Utc::now();
+                        entry.last_error = Some(message.clone());
+                        if let Some(version) = detected_version.clone() {
+                            entry.version = Some(version);
+                        }
+                    })
+                    .or_insert_with(|| AgentRuntimeDiscovery {
+                        models: Vec::new(),
+                        version: detected_version.clone(),
+                        last_checked_at: Utc::now(),
+                        last_error: Some(message.clone()),
+                    });
+                errors.push(AgentRuntimeRefreshError {
+                    runner_type: runner,
+                    message,
+                    preserved_models,
+                });
+            }
+        }
+    }
+    errors
+}
+
 async fn discover_runner_runtime(
     runner: BaseCodingAgent,
     executor_config: &ExecutorConfig,
@@ -412,44 +422,45 @@ pub fn update_runtime_config(
     payload: UpdateAgentRuntimeConfig,
 ) -> Result<AgentRuntimeStatus, AgentRuntimeError> {
     let path = store_path();
-    let mut store = read_store(&path)?;
     let profiles = ExecutorConfigs::get_cached();
 
     if !profiles.executors.contains_key(&runner) {
         return Err(AgentRuntimeError::UnknownRunner(runner.to_string()));
     }
 
-    let mut config = store
-        .configs
-        .get(&runner)
-        .cloned()
-        .unwrap_or_else(|| default_config(runner));
-
-    if let Some(run_mode) = payload.run_mode {
-        config.run_mode = run_mode;
-    }
-    if let Some(env_json) = payload.env_json {
-        validate_env_json(&env_json)?;
-        config.env_json = env_json;
-    }
-    if let Some(executor_options) = payload.executor_options {
-        let mut executor = profiles
-            .executors
+    let (store, ()) = update_store(&path, |store| {
+        let mut config = store
+            .configs
             .get(&runner)
-            .and_then(|entry| {
-                entry
-                    .get_default()
-                    .or_else(|| entry.configurations.values().next())
-            })
             .cloned()
-            .ok_or_else(|| AgentRuntimeError::UnknownRunner(runner.to_string()))?;
-        apply_executor_options(runner, &mut executor, &executor_options)?;
-        config.executor_options = executor_options;
-    }
-    config.updated_at = Utc::now();
+            .unwrap_or_else(|| default_config(runner));
 
-    store.configs.insert(runner, config);
-    write_store(&path, &store)?;
+        if let Some(run_mode) = payload.run_mode {
+            config.run_mode = run_mode;
+        }
+        if let Some(env_json) = payload.env_json {
+            validate_env_json(&env_json)?;
+            config.env_json = env_json;
+        }
+        if let Some(executor_options) = payload.executor_options {
+            let mut executor = profiles
+                .executors
+                .get(&runner)
+                .and_then(|entry| {
+                    entry
+                        .get_default()
+                        .or_else(|| entry.configurations.values().next())
+                })
+                .cloned()
+                .ok_or_else(|| AgentRuntimeError::UnknownRunner(runner.to_string()))?;
+            apply_executor_options(runner, &mut executor, &executor_options)?;
+            config.executor_options = executor_options;
+        }
+        config.updated_at = Utc::now();
+
+        store.configs.insert(runner, config);
+        Ok(())
+    })?;
 
     let status = build_statuses(&profiles, &store)
         .into_iter()
@@ -525,9 +536,11 @@ pub fn rename_runtime_model(
 
 pub async fn runtime_diagnostics(
     runner: BaseCodingAgent,
+    probe_dir: &Path,
+    auth_method_id: Option<&str>,
 ) -> Result<AgentRuntimeDiagnostics, AgentRuntimeError> {
     let path = store_path();
-    let mut store = read_store(&path)?;
+    let store = read_store(&path)?;
     let profiles = ExecutorConfigs::get_cached();
     let config = profiles
         .executors
@@ -553,11 +566,6 @@ pub async fn runtime_diagnostics(
     } else {
         None
     };
-    if let Some(version) = detected_version.as_deref() {
-        cache_runner_version(&mut store, runner, version.to_string());
-        write_store(&path, &store)?;
-    }
-    let version = detected_version.or(status.version);
     let resolved_command = resolve_runtime_command(&runtime_executor).await;
     let command_source = resolved_command.as_ref().map(|_| {
         if cmd_overrides_for_executor(&runtime_executor)
@@ -573,24 +581,30 @@ pub async fn runtime_diagnostics(
             .to_string()
         }
     });
-    let (acp_probe, acp_probe_error) = if matches!(
-        runtime_executor,
-        CodingAgent::Gemini(_) | CodingAgent::QwenCode(_)
-    ) {
-        let probe_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        match runtime_executor.probe_acp(&probe_dir, &env).await {
-            Ok(probe) => (probe, None),
-            Err(error) => (None, Some(error.to_string())),
-        }
-    } else {
-        (None, None)
+    let (acp_probe, acp_probe_error) = match runtime_executor
+        .probe_acp(probe_dir, &env, auth_method_id)
+        .await
+    {
+        Ok(probe) => (probe, None),
+        Err(error) => (None, Some(error.to_string())),
     };
+    let latest_store = if let Some(version) = detected_version.as_deref() {
+        update_store(&path, |latest| {
+            cache_runner_version(latest, runner, version.to_string());
+            Ok(())
+        })?
+        .0
+    } else {
+        read_store(&path)?
+    };
+    let latest_status = build_status(runner, config, base, &latest_store);
+    let version = detected_version.or(latest_status.version.clone());
 
     Ok(AgentRuntimeDiagnostics {
-        runner_type: status.runner_type,
-        installed: status.installed,
-        executable: status.executable,
-        availability: status.availability,
+        runner_type: latest_status.runner_type,
+        installed: latest_status.installed,
+        executable: latest_status.executable,
+        availability: latest_status.availability,
         config_path: cli_config_path
             .clone()
             .unwrap_or_else(|| path.display().to_string()),
@@ -599,14 +613,14 @@ pub async fn runtime_diagnostics(
         command_source,
         acp_probe,
         acp_probe_error,
-        discovered_models: status.discovered_models,
-        model_source: status.model_source,
+        discovered_models: latest_status.discovered_models,
+        model_source: latest_status.model_source,
         version,
-        last_checked_at: status.last_checked_at,
-        last_error: status.last_error,
-        run_mode: status.run_mode,
-        env_summary: status.env_summary,
-        executor_options: status.executor_options,
+        last_checked_at: latest_status.last_checked_at,
+        last_error: latest_status.last_error,
+        run_mode: latest_status.run_mode,
+        env_summary: latest_status.env_summary,
+        executor_options: latest_status.executor_options,
     })
 }
 
@@ -1269,7 +1283,7 @@ fn normalize_model_name(model_name: &str) -> Result<String, AgentRuntimeError> {
     Ok(model.to_string())
 }
 
-fn read_store(path: &Path) -> Result<AgentRuntimeStore, AgentRuntimeError> {
+fn read_store_unlocked(path: &Path) -> Result<AgentRuntimeStore, AgentRuntimeError> {
     match std::fs::read_to_string(path) {
         Ok(content) => Ok(serde_json::from_str(&content)?),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(AgentRuntimeStore::default()),
@@ -1277,12 +1291,40 @@ fn read_store(path: &Path) -> Result<AgentRuntimeStore, AgentRuntimeError> {
     }
 }
 
-fn write_store(path: &Path, store: &AgentRuntimeStore) -> Result<(), AgentRuntimeError> {
+fn write_store_unlocked(path: &Path, store: &AgentRuntimeStore) -> Result<(), AgentRuntimeError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, serde_json::to_string_pretty(store)?)?;
     Ok(())
+}
+
+fn read_store(path: &Path) -> Result<AgentRuntimeStore, AgentRuntimeError> {
+    let _guard = RUNTIME_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    read_store_unlocked(path)
+}
+
+#[cfg(test)]
+fn write_store(path: &Path, store: &AgentRuntimeStore) -> Result<(), AgentRuntimeError> {
+    let _guard = RUNTIME_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    write_store_unlocked(path, store)
+}
+
+fn update_store<T>(
+    path: &Path,
+    update: impl FnOnce(&mut AgentRuntimeStore) -> Result<T, AgentRuntimeError>,
+) -> Result<(AgentRuntimeStore, T), AgentRuntimeError> {
+    let _guard = RUNTIME_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut store = read_store_unlocked(path)?;
+    let result = update(&mut store)?;
+    write_store_unlocked(path, &store)?;
+    Ok((store, result))
 }
 
 #[cfg(test)]
@@ -1593,6 +1635,61 @@ mod tests {
         assert_eq!(restored_config.run_mode, AgentRunMode::Disabled);
         assert_eq!(restored_config.env_json["KIMI_API_KEY"], "secret");
         assert_eq!(restored_config.executor_options["model"], "kimi-k2.6");
+    }
+
+    #[test]
+    fn concurrent_config_and_discovery_updates_preserve_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.json");
+        let runner = BaseCodingAgent::KimiCode;
+        write_store(&path, &AgentRuntimeStore::default()).unwrap();
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let config_path = path.clone();
+        let config_barrier = Arc::clone(&barrier);
+        let config_update = std::thread::spawn(move || {
+            config_barrier.wait();
+            update_store(&config_path, |store| {
+                let mut config = default_config(runner);
+                config.run_mode = AgentRunMode::Local;
+                config
+                    .env_json
+                    .insert("KIMI_API_KEY".to_string(), "new-secret".to_string());
+                config.executor_options = serde_json::json!({ "model": "kimi-k2.6" });
+                store.configs.insert(runner, config);
+                Ok(())
+            })
+            .unwrap();
+        });
+
+        let discovery_path = path.clone();
+        let discovery_barrier = Arc::clone(&barrier);
+        let discovery_update = std::thread::spawn(move || {
+            discovery_barrier.wait();
+            update_store(&discovery_path, |store| {
+                Ok(apply_discovery_outcomes(
+                    store,
+                    vec![RunnerDiscoveryOutcome::ModelsDiscovered {
+                        runner,
+                        models: vec!["kimi-k2.6".to_string()],
+                        detected_version: Some("kimi 1.0.0".to_string()),
+                    }],
+                ))
+            })
+            .unwrap();
+        });
+
+        config_update.join().unwrap();
+        discovery_update.join().unwrap();
+
+        let restored = read_store(&path).unwrap();
+        let config = restored.configs.get(&runner).unwrap();
+        assert_eq!(config.run_mode, AgentRunMode::Local);
+        assert_eq!(config.env_json["KIMI_API_KEY"], "new-secret");
+        assert_eq!(config.executor_options["model"], "kimi-k2.6");
+        let discovery = restored.discoveries.get(&runner).unwrap();
+        assert_eq!(discovery.models, vec!["kimi-k2.6"]);
+        assert_eq!(discovery.version.as_deref(), Some("kimi 1.0.0"));
     }
 
     #[test]
