@@ -1251,6 +1251,15 @@ function AgentConfigSidebar({
   const cliVersion = diagnosticsLoading
     ? t("agents.details.checking")
     : (discoveredCliVersion?.trim() || t("agents.details.notReported"));
+  const commandSource = diagnosticsLoading
+    ? t("agents.details.loading")
+    : currentDiagnostics?.command_source
+      ? getCommandSourceLabel(currentDiagnostics.command_source, t)
+      : t("agents.details.notReported");
+  const baseCommand = diagnosticsLoading
+    ? t("agents.details.loading")
+    : (currentDiagnostics?.resolved_command?.trim() ||
+      t("agents.details.notReported"));
   const modelOptions =
     currentDiagnostics?.discovered_models ?? runner.discovered_models;
   const modelSource = currentDiagnostics?.model_source ?? runner.model_source;
@@ -1544,21 +1553,14 @@ function AgentConfigSidebar({
               label={t("agents.details.cliVersion")}
               value={cliVersion}
             />
-            {currentDiagnostics?.command_source && (
-              <DetailRow
-                label={t("agents.details.commandSource")}
-                value={getCommandSourceLabel(
-                  currentDiagnostics.command_source,
-                  t,
-                )}
-              />
-            )}
-            {currentDiagnostics?.resolved_command && (
-              <DetailRow
-                label={t("agents.details.baseCommand")}
-                value={currentDiagnostics.resolved_command}
-              />
-            )}
+            <DetailRow
+              label={t("agents.details.commandSource")}
+              value={commandSource}
+            />
+            <DetailRow
+              label={t("agents.details.baseCommand")}
+              value={baseCommand}
+            />
           </div>
           {diagnosticsError && (
             <div className="mt-3 flex items-start gap-2 rounded-[8px] border border-amber-500/20 bg-amber-500/5 p-3 text-[14px] leading-relaxed text-amber-400">

@@ -45,5 +45,23 @@ assert.match(
 );
 assert.doesNotMatch(source, /Full Access/u);
 assert.doesNotMatch(source, /window\.confirm/u);
+assert.doesNotMatch(source, /\{currentDiagnostics\?\.command_source &&/u);
+assert.doesNotMatch(source, /\{currentDiagnostics\?\.resolved_command &&/u);
+assert.match(
+  source,
+  /const commandSource = diagnosticsLoading[\s\S]*?t\("agents\.details\.notReported"\);/u,
+);
+assert.match(
+  source,
+  /const baseCommand = diagnosticsLoading[\s\S]*?t\("agents\.details\.notReported"\)\);/u,
+);
+assert.match(
+  source,
+  /label=\{t\("agents\.details\.commandSource"\)\}[\s\S]*?value=\{commandSource\}/u,
+);
+assert.match(
+  source,
+  /label=\{t\("agents\.details\.baseCommand"\)\}[\s\S]*?value=\{baseCommand\}/u,
+);
 
 console.log('AgentsPage runtime configuration: PASS');
