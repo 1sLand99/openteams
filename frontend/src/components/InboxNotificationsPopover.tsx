@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import { Bell, Check, LoaderCircle } from "lucide-react";
+import { approvalOptionLabel } from "@/components/approvals/executorApprovalPresentation";
 import { useAppScale } from "@/context/AppScaleContext";
 import { executorApprovalsApi } from "@/lib/api";
 import type { Session } from "@/types";
@@ -183,12 +184,21 @@ export const inboxNotificationLabel = (
   );
 };
 
+const approvalOptionOrder = (kind: string): number => {
+  if (kind === "allow_once") return 0;
+  if (kind === "allow_always") return 1;
+  if (kind.startsWith("reject")) return 2;
+  return 3;
+};
+
 function ExecutorApprovalInboxActions({
   item,
+  translate,
   onResolved,
 }: {
   item: InboxItem;
-  onResolved?: () => Promise<void>;
+  translate: Translate;
+  onResolved?: () => void;
 }) {
   const [request, setRequest] =
     useState<ChatExecutorApprovalRequest | null>(null);
@@ -217,6 +227,10 @@ function ExecutorApprovalInboxActions({
   }, [item.session_id, item.source_id]);
 
   if (!request || !item.session_id) return null;
+  const orderedOptions = [...request.options].sort(
+    (left, right) =>
+      approvalOptionOrder(left.kind) - approvalOptionOrder(right.kind),
+  );
 
   return (
     <div
@@ -224,7 +238,7 @@ function ExecutorApprovalInboxActions({
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
     >
-      {request.options.map((option) => (
+      {orderedOptions.map((option) => (
         <button
           key={option.option_id}
           type="button"
@@ -234,7 +248,10 @@ function ExecutorApprovalInboxActions({
             setResolveError(null);
             void executorApprovalsApi
               .resolve(item.session_id!, request.id, option.option_id)
-              .then(() => onResolved?.())
+              .then(() => {
+                setRequest(null);
+                onResolved?.();
+              })
               .catch((error) => {
                 setResolveError(
                   error instanceof Error ? error.message : String(error),
@@ -242,15 +259,13 @@ function ExecutorApprovalInboxActions({
               })
               .finally(() => setResolving(false));
           }}
-          className={`rounded border px-2 py-1 text-[10px] font-medium transition disabled:opacity-50 ${
-            option.kind.startsWith("reject")
-              ? "border-red-400/30 text-red-300 hover:bg-red-400/10"
-              : option.kind === "allow_always"
-                ? "border-amber-400/30 text-amber-300 hover:bg-amber-400/10"
-                : "border-[var(--primary)]/40 text-[var(--primary)] hover:bg-[var(--primary)]/10"
+          className={`rounded border border-transparent px-2 py-1 text-[10px] font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-focus)] disabled:opacity-50 ${
+            option.kind === "allow_once"
+              ? "bg-[var(--ink)] text-[var(--surface-1)] hover:opacity-80"
+              : "bg-[color-mix(in_srgb,var(--ink)_10%,transparent)] text-[var(--ink-muted)] hover:bg-[color-mix(in_srgb,var(--ink)_16%,transparent)]"
           }`}
         >
-          {option.label}
+          {approvalOptionLabel(option, translate)}
         </button>
       ))}
       {resolveError && (
@@ -280,6 +295,8 @@ export function InboxNotificationsPopover({
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0 });
   const [actionItemId, setActionItemId] = useState<string | null>(null);
+  const [locallyResolvedApprovalItemIds, setLocallyResolvedApprovalItemIds] =
+    useState<ReadonlySet<string>>(() => new Set());
   const portalScale =
     appScale.enabled && portalTarget === appScale.portalRoot
       ? appScale.scale
@@ -296,13 +313,28 @@ export function InboxNotificationsPopover({
   const sortedItems = useMemo(
     () =>
       [...items]
-        .filter((item) => item.read_at === null && item.archived_at === null)
+        .filter(
+          (item) =>
+            item.read_at === null &&
+            item.archived_at === null &&
+            !locallyResolvedApprovalItemIds.has(item.id),
+        )
         .sort(
           (left, right) =>
             inboxItemTimeMs(right.created_at) - inboxItemTimeMs(left.created_at),
         ),
-    [items],
+    [items, locallyResolvedApprovalItemIds],
   );
+
+  useEffect(() => {
+    const itemIds = new Set(items.map((item) => item.id));
+    setLocallyResolvedApprovalItemIds((current) => {
+      const next = new Set(
+        [...current].filter((itemId) => itemIds.has(itemId)),
+      );
+      return next.size === current.size ? current : next;
+    });
+  }, [items]);
 
   const updatePosition = useCallback(() => {
     const trigger = triggerRef.current;
@@ -323,6 +355,16 @@ export function InboxNotificationsPopover({
   }, [onRefresh, open, updatePosition]);
 
   const close = useCallback(() => setOpen(false), []);
+  const handleExecutorApprovalResolved = useCallback(
+    (itemId: string) => {
+      setLocallyResolvedApprovalItemIds((current) => {
+        if (current.has(itemId)) return current;
+        return new Set([...current, itemId]);
+      });
+      void onRefresh?.();
+    },
+    [onRefresh],
+  );
 
   const openItem = useCallback(
     (item: InboxItem) => {
@@ -530,7 +572,10 @@ export function InboxNotificationsPopover({
                           item.source_type === "executor_approval") && (
                           <ExecutorApprovalInboxActions
                             item={item}
-                            onResolved={onRefresh}
+                            translate={translate}
+                            onResolved={() =>
+                              handleExecutorApprovalResolved(item.id)
+                            }
                           />
                         )}
                         {onMarkItemRead && (

@@ -28,6 +28,19 @@ const configTabsSource = readFileSync(
   new URL("./team/TeamConfigTabs.tsx", import.meta.url),
   "utf8",
 );
+const configTabStart = configTabsSource.indexOf("function ConfigTab(");
+const permissionsTabStart = configTabsSource.indexOf(
+  "function PermissionsTab(",
+);
+const permissionsTabEnd = configTabsSource.indexOf("function SkillsTab(");
+const configTabSource = configTabsSource.slice(
+  configTabStart,
+  permissionsTabStart,
+);
+const permissionsTabSource = configTabsSource.slice(
+  permissionsTabStart,
+  permissionsTabEnd,
+);
 const appSource = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
 const teamNavigationSource = readFileSync(
   new URL("../lib/teamNavigation.ts", import.meta.url),
@@ -153,8 +166,9 @@ check(
 check(
   "team protocol remains available when the project has no selected member",
   configTabsSource.includes(
-    'const effectiveActiveTab = selectedMember ? activeTab : "teamProtocol"',
+    "const effectiveActiveTab = selectedMember",
   ) &&
+    configTabsSource.includes(': "teamProtocol";') &&
     configTabsSource.includes(
       "return selectedMember ? [...memberTabs, protocolTab] : [protocolTab]",
     ) &&
@@ -162,6 +176,41 @@ check(
       "if (!selectedMember) return <EmptyMemberState t={t} />",
     ),
   { configTabsSource },
+);
+
+check(
+  "ACP member permissions render in a dedicated permissions tab",
+  configTabsSource.includes('| "permissions"') &&
+    configTabsSource.includes('id: "permissions" as const') &&
+    configTabsSource.includes('t("teamPage.tabs.permissions")') &&
+    configTabsSource.includes("<PermissionsTab {...props} />") &&
+    permissionsTabStart > configTabStart &&
+    permissionsTabEnd > permissionsTabStart &&
+    !configTabSource.includes("权限与审批") &&
+    permissionsTabSource.includes('title="权限与审批"') &&
+    (permissionsTabSource.match(/<DropdownSelect/g) ?? []).length === 3 &&
+    !permissionsTabSource.includes("<select"),
+  { configTabSource, configTabsSource, permissionsTabSource },
+);
+
+check(
+  "risky ACP member permissions use the in-app confirmation dialog",
+  permissionsTabSource.includes("<ConfirmationDialog") &&
+    permissionsTabSource.includes(
+      'idPrefix="member-acp-permission-confirmation"',
+    ) &&
+    permissionsTabSource.includes(
+      't("permissions.fullAccessHighRisk")',
+    ) &&
+    permissionsTabSource.includes(
+      't("permissions.fullAccessMemberConfirmTitle")',
+    ) &&
+    permissionsTabSource.includes(
+      't("permissions.fullAccessMemberConfirmDescription")',
+    ) &&
+    !permissionsTabSource.includes("Full Access") &&
+    !permissionsTabSource.includes("window.confirm"),
+  permissionsTabSource,
 );
 
 check(

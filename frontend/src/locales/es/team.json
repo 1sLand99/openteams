@@ -113,8 +113,9 @@
   "teamPage.teamProtocol.noProject": "Selecciona o crea un proyecto antes de editar el protocolo de equipo",
   "teamPage.teamProtocol.placeholder": "Describe reglas compartidas, normas de colaboración, expectativas de traspaso y estándares de revisión.",
   "teamPage.teamProtocol.title": "Protocolo de equipo",
-  "teamPage.tabs.config": "Ajustes",
+  "teamPage.tabs.config": "Configuración básica",
   "teamPage.tabs.mcp": "MCP",
+  "teamPage.tabs.permissions": "Permisos",
   "teamPage.tabs.skills": "Habilidades",
   "teamPage.tabs.teamProtocol": "Protocolo de equipo"
 }

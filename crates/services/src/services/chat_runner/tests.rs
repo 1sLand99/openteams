@@ -23,7 +23,10 @@ use executors::executors::CancellationToken;
 use git::GitService;
 use serde_json::json;
 use sqlx::SqlitePool;
-use tokio::{process::Command, sync::oneshot};
+use tokio::{
+    process::Command,
+    sync::{Mutex, oneshot},
+};
 use utils::{log_msg::LogMsg, msg_store::MsgStore};
 use uuid::Uuid;
 
@@ -1900,6 +1903,7 @@ async fn exit_signal_waits_for_cleanup_before_finished() {
     let stop = CancellationToken::new();
     let msg_store = Arc::new(MsgStore::new());
     let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+    let terminal_failure_reason = Arc::new(Mutex::new(None));
     let (exit_tx, exit_rx) = oneshot::channel();
     exit_tx
         .send(executors::executors::ExecutorExitResult::Success)
@@ -1912,6 +1916,7 @@ async fn exit_signal_waits_for_cleanup_before_finished() {
         Some(exit_rx),
         msg_store.clone(),
         completion_status.clone(),
+        terminal_failure_reason,
         empty_log_forwarders(),
         Uuid::new_v4(),
         std::time::Duration::from_secs(3),
@@ -1930,12 +1935,53 @@ async fn exit_signal_waits_for_cleanup_before_finished() {
 }
 
 #[tokio::test]
+async fn exit_signal_preserves_authoritative_failure_reason() {
+    let child = sleep_command(30).group_spawn().expect("spawn child");
+    let stop = CancellationToken::new();
+    let msg_store = Arc::new(MsgStore::new());
+    let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+    let terminal_failure_reason = Arc::new(Mutex::new(None));
+    let (exit_tx, exit_rx) = oneshot::channel();
+    exit_tx
+        .send(
+            executors::executors::ExecutorExitResult::FailureWithError(
+                "OpenTeamsCli request timed out after 1800s without session activity".to_string(),
+            ),
+        )
+        .expect("send exit signal");
+
+    ChatRunner::watch_executor_lifecycle_with_timeout(
+        child,
+        stop,
+        None,
+        Some(exit_rx),
+        msg_store,
+        completion_status.clone(),
+        terminal_failure_reason.clone(),
+        empty_log_forwarders(),
+        Uuid::new_v4(),
+        std::time::Duration::from_millis(100),
+    )
+    .await;
+
+    assert_eq!(
+        RunCompletionStatus::from_atomic(&completion_status),
+        RunCompletionStatus::Failed
+    );
+    assert_eq!(
+        terminal_failure_reason.lock().await.as_deref(),
+        Some("OpenTeamsCli request timed out after 1800s without session activity")
+    );
+}
+
+#[tokio::test]
 async fn stop_request_uses_same_cleanup_flow() {
     let child = sleep_command(30).group_spawn().expect("spawn child");
     let stop = CancellationToken::new();
     let executor_cancel = CancellationToken::new();
     let msg_store = Arc::new(MsgStore::new());
     let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+    let terminal_failure_reason = Arc::new(Mutex::new(None));
 
     let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_with_timeout(
         child,
@@ -1944,6 +1990,7 @@ async fn stop_request_uses_same_cleanup_flow() {
         None,
         msg_store.clone(),
         completion_status.clone(),
+        terminal_failure_reason,
         empty_log_forwarders(),
         Uuid::new_v4(),
         std::time::Duration::from_millis(100),
@@ -1970,6 +2017,7 @@ async fn stop_request_waits_for_executor_exit_signal_before_finished() {
     let executor_cancel = CancellationToken::new();
     let msg_store = Arc::new(MsgStore::new());
     let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+    let terminal_failure_reason = Arc::new(Mutex::new(None));
     let (exit_tx, exit_rx) = oneshot::channel();
 
     let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_with_timeout(
@@ -1979,6 +2027,7 @@ async fn stop_request_waits_for_executor_exit_signal_before_finished() {
         Some(exit_rx),
         msg_store.clone(),
         completion_status.clone(),
+        terminal_failure_reason,
         empty_log_forwarders(),
         Uuid::new_v4(),
         std::time::Duration::from_millis(100),
@@ -2500,7 +2549,7 @@ async fn process_agent_protocol_output_requests_retry_for_first_json_shape_failu
             r#"{"type":"send","to":"you","content":"object is not allowed"}"#,
             None,
             None,
-            false,
+            RunCompletionStatus::Succeeded,
             false,
             None,
             None,
@@ -2548,7 +2597,7 @@ async fn process_agent_protocol_output_uses_raw_output_after_retry_exhaustion() 
             "still not json",
             None,
             None,
-            false,
+            RunCompletionStatus::Succeeded,
             false,
             None,
             None,
@@ -2594,7 +2643,7 @@ async fn process_agent_protocol_output_uses_conclusion_when_no_send() {
             r#"[{"type":"record","content":"shared fact"},{"type":"conclusion","content":"done"}]"#,
             None,
             None,
-            false,
+            RunCompletionStatus::Succeeded,
             false,
             None,
             None,
@@ -2642,7 +2691,7 @@ async fn process_agent_protocol_output_persists_run_model_on_send_message() {
             r#"[{"type":"send","to":"you","content":"done"}]"#,
             None,
             None,
-            false,
+            RunCompletionStatus::Succeeded,
             false,
             None,
             Some("gpt-5.5"),
@@ -2685,7 +2734,7 @@ async fn process_agent_protocol_output_uses_record_when_no_send_or_conclusion() 
             r#"[{"type":"record","content":"shared fact"}]"#,
             None,
             None,
-            false,
+            RunCompletionStatus::Succeeded,
             false,
             None,
             None,
@@ -2729,7 +2778,7 @@ async fn process_agent_protocol_output_persists_error_when_output_empty() {
             "",
             Some("CLI failed before writing output"),
             None,
-            false,
+            RunCompletionStatus::Failed,
             false,
             None,
             None,
@@ -2773,7 +2822,7 @@ async fn process_agent_protocol_output_persists_failure_hint_when_output_empty()
             "",
             None,
             None,
-            false,
+            RunCompletionStatus::Failed,
             false,
             None,
             None,
@@ -2791,6 +2840,58 @@ async fn process_agent_protocol_output_persists_failure_hint_when_output_empty()
     assert_eq!(messages[0].content, "Agent运行失败");
     assert_eq!(messages[0].meta["protocol"]["output_is_empty"], json!(true));
     assert_eq!(messages[0].meta["i18n"]["key"], json!("agent.runFailed"));
+}
+
+#[tokio::test]
+async fn process_agent_protocol_output_persists_completed_hint_when_successful_output_empty() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+
+    let result = runner
+        .process_agent_protocol_output(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "coder",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            0,
+            ResolvedPromptLanguage {
+                setting: "simplified_chinese",
+                code: "zh-Hans",
+                instruction: "You MUST respond in Simplified Chinese.",
+            },
+            "",
+            None,
+            None,
+            RunCompletionStatus::Succeeded,
+            false,
+            None,
+            None,
+            0,
+        )
+        .await
+        .expect("process protocol output");
+
+    assert!(matches!(result, super::ProtocolProcessResult::Success(1)));
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].sender_type, ChatSenderType::Agent);
+    assert_eq!(messages[0].content, "Agent运行完成（未返回文本）");
+    assert_eq!(messages[0].meta["protocol"]["output_is_empty"], json!(true));
+    assert_eq!(
+        messages[0].meta["protocol"]["terminal_reason"],
+        json!("completed_without_output")
+    );
+    assert_eq!(
+        messages[0].meta["i18n"]["key"],
+        json!("agent.runCompletedNoOutput")
+    );
 }
 
 #[tokio::test]
@@ -2818,7 +2919,7 @@ async fn process_agent_protocol_output_persists_permission_rejected_hint_when_ou
             "",
             None,
             None,
-            false,
+            RunCompletionStatus::Succeeded,
             true,
             None,
             None,
@@ -2870,7 +2971,7 @@ async fn process_agent_protocol_output_keeps_model_output_after_permission_rejec
             r#"[{"type":"send","to":"you","content":"The tool was rejected, so I did not modify the file."}]"#,
             None,
             None,
-            false,
+            RunCompletionStatus::Succeeded,
             true,
             None,
             None,
@@ -2917,7 +3018,7 @@ async fn process_agent_protocol_output_persists_stopped_hint_when_stopped_empty(
             "",
             None,
             None,
-            true,
+            RunCompletionStatus::Stopped,
             true,
             None,
             None,

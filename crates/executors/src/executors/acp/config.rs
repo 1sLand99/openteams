@@ -33,8 +33,8 @@ pub struct AcpCapabilityProbe {
 #[serde(rename_all = "snake_case")]
 #[ts(use_ts_enum)]
 pub enum AcpAccessMode {
-    #[default]
     WorkspaceOnly,
+    #[default]
     FullAccess,
 }
 
@@ -48,17 +48,14 @@ pub enum AcpApprovalMode {
     AutoReject,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AcpAuthSelection {
+    #[default]
     Auto,
-    MethodId { method_id: String },
-}
-
-impl Default for AcpAuthSelection {
-    fn default() -> Self {
-        Self::Auto
-    }
+    MethodId {
+        method_id: String,
+    },
 }
 
 /// Partial ACP settings. `None` means inherit from the lower-priority layer.

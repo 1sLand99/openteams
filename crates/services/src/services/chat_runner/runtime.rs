@@ -14,6 +14,7 @@ pub(super) struct ExitWatcherArgs {
     pub(super) exit_signal: Option<ExecutorExitSignal>,
     pub(super) msg_store: Arc<MsgStore>,
     pub(super) completion_status: Arc<AtomicU8>,
+    pub(super) terminal_failure_reason: Arc<Mutex<Option<String>>>,
     pub(super) log_forwarders: RunLogForwarders,
 }
 
@@ -1321,6 +1322,7 @@ impl ChatRunner {
         tail_log_path: PathBuf,
         raw_log_spool: Arc<Mutex<RunLogSpool>>,
         completion_status: Arc<AtomicU8>,
+        terminal_failure_reason: Arc<Mutex<Option<String>>>,
         workspace_change_baseline: WorkspaceChangeBaseline,
         chain_depth: u32,
         context_compacted: bool,
@@ -1744,6 +1746,18 @@ impl ChatRunner {
                         );
                         let completion_status =
                             RunCompletionStatus::from_atomic(&completion_status);
+                        if matches!(completion_status, RunCompletionStatus::Failed)
+                            && let Some(reason) = terminal_failure_reason
+                                .lock()
+                                .await
+                                .clone()
+                                .filter(|reason| !reason.trim().is_empty())
+                        {
+                            error_content = reason;
+                            if error_type.is_none() {
+                                error_type = Some(NormalizedEntryError::Other);
+                            }
+                        }
                         let should_clear_agent_session = matches!(
                             completion_status,
                             RunCompletionStatus::Failed | RunCompletionStatus::Stopped
@@ -2038,7 +2052,7 @@ impl ChatRunner {
                                 protocol_output,
                                 visible_error_content,
                                 error_type.as_ref(),
-                                matches!(completion_status, RunCompletionStatus::Stopped),
+                                completion_status,
                                 matches!(completion_status, RunCompletionStatus::Succeeded)
                                     && acp_permission_rejected,
                                 Some(&token_usage),
@@ -2628,6 +2642,7 @@ impl ChatRunner {
                 args.exit_signal,
                 args.msg_store,
                 args.completion_status,
+                args.terminal_failure_reason,
                 args.log_forwarders,
                 session_agent_id,
                 EXECUTOR_GRACEFUL_STOP_TIMEOUT,
@@ -3109,6 +3124,7 @@ impl ChatRunner {
         mut exit_signal: Option<ExecutorExitSignal>,
         msg_store: Arc<MsgStore>,
         completion_status: Arc<AtomicU8>,
+        terminal_failure_reason: Arc<Mutex<Option<String>>>,
         log_forwarders: RunLogForwarders,
         session_agent_id: Uuid,
         graceful_timeout: std::time::Duration,
@@ -3158,6 +3174,7 @@ impl ChatRunner {
                     exit_result
                     && !err_msg.is_empty()
                 {
+                    *terminal_failure_reason.lock().await = Some(err_msg.clone());
                     msg_store.push(LogMsg::Stderr(err_msg.clone()));
                 }
 

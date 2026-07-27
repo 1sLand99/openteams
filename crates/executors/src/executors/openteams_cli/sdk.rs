@@ -238,7 +238,7 @@ fn local_client_builder() -> reqwest::ClientBuilder {
 /// Do not also apply this duration as a reqwest request timeout. Session requests stay open for
 /// the entire agent turn and may legitimately run longer than this while SSE activity keeps
 /// resetting the watchdog in `run_request_with_control_timeout`.
-const REQUEST_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(600);
+const REQUEST_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// `session.status: idle` may be immediately preceded or followed by a
 /// provider error. Keep consuming the control channel briefly so an idle
 /// notification cannot mask a terminal error that is already in flight.
@@ -461,10 +461,13 @@ where
 {
     let mut idle_seen = false;
     let activity_error = || {
-        ExecutorError::Io(io::Error::other(format!(
-            "OpenTeamsCli request timed out after {}s without session activity",
-            activity_timeout.as_secs()
-        )))
+        ExecutorError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "OpenTeamsCli request timed out after {}s without session activity",
+                activity_timeout.as_secs()
+            ),
+        ))
     };
     let activity_deadline = tokio::time::sleep(activity_timeout);
     tokio::pin!(activity_deadline);
@@ -1962,15 +1965,21 @@ mod tests {
     use tokio::sync::{Mutex, mpsc};
 
     use super::{
-        ConfigProvidersResponse, ControlEvent, ProviderInfo, build_default_headers, create_session,
-        event_matches_session, extract_retry_status, is_retryable_openteams_cli_db_init_error,
-        local_client_builder, resolve_model_spec_from_config, resolve_session_id,
-        run_request_with_control, run_request_with_control_timeout, session_status_is_idle,
+        ConfigProvidersResponse, ControlEvent, ProviderInfo, REQUEST_ACTIVITY_TIMEOUT,
+        build_default_headers, create_session, event_matches_session, extract_retry_status,
+        is_retryable_openteams_cli_db_init_error, local_client_builder,
+        resolve_model_spec_from_config, resolve_session_id, run_request_with_control,
+        run_request_with_control_timeout, session_status_is_idle,
     };
     use crate::executors::{
         ExecutorError,
         openteams_cli::{DIRECTORY_HEADER, SERVER_USERNAME},
     };
+
+    #[test]
+    fn request_activity_timeout_is_thirty_minutes() {
+        assert_eq!(REQUEST_ACTIVITY_TIMEOUT, Duration::from_secs(30 * 60));
+    }
 
     #[test]
     fn extract_retry_status_parses_retry_payload() {
@@ -2226,6 +2235,10 @@ mod tests {
         .await;
 
         let err = result.expect_err("missing activity should fail request");
+        let ExecutorError::Io(err) = err else {
+            panic!("expected timeout io error");
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         assert!(err.to_string().contains("without session activity"));
     }
 

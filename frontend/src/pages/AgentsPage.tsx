@@ -23,6 +23,7 @@ import {
   DropdownSelect,
   type DropdownSelectOption,
 } from "@/components/DropdownSelect";
+import { ConfirmationDialog } from "@/components/ConfirmationDialog";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import {
   useCommandHandler,
@@ -563,16 +564,21 @@ function AcpRuntimeConfigField({
   value,
   onChange,
   onCommit,
+  t,
 }: {
   value: JsonValue | undefined;
   onChange: (key: string, value: JsonValue | undefined) => void;
   onCommit: () => void | Promise<void>;
+  t: TranslateFn;
 }) {
+  const [pendingRiskyChange, setPendingRiskyChange] = useState<
+    "full_access" | "auto_allow" | null
+  >(null);
   const config = isObjectRecord(value) ? value : {};
   const accessMode =
     typeof config.access_mode === "string"
       ? config.access_mode
-      : "workspace_only";
+      : "full_access";
   const approvalMode =
     typeof config.approval_mode === "string" ? config.approval_mode : "ask";
   const auth = isObjectRecord(config.auth) ? config.auth : {};
@@ -610,17 +616,16 @@ function AcpRuntimeConfigField({
           value={accessMode}
           options={[
             { id: "workspace_only", label: "仅工作区" },
-            { id: "full_access", label: "Full Access（高风险）" },
+            {
+              id: "full_access",
+              label: t("permissions.fullAccessHighRisk"),
+            },
           ]}
           showSearch={false}
           className={dropdownClass}
           onChange={(next) => {
-            if (
-              next === "full_access" &&
-              !window.confirm(
-                "Full Access 允许 Agent 访问工作区之外的文件和终端路径。确认启用？",
-              )
-            ) {
+            if (next === "full_access") {
+              setPendingRiskyChange("full_access");
               return;
             }
             update({ access_mode: next });
@@ -639,12 +644,8 @@ function AcpRuntimeConfigField({
           showSearch={false}
           className={dropdownClass}
           onChange={(next) => {
-            if (
-              next === "auto_allow" &&
-              !window.confirm(
-                "自动允许会跳过 ACP 工具确认。确认对该 Agent 启用？",
-              )
-            ) {
+            if (next === "auto_allow") {
+              setPendingRiskyChange("auto_allow");
               return;
             }
             update({ approval_mode: next });
@@ -714,6 +715,35 @@ function AcpRuntimeConfigField({
           onBlur={() => void onCommit()}
         />
       </label>
+      {pendingRiskyChange && (
+        <ConfirmationDialog
+          idPrefix="agent-acp-permission-confirmation"
+          title={
+            pendingRiskyChange === "full_access"
+              ? t("permissions.fullAccessAgentConfirmTitle")
+              : "启用自动允许？"
+          }
+          description={
+            pendingRiskyChange === "full_access"
+              ? t("permissions.fullAccessAgentConfirmDescription")
+              : "自动允许会跳过 ACP 工具确认。请仅对可信 Agent 启用。"
+          }
+          confirmLabel="确认启用"
+          cancelLabel="取消"
+          escLabel="Esc 取消"
+          tone="warning"
+          onCancel={() => setPendingRiskyChange(null)}
+          onConfirm={() => {
+            const next = pendingRiskyChange;
+            setPendingRiskyChange(null);
+            update(
+              next === "full_access"
+                ? { access_mode: next }
+                : { approval_mode: next },
+            );
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1182,6 +1212,7 @@ function AgentConfigSidebar({
     envSummaryToText(runner.env_summary),
   );
   const [envDirty, setEnvDirty] = useState(false);
+  const [envInputFocused, setEnvInputFocused] = useState(false);
   const [diagnostics, setDiagnostics] =
     useState<AgentRuntimeDiagnostics | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
@@ -1358,9 +1389,9 @@ function AgentConfigSidebar({
   }, [clearSavedStatusTimer]);
 
   useEffect(() => {
-    if (envDirty) return;
+    if (envDirty || envInputFocused) return;
     setEnvText(envSummaryText);
-  }, [envDirty, envSummaryText]);
+  }, [envDirty, envInputFocused, envSummaryText]);
 
   useEffect(() => {
     if (!isDirty) return;
@@ -1544,12 +1575,16 @@ function AgentConfigSidebar({
           <div>
             <textarea
               value={envText}
+              onFocus={() => {
+                setEnvInputFocused(true);
+              }}
               onChange={(event) => {
                 draftRevisionRef.current += 1;
                 setEnvText(event.target.value);
                 setEnvDirty(true);
               }}
               onBlur={() => {
+                setEnvInputFocused(false);
                 void runAutoSave();
               }}
               rows={Math.max(4, Math.min(10, envText.split(/\r?\n/u).length))}
@@ -1610,6 +1645,7 @@ function AgentConfigSidebar({
                     value={formData.acp}
                     onChange={handleConfigFieldChange}
                     onCommit={runAutoSave}
+                    t={t}
                   />
                 )}
                 {schemaFields.map(([fieldKey, property]) => (

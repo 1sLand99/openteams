@@ -1264,6 +1264,26 @@ mod tests {
     }
 
     #[test]
+    fn workflow_executor_signal_failure_uses_authoritative_reason_without_log_excerpt() {
+        let history = vec![LogMsg::Stderr(
+            "unrelated debug log\nERROR: stale provider error\n".to_string(),
+        )];
+
+        let message = workflow_executor_signal_failure_message(
+            "backend",
+            Some("OpenTeamsCli request timed out after 1800s without session activity"),
+            &history,
+        );
+
+        assert_eq!(
+            message,
+            "OpenTeamsCli request timed out after 1800s without session activity：backend"
+        );
+        assert!(!message.contains("Executor error:"));
+        assert!(!message.contains("stale provider error"));
+    }
+
+    #[test]
     fn cancel_running_step_is_scoped_to_the_interrupted_attempt() {
         let step_id = Uuid::new_v4();
         clear_running_step(step_id, 0);

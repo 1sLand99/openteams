@@ -268,7 +268,7 @@ impl StandardCodingAgentExecutor for QwenCode {
             .cmd
             .base_command_override
             .as_deref()
-            .and_then(|value| shlex::split(value))
+            .and_then(shlex::split)
             .and_then(|parts| parts.into_iter().next())
             .unwrap_or_else(|| Self::BASE_COMMAND.to_string());
         if resolve_executable_path_blocking(&command).is_some() {

@@ -2123,6 +2123,7 @@ impl ChatRunner {
             );
 
             let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+            let terminal_failure_reason = Arc::new(Mutex::new(None));
 
             startup_timing
                 .mark_and_persist(
@@ -2144,6 +2145,7 @@ impl ChatRunner {
                 tail_log_path,
                 raw_log_spool,
                 completion_status.clone(),
+                terminal_failure_reason.clone(),
                 workspace_change_baseline,
                 chain_depth,
                 context_snapshot.context_compacted,
@@ -2172,6 +2174,7 @@ impl ChatRunner {
                     exit_signal: spawned.exit_signal,
                     msg_store,
                     completion_status,
+                    terminal_failure_reason,
                     log_forwarders,
                 },
                 session_agent_id,

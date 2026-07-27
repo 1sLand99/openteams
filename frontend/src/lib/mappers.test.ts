@@ -216,7 +216,11 @@ const emptyAgentNoError = mapMessage(
   },
   { now },
 );
-eq('empty agent content uses fallback', emptyAgentNoError.text, 'Agent运行失败');
+eq(
+  'empty agent content remains empty for localized rendering fallback',
+  emptyAgentNoError.text,
+  '',
+);
 
 eq(
   'mapMessages length matches',

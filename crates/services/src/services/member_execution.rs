@@ -188,16 +188,22 @@ pub fn build_effective_member_executor(
 
 pub fn executor_acp_full_access_enabled(executor: &CodingAgent) -> bool {
     match executor {
-        CodingAgent::Gemini(config) => config
-            .acp
-            .as_ref()
-            .and_then(|acp| acp.access_mode)
-            .is_some_and(|mode| mode == AcpAccessMode::FullAccess),
-        CodingAgent::QwenCode(config) => config
-            .acp
-            .as_ref()
-            .and_then(|acp| acp.access_mode)
-            .is_some_and(|mode| mode == AcpAccessMode::FullAccess),
+        CodingAgent::Gemini(config) => {
+            config
+                .acp
+                .as_ref()
+                .and_then(|acp| acp.access_mode)
+                .unwrap_or_default()
+                == AcpAccessMode::FullAccess
+        }
+        CodingAgent::QwenCode(config) => {
+            config
+                .acp
+                .as_ref()
+                .and_then(|acp| acp.access_mode)
+                .unwrap_or_default()
+                == AcpAccessMode::FullAccess
+        }
         _ => false,
     }
 }
@@ -386,5 +392,15 @@ mod tests {
         let policy = resolve_acp_mcp_policy(&serde_json::json!({}));
         assert!(policy.allowed_server_names.is_none());
         assert!(policy.disabled_server_names.is_empty());
+    }
+
+    #[test]
+    fn qwen_and_gemini_default_to_acp_full_access() {
+        let profiles = ExecutorConfigs::from_defaults();
+
+        for runner in [BaseCodingAgent::Gemini, BaseCodingAgent::QwenCode] {
+            let executor = profiles.get_coding_agent_or_default(&ExecutorProfileId::new(runner));
+            assert!(executor_acp_full_access_enabled(&executor), "{runner}");
+        }
     }
 }

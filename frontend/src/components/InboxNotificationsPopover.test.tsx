@@ -38,6 +38,17 @@ const badgeSource =
   badgeStart >= 0 && badgeEnd > badgeStart
     ? source.slice(badgeStart, badgeEnd)
     : "";
+const approvalActionsStart = source.indexOf(
+  "function ExecutorApprovalInboxActions",
+);
+const approvalActionsEnd = source.indexOf(
+  "export function InboxNotificationsPopover",
+  approvalActionsStart,
+);
+const approvalActionsSource =
+  approvalActionsStart >= 0 && approvalActionsEnd > approvalActionsStart
+    ? source.slice(approvalActionsStart, approvalActionsEnd)
+    : "";
 
 const unreadItem: InboxItem = {
   id: "inbox-unread",
@@ -129,7 +140,9 @@ check(
 
 check(
   "unread list filters out read and archived items before sorting",
-  source.includes(".filter((item) => item.read_at === null && item.archived_at === null)") &&
+  source.includes("item.read_at === null") &&
+    source.includes("item.archived_at === null") &&
+    source.includes("!locallyResolvedApprovalItemIds.has(item.id)") &&
     source.includes("inboxItemTimeMs(right.created_at) - inboxItemTimeMs(left.created_at)"),
   source,
 );
@@ -243,6 +256,16 @@ check(
 );
 
 check(
+  "removes a resolved executor approval locally before the background inbox refresh",
+  source.includes("setRequest(null);") &&
+    source.includes("locallyResolvedApprovalItemIds") &&
+    source.includes("!locallyResolvedApprovalItemIds.has(item.id)") &&
+    source.includes("handleExecutorApprovalResolved(item.id)") &&
+    source.includes("void onRefresh?.();"),
+  source,
+);
+
+check(
   "keeps inbox rows compact with only a hover mark-read icon",
   source.includes("px-2.5 py-1.5 pr-8 text-left") &&
     source.includes("line-clamp-1") &&
@@ -253,6 +276,25 @@ check(
     !source.includes("inboxActionLabel(item)") &&
     !source.includes("<Archive"),
   source,
+);
+
+check(
+  "localizes and orders approval actions with a solid allow action and muted alternatives",
+  approvalActionsSource.includes("approvalOptionLabel(option, translate)") &&
+    approvalActionsSource.includes("const orderedOptions") &&
+    source.includes('if (kind === "allow_once") return 0') &&
+    source.includes('if (kind === "allow_always") return 1') &&
+    source.includes('if (kind.startsWith("reject")) return 2') &&
+    approvalActionsSource.includes("orderedOptions.map((option)") &&
+    approvalActionsSource.includes('option.kind === "allow_once"') &&
+    approvalActionsSource.includes("bg-[var(--ink)]") &&
+    approvalActionsSource.includes("text-[var(--surface-1)]") &&
+    approvalActionsSource.includes(
+      "bg-[color-mix(in_srgb,var(--ink)_10%,transparent)]",
+    ) &&
+    !approvalActionsSource.includes("red-400") &&
+    !approvalActionsSource.includes("amber-400"),
+  approvalActionsSource,
 );
 
 if (failures > 0) {
