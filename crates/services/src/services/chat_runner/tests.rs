@@ -23,7 +23,10 @@ use executors::executors::CancellationToken;
 use git::GitService;
 use serde_json::json;
 use sqlx::SqlitePool;
-use tokio::{process::Command, sync::oneshot};
+use tokio::{
+    process::Command,
+    sync::{Mutex, oneshot},
+};
 use utils::{log_msg::LogMsg, msg_store::MsgStore};
 use uuid::Uuid;
 
@@ -1900,6 +1903,7 @@ async fn exit_signal_waits_for_cleanup_before_finished() {
     let stop = CancellationToken::new();
     let msg_store = Arc::new(MsgStore::new());
     let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+    let terminal_failure_reason = Arc::new(Mutex::new(None));
     let (exit_tx, exit_rx) = oneshot::channel();
     exit_tx
         .send(executors::executors::ExecutorExitResult::Success)
@@ -1912,6 +1916,7 @@ async fn exit_signal_waits_for_cleanup_before_finished() {
         Some(exit_rx),
         msg_store.clone(),
         completion_status.clone(),
+        terminal_failure_reason,
         empty_log_forwarders(),
         Uuid::new_v4(),
         std::time::Duration::from_secs(3),
@@ -1930,12 +1935,53 @@ async fn exit_signal_waits_for_cleanup_before_finished() {
 }
 
 #[tokio::test]
+async fn exit_signal_preserves_authoritative_failure_reason() {
+    let child = sleep_command(30).group_spawn().expect("spawn child");
+    let stop = CancellationToken::new();
+    let msg_store = Arc::new(MsgStore::new());
+    let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+    let terminal_failure_reason = Arc::new(Mutex::new(None));
+    let (exit_tx, exit_rx) = oneshot::channel();
+    exit_tx
+        .send(
+            executors::executors::ExecutorExitResult::FailureWithError(
+                "OpenTeamsCli request timed out after 1800s without session activity".to_string(),
+            ),
+        )
+        .expect("send exit signal");
+
+    ChatRunner::watch_executor_lifecycle_with_timeout(
+        child,
+        stop,
+        None,
+        Some(exit_rx),
+        msg_store,
+        completion_status.clone(),
+        terminal_failure_reason.clone(),
+        empty_log_forwarders(),
+        Uuid::new_v4(),
+        std::time::Duration::from_millis(100),
+    )
+    .await;
+
+    assert_eq!(
+        RunCompletionStatus::from_atomic(&completion_status),
+        RunCompletionStatus::Failed
+    );
+    assert_eq!(
+        terminal_failure_reason.lock().await.as_deref(),
+        Some("OpenTeamsCli request timed out after 1800s without session activity")
+    );
+}
+
+#[tokio::test]
 async fn stop_request_uses_same_cleanup_flow() {
     let child = sleep_command(30).group_spawn().expect("spawn child");
     let stop = CancellationToken::new();
     let executor_cancel = CancellationToken::new();
     let msg_store = Arc::new(MsgStore::new());
     let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+    let terminal_failure_reason = Arc::new(Mutex::new(None));
 
     let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_with_timeout(
         child,
@@ -1944,6 +1990,7 @@ async fn stop_request_uses_same_cleanup_flow() {
         None,
         msg_store.clone(),
         completion_status.clone(),
+        terminal_failure_reason,
         empty_log_forwarders(),
         Uuid::new_v4(),
         std::time::Duration::from_millis(100),
@@ -1970,6 +2017,7 @@ async fn stop_request_waits_for_executor_exit_signal_before_finished() {
     let executor_cancel = CancellationToken::new();
     let msg_store = Arc::new(MsgStore::new());
     let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
+    let terminal_failure_reason = Arc::new(Mutex::new(None));
     let (exit_tx, exit_rx) = oneshot::channel();
 
     let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_with_timeout(
@@ -1979,6 +2027,7 @@ async fn stop_request_waits_for_executor_exit_signal_before_finished() {
         Some(exit_rx),
         msg_store.clone(),
         completion_status.clone(),
+        terminal_failure_reason,
         empty_log_forwarders(),
         Uuid::new_v4(),
         std::time::Duration::from_millis(100),

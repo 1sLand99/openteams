@@ -983,10 +983,11 @@ async fn run_workflow_agent_prompt_inner(
 
     if failed_by_signal {
         let history = msg_store.get_history();
-        let reason = exit_signal_error
-            .as_deref()
-            .unwrap_or("workflow 执行失败");
-        let message = workflow_executor_failure_message(&agent.name, reason, &history);
+        let message = workflow_executor_signal_failure_message(
+            &agent.name,
+            exit_signal_error.as_deref(),
+            &history,
+        );
         let latest_assistant = extract_latest_assistant_from_history(&history).unwrap_or_default();
         finish_workflow_runtime_run_record(
             db,
@@ -1309,6 +1310,18 @@ fn workflow_executor_failure_message(agent_name: &str, reason: &str, history: &[
     };
 
     format!("{base}\n\nExecutor error:\n{excerpt}")
+}
+
+fn workflow_executor_signal_failure_message(
+    agent_name: &str,
+    signal_error: Option<&str>,
+    history: &[LogMsg],
+) -> String {
+    if let Some(reason) = signal_error.map(str::trim).filter(|reason| !reason.is_empty()) {
+        return format!("{reason}：{agent_name}");
+    }
+
+    workflow_executor_failure_message(agent_name, "workflow 执行失败", history)
 }
 
 fn workflow_executor_log_excerpt(history: &[LogMsg]) -> Option<String> {

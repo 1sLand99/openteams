@@ -419,10 +419,11 @@ impl OpenTeamsCli {
             let exit_result = match result {
                 Ok(()) => ExecutorExitResult::Success,
                 Err(err) => {
+                    let error_message = executor_failure_message(&err);
                     let _ = log_writer
-                        .log_error(format!("OpenTeams CLI executor error: {err}"))
+                        .log_error(format!("OpenTeams CLI executor error: {error_message}"))
                         .await;
-                    ExecutorExitResult::FailureWithError(err.to_string())
+                    ExecutorExitResult::FailureWithError(error_message)
                 }
             };
             let _ = exit_signal_tx.send(exit_result);
@@ -758,6 +759,13 @@ fn merge_compaction_config(existing_json: Option<&str>) -> String {
     serde_json::to_string(&config).unwrap_or_else(|_| r#"{"compaction":{"auto":true}}"#.to_string())
 }
 
+fn executor_failure_message(error: &ExecutorError) -> String {
+    match error {
+        ExecutorError::Io(error) => error.to_string(),
+        _ => error.to_string(),
+    }
+}
+
 fn setup_builtin_provider_env(env: &ExecutionEnv) -> ExecutionEnv {
     let mut env = env.clone();
     let merged = merge_builtin_provider_config(env.get(CONFIG_CONTENT_ENV).map(String::as_str));
@@ -798,9 +806,27 @@ fn merge_builtin_provider_config(existing_json: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use serde_json::json;
 
-    use super::{merge_builtin_provider_config, parse_models_command_output};
+    use super::{
+        executor_failure_message, merge_builtin_provider_config, parse_models_command_output,
+    };
+    use crate::executors::ExecutorError;
+
+    #[test]
+    fn openteams_cli_failure_message_preserves_specific_io_cause() {
+        let error = ExecutorError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "OpenTeamsCli request timed out after 1800s without session activity",
+        ));
+
+        assert_eq!(
+            executor_failure_message(&error),
+            "OpenTeamsCli request timed out after 1800s without session activity"
+        );
+    }
 
     #[test]
     fn openteams_cli_model_discovery_filters_to_free_and_configured_models() {

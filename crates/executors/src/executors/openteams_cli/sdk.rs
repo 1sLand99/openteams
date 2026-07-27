@@ -461,10 +461,13 @@ where
 {
     let mut idle_seen = false;
     let activity_error = || {
-        ExecutorError::Io(io::Error::other(format!(
-            "OpenTeamsCli request timed out after {}s without session activity",
-            activity_timeout.as_secs()
-        )))
+        ExecutorError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "OpenTeamsCli request timed out after {}s without session activity",
+                activity_timeout.as_secs()
+            ),
+        ))
     };
     let activity_deadline = tokio::time::sleep(activity_timeout);
     tokio::pin!(activity_deadline);
@@ -2232,6 +2235,10 @@ mod tests {
         .await;
 
         let err = result.expect_err("missing activity should fail request");
+        let ExecutorError::Io(err) = err else {
+            panic!("expected timeout io error");
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
         assert!(err.to_string().contains("without session activity"));
     }
 
