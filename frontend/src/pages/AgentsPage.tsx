@@ -572,7 +572,7 @@ function AcpRuntimeConfigField({
   const accessMode =
     typeof config.access_mode === "string"
       ? config.access_mode
-      : "workspace_only";
+      : "full_access";
   const approvalMode =
     typeof config.approval_mode === "string" ? config.approval_mode : "ask";
   const auth = isObjectRecord(config.auth) ? config.auth : {};
@@ -1182,6 +1182,7 @@ function AgentConfigSidebar({
     envSummaryToText(runner.env_summary),
   );
   const [envDirty, setEnvDirty] = useState(false);
+  const [envInputFocused, setEnvInputFocused] = useState(false);
   const [diagnostics, setDiagnostics] =
     useState<AgentRuntimeDiagnostics | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
@@ -1358,9 +1359,9 @@ function AgentConfigSidebar({
   }, [clearSavedStatusTimer]);
 
   useEffect(() => {
-    if (envDirty) return;
+    if (envDirty || envInputFocused) return;
     setEnvText(envSummaryText);
-  }, [envDirty, envSummaryText]);
+  }, [envDirty, envInputFocused, envSummaryText]);
 
   useEffect(() => {
     if (!isDirty) return;
@@ -1544,12 +1545,16 @@ function AgentConfigSidebar({
           <div>
             <textarea
               value={envText}
+              onFocus={() => {
+                setEnvInputFocused(true);
+              }}
               onChange={(event) => {
                 draftRevisionRef.current += 1;
                 setEnvText(event.target.value);
                 setEnvDirty(true);
               }}
               onBlur={() => {
+                setEnvInputFocused(false);
                 void runAutoSave();
               }}
               rows={Math.max(4, Math.min(10, envText.split(/\r?\n/u).length))}

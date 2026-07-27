@@ -113,8 +113,9 @@
   "teamPage.teamProtocol.noProject": "チームプロトコルを編集する前に、プロジェクトを選択または作成してください",
   "teamPage.teamProtocol.placeholder": "共有ルール、連携方針、引き継ぎの期待値、レビュー基準を記述します。",
   "teamPage.teamProtocol.title": "チームプロトコル",
-  "teamPage.tabs.config": "設定",
+  "teamPage.tabs.config": "基本設定",
   "teamPage.tabs.mcp": "MCP",
+  "teamPage.tabs.permissions": "権限設定",
   "teamPage.tabs.skills": "Skills",
   "teamPage.tabs.teamProtocol": "チームプロトコル"
 }

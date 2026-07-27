@@ -113,8 +113,9 @@
   "teamPage.teamProtocol.noProject": "请先选择或创建项目，再编辑团队协议",
   "teamPage.teamProtocol.placeholder": "描述团队共同遵循的协作规则、交接方式、评审标准和沟通准则",
   "teamPage.teamProtocol.title": "团队协议",
-  "teamPage.tabs.config": "设置",
+  "teamPage.tabs.config": "基础配置",
   "teamPage.tabs.mcp": "MCP",
+  "teamPage.tabs.permissions": "权限配置",
   "teamPage.tabs.skills": "技能配置",
   "teamPage.tabs.teamProtocol": "团队协议"
 }

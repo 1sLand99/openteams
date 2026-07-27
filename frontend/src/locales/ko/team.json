@@ -113,8 +113,9 @@
   "teamPage.teamProtocol.noProject": "팀 프로토콜을 편집하기 전에 프로젝트를 선택하거나 생성하세요",
   "teamPage.teamProtocol.placeholder": "공유 규칙, 협업 방식, 인수인계 기대치, 리뷰 기준을 설명하세요.",
   "teamPage.teamProtocol.title": "팀 프로토콜",
-  "teamPage.tabs.config": "설정",
+  "teamPage.tabs.config": "기본 설정",
   "teamPage.tabs.mcp": "MCP",
+  "teamPage.tabs.permissions": "권한 설정",
   "teamPage.tabs.skills": "Skills",
   "teamPage.tabs.teamProtocol": "팀 프로토콜"
 }

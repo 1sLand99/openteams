@@ -113,8 +113,9 @@
   "teamPage.teamProtocol.noProject": "Select or create a project before editing the team protocol.",
   "teamPage.teamProtocol.placeholder": "Describe shared team rules, collaboration norms, handoff expectations, and review standards.",
   "teamPage.teamProtocol.title": "Team protocol",
-  "teamPage.tabs.config": "Settings",
+  "teamPage.tabs.config": "Basic Configuration",
   "teamPage.tabs.mcp": "MCP",
+  "teamPage.tabs.permissions": "Permissions",
   "teamPage.tabs.skills": "Skills",
   "teamPage.tabs.teamProtocol": "Team Protocol"
 }

@@ -33,8 +33,8 @@ pub struct AcpCapabilityProbe {
 #[serde(rename_all = "snake_case")]
 #[ts(use_ts_enum)]
 pub enum AcpAccessMode {
-    #[default]
     WorkspaceOnly,
+    #[default]
     FullAccess,
 }
 

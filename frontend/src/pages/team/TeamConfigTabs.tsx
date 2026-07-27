@@ -14,6 +14,7 @@ import {
   RefreshCw,
   Server,
   Settings,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import { AgentMarkdown } from "@/components/AgentMarkdown";
@@ -35,7 +36,12 @@ import {
   type ProjectMemberWithExecution,
 } from "./teamUtils";
 
-type MemberConfigTab = "config" | "skills" | "mcp" | "teamProtocol";
+type MemberConfigTab =
+  | "config"
+  | "permissions"
+  | "skills"
+  | "mcp"
+  | "teamProtocol";
 
 type TranslateFn = (
   key: string,
@@ -506,12 +512,6 @@ function SkillMarkdownPanel({
 }
 
 function ConfigTab({
-  acpAccessMode,
-  acpAdditionalDirectories,
-  acpAdditionalDirectoriesOverride,
-  acpApprovalMode,
-  acpAuthMode,
-  acpAuthMethodId,
   capability,
   isLeader,
   modelOptions,
@@ -523,12 +523,6 @@ function ConfigTab({
   selectedReasoningValue,
   workspacePath,
   setIsLeader,
-  setAcpAccessMode,
-  setAcpAdditionalDirectories,
-  setAcpAdditionalDirectoriesOverride,
-  setAcpApprovalMode,
-  setAcpAuthMode,
-  setAcpAuthMethodId,
   setMemberName,
   setModelName,
   setModelVariant,
@@ -693,123 +687,6 @@ function ConfigTab({
           </SettingRow>
         </ConfigSection>
 
-        {(runnerType === "GEMINI" || runnerType === "QWEN_CODE") && (
-          <ConfigSection
-            title="ACP 权限与审批"
-            description="成员设置会覆盖 Agents 页面中的全局默认值。"
-            className="!pb-0"
-            bodyClassName="space-y-4 p-4"
-          >
-            <SettingRow
-              title="文件权限"
-              description="Full Access 允许访问工作区和附加目录之外的路径。"
-            >
-              <select
-                value={acpAccessMode}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  if (
-                    value === "full_access" &&
-                    !window.confirm(
-                      "Full Access 允许此成员访问工作区外的文件和终端路径。确认启用？",
-                    )
-                  ) {
-                    return;
-                  }
-                  setAcpAccessMode(value);
-                }}
-                className={inputClassName}
-              >
-                <option value="">继承全局设置</option>
-                <option value="workspace_only">仅工作区</option>
-                <option value="full_access">Full Access（高风险）</option>
-              </select>
-            </SettingRow>
-
-            <SettingRow
-              title="审批策略"
-              description="自动允许会跳过用户确认，请仅用于可信成员。"
-            >
-              <select
-                value={acpApprovalMode}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  if (
-                    value === "auto_allow" &&
-                    !window.confirm(
-                      "自动允许会跳过所有可允许的 ACP 工具审批。确认启用？",
-                    )
-                  ) {
-                    return;
-                  }
-                  setAcpApprovalMode(value);
-                }}
-                className={inputClassName}
-              >
-                <option value="">继承全局设置</option>
-                <option value="ask">每次询问</option>
-                <option value="auto_allow">自动允许（高风险）</option>
-                <option value="auto_reject">自动拒绝</option>
-              </select>
-            </SettingRow>
-
-            <SettingRow
-              title="认证方法"
-              description="留空时自动使用 CLI 已有登录状态；指定值必须由 ACP Agent 公布。"
-            >
-              <div className="space-y-2">
-                <select
-                  value={acpAuthMode}
-                  onChange={(event) => setAcpAuthMode(event.target.value)}
-                  className={inputClassName}
-                >
-                  <option value="">继承全局设置</option>
-                  <option value="auto">自动（使用 CLI 登录态）</option>
-                  <option value="method_id">指定 auth_method_id</option>
-                </select>
-                {acpAuthMode === "method_id" && (
-                  <input
-                    value={acpAuthMethodId}
-                    onChange={(event) =>
-                      setAcpAuthMethodId(event.target.value)
-                    }
-                    placeholder="auth_method_id"
-                    className={inputClassName}
-                  />
-                )}
-              </div>
-            </SettingRow>
-
-            <SettingRow
-              title="附加目录"
-              description="启用覆盖后，每行一个绝对目录；空列表会显式清除全局附加目录。"
-            >
-              <div className="space-y-2">
-                <label className="flex items-center gap-2 text-xs text-[var(--ink-subtle)]">
-                  <input
-                    type="checkbox"
-                    checked={acpAdditionalDirectoriesOverride}
-                    onChange={(event) =>
-                      setAcpAdditionalDirectoriesOverride(event.target.checked)
-                    }
-                  />
-                  覆盖全局附加目录
-                </label>
-                <textarea
-                  value={acpAdditionalDirectories}
-                  disabled={!acpAdditionalDirectoriesOverride}
-                  onChange={(event) =>
-                    setAcpAdditionalDirectories(event.target.value)
-                  }
-                  rows={4}
-                  placeholder={"/absolute/path/one\n/absolute/path/two"}
-                  className={`${inputClassName} h-auto resize-y font-mono text-xs disabled:opacity-50`}
-                />
-              </div>
-            </SettingRow>
-          </ConfigSection>
-        )}
-
         <ConfigSection
           title={t("teamPage.systemPrompt.title")}
           description={t("teamPage.systemPrompt.desc")}
@@ -825,6 +702,156 @@ function ConfigTab({
         </ConfigSection>
       </div>
     </div>
+  );
+}
+
+function PermissionsTab({
+  acpAccessMode,
+  acpAdditionalDirectories,
+  acpAdditionalDirectoriesOverride,
+  acpApprovalMode,
+  acpAuthMode,
+  acpAuthMethodId,
+  setAcpAccessMode,
+  setAcpAdditionalDirectories,
+  setAcpAdditionalDirectoriesOverride,
+  setAcpApprovalMode,
+  setAcpAuthMode,
+  setAcpAuthMethodId,
+}: Pick<
+  TeamConfigTabsProps,
+  | "acpAccessMode"
+  | "acpAdditionalDirectories"
+  | "acpAdditionalDirectoriesOverride"
+  | "acpApprovalMode"
+  | "acpAuthMode"
+  | "acpAuthMethodId"
+  | "setAcpAccessMode"
+  | "setAcpAdditionalDirectories"
+  | "setAcpAdditionalDirectoriesOverride"
+  | "setAcpApprovalMode"
+  | "setAcpAuthMode"
+  | "setAcpAuthMethodId"
+>) {
+  const dropdownClassName =
+    "[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]";
+
+  return (
+    <ConfigSection
+      title="权限与审批"
+      description="成员设置会覆盖 Agents 页面中的全局默认值。"
+      bodyClassName="space-y-4 p-4"
+    >
+      <SettingRow
+        title="文件权限"
+        description="Full Access 允许访问工作区和附加目录之外的路径。"
+      >
+        <DropdownSelect
+          value={acpAccessMode}
+          options={[
+            { id: "", label: "继承全局设置" },
+            { id: "workspace_only", label: "仅工作区" },
+            { id: "full_access", label: "Full Access（高风险）" },
+          ]}
+          showSearch={false}
+          className={dropdownClassName}
+          onChange={(value) => {
+            if (
+              value === "full_access" &&
+              !window.confirm(
+                "Full Access 允许此成员访问工作区外的文件和终端路径。确认启用？",
+              )
+            ) {
+              return;
+            }
+            setAcpAccessMode(value);
+          }}
+        />
+      </SettingRow>
+
+      <SettingRow
+        title="审批策略"
+        description="自动允许会跳过用户确认，请仅用于可信成员。"
+      >
+        <DropdownSelect
+          value={acpApprovalMode}
+          options={[
+            { id: "", label: "继承全局设置" },
+            { id: "ask", label: "每次询问" },
+            { id: "auto_allow", label: "自动允许（高风险）" },
+            { id: "auto_reject", label: "自动拒绝" },
+          ]}
+          showSearch={false}
+          className={dropdownClassName}
+          onChange={(value) => {
+            if (
+              value === "auto_allow" &&
+              !window.confirm(
+                "自动允许会跳过所有可允许的 ACP 工具审批。确认启用？",
+              )
+            ) {
+              return;
+            }
+            setAcpApprovalMode(value);
+          }}
+        />
+      </SettingRow>
+
+      <SettingRow
+        title="认证方法"
+        description="留空时自动使用 CLI 已有登录状态；指定值必须由 ACP Agent 公布。"
+      >
+        <div className="space-y-2">
+          <DropdownSelect
+            value={acpAuthMode}
+            options={[
+              { id: "", label: "继承全局设置" },
+              { id: "auto", label: "自动（使用 CLI 登录态）" },
+              { id: "method_id", label: "指定 auth_method_id" },
+            ]}
+            showSearch={false}
+            className={dropdownClassName}
+            onChange={setAcpAuthMode}
+          />
+          {acpAuthMode === "method_id" && (
+            <input
+              value={acpAuthMethodId}
+              onChange={(event) => setAcpAuthMethodId(event.target.value)}
+              placeholder="auth_method_id"
+              className={inputClassName}
+            />
+          )}
+        </div>
+      </SettingRow>
+
+      <SettingRow
+        title="附加目录"
+        description="启用覆盖后，每行一个绝对目录；空列表会显式清除全局附加目录。"
+      >
+        <div className="space-y-2">
+          <label className="flex items-center gap-2 text-xs text-[var(--ink-subtle)]">
+            <input
+              type="checkbox"
+              checked={acpAdditionalDirectoriesOverride}
+              onChange={(event) =>
+                setAcpAdditionalDirectoriesOverride(event.target.checked)
+              }
+            />
+            覆盖全局附加目录
+          </label>
+          <textarea
+            value={acpAdditionalDirectories}
+            disabled={!acpAdditionalDirectoriesOverride}
+            onChange={(event) =>
+              setAcpAdditionalDirectories(event.target.value)
+            }
+            rows={4}
+            placeholder={"/absolute/path/one\n/absolute/path/two"}
+            className={`${inputClassName} h-auto resize-y font-mono text-xs disabled:opacity-50`}
+          />
+        </div>
+      </SettingRow>
+    </ConfigSection>
   );
 }
 
@@ -1085,7 +1112,13 @@ function TeamProtocolTab({
 export function TeamConfigTabs(props: TeamConfigTabsProps) {
   const [activeTab, setActiveTab] = useState<MemberConfigTab>("config");
   const { selectedMember, t } = props;
-  const effectiveActiveTab = selectedMember ? activeTab : "teamProtocol";
+  const supportsAcpPermissions =
+    props.runnerType === "GEMINI" || props.runnerType === "QWEN_CODE";
+  const effectiveActiveTab = selectedMember
+    ? activeTab === "permissions" && !supportsAcpPermissions
+      ? "config"
+      : activeTab
+    : "teamProtocol";
   const dirtyNotice =
     props.teamProtocolDirty
       ? t("teamPage.notice.unsavedTeamProtocol")
@@ -1125,6 +1158,15 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
         label: t("teamPage.tabs.config"),
         icon: Settings,
       },
+      ...(supportsAcpPermissions
+        ? [
+            {
+              id: "permissions" as const,
+              label: t("teamPage.tabs.permissions"),
+              icon: ShieldCheck,
+            },
+          ]
+        : []),
       {
         id: "skills" as const,
         label: t("teamPage.tabs.skills"),
@@ -1138,7 +1180,7 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
       icon: FileText,
     };
     return selectedMember ? [...memberTabs, protocolTab] : [protocolTab];
-  }, [selectedMember, t]);
+  }, [selectedMember, supportsAcpPermissions, t]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--surface-2)]">
@@ -1197,6 +1239,8 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5 ot-scroll-area-styled">
         {effectiveActiveTab === "config" ? (
           <ConfigTab {...props} />
+        ) : effectiveActiveTab === "permissions" ? (
+          <PermissionsTab {...props} />
         ) : effectiveActiveTab === "skills" ? (
           <SkillsTab
             allowedSkillIds={props.allowedSkillIds}
