@@ -16,6 +16,14 @@ assert.match(
   source,
   /savedRevision === draftRevisionRef\.current[\s\S]*?setEnvDirty\(false\)/u,
 );
+assert.match(
+  source,
+  /if \(envDirty \|\| envInputFocused\) return;[\s\S]*?\[envDirty, envInputFocused, envSummaryText\]/u,
+);
+assert.match(
+  source,
+  /<textarea[\s\S]*?onFocus=\{\(\) => \{[\s\S]*?setEnvInputFocused\(true\)[\s\S]*?onBlur=\{\(\) => \{[\s\S]*?setEnvInputFocused\(false\)/u,
+);
 assert.match(source, /role="alert"[\s\S]*?\{envValidationError\}/u);
 assert.equal(
   source.match(/text-\[var\(--ink-subtle\)\] uppercase/g)?.length,
