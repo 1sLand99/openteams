@@ -1,5 +1,6 @@
-import React, { useMemo } from 'react';
-import { AlertCircle, Shield } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { AlertCircle, ChevronDown, Shield } from 'lucide-react';
 import type {
   ChatExecutorApprovalOption,
   ChatExecutorApprovalRequest,
@@ -11,6 +12,8 @@ import { useAppTranslation } from '@/hooks/useAppTranslation';
 import { cn } from '@/lib/utils';
 import {
   approvalOptionLabel,
+  groupApprovalRequests,
+  partitionApprovalOptions,
   type ApprovalTranslate,
 } from './executorApprovalPresentation';
 
@@ -21,97 +24,188 @@ type FreeChatApprovalTrayProps = {
   workflowExecutionId?: string;
 };
 
-const optionTone = (option: ChatExecutorApprovalOption) => {
-  if (option.kind === 'allow_once') {
-    return 'bg-[var(--primary)] text-[var(--on-primary)] hover:bg-[var(--primary-hover)]';
-  }
-  return 'bg-transparent text-[var(--ink-subtle)] hover:bg-[var(--surface-2)] hover:text-[var(--ink)]';
-};
-
-const RequestCard: React.FC<{
+const ApprovalRequestRow: React.FC<{
   request: ChatExecutorApprovalRequest;
-  member?: Member;
   disabled: boolean;
   onResolve: (optionId: string) => void;
   locale: string;
   translate: ApprovalTranslate;
-}> = ({ request, member, disabled, onResolve, locale, translate }) => {
-  const memberName = member?.name ?? request.runner;
-  const memberHandle = memberName.startsWith('@')
-    ? memberName
-    : `@${memberName}`;
-  const optionPriority = (option: ChatExecutorApprovalOption) => {
-    if (option.kind === 'allow_once') return 0;
-    if (option.kind.startsWith('reject')) return 1;
-    if (option.kind === 'allow_always') return 2;
-    return 1;
-  };
-  const orderedOptions = [...request.options].sort(
-    (left, right) => optionPriority(left) - optionPriority(right),
+}> = ({ request, disabled, onResolve, locale, translate }) => {
+  const [allowMenuOpen, setAllowMenuOpen] = useState(false);
+  const [allowMenuPosition, setAllowMenuPosition] = useState<{
+    left: number;
+    top: number;
+  } | null>(null);
+  const allowMenuRef = useRef<HTMLDivElement>(null);
+  const allowMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const allowMenuPopupRef = useRef<HTMLDivElement>(null);
+  const { allowOnce, allowAlways, otherOptions } = partitionApprovalOptions(
+    request.options,
   );
 
-  const renderOption = (option: ChatExecutorApprovalOption) => (
+  useEffect(() => {
+    if (!allowMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node &&
+        !allowMenuRef.current?.contains(event.target) &&
+        !allowMenuPopupRef.current?.contains(event.target)
+      ) {
+        setAllowMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setAllowMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [allowMenuOpen]);
+
+  useEffect(() => {
+    if (!allowMenuOpen) {
+      setAllowMenuPosition(null);
+      return;
+    }
+    const updatePosition = () => {
+      const trigger = allowMenuButtonRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      const menuWidth = 144;
+      const gap = 4;
+      setAllowMenuPosition({
+        left: Math.max(
+          8,
+          Math.min(
+            rect.right - menuWidth,
+            window.innerWidth - menuWidth - 8,
+          ),
+        ),
+        top: rect.bottom + gap,
+      });
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [allowMenuOpen]);
+
+  useEffect(() => {
+    if (disabled) setAllowMenuOpen(false);
+  }, [disabled]);
+
+  const resolveOption = (optionId: string) => {
+    setAllowMenuOpen(false);
+    onResolve(optionId);
+  };
+
+  const renderGhostOption = (option: ChatExecutorApprovalOption) => (
     <button
       key={option.option_id}
       type="button"
       disabled={disabled}
-      onClick={() => onResolve(option.option_id)}
-      className={cn(
-        'inline-flex h-7 items-center rounded-md px-2.5 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-1)] disabled:cursor-wait disabled:opacity-50',
-        optionTone(option),
-      )}
+      onClick={() => resolveOption(option.option_id)}
+      className="inline-flex h-7 items-center rounded-md bg-transparent px-2.5 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-1)] disabled:cursor-wait disabled:opacity-50"
     >
       {approvalOptionLabel(option, translate)}
     </button>
   );
 
   return (
-    <article className="px-3.5 py-3">
-      <div className="flex items-start gap-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-[var(--surface-2)] text-xs font-semibold text-[var(--ink-muted)]">
-          {member?.avatar &&
-          (/^(?:https?:|data:|blob:|\/)/u.test(member.avatar)) ? (
-            <img
-              src={member.avatar}
-              alt=""
-              className="h-full w-full object-cover"
-            />
+    <article className="px-3.5 py-2.5">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="flex min-w-0 flex-[1_1_15rem] items-baseline gap-2">
+          <span className="shrink-0 text-xs text-[var(--ink-subtle)]">
+            {translate('approvals.requestAction', 'requests to run')}
+          </span>
+          <code
+            title={request.tool_name}
+            className="min-w-0 truncate font-mono text-[12px] font-medium text-[var(--ink)]"
+          >
+            {request.tool_name}
+          </code>
+          <time
+            dateTime={new Date(request.created_at).toISOString()}
+            className="ml-auto shrink-0 font-mono text-[10px] text-[var(--ink-tertiary)]"
+          >
+            {new Intl.DateTimeFormat(locale, {
+              hour: '2-digit',
+              minute: '2-digit',
+            }).format(new Date(request.created_at))}
+          </time>
+        </div>
+
+        <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
+          {otherOptions.map(renderGhostOption)}
+          {allowOnce ? (
+            <div ref={allowMenuRef} className="relative ml-1 inline-flex">
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => resolveOption(allowOnce.option_id)}
+                className={cn(
+                  'inline-flex h-7 items-center bg-[var(--primary)] px-2.5 text-xs font-medium text-[var(--on-primary)] transition-colors hover:bg-[var(--primary-hover)] focus-visible:z-[1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-1)] disabled:cursor-wait disabled:opacity-50',
+                  allowAlways ? 'rounded-l-md' : 'rounded-md',
+                )}
+              >
+                {approvalOptionLabel(allowOnce, translate)}
+              </button>
+              {allowAlways && (
+                <>
+                  <button
+                    ref={allowMenuButtonRef}
+                    type="button"
+                    disabled={disabled}
+                    aria-haspopup="menu"
+                    aria-expanded={allowMenuOpen}
+                    aria-label={translate(
+                      'approvals.moreAllowOptions',
+                      'More allow options',
+                    )}
+                    onClick={() => setAllowMenuOpen((open) => !open)}
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-r-md border-l border-[color-mix(in_srgb,var(--on-primary)_22%,transparent)] bg-[var(--primary)] text-[var(--on-primary)] transition-colors hover:bg-[var(--primary-hover)] focus-visible:z-[1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--surface-1)] disabled:cursor-wait disabled:opacity-50"
+                  >
+                    <ChevronDown
+                      className="h-3.5 w-3.5"
+                    />
+                  </button>
+                  {allowMenuOpen &&
+                    allowMenuPosition &&
+                    createPortal(
+                      <div
+                        ref={allowMenuPopupRef}
+                        role="menu"
+                        style={{
+                          left: allowMenuPosition.left,
+                          top: allowMenuPosition.top,
+                        }}
+                        className="fixed z-[100] min-w-36 rounded-md border border-[var(--hairline)] bg-[var(--surface-1)] p-1"
+                      >
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={disabled}
+                          onClick={() => resolveOption(allowAlways.option_id)}
+                          className="flex h-7 w-full items-center rounded-md bg-transparent px-2.5 text-left text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-focus)] disabled:opacity-50"
+                        >
+                          {approvalOptionLabel(allowAlways, translate)}
+                        </button>
+                      </div>,
+                      document.body,
+                    )}
+                </>
+              )}
+            </div>
           ) : (
-            member?.avatar ||
-            memberName.slice(0, 2).toUpperCase()
+            allowAlways && renderGhostOption(allowAlways)
           )}
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-baseline justify-between gap-3">
-            <p className="min-w-0 text-sm leading-5">
-              <span className="font-medium text-[var(--ink)]">
-                {memberHandle}
-              </span>{' '}
-              <span className="text-[var(--ink-subtle)]">
-                {translate('approvals.requestAction', 'requests to run')}
-              </span>{' '}
-              <code className="break-all font-mono text-[12px] text-[var(--ink-muted)]">
-                {request.tool_name}
-              </code>{' '}
-              <span className="inline-flex rounded-sm bg-[color-mix(in_srgb,var(--ink)_5%,transparent)] px-1.5 py-0.5 align-middle text-[9px] font-semibold tracking-[0.02em] text-[var(--ink-tertiary)]">
-                {request.runner}
-              </span>
-            </p>
-            <time
-              dateTime={new Date(request.created_at).toISOString()}
-              className="shrink-0 font-mono text-[10px] text-[color-mix(in_srgb,var(--ink-tertiary)_72%,transparent)]"
-            >
-              {new Intl.DateTimeFormat(locale, {
-                hour: '2-digit',
-                minute: '2-digit',
-              }).format(new Date(request.created_at))}
-            </time>
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-2.5 flex flex-wrap items-center justify-end gap-1 pl-12">
-        {orderedOptions.map(renderOption)}
       </div>
     </article>
   );
@@ -127,14 +221,25 @@ export const FreeChatApprovalTray: React.FC<FreeChatApprovalTrayProps> = ({
   const { locale } = useWorkspace();
   const { requests: allRequests, resolvingId, error, resolve } =
     useExecutorApprovals(sessionId);
-  const requests = workflowExecutionId
-    ? allRequests.filter(
-        (request) => request.workflow_execution_id === workflowExecutionId,
-      )
-    : allRequests.filter((request) => request.workflow_execution_id === null);
+  const requests = useMemo(
+    () =>
+      workflowExecutionId
+        ? allRequests.filter(
+            (request) =>
+              request.workflow_execution_id === workflowExecutionId,
+          )
+        : allRequests.filter(
+            (request) => request.workflow_execution_id === null,
+          ),
+    [allRequests, workflowExecutionId],
+  );
   const membersBySessionAgentId = useMemo(
     () => new Map(members.map((member) => [member.id, member])),
     [members],
+  );
+  const requestGroups = useMemo(
+    () => groupApprovalRequests(requests),
+    [requests],
   );
 
   if (requests.length === 0 && !error) return null;
@@ -167,22 +272,54 @@ export const FreeChatApprovalTray: React.FC<FreeChatApprovalTrayProps> = ({
           <p>{error}</p>
         </div>
       )}
-      <div className="max-h-[28rem] divide-y divide-[color-mix(in_srgb,var(--hairline)_62%,transparent)] overflow-y-auto border-t border-[color-mix(in_srgb,var(--hairline)_62%,transparent)]">
-        {requests.map((request) => (
-          <RequestCard
-            key={request.id}
-            request={request}
-            member={membersBySessionAgentId.get(request.session_agent_id)}
-            disabled={resolvingId === request.id}
-            locale={locale}
-            translate={translate}
-            onResolve={(optionId) => {
-              void resolve(request.id, optionId).catch((cause) =>
-                onError(cause instanceof Error ? cause.message : String(cause)),
-              );
-            }}
-          />
-        ))}
+      <div className="max-h-[28rem] divide-y divide-[var(--hairline)] overflow-y-auto border-t border-[color-mix(in_srgb,var(--hairline)_62%,transparent)]">
+        {requestGroups.map((group) => {
+          const firstRequest = group.requests[0];
+          const groupMember = membersBySessionAgentId.get(group.sessionAgentId);
+          const memberName = groupMember?.name ?? firstRequest.runner;
+          const memberHandle = memberName.startsWith('@')
+            ? memberName
+            : `@${memberName}`;
+          return (
+            <section key={group.sessionAgentId}>
+              <div className="sticky top-0 z-[1] flex items-center gap-2.5 bg-[color-mix(in_srgb,var(--surface-2)_42%,var(--surface-1))] px-3.5 py-2">
+                <span className="min-w-0 truncate text-xs font-medium text-[var(--ink)]">
+                  {memberHandle}
+                </span>
+                <span className="rounded-sm bg-[color-mix(in_srgb,var(--ink)_5%,transparent)] px-1.5 py-0.5 font-mono text-[9px] font-semibold tracking-[0.02em] text-[var(--ink-tertiary)]">
+                  {firstRequest.runner}
+                </span>
+                <span className="ml-auto shrink-0 font-mono text-[10px] text-[var(--ink-tertiary)]">
+                  {translate(
+                    'approvals.memberPending',
+                    '{count} pending',
+                    { count: group.requests.length },
+                  )}
+                </span>
+              </div>
+              <div className="divide-y divide-[color-mix(in_srgb,var(--hairline)_62%,transparent)]">
+                {group.requests.map((request) => (
+                  <ApprovalRequestRow
+                    key={request.id}
+                    request={request}
+                    disabled={resolvingId === request.id}
+                    locale={locale}
+                    translate={translate}
+                    onResolve={(optionId) => {
+                      void resolve(request.id, optionId).catch((cause) =>
+                        onError(
+                          cause instanceof Error
+                            ? cause.message
+                            : String(cause),
+                        ),
+                      );
+                    }}
+                  />
+                ))}
+              </div>
+            </section>
+          );
+        })}
       </div>
     </section>
   );

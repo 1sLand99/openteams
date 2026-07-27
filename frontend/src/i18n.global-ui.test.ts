@@ -11,6 +11,8 @@ const requiredKeys = [
   "approvals.option.allowOnce",
   "approvals.option.rejectAlways",
   "approvals.option.rejectOnce",
+  "approvals.memberPending",
+  "approvals.moreAllowOptions",
   "approvals.requestAction",
   "approvals.summary",
   "approvals.title",
