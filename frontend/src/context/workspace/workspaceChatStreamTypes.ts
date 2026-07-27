@@ -1,4 +1,5 @@
 import type { BackendChatMessage, MemberQueueSnapshot } from '@/types';
+import type { ChatExecutorApprovalRequest } from '../../../../shared/types';
 
 export type FileChangeType = 'created' | 'modified' | 'deleted';
 
@@ -99,4 +100,5 @@ export type ChatStreamEvent =
       session_id: string;
       request_id: string;
       session_agent_id: string;
+      request: ChatExecutorApprovalRequest;
     };

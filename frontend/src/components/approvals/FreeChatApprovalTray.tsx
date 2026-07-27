@@ -14,6 +14,7 @@ import {
   approvalOptionLabel,
   groupApprovalRequests,
   partitionApprovalOptions,
+  shouldShowApprovalSummary,
   type ApprovalTranslate,
 } from './executorApprovalPresentation';
 
@@ -27,10 +28,11 @@ type FreeChatApprovalTrayProps = {
 const ApprovalRequestRow: React.FC<{
   request: ChatExecutorApprovalRequest;
   disabled: boolean;
-  onResolve: (optionId: string) => void;
+  error?: string;
+  onResolve: (requestId: string, optionId: string) => void;
   locale: string;
   translate: ApprovalTranslate;
-}> = ({ request, disabled, onResolve, locale, translate }) => {
+}> = React.memo(({ request, disabled, error, onResolve, locale, translate }) => {
   const [allowMenuOpen, setAllowMenuOpen] = useState(false);
   const [allowMenuPosition, setAllowMenuPosition] = useState<{
     left: number;
@@ -102,7 +104,7 @@ const ApprovalRequestRow: React.FC<{
 
   const resolveOption = (optionId: string) => {
     setAllowMenuOpen(false);
-    onResolve(optionId);
+    onResolve(request.id, optionId);
   };
 
   const renderGhostOption = (option: ChatExecutorApprovalOption) => (
@@ -185,7 +187,7 @@ const ApprovalRequestRow: React.FC<{
                           left: allowMenuPosition.left,
                           top: allowMenuPosition.top,
                         }}
-                        className="fixed z-[100] min-w-36 rounded-md border border-[var(--hairline)] bg-[var(--surface-1)] p-1"
+                        className="fixed z-[100] min-w-44 rounded-md border border-[var(--hairline)] bg-[var(--surface-1)] p-1"
                       >
                         <button
                           type="button"
@@ -207,9 +209,14 @@ const ApprovalRequestRow: React.FC<{
           )}
         </div>
       </div>
+      {error && (
+        <p className="mt-2 text-xs text-red-400" role="alert">
+          {error}
+        </p>
+      )}
     </article>
   );
-};
+});
 
 export const FreeChatApprovalTray: React.FC<FreeChatApprovalTrayProps> = ({
   sessionId,
@@ -219,8 +226,16 @@ export const FreeChatApprovalTray: React.FC<FreeChatApprovalTrayProps> = ({
 }) => {
   const { t } = useAppTranslation();
   const { locale } = useWorkspace();
-  const { requests: allRequests, resolvingId, error, resolve } =
+  const {
+    requests: allRequests,
+    resolvingIds,
+    requestErrors,
+    error,
+    resolve,
+  } =
     useExecutorApprovals(sessionId);
+  const [trayVisible, setTrayVisible] = useState(false);
+  const emptyDismissTimerRef = useRef<number | null>(null);
   const requests = useMemo(
     () =>
       workflowExecutionId
@@ -241,13 +256,50 @@ export const FreeChatApprovalTray: React.FC<FreeChatApprovalTrayProps> = ({
     () => groupApprovalRequests(requests),
     [requests],
   );
+  const translate = React.useCallback<ApprovalTranslate>(
+    (key, fallback, replacements = {}) =>
+      t(key, { defaultValue: fallback, ...replacements }),
+    [t],
+  );
+  const handleResolve = React.useCallback(
+    (requestId: string, optionId: string) => {
+      void resolve(requestId, optionId).catch((cause) =>
+        onError(cause instanceof Error ? cause.message : String(cause)),
+      );
+    },
+    [onError, resolve],
+  );
 
-  if (requests.length === 0 && !error) return null;
+  useEffect(() => {
+    setTrayVisible(false);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (emptyDismissTimerRef.current !== null) {
+      window.clearTimeout(emptyDismissTimerRef.current);
+      emptyDismissTimerRef.current = null;
+    }
+    if (requests.length > 0 || error) {
+      setTrayVisible(true);
+      return;
+    }
+    if (!trayVisible) return;
+    emptyDismissTimerRef.current = window.setTimeout(() => {
+      setTrayVisible(false);
+      emptyDismissTimerRef.current = null;
+    }, 500);
+    return () => {
+      if (emptyDismissTimerRef.current !== null) {
+        window.clearTimeout(emptyDismissTimerRef.current);
+        emptyDismissTimerRef.current = null;
+      }
+    };
+  }, [error, requests.length, trayVisible]);
+
+  if (!trayVisible && requests.length === 0 && !error) return null;
   const memberCount = new Set(
     requests.map((request) => request.session_agent_id),
   ).size;
-  const translate: ApprovalTranslate = (key, fallback, replacements = {}) =>
-    t(key, { defaultValue: fallback, ...replacements });
 
   return (
     <section className="mx-3 mb-2 overflow-hidden rounded-xl border border-[var(--hairline)] bg-[var(--surface-1)]">
@@ -257,13 +309,15 @@ export const FreeChatApprovalTray: React.FC<FreeChatApprovalTrayProps> = ({
           <h3 className="text-sm font-medium text-[var(--ink)]">
             {translate('approvals.title', 'Permission requests')}
           </h3>
-          <p className="mt-0.5 text-[11px] text-[var(--ink-tertiary)]">
-            {translate(
-              'approvals.summary',
-              '{count} pending · {members} members',
-              { count: requests.length, members: memberCount },
-            )}
-          </p>
+          {shouldShowApprovalSummary(requests.length, memberCount) && (
+            <p className="mt-0.5 text-[11px] text-[var(--ink-tertiary)]">
+              {translate(
+                'approvals.summary',
+                '{count} pending · {members} members',
+                { count: requests.length, members: memberCount },
+              )}
+            </p>
+          )}
         </div>
       </div>
       {error && (
@@ -273,7 +327,17 @@ export const FreeChatApprovalTray: React.FC<FreeChatApprovalTrayProps> = ({
         </div>
       )}
       <div className="max-h-[28rem] divide-y divide-[var(--hairline)] overflow-y-auto border-t border-[color-mix(in_srgb,var(--hairline)_62%,transparent)]">
-        {requestGroups.map((group) => {
+        {requests.length === 0 && !error ? (
+          <div
+            className="px-3.5 py-3 text-xs text-[var(--ink-tertiary)]"
+            role="status"
+          >
+            {translate(
+              'approvals.processingNext',
+              'Approval processed. Waiting for the next request…',
+            )}
+          </div>
+        ) : requestGroups.map((group) => {
           const firstRequest = group.requests[0];
           const groupMember = membersBySessionAgentId.get(group.sessionAgentId);
           const memberName = groupMember?.name ?? firstRequest.runner;
@@ -302,18 +366,11 @@ export const FreeChatApprovalTray: React.FC<FreeChatApprovalTrayProps> = ({
                   <ApprovalRequestRow
                     key={request.id}
                     request={request}
-                    disabled={resolvingId === request.id}
+                    disabled={resolvingIds.has(request.id)}
+                    error={requestErrors[request.id]}
                     locale={locale}
                     translate={translate}
-                    onResolve={(optionId) => {
-                      void resolve(request.id, optionId).catch((cause) =>
-                        onError(
-                          cause instanceof Error
-                            ? cause.message
-                            : String(cause),
-                        ),
-                      );
-                    }}
+                    onResolve={handleResolve}
                   />
                 ))}
               </div>

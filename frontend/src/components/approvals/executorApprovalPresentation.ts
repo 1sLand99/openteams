@@ -11,9 +11,9 @@ export type ApprovalTranslate = (
 
 const OPTION_LABELS: Record<string, [string, string]> = {
   allow_always: ['approvals.option.allowAlways', 'Always allow'],
-  allow_once: ['approvals.option.allowOnce', 'Allow once'],
+  allow_once: ['approvals.option.allowOnce', 'Allow'],
   reject_always: ['approvals.option.rejectAlways', 'Always deny'],
-  reject_once: ['approvals.option.rejectOnce', 'Deny once'],
+  reject_once: ['approvals.option.rejectOnce', 'Deny'],
 };
 
 export const approvalOptionLabel = (
@@ -59,3 +59,8 @@ export const groupApprovalRequests = (
   });
   return Array.from(groups.values());
 };
+
+export const shouldShowApprovalSummary = (
+  requestCount: number,
+  memberCount: number,
+) => requestCount > 1 || memberCount > 1;

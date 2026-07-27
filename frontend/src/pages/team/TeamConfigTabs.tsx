@@ -22,6 +22,7 @@ import {
   DropdownSelect,
   type DropdownSelectOption,
 } from "@/components/DropdownSelect";
+import { ConfirmationDialog } from "@/components/ConfirmationDialog";
 import { AgentBrandAvatar } from "../agent-runtime/agentRuntimeBrand";
 import type {
   AgentRuntimeReasoningCapability,
@@ -718,6 +719,7 @@ function PermissionsTab({
   setAcpApprovalMode,
   setAcpAuthMode,
   setAcpAuthMethodId,
+  t,
 }: Pick<
   TeamConfigTabsProps,
   | "acpAccessMode"
@@ -732,36 +734,40 @@ function PermissionsTab({
   | "setAcpApprovalMode"
   | "setAcpAuthMode"
   | "setAcpAuthMethodId"
+  | "t"
 >) {
+  const [pendingRiskyChange, setPendingRiskyChange] = useState<
+    "full_access" | "auto_allow" | null
+  >(null);
   const dropdownClassName =
     "[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]";
 
   return (
-    <ConfigSection
-      title="权限与审批"
-      description="成员设置会覆盖 Agents 页面中的全局默认值。"
-      bodyClassName="space-y-4 p-4"
-    >
+    <>
+      <ConfigSection
+        title="权限与审批"
+        description="成员设置会覆盖 Agents 页面中的全局默认值。"
+        bodyClassName="space-y-4 p-4"
+      >
       <SettingRow
         title="文件权限"
-        description="Full Access 允许访问工作区和附加目录之外的路径。"
+        description={t("permissions.fullAccessDescription")}
       >
         <DropdownSelect
           value={acpAccessMode}
           options={[
             { id: "", label: "继承全局设置" },
             { id: "workspace_only", label: "仅工作区" },
-            { id: "full_access", label: "Full Access（高风险）" },
+            {
+              id: "full_access",
+              label: t("permissions.fullAccessHighRisk"),
+            },
           ]}
           showSearch={false}
           className={dropdownClassName}
           onChange={(value) => {
-            if (
-              value === "full_access" &&
-              !window.confirm(
-                "Full Access 允许此成员访问工作区外的文件和终端路径。确认启用？",
-              )
-            ) {
+            if (value === "full_access") {
+              setPendingRiskyChange("full_access");
               return;
             }
             setAcpAccessMode(value);
@@ -784,12 +790,8 @@ function PermissionsTab({
           showSearch={false}
           className={dropdownClassName}
           onChange={(value) => {
-            if (
-              value === "auto_allow" &&
-              !window.confirm(
-                "自动允许会跳过所有可允许的 ACP 工具审批。确认启用？",
-              )
-            ) {
+            if (value === "auto_allow") {
+              setPendingRiskyChange("auto_allow");
               return;
             }
             setAcpApprovalMode(value);
@@ -851,7 +853,37 @@ function PermissionsTab({
           />
         </div>
       </SettingRow>
-    </ConfigSection>
+      </ConfigSection>
+      {pendingRiskyChange && (
+        <ConfirmationDialog
+          idPrefix="member-acp-permission-confirmation"
+          title={
+            pendingRiskyChange === "full_access"
+              ? t("permissions.fullAccessMemberConfirmTitle")
+              : "为成员启用自动允许？"
+          }
+          description={
+            pendingRiskyChange === "full_access"
+              ? t("permissions.fullAccessMemberConfirmDescription")
+              : "自动允许会跳过所有可允许的 ACP 工具审批。请仅对可信成员启用。"
+          }
+          confirmLabel="确认启用"
+          cancelLabel="取消"
+          escLabel="Esc 取消"
+          tone="warning"
+          onCancel={() => setPendingRiskyChange(null)}
+          onConfirm={() => {
+            const next = pendingRiskyChange;
+            setPendingRiskyChange(null);
+            if (next === "full_access") {
+              setAcpAccessMode(next);
+            } else {
+              setAcpApprovalMode(next);
+            }
+          }}
+        />
+      )}
+    </>
   );
 }
 

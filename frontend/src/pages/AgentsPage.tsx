@@ -23,6 +23,7 @@ import {
   DropdownSelect,
   type DropdownSelectOption,
 } from "@/components/DropdownSelect";
+import { ConfirmationDialog } from "@/components/ConfirmationDialog";
 import { useWorkspace } from "@/context/WorkspaceContext";
 import {
   useCommandHandler,
@@ -563,11 +564,16 @@ function AcpRuntimeConfigField({
   value,
   onChange,
   onCommit,
+  t,
 }: {
   value: JsonValue | undefined;
   onChange: (key: string, value: JsonValue | undefined) => void;
   onCommit: () => void | Promise<void>;
+  t: TranslateFn;
 }) {
+  const [pendingRiskyChange, setPendingRiskyChange] = useState<
+    "full_access" | "auto_allow" | null
+  >(null);
   const config = isObjectRecord(value) ? value : {};
   const accessMode =
     typeof config.access_mode === "string"
@@ -610,17 +616,16 @@ function AcpRuntimeConfigField({
           value={accessMode}
           options={[
             { id: "workspace_only", label: "仅工作区" },
-            { id: "full_access", label: "Full Access（高风险）" },
+            {
+              id: "full_access",
+              label: t("permissions.fullAccessHighRisk"),
+            },
           ]}
           showSearch={false}
           className={dropdownClass}
           onChange={(next) => {
-            if (
-              next === "full_access" &&
-              !window.confirm(
-                "Full Access 允许 Agent 访问工作区之外的文件和终端路径。确认启用？",
-              )
-            ) {
+            if (next === "full_access") {
+              setPendingRiskyChange("full_access");
               return;
             }
             update({ access_mode: next });
@@ -639,12 +644,8 @@ function AcpRuntimeConfigField({
           showSearch={false}
           className={dropdownClass}
           onChange={(next) => {
-            if (
-              next === "auto_allow" &&
-              !window.confirm(
-                "自动允许会跳过 ACP 工具确认。确认对该 Agent 启用？",
-              )
-            ) {
+            if (next === "auto_allow") {
+              setPendingRiskyChange("auto_allow");
               return;
             }
             update({ approval_mode: next });
@@ -714,6 +715,35 @@ function AcpRuntimeConfigField({
           onBlur={() => void onCommit()}
         />
       </label>
+      {pendingRiskyChange && (
+        <ConfirmationDialog
+          idPrefix="agent-acp-permission-confirmation"
+          title={
+            pendingRiskyChange === "full_access"
+              ? t("permissions.fullAccessAgentConfirmTitle")
+              : "启用自动允许？"
+          }
+          description={
+            pendingRiskyChange === "full_access"
+              ? t("permissions.fullAccessAgentConfirmDescription")
+              : "自动允许会跳过 ACP 工具确认。请仅对可信 Agent 启用。"
+          }
+          confirmLabel="确认启用"
+          cancelLabel="取消"
+          escLabel="Esc 取消"
+          tone="warning"
+          onCancel={() => setPendingRiskyChange(null)}
+          onConfirm={() => {
+            const next = pendingRiskyChange;
+            setPendingRiskyChange(null);
+            update(
+              next === "full_access"
+                ? { access_mode: next }
+                : { approval_mode: next },
+            );
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1615,6 +1645,7 @@ function AgentConfigSidebar({
                     value={formData.acp}
                     onChange={handleConfigFieldChange}
                     onCommit={runAutoSave}
+                    t={t}
                   />
                 )}
                 {schemaFields.map(([fieldKey, property]) => (

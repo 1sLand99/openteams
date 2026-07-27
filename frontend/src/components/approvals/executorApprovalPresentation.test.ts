@@ -3,6 +3,7 @@ import {
   approvalOptionLabel,
   groupApprovalRequests,
   partitionApprovalOptions,
+  shouldShowApprovalSummary,
   type ApprovalTranslate,
 } from './executorApprovalPresentation';
 import type { ChatExecutorApprovalRequest } from '../../../../shared/types';
@@ -19,7 +20,7 @@ assert.equal(
     { option_id: 'once', kind: 'allow_once', label: 'Proceed' },
     translate,
   ),
-  'Allow once',
+  'Allow',
 );
 assert.equal(
   approvalOptionLabel(
@@ -27,6 +28,13 @@ assert.equal(
     translate,
   ),
   'Always allow',
+);
+assert.equal(
+  approvalOptionLabel(
+    { option_id: 'deny', kind: 'reject_once', label: 'Stop' },
+    translate,
+  ),
+  'Deny',
 );
 assert.equal(
   approvalOptionLabel(
@@ -65,5 +73,9 @@ assert.deepEqual(
     { member: 'member-b', requests: ['b-1'] },
   ],
 );
+
+assert.equal(shouldShowApprovalSummary(1, 1), false);
+assert.equal(shouldShowApprovalSummary(2, 1), true);
+assert.equal(shouldShowApprovalSummary(2, 2), true);
 
 console.log('executor approval presentation tests passed');

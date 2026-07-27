@@ -194,6 +194,26 @@ check(
 );
 
 check(
+  "risky ACP member permissions use the in-app confirmation dialog",
+  permissionsTabSource.includes("<ConfirmationDialog") &&
+    permissionsTabSource.includes(
+      'idPrefix="member-acp-permission-confirmation"',
+    ) &&
+    permissionsTabSource.includes(
+      't("permissions.fullAccessHighRisk")',
+    ) &&
+    permissionsTabSource.includes(
+      't("permissions.fullAccessMemberConfirmTitle")',
+    ) &&
+    permissionsTabSource.includes(
+      't("permissions.fullAccessMemberConfirmDescription")',
+    ) &&
+    !permissionsTabSource.includes("Full Access") &&
+    !permissionsTabSource.includes("window.confirm"),
+  permissionsTabSource,
+);
+
+check(
   "member name field keeps the inherited agent name as placeholder only",
   source.includes('memberName: member.member_name?.trim() ?? ""') &&
     source.includes(

@@ -30,5 +30,20 @@ assert.equal(
   3,
 );
 assert.doesNotMatch(source, /text-white\/40 uppercase/u);
+assert.match(
+  source,
+  /idPrefix="agent-acp-permission-confirmation"[\s\S]*?<ConfirmationDialog|<ConfirmationDialog[\s\S]*?idPrefix="agent-acp-permission-confirmation"/u,
+);
+assert.match(source, /label: t\("permissions\.fullAccessHighRisk"\)/u);
+assert.match(
+  source,
+  /t\("permissions\.fullAccessAgentConfirmTitle"\)/u,
+);
+assert.match(
+  source,
+  /t\("permissions\.fullAccessAgentConfirmDescription"\)/u,
+);
+assert.doesNotMatch(source, /Full Access/u);
+assert.doesNotMatch(source, /window\.confirm/u);
 
 console.log('AgentsPage runtime configuration: PASS');

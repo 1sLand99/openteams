@@ -527,7 +527,12 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
           parsed.type === 'executor_approval_expired') &&
         parsed.session_id === sid
       ) {
-        notifyExecutorApprovalChanged(sid);
+        notifyExecutorApprovalChanged({
+          sessionId: sid,
+          type: parsed.type,
+          requestId: parsed.request_id,
+          request: parsed.request,
+        });
         void refreshMembers();
         scheduleInboxRefresh();
         return;
