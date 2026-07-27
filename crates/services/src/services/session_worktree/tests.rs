@@ -1091,18 +1091,20 @@ async fn cherry_pick_merge_preserves_session_commit_without_merge_commit() {
     git(&worktree_path, &["add", "."]);
     git(&worktree_path, &["commit", "-m", "second session commit"]);
 
+    // After merge, new commits on the session branch transition the worktree
+    // back to `Dirty` so the user can re-merge or discard.
     let refreshed = service
         .get_latest_for_session(session_id)
         .await
         .expect("refresh merged worktree")
         .expect("worktree row");
-    assert_eq!(refreshed.status, SessionWorktreeStatus::Merged);
-    assert!(!refreshed.has_unmerged_commits);
+    assert_eq!(refreshed.status, SessionWorktreeStatus::Dirty);
+    assert!(refreshed.has_unmerged_commits);
 
     service
         .discard_worktree(session_id)
         .await
-        .expect("cleanup merged worktree");
+        .expect("cleanup dirty worktree");
     assert!(
         git_fails(&base, &["rev-parse", "--verify", &worktree.branch_name]),
         "discard should delete the session worktree branch"
