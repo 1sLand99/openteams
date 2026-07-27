@@ -53,7 +53,9 @@ pub enum AcpApprovalMode {
 pub enum AcpAuthSelection {
     #[default]
     Auto,
-    MethodId { method_id: String },
+    MethodId {
+        method_id: String,
+    },
 }
 
 /// Partial ACP settings. `None` means inherit from the lower-priority layer.
