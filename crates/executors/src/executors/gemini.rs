@@ -42,8 +42,6 @@ pub struct Gemini {
     )]
     pub thinking_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp: Option<AcpExecutionOptions>,
     #[serde(flatten)]
     pub cmd: CmdOverrides,
@@ -59,6 +57,7 @@ pub struct Gemini {
 
 impl Gemini {
     const BASE_COMMAND: &'static str = "gemini";
+    const TRUST_WORKSPACE_ENV: &'static str = "GEMINI_CLI_TRUST_WORKSPACE";
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         let mut builder = CommandBuilder::new(Self::BASE_COMMAND);
@@ -68,15 +67,28 @@ impl Gemini {
         apply_overrides(builder, &self.cmd)
     }
 
+    fn workspace_trusted_env(env: &ExecutionEnv) -> ExecutionEnv {
+        let mut runtime_env = env.clone();
+        if !runtime_env.contains_key(Self::TRUST_WORKSPACE_ENV) {
+            runtime_env.insert(Self::TRUST_WORKSPACE_ENV, "true");
+        }
+        runtime_env
+    }
+
+    fn acp_client_services(full_access: bool) -> AcpClientServicePolicy {
+        // Gemini runs beside OpenTeams and has its own filesystem service. Do
+        // not advertise ACP FS callbacks: Gemini relies on native ENOENT when
+        // deciding whether `write_file` is creating a new file.
+        AcpClientServicePolicy {
+            terminal: true,
+            full_access,
+            ..AcpClientServicePolicy::default()
+        }
+    }
+
     async fn acp_harness(&self) -> Result<AcpAgentHarness, ExecutorError> {
         let options = self.acp.clone().unwrap_or_default();
-        let approval_policy = match options.approval_mode.unwrap_or_else(|| {
-            if self.yolo.unwrap_or(false) {
-                AcpApprovalMode::AutoAllow
-            } else {
-                AcpApprovalMode::Ask
-            }
-        }) {
+        let approval_policy = match options.approval_mode.unwrap_or_default() {
             AcpApprovalMode::Ask => AcpApprovalPolicy::Ask,
             AcpApprovalMode::AutoAllow => AcpApprovalPolicy::AutoAllow,
             AcpApprovalMode::AutoReject => AcpApprovalPolicy::AutoReject,
@@ -89,13 +101,7 @@ impl Gemini {
         let mut harness = AcpAgentHarness::new()
             .with_approval_policy(approval_policy)
             .with_additional_directories(additional_directories)
-            .with_client_services(AcpClientServicePolicy {
-                read_text_file: true,
-                write_text_file: true,
-                terminal: true,
-                full_access,
-                ..AcpClientServicePolicy::default()
-            });
+            .with_client_services(Self::acp_client_services(full_access));
         if let Some(AcpAuthSelection::MethodId { method_id }) = options.auth {
             harness = harness.with_auth_method_id(method_id);
         }
@@ -132,8 +138,23 @@ impl Gemini {
         current_dir: &Path,
         env: &ExecutionEnv,
     ) -> Result<ExecutionEnv, ExecutorError> {
-        let path = write_mcp_isolation_settings(current_dir, "gemini-acp-settings").await?;
-        let mut runtime_env = env.clone();
+        // Gemini CLI 0.52 creates a non-resumable transcript while loading an
+        // ACP session. Its next-process retention cleanup groups files by the
+        // session short ID and can delete the resumable transcript with that
+        // placeholder. Disable vendor cleanup for OpenTeams-managed ACP runs.
+        let path = write_mcp_isolation_settings(
+            current_dir,
+            "gemini-acp-settings",
+            serde_json::json!({
+                "general": {
+                    "sessionRetention": {
+                        "enabled": false
+                    }
+                }
+            }),
+        )
+        .await?;
+        let mut runtime_env = Self::workspace_trusted_env(env);
         runtime_env.insert(
             "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
             path.to_string_lossy().to_string(),
@@ -153,13 +174,14 @@ impl StandardCodingAgentExecutor for Gemini {
         current_dir: &Path,
         env: &ExecutionEnv,
     ) -> Result<Option<Vec<String>>, ExecutorError> {
+        let runtime_env = Self::workspace_trusted_env(env);
         let config_paths = runner_config_paths([
             self.default_mcp_config_path(),
             dirs::home_dir().map(|home| home.join(".gemini").join("settings.jsonc")),
         ]);
         discover_from_sources(
             current_dir,
-            env,
+            &runtime_env,
             &self.cmd,
             self.model.as_deref(),
             config_paths,
@@ -174,11 +196,12 @@ impl StandardCodingAgentExecutor for Gemini {
         current_dir: &Path,
         env: &ExecutionEnv,
     ) -> Result<Option<AcpCapabilityProbe>, ExecutorError> {
+        let runtime_env = Self::workspace_trusted_env(env);
         Ok(Some(
             super::acp::runtime::probe_acp_command(
                 self.build_command_builder()?.build_initial()?,
                 current_dir,
-                env,
+                &runtime_env,
                 &self.cmd,
             )
             .await?,
@@ -275,12 +298,94 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workspace_is_trusted_by_default() {
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let runtime_env = Gemini::workspace_trusted_env(&env);
+
+        assert_eq!(
+            runtime_env.get(Gemini::TRUST_WORKSPACE_ENV),
+            Some(&"true".to_string())
+        );
+    }
+
+    #[test]
+    fn explicit_workspace_trust_override_is_preserved() {
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert(Gemini::TRUST_WORKSPACE_ENV, "false");
+
+        let runtime_env = Gemini::workspace_trusted_env(&env);
+
+        assert_eq!(
+            runtime_env.get(Gemini::TRUST_WORKSPACE_ENV),
+            Some(&"false".to_string())
+        );
+    }
+
+    #[test]
+    fn acp_uses_gemini_local_filesystem() {
+        let services = Gemini::acp_client_services(false);
+
+        assert!(!services.read_text_file);
+        assert!(!services.write_text_file);
+        assert!(services.terminal);
+        assert!(!services.full_access);
+    }
+
+    #[tokio::test]
+    async fn acp_disables_gemini_session_retention_cleanup() {
+        let workspace =
+            std::env::temp_dir().join(format!("openteams-gemini-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+        let gemini = Gemini {
+            append_prompt: AppendPrompt::default(),
+            model: None,
+            thinking_effort: None,
+            acp: None,
+            cmd: CmdOverrides::default(),
+            acp_mcp_policy: AcpMcpPolicy::default(),
+            approvals: None,
+        };
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let runtime_env = gemini
+            .acp_runtime_env(&workspace, &env)
+            .await
+            .expect("ACP runtime environment");
+        let settings_path = runtime_env
+            .get("GEMINI_CLI_SYSTEM_SETTINGS_PATH")
+            .expect("Gemini system settings path");
+        let settings: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(settings_path)
+                .await
+                .expect("read Gemini system settings"),
+        )
+        .expect("parse Gemini system settings");
+
+        assert_eq!(
+            settings["general"]["sessionRetention"]["enabled"],
+            serde_json::json!(false)
+        );
+        assert!(
+            settings["mcpServers"]
+                .as_object()
+                .expect("server map")
+                .is_empty()
+        );
+
+        tokio::fs::remove_dir_all(workspace)
+            .await
+            .expect("remove workspace");
+    }
+
+    #[test]
     fn command_builder_uses_current_acp_flag() {
         let gemini = Gemini {
             append_prompt: AppendPrompt::default(),
             model: Some("gemini-3-pro-preview".to_string()),
             thinking_effort: None,
-            yolo: Some(true),
             acp: None,
             cmd: CmdOverrides::default(),
             acp_mcp_policy: AcpMcpPolicy::default(),

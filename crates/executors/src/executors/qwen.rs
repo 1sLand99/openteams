@@ -39,8 +39,6 @@ pub struct QwenCode {
     )]
     pub thinking_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp: Option<AcpExecutionOptions>,
     #[serde(flatten)]
     pub cmd: CmdOverrides,
@@ -61,13 +59,7 @@ impl QwenCode {
         self.acp
             .as_ref()
             .and_then(|options| options.approval_mode)
-            .unwrap_or_else(|| {
-                if self.yolo.unwrap_or(false) {
-                    AcpApprovalMode::AutoAllow
-                } else {
-                    AcpApprovalMode::Ask
-                }
-            })
+            .unwrap_or_default()
     }
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
@@ -154,7 +146,9 @@ impl QwenCode {
         current_dir: &Path,
         env: &ExecutionEnv,
     ) -> Result<ExecutionEnv, ExecutorError> {
-        let path = write_mcp_isolation_settings(current_dir, "qwen-acp-settings").await?;
+        let path =
+            write_mcp_isolation_settings(current_dir, "qwen-acp-settings", serde_json::json!({}))
+                .await?;
         let mut runtime_env = env.clone();
         runtime_env.insert(
             "QWEN_CODE_SYSTEM_SETTINGS_PATH",
@@ -289,12 +283,11 @@ impl StandardCodingAgentExecutor for QwenCode {
 mod tests {
     use super::*;
 
-    fn qwen_with_approval(approval_mode: Option<AcpApprovalMode>, yolo: Option<bool>) -> QwenCode {
+    fn qwen_with_approval(approval_mode: Option<AcpApprovalMode>) -> QwenCode {
         QwenCode {
             append_prompt: AppendPrompt::default(),
             model: Some("qwen3-coder-plus".to_string()),
             thinking_effort: None,
-            yolo,
             acp: Some(AcpExecutionOptions {
                 approval_mode,
                 ..Default::default()
@@ -320,7 +313,7 @@ mod tests {
             AcpApprovalMode::AutoReject,
             AcpApprovalMode::AutoAllow,
         ] {
-            let (program, args) = command_parts(&qwen_with_approval(Some(mode), None));
+            let (program, args) = command_parts(&qwen_with_approval(Some(mode)));
             assert_eq!(program, "qwen");
             assert_eq!(args.iter().filter(|arg| *arg == "--acp").count(), 1);
             assert_eq!(
@@ -339,18 +332,18 @@ mod tests {
     }
 
     #[test]
-    fn explicit_acp_mode_takes_priority_over_legacy_yolo() {
-        let qwen = qwen_with_approval(Some(AcpApprovalMode::AutoReject), Some(true));
+    fn explicit_acp_mode_is_used() {
+        let qwen = qwen_with_approval(Some(AcpApprovalMode::AutoReject));
         assert_eq!(qwen.effective_approval_mode(), AcpApprovalMode::AutoReject);
 
-        let legacy = qwen_with_approval(None, Some(true));
-        assert_eq!(legacy.effective_approval_mode(), AcpApprovalMode::AutoAllow);
+        let default = qwen_with_approval(None);
+        assert_eq!(default.effective_approval_mode(), AcpApprovalMode::Ask);
     }
 
     #[test]
     fn additional_params_cannot_override_qwen_approval_mode() {
-        let mut qwen = qwen_with_approval(Some(AcpApprovalMode::Ask), None);
-        qwen.cmd.additional_params = Some(vec!["--approval-mode yolo".to_string()]);
+        let mut qwen = qwen_with_approval(Some(AcpApprovalMode::Ask));
+        qwen.cmd.additional_params = Some(vec!["--approval-mode auto".to_string()]);
 
         let error = qwen
             .build_command_builder()

@@ -82,17 +82,29 @@ pub fn resolve_effective_mcp_config(
 pub async fn write_mcp_isolation_settings(
     current_dir: &Path,
     prefix: &str,
+    additional_settings: Value,
 ) -> Result<std::path::PathBuf, ExecutorError> {
     let directory = current_dir.join(".openteams").join("tmp");
     tokio::fs::create_dir_all(&directory)
         .await
         .map_err(ExecutorError::Io)?;
     let path = directory.join(format!("{prefix}-{}.json", uuid::Uuid::new_v4()));
-    let body = serde_json::to_vec_pretty(&serde_json::json!({ "mcpServers": {} }))?;
+    let body = serde_json::to_vec_pretty(&build_mcp_isolation_settings(additional_settings)?)?;
     tokio::fs::write(&path, body)
         .await
         .map_err(ExecutorError::Io)?;
     Ok(path)
+}
+
+fn build_mcp_isolation_settings(mut additional_settings: Value) -> Result<Value, ExecutorError> {
+    let Some(root) = additional_settings.as_object_mut() else {
+        return Err(ExecutorError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ACP isolation settings must be a JSON object",
+        )));
+    };
+    root.insert("mcpServers".to_string(), Value::Object(Default::default()));
+    Ok(additional_settings)
 }
 
 fn parse_mcp_servers(value: &Value) -> Result<Vec<McpServer>, ExecutorError> {
@@ -332,6 +344,34 @@ mod tests {
         let effective = filter_canonical_servers(&value, &policy).expect("effective config");
         assert!(
             effective["mcpServers"]
+                .as_object()
+                .expect("server map")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn isolation_settings_preserve_vendor_overrides_and_clear_mcp_servers() {
+        let settings = build_mcp_isolation_settings(serde_json::json!({
+            "general": {
+                "sessionRetention": {
+                    "enabled": false
+                }
+            },
+            "mcpServers": {
+                "must-not-leak": {
+                    "command": "/bin/echo"
+                }
+            }
+        }))
+        .expect("isolation settings");
+
+        assert_eq!(
+            settings["general"]["sessionRetention"]["enabled"],
+            serde_json::json!(false)
+        );
+        assert!(
+            settings["mcpServers"]
                 .as_object()
                 .expect("server map")
                 .is_empty()
