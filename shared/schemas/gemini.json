@@ -25,12 +25,6 @@
         "null"
       ]
     },
-    "yolo": {
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
     "acp": {
       "description": "Partial ACP settings. `None` means inherit from the lower-priority layer.",
       "type": [

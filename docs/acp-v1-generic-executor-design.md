@@ -73,7 +73,7 @@ Qwen Code 的现状反推通用设计。通用核心只作为 Gemini/Qwen 的内
 
 - `AcpAgentHarness::new()` 默认使用 `gemini_sessions`。
 - 通用 Harness 中硬编码 `runtime_agent = gemini` 和 `provider_id = google`。
-- Gemini/Qwen 的 model、thinking effort、yolo 由 CLI 参数或临时环境配置实现。
+- Gemini/Qwen 的 model、thinking effort 由 CLI 参数或临时环境配置实现。
 - Qwen 通过 Gemini 模块 re-export Harness，形成不必要的反向依赖。
 
 ### 3.3 Session 与事件管线问题
@@ -90,7 +90,7 @@ Qwen Code 的现状反推通用设计。通用核心只作为 Gemini/Qwen 的内
 
 - 是否注入 `ExecutorApprovalService` 被同时当作“是否需要审批”和“自动允许”开关。
 - 自动允许在找不到 allow 选项时会退到第一个任意选项，可能意外选择拒绝。
-- `yolo` 是 Gemini/Qwen 的厂商配置名，不适合作为 ACP 通用语义。
+- 厂商私有的免审批开关不适合作为 ACP 通用语义。
 
 ## 4. 目标与非目标
 
@@ -314,12 +314,10 @@ OpenTeams 固定请求 `ProtocolVersion::V1`，同时发送：
 
 不得退回“选择 options 中第一个值”。
 
-### 8.2 与现有配置的迁移
+### 8.2 配置边界
 
-- Gemini/Qwen 的 `yolo: true` 迁移为 `auto_allow`。
-- `yolo: false` 迁移为 `ask`。
 - 通用 ACP 核心默认使用 `ask`。
-- 迁移期间保留旧 profile 的反序列化兼容，但新配置和 UI 不再暴露 `yolo`。
+- 审批策略只由结构化 ACP 配置表达，不读取厂商私有的历史免审批开关。
 
 ### 8.3 用户拒绝
 

@@ -34,8 +34,6 @@ pub struct KimiCode {
     pub append_prompt: AppendPrompt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub yolo: Option<bool>,
     #[serde(flatten)]
     pub cmd: CmdOverrides,
 }
@@ -65,10 +63,6 @@ impl KimiCode {
         if let Some(model) = &self.model {
             let model = Self::normalize_model_name(model);
             builder = builder.extend_params(["--model".to_string(), model]);
-        }
-
-        if self.yolo.unwrap_or(false) {
-            builder = builder.extend_params(["--yolo"]);
         }
 
         apply_overrides(builder, &self.cmd)
@@ -652,7 +646,6 @@ mod tests {
         let executor = KimiCode {
             append_prompt: AppendPrompt::default(),
             model: Some("kimi-k2.5".to_string()),
-            yolo: None,
             cmd: Default::default(),
         };
 
@@ -674,7 +667,6 @@ mod tests {
         let executor = KimiCode {
             append_prompt: AppendPrompt::default(),
             model: None,
-            yolo: None,
             cmd: Default::default(),
         };
         let msg_store = Arc::new(MsgStore::new());

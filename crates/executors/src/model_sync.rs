@@ -322,7 +322,6 @@ mod tests {
         let base = CodingAgent::KimiCode(crate::executors::kimi::KimiCode {
             append_prompt: AppendPrompt::default(),
             model: None,
-            yolo: None,
             cmd: Default::default(),
         });
 

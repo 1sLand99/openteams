@@ -329,8 +329,7 @@ M3 和 M4 可以在 M2 的类型与 Session 接口稳定后并行开发；M6 只
 任务：
 
 - 将 Gemini 的启动命令、环境和 availability 保留在 adapter，协议行为交给通用核心。
-- `yolo: true/false` 反序列化兼容映射为 `auto_allow/ask`；新 schema/UI 不再新增
-  `yolo` 配置。
+- 审批策略只读取结构化 ACP 配置，不兼容厂商私有的历史免审批开关。
 - model、thought level、mode 优先使用 Session config options。
 - token 使用稳定 usage update；不得在通用核心写死 Gemini/Google metadata。
 - Follow-up 优先原生 resume/load；若受支持版本仍有明确协议偏差，只能在 Gemini

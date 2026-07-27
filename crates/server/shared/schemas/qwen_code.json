@@ -18,12 +18,6 @@
         "null"
       ]
     },
-    "yolo": {
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
     "base_command_override": {
       "title": "Base Command Override",
       "description": "Override the base command with a custom command",

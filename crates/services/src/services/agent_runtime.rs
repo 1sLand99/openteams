@@ -1295,7 +1295,6 @@ mod tests {
         CodingAgent::KimiCode(KimiCode {
             append_prompt: AppendPrompt::default(),
             model: model.map(str::to_string),
-            yolo: None,
             cmd: Default::default(),
         })
     }
@@ -1575,7 +1574,7 @@ mod tests {
         let mut runtime = default_config(runner);
         runtime.run_mode = AgentRunMode::Disabled;
         runtime.executor_options = serde_json::json!({
-            "yolo": true,
+            "model": "kimi-k2.6",
             "cmd": {
                 "base_command_override": "kimi-dev"
             }
@@ -1593,7 +1592,7 @@ mod tests {
         assert_eq!(restored_config.runner_type, runner);
         assert_eq!(restored_config.run_mode, AgentRunMode::Disabled);
         assert_eq!(restored_config.env_json["KIMI_API_KEY"], "secret");
-        assert_eq!(restored_config.executor_options["yolo"], true);
+        assert_eq!(restored_config.executor_options["model"], "kimi-k2.6");
     }
 
     #[test]
@@ -1601,8 +1600,7 @@ mod tests {
         let runner = BaseCodingAgent::KimiCode;
         let mut runtime = default_config(runner);
         runtime.executor_options = serde_json::json!({
-            "model": "kimi-k2.6",
-            "yolo": true
+            "model": "kimi-k2.6"
         });
         let mut store = AgentRuntimeStore::default();
         store.configs.insert(runner, runtime);
@@ -1615,7 +1613,7 @@ mod tests {
         let CodingAgent::KimiCode(config) = executor else {
             panic!("expected KimiCode executor");
         };
-        assert_eq!(config.yolo, Some(true));
+        assert_eq!(config.model.as_deref(), Some("kimi-k2.6"));
     }
 
     #[test]

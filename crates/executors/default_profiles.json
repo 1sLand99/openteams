@@ -96,43 +96,31 @@
     },
     "GEMINI": {
       "DEFAULT": {
-        "GEMINI": {
-          "yolo": true
-        }
+        "GEMINI": {}
       },
       "FLASH": {
         "GEMINI": {
-          "model": "gemini-2.5-flash",
-          "yolo": true
+          "model": "gemini-2.5-flash"
         }
       },
       "FLASH_LITE": {
         "GEMINI": {
-          "model": "gemini-2.5-flash-lite",
-          "yolo": true
+          "model": "gemini-2.5-flash-lite"
         }
       },
       "PRO": {
         "GEMINI": {
-          "model": "gemini-2.5-pro",
-          "yolo": true
+          "model": "gemini-2.5-pro"
         }
       },
       "FLASH_PREVIEW": {
         "GEMINI": {
-          "model": "gemini-3-flash-preview",
-          "yolo": true
+          "model": "gemini-3-flash-preview"
         }
       },
       "PRO_PREVIEW": {
         "GEMINI": {
-          "model": "gemini-3-pro-preview",
-          "yolo": true
-        }
-      },
-      "APPROVALS": {
-        "GEMINI": {
-          "yolo": false
+          "model": "gemini-3-pro-preview"
         }
       }
     },
@@ -228,25 +216,16 @@
     },
     "QWEN_CODE": {
       "DEFAULT": {
-        "QWEN_CODE": {
-          "yolo": true
-        }
+        "QWEN_CODE": {}
       },
       "QWEN_3_CODER_PLUS": {
         "QWEN_CODE": {
-          "model": "qwen3-coder-plus",
-          "yolo": true
+          "model": "qwen3-coder-plus"
         }
       },
       "QWEN_3_CODER_FLASH": {
         "QWEN_CODE": {
-          "model": "qwen3-coder-flash",
-          "yolo": true
-        }
-      },
-      "APPROVALS": {
-        "QWEN_CODE": {
-          "yolo": false
+          "model": "qwen3-coder-flash"
         }
       }
     },

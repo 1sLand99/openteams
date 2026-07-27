@@ -294,6 +294,19 @@ const getModelSourceLabel = (
   }
 };
 
+const getCommandSourceLabel = (source: string, t: TranslateFn): string => {
+  switch (source) {
+    case "override":
+      return t("agents.details.commandSourceOverride");
+    case "native":
+      return t("agents.details.commandSourceNative");
+    case "default":
+      return t("agents.details.commandSourceDefault");
+    default:
+      return source;
+  }
+};
+
 const createStatusFilterOptions = (t: TranslateFn): DropdownSelectOption[] =>
   [
     { key: "all", label: t("agents.filter.all") },
@@ -584,24 +597,24 @@ function AcpRuntimeConfigField({
   };
   const inputClass =
     "h-8 w-full border-x-0 border-b border-t-0 border-transparent bg-transparent px-0 font-mono text-[12px] text-[var(--ink)] outline-none hover:border-white/10 focus:border-white/20";
+  const labelClass =
+    "block truncate text-[12px] font-medium leading-[1.35] text-[var(--ink-subtle)]";
+  const dropdownClass =
+    "w-full min-w-0 hover:[&>button]:!border-white/10 hover:[&>button]:!bg-white/[0.04] focus-within:[&>button]:!border-white/20 focus-within:[&>button]:!bg-white/[0.04] [&>button]:h-8 [&>button]:!rounded-none [&>button]:!border-x-0 [&>button]:!border-b [&>button]:!border-t-0 [&>button]:!border-transparent [&>button]:!bg-transparent [&>button]:px-0 [&>button]:py-0 [&>button]:font-mono [&>button]:text-[12px]";
 
   return (
-    <div className="my-3 space-y-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3">
-      <div>
-        <p className="text-[12px] font-semibold text-[var(--ink)]">
-          ACP 权限与审批
-        </p>
-        <p className="mt-1 text-[11px] text-[var(--ink-tertiary)]">
-          Gemini/Qwen 原生 CLI 的全局默认配置，成员配置可覆盖这些值。
-        </p>
-      </div>
-      <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 text-[12px] text-[var(--ink-subtle)]">
-        文件权限
-        <select
+    <div className="space-y-1">
+      <div className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
+        <span className={labelClass}>文件权限</span>
+        <DropdownSelect
           value={accessMode}
-          className={inputClass}
-          onChange={(event) => {
-            const next = event.target.value;
+          options={[
+            { id: "workspace_only", label: "仅工作区" },
+            { id: "full_access", label: "Full Access（高风险）" },
+          ]}
+          showSearch={false}
+          className={dropdownClass}
+          onChange={(next) => {
             if (
               next === "full_access" &&
               !window.confirm(
@@ -612,18 +625,20 @@ function AcpRuntimeConfigField({
             }
             update({ access_mode: next });
           }}
-        >
-          <option value="workspace_only">仅工作区</option>
-          <option value="full_access">Full Access（高风险）</option>
-        </select>
-      </label>
-      <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 text-[12px] text-[var(--ink-subtle)]">
-        审批策略
-        <select
+        />
+      </div>
+      <div className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
+        <span className={labelClass}>审批策略</span>
+        <DropdownSelect
           value={approvalMode}
-          className={inputClass}
-          onChange={(event) => {
-            const next = event.target.value;
+          options={[
+            { id: "ask", label: "每次询问" },
+            { id: "auto_allow", label: "自动允许（高风险）" },
+            { id: "auto_reject", label: "自动拒绝" },
+          ]}
+          showSearch={false}
+          className={dropdownClass}
+          onChange={(next) => {
             if (
               next === "auto_allow" &&
               !window.confirm(
@@ -634,33 +649,31 @@ function AcpRuntimeConfigField({
             }
             update({ approval_mode: next });
           }}
-        >
-          <option value="ask">每次询问</option>
-          <option value="auto_allow">自动允许（高风险）</option>
-          <option value="auto_reject">自动拒绝</option>
-        </select>
-      </label>
-      <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 text-[12px] text-[var(--ink-subtle)]">
-        认证方式
-        <select
+        />
+      </div>
+      <div className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
+        <span className={labelClass}>认证方式</span>
+        <DropdownSelect
           value={authMode}
-          className={inputClass}
-          onChange={(event) =>
+          options={[
+            { id: "auto", label: "自动（CLI 登录态）" },
+            { id: "method_id", label: "指定方法 ID" },
+          ]}
+          showSearch={false}
+          className={dropdownClass}
+          onChange={(next) =>
             update({
               auth:
-                event.target.value === "auto"
+                next === "auto"
                   ? { type: "auto" }
                   : { type: "method_id", method_id: authMethodId },
             })
           }
-        >
-          <option value="auto">自动（CLI 登录态）</option>
-          <option value="method_id">指定方法 ID</option>
-        </select>
-      </label>
+        />
+      </div>
       {authMode === "method_id" && (
-        <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 text-[12px] text-[var(--ink-subtle)]">
-          认证方法 ID
+        <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
+          <span className={labelClass}>认证方法 ID</span>
           <input
             value={authMethodId}
             className={inputClass}
@@ -680,8 +693,8 @@ function AcpRuntimeConfigField({
           />
         </label>
       )}
-      <label className="grid grid-cols-[128px_minmax(0,1fr)] items-start gap-3 text-[12px] text-[var(--ink-subtle)]">
-        附加目录
+      <label className="grid grid-cols-[128px_minmax(0,1fr)] items-start gap-3 py-1.5">
+        <span className={`${labelClass} pt-1`}>附加目录</span>
         <textarea
           value={directories.join("\n")}
           rows={3}
@@ -1182,8 +1195,6 @@ function AgentConfigSidebar({
   const saveInFlightRef = useRef(false);
   const savePendingRef = useRef(false);
   const runAutoSaveRef = useRef<() => Promise<void>>(async () => {});
-  const latestRunnerRef = useRef(runner);
-  latestRunnerRef.current = runner;
   const schema = agentConfigSchemas[runner.runner_type];
   const diagnosticsFailedLabel = t("agents.diagnostics.failed");
   const diagnosticsFailedLabelRef = useRef(diagnosticsFailedLabel);
@@ -1203,11 +1214,12 @@ function AgentConfigSidebar({
     (diagnosticsLoading
       ? t("agents.details.loading")
       : t("agents.details.notReported"));
+  const discoveredCliVersion = isAcpRunner(runner.runner_type)
+    ? currentDiagnostics?.acp_probe?.agent_version
+    : currentDiagnostics?.version;
   const cliVersion = diagnosticsLoading
     ? t("agents.details.checking")
-    : (currentDiagnostics?.version ??
-      runner.version ??
-      t("agents.details.notReported"));
+    : (discoveredCliVersion?.trim() || t("agents.details.notReported"));
   const modelOptions =
     currentDiagnostics?.discovered_models ?? runner.discovered_models;
   const modelSource = currentDiagnostics?.model_source ?? runner.model_source;
@@ -1326,7 +1338,6 @@ function AgentConfigSidebar({
             availability: runner.availability,
             discovered_models: runner.discovered_models,
             model_source: runner.model_source,
-            version: runner.version,
             last_checked_at: runner.last_checked_at,
             last_error: runner.last_error,
             run_mode: runner.run_mode,
@@ -1378,8 +1389,6 @@ function AgentConfigSidebar({
       .getDiagnostics(runner.runner_type)
       .then((result) => {
         if (active) {
-          const latestRunner = latestRunnerRef.current;
-          if (!shouldApplyRuntimeSnapshot(latestRunner, result)) return;
           setDiagnostics(result);
           onDiagnosticsLoadedRef.current(result);
         }
@@ -1400,7 +1409,7 @@ function AgentConfigSidebar({
     return () => {
       active = false;
     };
-  }, [runner.runner_type, runner.last_checked_at]);
+  }, [runner.runner_type]);
 
   const handleConfigFieldChange = (
     key: string,
@@ -1504,76 +1513,22 @@ function AgentConfigSidebar({
               label={t("agents.details.cliVersion")}
               value={cliVersion}
             />
+            {currentDiagnostics?.command_source && (
+              <DetailRow
+                label={t("agents.details.commandSource")}
+                value={getCommandSourceLabel(
+                  currentDiagnostics.command_source,
+                  t,
+                )}
+              />
+            )}
             {currentDiagnostics?.resolved_command && (
               <DetailRow
-                label="Resolved command"
+                label={t("agents.details.baseCommand")}
                 value={currentDiagnostics.resolved_command}
               />
             )}
-            {currentDiagnostics?.command_source && (
-              <DetailRow
-                label="Command source"
-                value={currentDiagnostics.command_source}
-              />
-            )}
-            {currentDiagnostics?.acp_probe && (
-              <>
-                <DetailRow
-                  label="ACP protocol"
-                  value={currentDiagnostics.acp_probe.protocol_version}
-                />
-                <DetailRow
-                  label="ACP agent"
-                  value={[
-                    currentDiagnostics.acp_probe.agent_name,
-                    currentDiagnostics.acp_probe.agent_version,
-                  ]
-                    .filter(Boolean)
-                    .join(" ") || "Unknown"}
-                />
-                <DetailRow
-                  label="ACP auth methods"
-                  value={
-                    currentDiagnostics.acp_probe.auth_methods
-                      .map((method) => `${method.name} (${method.id})`)
-                      .join(", ") || "CLI login state"
-                  }
-                />
-                <DetailRow
-                  label="ACP session capabilities"
-                  value={[
-                    currentDiagnostics.acp_probe.supports_session_list &&
-                      "list",
-                    currentDiagnostics.acp_probe.supports_session_resume &&
-                      "resume",
-                    currentDiagnostics.acp_probe.supports_session_close &&
-                      "close",
-                    currentDiagnostics.acp_probe.supports_session_delete &&
-                      "delete",
-                    currentDiagnostics.acp_probe
-                      .supports_additional_directories &&
-                      "additionalDirectories",
-                  ]
-                    .filter(Boolean)
-                    .join(", ") || "None"}
-                />
-                <DetailRow
-                  label="ACP config options"
-                  value={
-                    currentDiagnostics.acp_probe.config_options.length > 0
-                      ? `${currentDiagnostics.acp_probe.config_options.length} advertised`
-                      : "None advertised"
-                  }
-                />
-              </>
-            )}
           </div>
-          {currentDiagnostics?.acp_probe_error && (
-            <div className="mt-3 flex items-start gap-2 rounded-[8px] border border-amber-500/20 bg-amber-500/5 p-3 text-[14px] leading-relaxed text-amber-400">
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              ACP probe failed: {currentDiagnostics.acp_probe_error}
-            </div>
-          )}
           {diagnosticsError && (
             <div className="mt-3 flex items-start gap-2 rounded-[8px] border border-amber-500/20 bg-amber-500/5 p-3 text-[14px] leading-relaxed text-amber-400">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />

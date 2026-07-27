@@ -1359,7 +1359,7 @@ export enum BaseAgentCapability { SESSION_FORK = "SESSION_FORK", SETUP_HELPER = 
 
 export type ClaudeCode = { append_prompt: AppendPrompt, claude_code_router?: boolean | null, plan?: boolean | null, approvals?: boolean | null, model?: string | null, effort?: string | null, dangerously_skip_permissions?: boolean | null, disable_api_key?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
-export type Gemini = { append_prompt: AppendPrompt, model?: string | null, thinking_effort?: string | null, yolo?: boolean | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+export type Gemini = { append_prompt: AppendPrompt, model?: string | null, thinking_effort?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Amp = { append_prompt: AppendPrompt, model?: string | null, dangerously_allow_all?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
@@ -1399,11 +1399,11 @@ auto_approve: boolean,
  */
 auto_compact: boolean, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
-export type QwenCode = { append_prompt: AppendPrompt, model?: string | null, thinking_effort?: string | null, yolo?: boolean | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+export type QwenCode = { append_prompt: AppendPrompt, model?: string | null, thinking_effort?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Droid = { append_prompt: AppendPrompt, autonomy: Autonomy, model?: string | null, reasoning_effort?: DroidReasoningEffort | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
-export type KimiCode = { append_prompt: AppendPrompt, model?: string | null, yolo?: boolean | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+export type KimiCode = { append_prompt: AppendPrompt, model?: string | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Autonomy = "normal" | "low" | "medium" | "high" | "skip-permissions-unsafe";
 
