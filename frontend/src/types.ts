@@ -7,6 +7,8 @@
 // =============================================================================
 
 import type {
+  AcpConfigOptionSnapshot,
+  AcpExecutionOptions,
   KeyboardShortcutsConfig,
   MemberQueueSnapshot,
 } from '../../shared/types';
@@ -1029,6 +1031,7 @@ export interface MemberExecutionConfig {
   model_name?: string | null;
   thinking_effort?: string | null;
   model_variant?: string | null;
+  acp?: AcpExecutionOptions | null;
 }
 
 export interface BackendChatSessionAgent {
@@ -1236,7 +1239,8 @@ export interface AcpCapabilityProbe {
   supports_session_delete: boolean;
   supports_additional_directories: boolean;
   agent_capabilities: JsonValue;
-  config_options: JsonValue[];
+  config_source: 'none' | 'stable' | 'legacy_model';
+  config_options: AcpConfigOptionSnapshot[];
 }
 
 export type ExecutorVariantConfig = Record<

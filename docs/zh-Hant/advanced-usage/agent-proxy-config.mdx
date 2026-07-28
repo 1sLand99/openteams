@@ -1,28 +1,26 @@
 ---
-title: "Agent 代理設定"
-description: "您可以為您的代理設定不同的模型"
-sidebarTitle: "Agent 代理設定"
+title: "Agent 模型探索"
+description: "重新整理並選擇各 Agent CLI 實際支援的模型"
+sidebarTitle: "Agent 模型探索"
 ---
 
-## 新增代理設定
-您的代理 Agent 可能支援了新模型，或者您想使用的模型在內建設定中沒有，因此您可以在代理設定中新增新的模型設定。
-（openteams-cli 的模型設定會自動同步服務供應商中的模型，您無需手動設定）
+## 重新整理 Agent 模型
+
+openteams 會讀取各 Agent CLI 或 ACP 執行環境回報的模型清單。Agent 頁面不支援手動新增模型 ID，因為這不會讓底層 CLI 取得相應模型能力。
 
 <Steps>
 <Step>
-進入 `設定 -> 代理` 設定頁面
+進入 `設定 -> Agents` 頁面
 ![進入代理設定](../../images/zh/agent_setting.png)
 </Step>
 <Step>
-選擇您要新增模型設定的代理，點擊設定 + 按鈕
-![進入代理設定](../../images/zh/add_agent_config.png)
+選擇 Agent，然後點擊**模型**欄位旁的**重新整理模型**。openteams 會重新查詢已安裝的 CLI 或 ACP 執行環境並更新模型清單。
 </Step>
 <Step>
-新建一個設定，輸入設定名稱
-![進入代理設定](../../images/zh/new_config.png)
-</Step>
-<Step>
-填寫好設定資訊，最重要的就是**模型名稱**，這個必須填寫正確否則 Agent 無法存取模型
-![進入代理設定](../../images/zh/fill_config.png)
+選擇 Agent，然後在**模型**欄位中選擇已探索到的模型。
 </Step>
 </Steps>
+
+頁面右上角的重新整理按鈕用於重新整理 Agent 設定，不用於重新整理模型清單。
+
+對於 openteams CLI 等由服務供應商提供模型的執行環境，請在 `設定 -> 服務供應商` 中設定模型；Agent 模型清單會自動同步。

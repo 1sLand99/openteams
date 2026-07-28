@@ -6,7 +6,7 @@ use std::{
 };
 
 use agent_client_protocol::{
-    Agent, ConnectionTo, Lines,
+    Agent, ConnectionTo, Lines, UntypedMessage,
     schema::{
         ProtocolVersion,
         v1::{
@@ -25,11 +25,13 @@ use agent_client_protocol::{
 };
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use futures::{AsyncBufReadExt, sink};
+use serde::{Deserialize, Serialize};
 use tokio::{io::AsyncWriteExt, process::Command};
 use tokio_util::{compat::TokioAsyncReadCompatExt, sync::CancellationToken};
 
 use super::{
-    AcpApprovalPolicy, AcpAuthMethodInfo, AcpCapabilityProbe, AcpClient, AcpEvent, AcpRunConfig,
+    AcpApprovalPolicy, AcpAuthMethodInfo, AcpCapabilityProbe, AcpClient, AcpConfigChoice,
+    AcpConfigOptionKind, AcpConfigOptionSnapshot, AcpConfigSource, AcpEvent, AcpRunConfig,
     AcpSessionPreferences, mcp::validate_mcp_servers, output::AcpOutput,
 };
 use crate::{
@@ -37,6 +39,7 @@ use crate::{
     command::{CmdOverrides, CommandParts},
     env::ExecutionEnv,
     executors::{ExecutorError, ExecutorExitResult, SpawnedChild},
+    model_identity::model_id_match_score,
 };
 
 #[derive(Debug)]
@@ -44,6 +47,30 @@ enum BootstrapError {
     FollowUpNotSupported(String),
     AuthRequired(String),
     Other(String),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacySessionModelState {
+    current_model_id: String,
+    #[serde(default)]
+    available_models: Vec<LegacyModelInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyModelInfo {
+    model_id: String,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug)]
+struct AcpSessionConfigState {
+    session_id: SessionId,
+    config_options: Vec<SessionConfigOption>,
+    legacy_models: Option<LegacySessionModelState>,
 }
 
 /// Generic stable ACP v1 process and protocol harness.
@@ -84,8 +111,20 @@ impl AcpAgentHarness {
         self
     }
 
-    pub fn with_mode(mut self, mode: impl Into<String>) -> Self {
-        self.config.session.mode = Some(mode.into());
+    pub fn with_native_thought_level_fallback(mut self, thought_level: impl Into<String>) -> Self {
+        self.config.session.thought_level = Some(thought_level.into());
+        self.config.session.native_thought_level_fallback = true;
+        self
+    }
+
+    pub fn with_config_override(mut self, selection: &super::AcpConfigOverride) -> Self {
+        if selection.controls_session_mode() {
+            return self;
+        }
+        self.config.session.options.push(super::AcpConfigSelection {
+            option_id: selection.option_id.clone(),
+            value: selection.value.to_protocol(),
+        });
         self
     }
 
@@ -411,6 +450,7 @@ pub async fn probe_acp_command(
     current_dir: &Path,
     env: &ExecutionEnv,
     cmd_overrides: &CmdOverrides,
+    auth_method_id: Option<String>,
 ) -> Result<AcpCapabilityProbe, ExecutorError> {
     let (program_path, args) = command_parts.into_resolved().await?;
     let mut command = Command::new(program_path);
@@ -433,7 +473,9 @@ pub async fn probe_acp_command(
         child.inner().stdin.take().ok_or_else(|| {
             ExecutorError::Io(std::io::Error::other("ACP probe stdin unavailable"))
         })?;
-    let (probe_tx, probe_rx) = tokio::sync::oneshot::channel();
+    let (probe_tx, probe_rx) =
+        tokio::sync::oneshot::channel::<Result<AcpCapabilityProbe, String>>();
+    let probe_tx = Arc::new(StdMutex::new(Some(probe_tx)));
     let probe_cwd = current_dir.to_path_buf();
 
     tokio::task::spawn_blocking(move || {
@@ -452,13 +494,14 @@ pub async fn probe_acp_command(
                 Ok::<_, std::io::Error>(stdin)
             });
             let transport = Lines::new(outgoing, incoming);
-            let _ = agent_client_protocol::Client
+            let probe_tx_for_connection = Arc::clone(&probe_tx);
+            let connection_result = agent_client_protocol::Client
                 .builder()
                 .connect_with(transport, async move |connection: ConnectionTo<Agent>| {
                     let initialize = connection
                         .send_request(
                             InitializeRequest::new(ProtocolVersion::V1)
-                                .client_capabilities(ClientCapabilities::new())
+                                .client_capabilities(acp_client_capabilities(false, false, false))
                                 .client_info(Implementation::new(
                                     "openteams-probe",
                                     env!("CARGO_PKG_VERSION"),
@@ -466,44 +509,67 @@ pub async fn probe_acp_command(
                         )
                         .block_task()
                         .await?;
+                    if initialize.protocol_version != ProtocolVersion::V1 {
+                        return Err(
+                            agent_client_protocol::Error::invalid_request().data(format!(
+                                "unsupported ACP protocol version {}",
+                                initialize.protocol_version
+                            )),
+                        );
+                    }
                     let session = &initialize.agent_capabilities.session_capabilities;
-                    let config_options = if session.close.is_some() || session.delete.is_some() {
-                        match connection
-                            .send_request(
-                                NewSessionRequest::new(probe_cwd)
-                                    .additional_directories(Vec::new())
-                                    .mcp_servers(Vec::new()),
-                            )
-                            .block_task()
-                            .await
+                    let supports_close = session.close.is_some();
+                    let supports_delete = session.delete.is_some();
+                    if let Some(method_id) = auth_method_id.as_deref() {
+                        if !initialize
+                            .auth_methods
+                            .iter()
+                            .any(|method| method.id().0.as_ref() == method_id)
                         {
-                            Ok(response) => {
-                                let options = response
-                                    .config_options
-                                    .unwrap_or_default()
-                                    .iter()
-                                    .filter_map(|option| serde_json::to_value(option).ok())
-                                    .collect();
-                                if session.close.is_some() {
-                                    let _ = connection
-                                        .send_request(CloseSessionRequest::new(response.session_id))
-                                        .block_task()
-                                        .await;
-                                } else {
-                                    let _ = connection
-                                        .send_request(DeleteSessionRequest::new(
-                                            response.session_id,
-                                        ))
-                                        .block_task()
-                                        .await;
-                                }
-                                options
-                            }
-                            Err(_) => Vec::new(),
+                            return Err(agent_client_protocol::Error::auth_required().data(
+                                format!(
+                                    "ACP authentication method `{method_id}` was not advertised"
+                                ),
+                            ));
                         }
-                    } else {
-                        Vec::new()
+                        connection
+                            .send_request(AuthenticateRequest::new(method_id.to_string()))
+                            .block_task()
+                            .await?;
+                    }
+                    let session_state = send_session_start_request(
+                        &connection,
+                        "session/new",
+                        NewSessionRequest::new(probe_cwd)
+                            .additional_directories(Vec::new())
+                            .mcp_servers(Vec::new()),
+                        None,
+                    )
+                    .await?;
+                    let (config_source, config_options) = match &session_state {
+                        state if !state.config_options.is_empty() => (
+                            AcpConfigSource::Stable,
+                            snapshot_config_options(&state.config_options),
+                        ),
+                        state if state.legacy_models.is_some() => (
+                            AcpConfigSource::LegacyModel,
+                            vec![legacy_model_config_snapshot(
+                                state.legacy_models.as_ref().expect("checked legacy models"),
+                            )],
+                        ),
+                        _ => (AcpConfigSource::None, Vec::new()),
                     };
+                    if supports_close {
+                        let _ = connection
+                            .send_request(CloseSessionRequest::new(session_state.session_id))
+                            .block_task()
+                            .await;
+                    } else if supports_delete {
+                        let _ = connection
+                            .send_request(DeleteSessionRequest::new(session_state.session_id))
+                            .block_task()
+                            .await;
+                    }
                     let probe = AcpCapabilityProbe {
                         protocol_version: initialize.protocol_version.to_string(),
                         agent_name: initialize.agent_info.as_ref().map(|info| info.name.clone()),
@@ -522,17 +588,32 @@ pub async fn probe_acp_command(
                             .collect(),
                         supports_session_list: session.list.is_some(),
                         supports_session_resume: session.resume.is_some(),
-                        supports_session_close: session.close.is_some(),
-                        supports_session_delete: session.delete.is_some(),
+                        supports_session_close: supports_close,
+                        supports_session_delete: supports_delete,
                         supports_additional_directories: session.additional_directories.is_some(),
                         agent_capabilities: serde_json::to_value(&initialize.agent_capabilities)
                             .unwrap_or(serde_json::Value::Null),
+                        config_source,
                         config_options,
                     };
-                    let _ = probe_tx.send(probe);
+                    if let Some(sender) = probe_tx_for_connection
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take()
+                    {
+                        let _ = sender.send(Ok(probe));
+                    }
                     Ok(())
                 })
                 .await;
+            if let Err(error) = connection_result
+                && let Some(sender) = probe_tx
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+            {
+                let _ = sender.send(Err(error.to_string()));
+            }
         });
     });
 
@@ -548,9 +629,166 @@ pub async fn probe_acp_command(
             ExecutorError::Io(std::io::Error::other(
                 "ACP initialize probe exited without a response",
             ))
-        });
+        })?
+        .map_err(|error| ExecutorError::Io(std::io::Error::other(error)));
     let _ = child.kill().await;
     result
+}
+
+fn acp_client_capabilities(
+    read_text_file: bool,
+    write_text_file: bool,
+    terminal: bool,
+) -> ClientCapabilities {
+    ClientCapabilities::new()
+        .fs(FileSystemCapabilities::new()
+            .read_text_file(read_text_file)
+            .write_text_file(write_text_file))
+        .terminal(terminal)
+        .session(ClientSessionCapabilities::new().config_options(
+            SessionConfigOptionsCapabilities::new().boolean(BooleanConfigOptionCapabilities::new()),
+        ))
+}
+
+async fn send_session_start_request(
+    connection: &ConnectionTo<Agent>,
+    method: &str,
+    params: impl Serialize,
+    fallback_session_id: Option<SessionId>,
+) -> agent_client_protocol::Result<AcpSessionConfigState> {
+    let request = UntypedMessage::new(method, params)?;
+    let response = connection.send_request(request).block_task().await?;
+    parse_session_start_response(method, response, fallback_session_id)
+}
+
+fn parse_session_start_response(
+    method: &str,
+    response: serde_json::Value,
+    fallback_session_id: Option<SessionId>,
+) -> agent_client_protocol::Result<AcpSessionConfigState> {
+    let session_id = response
+        .get("sessionId")
+        .and_then(serde_json::Value::as_str)
+        .map(SessionId::new)
+        .or(fallback_session_id)
+        .ok_or_else(|| {
+            agent_client_protocol::Error::internal_error()
+                .data(format!("ACP `{method}` response omitted sessionId"))
+        })?;
+    let config_options = response
+        .get("configOptions")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    serde_json::from_value(value.clone()).map_err(|error| {
+                        agent_client_protocol::Error::internal_error().data(format!(
+                            "ACP `{method}` returned an invalid config option: {error}"
+                        ))
+                    })
+                })
+                .collect::<agent_client_protocol::Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let legacy_models = match response.get("models") {
+        Some(value) => Some(serde_json::from_value(value.clone()).map_err(|error| {
+            agent_client_protocol::Error::internal_error().data(format!(
+                "ACP `{method}` returned invalid legacy models: {error}"
+            ))
+        })?),
+        None => None,
+    };
+
+    Ok(AcpSessionConfigState {
+        session_id,
+        config_options,
+        legacy_models,
+    })
+}
+
+fn snapshot_config_options(options: &[SessionConfigOption]) -> Vec<AcpConfigOptionSnapshot> {
+    options.iter().filter_map(snapshot_config_option).collect()
+}
+
+fn snapshot_config_option(option: &SessionConfigOption) -> Option<AcpConfigOptionSnapshot> {
+    let category = option.category.as_ref().and_then(|category| {
+        serde_json::to_value(category)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+    });
+    let kind = match &option.kind {
+        SessionConfigKind::Select(select) => {
+            let options = match &select.options {
+                SessionConfigSelectOptions::Ungrouped(options) => options
+                    .iter()
+                    .map(|choice| AcpConfigChoice {
+                        value: choice.value.0.to_string(),
+                        name: choice.name.clone(),
+                        description: choice.description.clone(),
+                    })
+                    .collect(),
+                SessionConfigSelectOptions::Grouped(groups) => groups
+                    .iter()
+                    .flat_map(|group| group.options.iter())
+                    .map(|choice| AcpConfigChoice {
+                        value: choice.value.0.to_string(),
+                        name: choice.name.clone(),
+                        description: choice.description.clone(),
+                    })
+                    .collect(),
+                _ => return None,
+            };
+            AcpConfigOptionKind::Select {
+                current_value: select.current_value.0.to_string(),
+                options,
+            }
+        }
+        SessionConfigKind::Boolean(boolean) => AcpConfigOptionKind::Boolean {
+            current_value: boolean.current_value,
+        },
+        _ => return None,
+    };
+    Some(AcpConfigOptionSnapshot {
+        id: option.id.0.to_string(),
+        name: option.name.clone(),
+        description: option.description.clone(),
+        category,
+        kind,
+    })
+}
+
+fn legacy_model_config_snapshot(state: &LegacySessionModelState) -> AcpConfigOptionSnapshot {
+    let mut options = state
+        .available_models
+        .iter()
+        .map(|model| AcpConfigChoice {
+            value: model.model_id.clone(),
+            name: model.name.clone(),
+            description: model.description.clone(),
+        })
+        .collect::<Vec<_>>();
+    if !options
+        .iter()
+        .any(|option| option.value == state.current_model_id)
+    {
+        options.push(AcpConfigChoice {
+            value: state.current_model_id.clone(),
+            name: state.current_model_id.clone(),
+            description: None,
+        });
+    }
+    AcpConfigOptionSnapshot {
+        id: "model".to_string(),
+        name: "Model".to_string(),
+        description: Some("Legacy ACP session model selector".to_string()),
+        category: Some("model".to_string()),
+        kind: AcpConfigOptionKind::Select {
+            current_value: state.current_model_id.clone(),
+            options,
+        },
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -565,14 +803,11 @@ async fn run_connection(
     output: AcpOutput,
     cancel: CancellationToken,
 ) -> agent_client_protocol::Result<()> {
-    let client_capabilities = ClientCapabilities::new()
-        .fs(FileSystemCapabilities::new()
-            .read_text_file(config.client_services.read_text_file)
-            .write_text_file(config.client_services.write_text_file))
-        .terminal(config.client_services.terminal)
-        .session(ClientSessionCapabilities::new().config_options(
-            SessionConfigOptionsCapabilities::new().boolean(BooleanConfigOptionCapabilities::new()),
-        ));
+    let client_capabilities = acp_client_capabilities(
+        config.client_services.read_text_file,
+        config.client_services.write_text_file,
+        config.client_services.terminal,
+    );
     let initialize = connection
         .send_request(
             InitializeRequest::new(ProtocolVersion::V1)
@@ -624,20 +859,17 @@ async fn run_connection(
             .data("ACP Agent does not support additionalDirectories"));
     }
 
-    let (session_id, mut config_options) = match existing_session {
+    let mut session_state = match existing_session {
         None => {
-            let response = connection
-                .send_request(
-                    NewSessionRequest::new(cwd)
-                        .additional_directories(config.additional_directories.clone())
-                        .mcp_servers(config.mcp_servers.clone()),
-                )
-                .block_task()
-                .await?;
-            (
-                response.session_id,
-                response.config_options.unwrap_or_default(),
+            send_session_start_request(
+                connection,
+                "session/new",
+                NewSessionRequest::new(cwd)
+                    .additional_directories(config.additional_directories.clone())
+                    .mcp_servers(config.mcp_servers.clone()),
+                None,
             )
+            .await?
         }
         Some(existing) => {
             let session_id = SessionId::new(existing);
@@ -647,25 +879,25 @@ async fn run_connection(
                 .resume
                 .is_some()
             {
-                let response = connection
-                    .send_request(
-                        ResumeSessionRequest::new(session_id.clone(), cwd)
-                            .additional_directories(config.additional_directories.clone())
-                            .mcp_servers(config.mcp_servers.clone()),
-                    )
-                    .block_task()
-                    .await?;
-                (session_id, response.config_options.unwrap_or_default())
+                send_session_start_request(
+                    connection,
+                    "session/resume",
+                    ResumeSessionRequest::new(session_id.clone(), cwd)
+                        .additional_directories(config.additional_directories.clone())
+                        .mcp_servers(config.mcp_servers.clone()),
+                    Some(session_id),
+                )
+                .await?
             } else if negotiated.agent_capabilities.load_session {
-                let response = connection
-                    .send_request(
-                        LoadSessionRequest::new(session_id.clone(), cwd)
-                            .additional_directories(config.additional_directories.clone())
-                            .mcp_servers(config.mcp_servers.clone()),
-                    )
-                    .block_task()
-                    .await?;
-                (session_id, response.config_options.unwrap_or_default())
+                send_session_start_request(
+                    connection,
+                    "session/load",
+                    LoadSessionRequest::new(session_id.clone(), cwd)
+                        .additional_directories(config.additional_directories.clone())
+                        .mcp_servers(config.mcp_servers.clone()),
+                    Some(session_id),
+                )
+                .await?
             } else {
                 let message =
                     "Agent advertises neither session/resume nor session/load".to_string();
@@ -677,29 +909,38 @@ async fn run_connection(
             }
         }
     };
+    let session_id = session_state.session_id.clone();
 
     output
         .send(AcpEvent::SessionStart(session_id.0.to_string()))
         .await
         .map_err(|_| agent_client_protocol::Error::internal_error())?;
+    let effective_model = apply_session_preferences(
+        connection,
+        &session_id,
+        &config.session,
+        &mut session_state.config_options,
+        session_state.legacy_models.as_ref(),
+    )
+    .await?;
     client
         .set_token_usage_identity(
             negotiated
                 .agent_info
                 .as_ref()
                 .map(|agent| agent.name.clone()),
-            config.session.model.clone(),
+            effective_model,
             session_id.0.to_string(),
         )
         .await;
-    apply_session_preferences(
-        connection,
-        &session_id,
-        &config.session,
-        &mut config_options,
-        &output,
-    )
-    .await?;
+    if !session_state.config_options.is_empty() {
+        output
+            .send(AcpEvent::ConfigOptions(
+                session_state.config_options.clone(),
+            ))
+            .await
+            .map_err(|_| agent_client_protocol::Error::internal_error())?;
+    }
     client.begin_token_usage_turn().await;
     client.record_user_prompt_event(&prompt).await;
     send_startup(&startup_tx, Ok(()));
@@ -742,8 +983,18 @@ async fn apply_session_preferences(
     session_id: &SessionId,
     preferences: &AcpSessionPreferences,
     options: &mut Vec<SessionConfigOption>,
-    output: &AcpOutput,
-) -> agent_client_protocol::Result<()> {
+    legacy_models: Option<&LegacySessionModelState>,
+) -> agent_client_protocol::Result<Option<String>> {
+    if options.is_empty() {
+        return apply_legacy_session_preferences(
+            connection,
+            session_id,
+            preferences,
+            legacy_models,
+        )
+        .await;
+    }
+
     let category_preferences = [
         (
             SessionConfigOptionCategory::Model,
@@ -755,84 +1006,262 @@ async fn apply_session_preferences(
             preferences.thought_level.as_ref(),
             "thought level",
         ),
-        (
-            SessionConfigOptionCategory::Mode,
-            preferences.mode.as_ref(),
-            "mode",
-        ),
     ];
 
     for (category, desired, label) in category_preferences {
         let Some(desired) = desired else {
             continue;
         };
-        let matches = options
-            .iter()
-            .filter(|option| option.category.as_ref() == Some(&category))
-            .cloned()
-            .collect::<Vec<_>>();
-        if matches.len() != 1 {
-            let _ = output
-                .send(AcpEvent::Warning(format!(
-                    "ACP {label} preference ignored: expected one matching config option, found {}",
-                    matches.len()
-                )))
-                .await;
+        if preferences.options.iter().any(|selection| {
+            options
+                .iter()
+                .find(|option| option.id.0.as_ref() == selection.option_id)
+                .is_some_and(|option| option_matches_category(option, &category))
+        }) {
             continue;
         }
-        let value = SessionConfigOptionValue::value_id(desired.clone());
-        if !config_value_supported(&matches[0], &value) {
-            let _ = output
-                .send(AcpEvent::Warning(format!(
-                    "ACP {label} preference `{desired}` was not advertised"
-                )))
-                .await;
-            continue;
-        }
-        let response = connection
-            .send_request(SetSessionConfigOptionRequest::new(
-                session_id.clone(),
-                matches[0].id.clone(),
-                value,
+        let Some(option) = find_category_option(options, &category) else {
+            if category == SessionConfigOptionCategory::ThoughtLevel
+                && preferences.native_thought_level_fallback
+            {
+                continue;
+            }
+            return Err(invalid_config(format!(
+                "ACP {label} preference `{desired}` cannot be applied: the Agent did not advertise one unambiguous option"
+            )));
+        };
+        let value = resolve_preference_value(&option, desired, &category).ok_or_else(|| {
+            invalid_config(format!(
+                "ACP {label} preference `{desired}` was not advertised or matched multiple values"
             ))
-            .block_task()
-            .await?;
-        *options = response.config_options;
+        })?;
+        set_config_option_and_verify(connection, session_id, &option, value, options).await?;
     }
 
     for selection in &preferences.options {
-        let Some(option) = options
+        let option = options
             .iter()
             .find(|option| option.id.0.as_ref() == selection.option_id)
-        else {
-            let _ = output
-                .send(AcpEvent::Warning(format!(
+            .cloned()
+            .ok_or_else(|| {
+                invalid_config(format!(
                     "ACP config option `{}` was not advertised",
                     selection.option_id
-                )))
-                .await;
+                ))
+            })?;
+        if !config_value_supported(&option, &selection.value) {
+            return Err(invalid_config(format!(
+                "ACP config value for `{}` was not advertised",
+                selection.option_id
+            )));
+        }
+        set_config_option_and_verify(
+            connection,
+            session_id,
+            &option,
+            selection.value.clone(),
+            options,
+        )
+        .await?;
+    }
+    Ok(effective_model_from_options(options))
+}
+
+async fn apply_legacy_session_preferences(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    preferences: &AcpSessionPreferences,
+    legacy_models: Option<&LegacySessionModelState>,
+) -> agent_client_protocol::Result<Option<String>> {
+    if preferences.thought_level.is_some() && !preferences.native_thought_level_fallback {
+        return Err(invalid_config(
+            "ACP Agent only advertises the legacy model selector; other requested session preferences are unsupported",
+        ));
+    }
+    let mut explicit_model = None;
+    for selection in &preferences.options {
+        if selection.option_id != "model" {
+            return Err(invalid_config(format!(
+                "ACP config option `{}` is unavailable because the Agent only advertises the legacy model selector",
+                selection.option_id
+            )));
+        }
+        let Some(value) = selection.value.as_value_id() else {
+            return Err(invalid_config(
+                "legacy ACP model selection requires a value_id",
+            ));
+        };
+        explicit_model = Some(value.0.to_string());
+    }
+    let Some(desired) = explicit_model.or_else(|| preferences.model.clone()) else {
+        return Ok(legacy_models.map(|models| models.current_model_id.clone()));
+    };
+    let models = legacy_models.ok_or_else(|| {
+        invalid_config(format!(
+            "ACP model preference `{desired}` cannot be applied: the Agent advertises neither configOptions nor legacy models"
+        ))
+    })?;
+    let selected = resolve_legacy_model(models, &desired).ok_or_else(|| {
+        invalid_config(format!(
+            "ACP model preference `{desired}` was not advertised or matched multiple legacy models"
+        ))
+    })?;
+    if selected == models.current_model_id {
+        return Ok(Some(selected));
+    }
+    let request = UntypedMessage::new(
+        "session/set_model",
+        serde_json::json!({
+            "sessionId": session_id.0.as_ref(),
+            "modelId": selected,
+        }),
+    )?;
+    connection.send_request(request).block_task().await?;
+    Ok(Some(selected))
+}
+
+fn effective_model_from_options(options: &[SessionConfigOption]) -> Option<String> {
+    let option = find_category_option(options, &SessionConfigOptionCategory::Model)?;
+    let SessionConfigKind::Select(select) = option.kind else {
+        return None;
+    };
+    Some(select.current_value.0.to_string())
+}
+
+fn resolve_legacy_model(state: &LegacySessionModelState, desired: &str) -> Option<String> {
+    if state.current_model_id == desired {
+        return Some(state.current_model_id.clone());
+    }
+    if let Some(model) = state
+        .available_models
+        .iter()
+        .find(|model| model.model_id == desired)
+    {
+        return Some(model.model_id.clone());
+    }
+
+    let mut best: Option<(u8, &str)> = None;
+    let mut ambiguous = false;
+    for model in &state.available_models {
+        let score = model_id_match_score(desired, &model.model_id).or_else(|| {
+            model_id_match_score(desired, &model.name).map(|score| score.saturating_sub(10))
+        });
+        let Some(score) = score else {
             continue;
         };
-        if !config_value_supported(option, &selection.value) {
-            let _ = output
-                .send(AcpEvent::Warning(format!(
-                    "ACP config value for `{}` was not advertised",
-                    selection.option_id
-                )))
-                .await;
-            continue;
+        match best {
+            Some((best_score, _)) if score < best_score => {}
+            Some((best_score, _)) if score == best_score => ambiguous = true,
+            _ => {
+                best = Some((score, model.model_id.as_str()));
+                ambiguous = false;
+            }
         }
-        let response = connection
-            .send_request(SetSessionConfigOptionRequest::new(
-                session_id.clone(),
-                option.id.clone(),
-                selection.value.clone(),
-            ))
-            .block_task()
-            .await?;
-        *options = response.config_options;
     }
+    (!ambiguous)
+        .then(|| best.map(|(_, model_id)| model_id.to_string()))
+        .flatten()
+}
+
+fn find_category_option(
+    options: &[SessionConfigOption],
+    category: &SessionConfigOptionCategory,
+) -> Option<SessionConfigOption> {
+    let exact = options
+        .iter()
+        .filter(|option| option.category.as_ref() == Some(category))
+        .collect::<Vec<_>>();
+    if exact.len() == 1 {
+        return Some(exact[0].clone());
+    }
+    if !exact.is_empty() {
+        return None;
+    }
+    let semantic = options
+        .iter()
+        .filter(|option| option_matches_category(option, category))
+        .collect::<Vec<_>>();
+    (semantic.len() == 1).then(|| semantic[0].clone())
+}
+
+fn option_matches_category(
+    option: &SessionConfigOption,
+    category: &SessionConfigOptionCategory,
+) -> bool {
+    if option.category.as_ref() == Some(category) {
+        return true;
+    }
+    let expected = match category {
+        SessionConfigOptionCategory::Model => "model",
+        SessionConfigOptionCategory::ThoughtLevel => "thoughtlevel",
+        _ => return false,
+    };
+    [&*option.id.0, option.name.as_str()].iter().any(|value| {
+        let key = semantic_config_key(value);
+        key == expected || key.ends_with(expected)
+    })
+}
+
+fn semantic_config_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+async fn set_config_option_and_verify(
+    connection: &ConnectionTo<Agent>,
+    session_id: &SessionId,
+    option: &SessionConfigOption,
+    value: SessionConfigOptionValue,
+    options: &mut Vec<SessionConfigOption>,
+) -> agent_client_protocol::Result<()> {
+    let response = connection
+        .send_request(SetSessionConfigOptionRequest::new(
+            session_id.clone(),
+            option.id.clone(),
+            value.clone(),
+        ))
+        .block_task()
+        .await?;
+    let effective = response
+        .config_options
+        .iter()
+        .find(|candidate| candidate.id == option.id)
+        .ok_or_else(|| {
+            invalid_config(format!(
+                "ACP Agent omitted config option `{}` after setting it",
+                option.id
+            ))
+        })?;
+    if !config_current_value_matches(effective, &value) {
+        return Err(invalid_config(format!(
+            "ACP Agent did not activate the requested value for `{}`",
+            option.id
+        )));
+    }
+    *options = response.config_options;
     Ok(())
+}
+
+fn config_current_value_matches(
+    option: &SessionConfigOption,
+    value: &SessionConfigOptionValue,
+) -> bool {
+    match (&option.kind, value) {
+        (SessionConfigKind::Select(select), SessionConfigOptionValue::ValueId { value }) => {
+            select.current_value == *value
+        }
+        (SessionConfigKind::Boolean(boolean), SessionConfigOptionValue::Boolean { value }) => {
+            boolean.current_value == *value
+        }
+        _ => false,
+    }
+}
+
+fn invalid_config(message: impl Into<String>) -> agent_client_protocol::Error {
+    agent_client_protocol::Error::invalid_params().data(message.into())
 }
 
 fn config_value_supported(option: &SessionConfigOption, value: &SessionConfigOptionValue) -> bool {
@@ -852,6 +1281,58 @@ fn config_value_supported(option: &SessionConfigOption, value: &SessionConfigOpt
         (SessionConfigKind::Boolean(_), SessionConfigOptionValue::Boolean { .. }) => true,
         _ => false,
     }
+}
+
+fn resolve_preference_value(
+    option: &SessionConfigOption,
+    desired: &str,
+    category: &SessionConfigOptionCategory,
+) -> Option<SessionConfigOptionValue> {
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    let candidates = match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options.iter().collect::<Vec<_>>(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .collect(),
+        _ => return None,
+    };
+
+    if let Some(exact) = candidates
+        .iter()
+        .find(|candidate| candidate.value.0.as_ref() == desired)
+    {
+        return Some(SessionConfigOptionValue::value_id(exact.value.clone()));
+    }
+    if category != &SessionConfigOptionCategory::Model {
+        return None;
+    }
+
+    let mut best: Option<(u8, &str)> = None;
+    let mut ambiguous = false;
+    for candidate in candidates {
+        let score = model_id_match_score(desired, candidate.value.0.as_ref()).or_else(|| {
+            model_id_match_score(desired, candidate.name.as_ref())
+                .map(|score| score.saturating_sub(10))
+        });
+        let Some(score) = score else {
+            continue;
+        };
+        match best {
+            Some((best_score, _)) if score < best_score => {}
+            Some((best_score, _)) if score == best_score => ambiguous = true,
+            _ => {
+                best = Some((score, candidate.value.0.as_ref()));
+                ambiguous = false;
+            }
+        }
+    }
+
+    (!ambiguous)
+        .then(|| best.map(|(_, value)| SessionConfigOptionValue::value_id(value.to_string())))
+        .flatten()
 }
 
 type StartupSender =
@@ -907,6 +1388,148 @@ mod tests {
         assert!(!config_value_supported(
             &option,
             &SessionConfigOptionValue::value_id("false")
+        ));
+    }
+
+    #[test]
+    fn native_thought_level_fallback_keeps_acp_preference_optional() {
+        let harness = AcpAgentHarness::new().with_native_thought_level_fallback("high");
+
+        assert_eq!(
+            harness.config.session.thought_level.as_deref(),
+            Some("high")
+        );
+        assert!(harness.config.session.native_thought_level_fallback);
+    }
+
+    #[test]
+    fn model_preference_resolves_unique_provider_qualified_value() {
+        let option = SessionConfigOption::select(
+            "model",
+            "Model",
+            "default",
+            vec![
+                SessionConfigSelectOption::new("default", "Default"),
+                SessionConfigSelectOption::new("gpt-5.6-luna(openai)", "GPT 5.6 Luna"),
+            ],
+        );
+
+        assert_eq!(
+            resolve_preference_value(&option, "gpt-5.6-luna", &SessionConfigOptionCategory::Model,),
+            Some(SessionConfigOptionValue::value_id("gpt-5.6-luna(openai)"))
+        );
+    }
+
+    #[test]
+    fn model_preference_rejects_ambiguous_adaptive_matches() {
+        let option = SessionConfigOption::select(
+            "model",
+            "Model",
+            "default",
+            vec![
+                SessionConfigSelectOption::new("gpt-5.6-luna(openai)", "GPT 5.6 Luna (OpenAI)"),
+                SessionConfigSelectOption::new("gpt-5.6-luna(other)", "GPT 5.6 Luna (Other)"),
+            ],
+        );
+
+        assert_eq!(
+            resolve_preference_value(&option, "gpt-5.6-luna", &SessionConfigOptionCategory::Model,),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_legacy_models_without_reconstructing_route_ids() {
+        let state = parse_session_start_response(
+            "session/new",
+            serde_json::json!({
+                "sessionId": "session-1",
+                "models": {
+                    "currentModelId": "gemini-3.1-pro-preview",
+                    "availableModels": [{
+                        "modelId": "gpt-5.6-luna(openai)",
+                        "name": "GPT 5.6 Luna"
+                    }]
+                }
+            }),
+            None,
+        )
+        .expect("legacy session response should parse");
+
+        let models = state.legacy_models.expect("legacy models");
+        assert_eq!(
+            resolve_legacy_model(&models, "gpt-5.6-luna").as_deref(),
+            Some("gpt-5.6-luna(openai)")
+        );
+        assert_eq!(
+            legacy_model_config_snapshot(&models).kind,
+            AcpConfigOptionKind::Select {
+                current_value: "gemini-3.1-pro-preview".to_string(),
+                options: vec![
+                    AcpConfigChoice {
+                        value: "gpt-5.6-luna(openai)".to_string(),
+                        name: "GPT 5.6 Luna".to_string(),
+                        description: None,
+                    },
+                    AcpConfigChoice {
+                        value: "gemini-3.1-pro-preview".to_string(),
+                        name: "gemini-3.1-pro-preview".to_string(),
+                        description: None,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_model_resolution_fails_when_canonical_value_is_ambiguous() {
+        let state = LegacySessionModelState {
+            current_model_id: "default".to_string(),
+            available_models: vec![
+                LegacyModelInfo {
+                    model_id: "gpt-5.6-luna(openai)".to_string(),
+                    name: "OpenAI".to_string(),
+                    description: None,
+                },
+                LegacyModelInfo {
+                    model_id: "gpt-5.6-luna(other)".to_string(),
+                    name: "Other".to_string(),
+                    description: None,
+                },
+            ],
+        };
+
+        assert_eq!(resolve_legacy_model(&state, "gpt-5.6-luna"), None);
+    }
+
+    #[test]
+    fn effective_model_uses_category_semantics_when_category_is_absent() {
+        let option = SessionConfigOption::select(
+            "session-model",
+            "Session model",
+            "gpt-5.6-luna(openai)",
+            vec![SessionConfigSelectOption::new(
+                "gpt-5.6-luna(openai)",
+                "GPT 5.6 Luna",
+            )],
+        );
+
+        assert_eq!(
+            effective_model_from_options(&[option]).as_deref(),
+            Some("gpt-5.6-luna(openai)")
+        );
+    }
+
+    #[test]
+    fn effective_value_must_equal_the_value_acknowledged_by_agent() {
+        let option = SessionConfigOption::boolean("thinking", "Thinking", true);
+        assert!(config_current_value_matches(
+            &option,
+            &SessionConfigOptionValue::boolean(true)
+        ));
+        assert!(!config_current_value_matches(
+            &option,
+            &SessionConfigOptionValue::boolean(false)
         ));
     }
 }

@@ -274,6 +274,7 @@ pub trait StandardCodingAgentExecutor {
         &self,
         _current_dir: &Path,
         _env: &ExecutionEnv,
+        _auth_method_id: Option<&str>,
     ) -> Result<Option<acp::AcpCapabilityProbe>, ExecutorError> {
         Ok(None)
     }

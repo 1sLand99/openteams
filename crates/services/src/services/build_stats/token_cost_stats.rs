@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
+use executors::model_identity::canonical_runtime_model_id;
 use serde_json::Value;
 use sqlx::{FromRow, Result, SqlitePool, types::Json};
 use uuid::Uuid;
 
-use super::model_pricing_sync::{resolve_canonical_id, strip_model_id_annotations};
+use super::model_pricing_sync::resolve_canonical_id;
 
 #[derive(Clone, Default)]
 pub struct TokenCostStatsService;
@@ -921,7 +922,8 @@ fn runtime_model_value(token_usage: &Value, agent_model_name: Option<String>) ->
 }
 
 fn normalize_executor_model_id(model_id: &str) -> String {
-    let trimmed = strip_model_id_annotations(model_id);
+    let normalized = canonical_runtime_model_id(model_id);
+    let trimmed = normalized.trim();
     if trimmed.is_empty() {
         "unknown".to_string()
     } else {
@@ -1662,6 +1664,31 @@ mod tests {
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].model_id, "glm-5.2");
+    }
+
+    #[test]
+    fn strips_provider_route_annotations_from_runtime_model_ids() {
+        let records = real_usage_records_from_rows(
+            vec![row(
+                "m1",
+                "run-1",
+                "qwen_code",
+                None,
+                serde_json::json!({
+                    "token_usage": {
+                        "runtime_model_id": "gpt-5.6-luna(openai)",
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "is_estimated": false
+                    }
+                }),
+            )],
+            None,
+            None,
+        );
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].model_id, "gpt-5.6-luna");
     }
 
     #[test]

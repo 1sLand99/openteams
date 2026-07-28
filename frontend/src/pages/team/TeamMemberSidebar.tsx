@@ -66,7 +66,8 @@ function MemberRunStateBadge({
           "border-[var(--hairline)] bg-[var(--surface-3)] text-[var(--ink-tertiary)]",
         state === "running" &&
           "border-[var(--success)]/20 bg-[var(--success)]/10 text-[var(--success)]",
-        state === "dead" && "border-red-500/20 bg-red-500/10 text-red-400",
+        state === "dead" &&
+          "border-[var(--notification-warning-border)] bg-[var(--notification-warning-bg)] text-[var(--notification-warning)]",
       )}
     >
       <span
@@ -74,7 +75,7 @@ function MemberRunStateBadge({
           "h-1 w-1 rounded-full",
           state === "idle" && "bg-[var(--ink-tertiary)]",
           state === "running" && "bg-[var(--success)] animate-pulse",
-          state === "dead" && "bg-red-500",
+          state === "dead" && "bg-[var(--notification-warning)]",
         )}
       />
       {t(`teamPage.state.${state}`)}

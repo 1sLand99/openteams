@@ -27,6 +27,7 @@ import {
   readTeamMemberInviteTarget,
 } from "@/lib/teamNavigation";
 import type {
+  AcpCapabilityProbe,
   AgentRuntimeReasoningCapability,
   AgentRuntimeStatus,
   BackendChatAgent,
@@ -46,15 +47,25 @@ import {
   TeamMemberSidebar,
 } from "./team/TeamMemberSidebar";
 import {
+  acpOptionSemanticCategory,
   buildSessionAgentLookup,
+  canonicalRuntimeModelId,
   defaultOptionId,
+  effectiveAcpConfigValue,
+  findAcpSelectConfigOption,
   memberName,
   nonLeadRole,
   normalizeRunnerType,
+  resolveUniqueAcpChoice,
   trimOrNull,
+  withoutAcpModeOverrides,
+  withoutAcpThoughtLevelOverrides,
   type ProjectMemberWithExecution,
 } from "./team/teamUtils";
 import {
+  type AcpConfigOptionSnapshot,
+  type AcpConfigOverride,
+  type AcpConfigValue,
   ProjectMemberType,
   type BaseCodingAgent as ProjectBaseCodingAgent,
   type MemberExecutionConfig as ProjectMemberExecutionConfig,
@@ -251,6 +262,7 @@ type MemberFormState = {
   acpApprovalMode: string;
   acpAuthMode: string;
   acpAuthMethodId: string;
+  acpConfigOverrides: AcpConfigOverride[];
   allowedSkillIds: string[];
   isLeader: boolean;
   memberName: string;
@@ -289,6 +301,9 @@ const resolveMemberFormState = (
       config.acp?.auth?.type === "method_id"
         ? config.acp.auth.method_id
         : "",
+    acpConfigOverrides: withoutAcpModeOverrides(
+      config.acp?.config_overrides ?? [],
+    ),
     allowedSkillIds: member.allowed_skill_ids ?? [],
     isLeader: member.role === "lead",
     memberName: member.member_name?.trim() ?? "",
@@ -320,6 +335,8 @@ const sameMemberFormState = (
   left.acpApprovalMode === right.acpApprovalMode &&
   left.acpAuthMode === right.acpAuthMode &&
   left.acpAuthMethodId === right.acpAuthMethodId &&
+  JSON.stringify(left.acpConfigOverrides) ===
+    JSON.stringify(right.acpConfigOverrides) &&
   left.memberName === right.memberName &&
   left.isLeader === right.isLeader &&
   left.runnerType === right.runnerType &&
@@ -402,6 +419,15 @@ export function TeamPage() {
   const [acpApprovalMode, setAcpApprovalMode] = useState("");
   const [acpAuthMode, setAcpAuthMode] = useState("");
   const [acpAuthMethodId, setAcpAuthMethodId] = useState("");
+  const [acpConfigOverrides, setAcpConfigOverrides] = useState<
+    AcpConfigOverride[]
+  >([]);
+  const [acpProbe, setAcpProbe] = useState<AcpCapabilityProbe | null>(null);
+  const [acpProbeRequestKey, setAcpProbeRequestKey] = useState<string | null>(
+    null,
+  );
+  const [acpProbeLoading, setAcpProbeLoading] = useState(false);
+  const [acpProbeError, setAcpProbeError] = useState<string | null>(null);
   const [acpAdditionalDirectories, setAcpAdditionalDirectories] = useState("");
   const [
     acpAdditionalDirectoriesOverride,
@@ -535,6 +561,48 @@ export function TeamPage() {
     () => createReasoningOptions(t, capability),
     [capability, t],
   );
+  const currentAcpProbeRequestKey = selectedMember
+    ? JSON.stringify([
+        selectedMember.id,
+        runnerType,
+        memberFormState?.workspacePath ?? "",
+        acpAuthMode === "method_id" ? acpAuthMethodId.trim() : "",
+      ])
+    : null;
+  const acpProbeIsCurrent =
+    acpProbeRequestKey !== null &&
+    acpProbeRequestKey === currentAcpProbeRequestKey;
+  const acpConfigOptions = acpProbeIsCurrent
+    ? (acpProbe?.config_options ?? [])
+    : [];
+  const acpProbeAvailable = acpProbeIsCurrent && acpProbe !== null;
+  const acpThoughtLevelSupported =
+    findAcpSelectConfigOption(acpConfigOptions, "thought_level") !== null;
+  const reasoningUnsupported =
+    capability === null && !acpThoughtLevelSupported;
+  const nativeReasoningFallbackActive =
+    capability !== null && acpProbeAvailable && !acpThoughtLevelSupported;
+  const handleAcpConfigValueChange = (
+    option: AcpConfigOptionSnapshot,
+    value: AcpConfigValue,
+  ) => {
+    setAcpConfigOverrides((current) => [
+      ...current.filter((override) => override.option_id !== option.id),
+      {
+        option_id: option.id,
+        value,
+        label_snapshot: option.name,
+        category_snapshot: option.category ?? null,
+      },
+    ]);
+    if (value.type !== "value_id") return;
+    const category = acpOptionSemanticCategory(option);
+    if (category === "model") {
+      setModelName(canonicalRuntimeModelId(value.value));
+    } else if (category === "thought_level") {
+      setThinkingEffort(value.value);
+    }
+  };
   const selectedModelValue = modelName || defaultOptionId;
   const selectedReasoningValue =
     (capability?.kind === "variant" ? modelVariant : thinkingEffort) ||
@@ -546,6 +614,7 @@ export function TeamPage() {
     acpApprovalMode,
     acpAuthMode,
     acpAuthMethodId,
+    acpConfigOverrides,
     allowedSkillIds,
     isLeader,
     memberName: memberNameValue,
@@ -568,6 +637,8 @@ export function TeamPage() {
       acpApprovalMode !== memberFormState.acpApprovalMode ||
       acpAuthMode !== memberFormState.acpAuthMode ||
       acpAuthMethodId !== memberFormState.acpAuthMethodId ||
+      JSON.stringify(acpConfigOverrides) !==
+        JSON.stringify(memberFormState.acpConfigOverrides) ||
       acpAdditionalDirectories !==
         memberFormState.acpAdditionalDirectories ||
       acpAdditionalDirectoriesOverride !==
@@ -802,6 +873,7 @@ export function TeamPage() {
       setAcpApprovalMode(memberFormState.acpApprovalMode);
       setAcpAuthMode(memberFormState.acpAuthMode);
       setAcpAuthMethodId(memberFormState.acpAuthMethodId);
+      setAcpConfigOverrides(memberFormState.acpConfigOverrides);
       setAcpAdditionalDirectories(memberFormState.acpAdditionalDirectories);
       setAcpAdditionalDirectoriesOverride(
         memberFormState.acpAdditionalDirectoriesOverride,
@@ -817,6 +889,96 @@ export function TeamPage() {
     }
     setNotice(null);
   }, [memberFormState, selectedMember]);
+
+  useEffect(() => {
+    if (!selectedMember) {
+      setAcpProbe(null);
+      setAcpProbeRequestKey(null);
+      setAcpProbeLoading(false);
+      setAcpProbeError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const requestKey = currentAcpProbeRequestKey;
+    setAcpProbe(null);
+    setAcpProbeRequestKey(null);
+    setAcpProbeLoading(true);
+    setAcpProbeError(null);
+    void agentRuntimeApi
+      .getDiagnostics(runnerType, {
+        workspacePath: memberFormState?.workspacePath || undefined,
+        authMethodId:
+          acpAuthMode === "method_id"
+            ? acpAuthMethodId.trim() || undefined
+            : undefined,
+      })
+      .then((diagnostics) => {
+        if (cancelled) return;
+        setAcpProbe(diagnostics.acp_probe);
+        setAcpProbeRequestKey(requestKey);
+        setAcpProbeError(diagnostics.acp_probe_error);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setAcpProbe(null);
+        setAcpProbeRequestKey(requestKey);
+        setAcpProbeError(
+          err instanceof Error
+            ? err.message
+            : t("teamPage.error.acpConfigUnavailable"),
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setAcpProbeLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    acpAuthMethodId,
+    acpAuthMode,
+    currentAcpProbeRequestKey,
+    memberFormState?.workspacePath,
+    runnerType,
+    selectedMember?.id,
+    t,
+  ]);
+
+  useEffect(() => {
+    if (acpConfigOptions.length === 0) return;
+    setAcpConfigOverrides((current) => {
+      const next = [...current];
+      let changed = false;
+      for (const option of acpConfigOptions) {
+        if (
+          option.type !== "select" ||
+          current.some((override) => override.option_id === option.id)
+        ) {
+          continue;
+        }
+        const category = acpOptionSemanticCategory(option);
+        const legacyValue =
+          category === "model"
+            ? modelName
+            : category === "thought_level"
+              ? thinkingEffort
+              : "";
+        if (!legacyValue) continue;
+        const choice = resolveUniqueAcpChoice(legacyValue, option.options);
+        if (!choice) continue;
+        next.push({
+          option_id: option.id,
+          value: { type: "value_id", value: choice.value },
+          label_snapshot: option.name,
+          category_snapshot: option.category ?? category,
+        });
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [acpConfigOptions, modelName, thinkingEffort]);
 
   useEffect(() => {
     if (!selectedMember) {
@@ -909,6 +1071,12 @@ export function TeamPage() {
         nextMemberName === fallbackAgentName
           ? null
           : trimOrNull(draft.memberName);
+      const supportedConfigOverrides =
+        reasoningUnsupported || nativeReasoningFallbackActive
+          ? withoutAcpThoughtLevelOverrides(
+              withoutAcpModeOverrides(draft.acpConfigOverrides),
+            )
+          : withoutAcpModeOverrides(draft.acpConfigOverrides);
       const memberUpdate = projectApi.updateMember(
         selectedProjectId,
         selectedMember.id,
@@ -923,16 +1091,17 @@ export function TeamPage() {
             runner_type: draft.runnerType,
             model_name: trimOrNull(draft.modelName),
             thinking_effort:
-              capability?.kind === "effort"
+              !reasoningUnsupported && capability?.kind === "effort"
                 ? trimOrNull(draft.thinkingEffort)
                 : null,
             model_variant:
-              capability?.kind === "variant"
+              !reasoningUnsupported && capability?.kind === "variant"
                 ? trimOrNull(draft.modelVariant)
                 : null,
             acp:
-              draft.runnerType === "GEMINI" ||
-              draft.runnerType === "QWEN_CODE"
+              (acpProbeIsCurrent && acpProbe !== null) ||
+              selectedMember.execution_config?.acp != null ||
+              supportedConfigOverrides.length > 0
                 ? {
                     access_mode: draft.acpAccessMode || null,
                     approval_mode: draft.acpApprovalMode || null,
@@ -952,6 +1121,10 @@ export function TeamPage() {
                             .split(/\r?\n/u)
                             .map((path) => path.trim())
                             .filter(Boolean)
+                        : null,
+                    config_overrides:
+                      supportedConfigOverrides.length > 0
+                        ? supportedConfigOverrides
                         : null,
                   }
                 : null,
@@ -1016,6 +1189,7 @@ export function TeamPage() {
         setAcpApprovalMode(savedFormState.acpApprovalMode);
         setAcpAuthMode(savedFormState.acpAuthMode);
         setAcpAuthMethodId(savedFormState.acpAuthMethodId);
+        setAcpConfigOverrides(savedFormState.acpConfigOverrides);
         setAcpAdditionalDirectories(
           savedFormState.acpAdditionalDirectories,
         );
@@ -1143,6 +1317,9 @@ export function TeamPage() {
     setModelName(runtimeConfiguredModel(nextRuntime));
     setThinkingEffort("");
     setModelVariant("");
+    setAcpConfigOverrides([]);
+    setAcpProbe(null);
+    setAcpProbeError(null);
   };
 
   const handleTeamProtocolChange = (value: string) => {
@@ -1209,6 +1386,7 @@ export function TeamPage() {
     acpApprovalMode,
     acpAuthMode,
     acpAuthMethodId,
+    acpConfigOverrides,
     isLeader,
     memberDirty,
     memberNameValue,
@@ -1542,9 +1720,14 @@ export function TeamPage() {
               acpApprovalMode={acpApprovalMode}
               acpAuthMode={acpAuthMode}
               acpAuthMethodId={acpAuthMethodId}
+              acpConfigOptions={acpConfigOptions}
+              acpConfigOverrides={acpConfigOverrides}
+              reasoningUnsupported={reasoningUnsupported}
               capability={capability}
               configuredMcpServerKeys={configuredMcpServerKeys}
               isLeader={isLeader}
+              legacyModelName={modelName}
+              legacyThinkingEffort={thinkingEffort}
               memberName={memberNameValue}
               memberNamePlaceholder={
                 selectedAgent?.name ?? t("teamPage.form.memberName")
@@ -1581,6 +1764,7 @@ export function TeamPage() {
               teamProtocolSuccess={teamProtocolSuccess}
               workspacePath={workspacePath}
               onMcpServersChange={handleMcpServersChange}
+              onAcpConfigValueChange={handleAcpConfigValueChange}
               onTeamProtocolChange={handleTeamProtocolChange}
               onToggleMcpServer={toggleMcpServer}
               setAllowedSkillIds={setAllowedSkillIds}

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use ts_rs::TS;
 use workspace_utils::{msg_store::MsgStore, shell::resolve_executable_path_blocking};
 
@@ -35,7 +36,7 @@ pub struct QwenCode {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(
-        description = "Per-run Qwen Code reasoning effort: off, low, medium, high, max, or a numeric token budget"
+        description = "Per-run Qwen Code reasoning effort: low, medium, high, xhigh, max, or a numeric token budget"
     )]
     pub thinking_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,6 +61,52 @@ impl QwenCode {
             .as_ref()
             .and_then(|options| options.approval_mode)
             .unwrap_or_default()
+    }
+
+    fn native_reasoning_settings(&self) -> Result<Value, ExecutorError> {
+        let Some(effort) = self
+            .thinking_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(json!({}));
+        };
+        let normalized = effort.to_ascii_lowercase();
+        if matches!(
+            normalized.as_str(),
+            "low" | "medium" | "high" | "xhigh" | "max"
+        ) {
+            return Ok(json!({
+                "model": {
+                    "reasoningEffort": normalized
+                }
+            }));
+        }
+        if matches!(normalized.as_str(), "off" | "none") {
+            return Ok(json!({
+                "model": {
+                    "generationConfig": {
+                        "reasoning": false
+                    }
+                }
+            }));
+        }
+        if let Ok(budget) = normalized.parse::<u32>() {
+            return Ok(json!({
+                "model": {
+                    "generationConfig": {
+                        "reasoning": {
+                            "effort": "high",
+                            "budget_tokens": budget
+                        }
+                    }
+                }
+            }));
+        }
+        Err(invalid_reasoning_effort(format!(
+            "unsupported Qwen Code reasoning effort `{effort}`"
+        )))
     }
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
@@ -113,10 +160,23 @@ impl QwenCode {
         if let Some(AcpAuthSelection::MethodId { method_id }) = options.auth {
             harness = harness.with_auth_method_id(method_id);
         }
+        let config_overrides = options.config_overrides.as_deref().unwrap_or_default();
+        let has_model_override = config_overrides.iter().any(|selection| {
+            selection.category_snapshot.as_deref() == Some("model")
+                || selection.option_id.eq_ignore_ascii_case("model")
+        });
+        let has_thought_override = config_overrides.iter().any(|selection| {
+            selection.category_snapshot.as_deref() == Some("thought_level")
+                || selection
+                    .option_id
+                    .replace(['-', '_', ' '], "")
+                    .eq_ignore_ascii_case("thoughtlevel")
+        });
         if let Some(model) = self
             .model
             .as_deref()
             .filter(|value| !value.trim().is_empty())
+            .filter(|_| !has_model_override)
         {
             harness = harness.with_model(model);
         }
@@ -124,8 +184,12 @@ impl QwenCode {
             .thinking_effort
             .as_deref()
             .filter(|value| !value.trim().is_empty())
+            .filter(|_| !has_thought_override)
         {
-            harness = harness.with_thought_level(effort);
+            harness = harness.with_native_thought_level_fallback(effort);
+        }
+        for selection in config_overrides {
+            harness = harness.with_config_override(selection);
         }
         let config_path = self.default_mcp_config_path();
         let canonical = match config_path {
@@ -146,9 +210,12 @@ impl QwenCode {
         current_dir: &Path,
         env: &ExecutionEnv,
     ) -> Result<ExecutionEnv, ExecutorError> {
-        let path =
-            write_mcp_isolation_settings(current_dir, "qwen-acp-settings", serde_json::json!({}))
-                .await?;
+        let path = write_mcp_isolation_settings(
+            current_dir,
+            "qwen-acp-settings",
+            self.native_reasoning_settings()?,
+        )
+        .await?;
         let mut runtime_env = env.clone();
         runtime_env.insert(
             "QWEN_CODE_SYSTEM_SETTINGS_PATH",
@@ -156,6 +223,13 @@ impl QwenCode {
         );
         Ok(runtime_env)
     }
+}
+
+fn invalid_reasoning_effort(message: impl Into<String>) -> ExecutorError {
+    ExecutorError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        message.into(),
+    ))
 }
 
 #[async_trait]
@@ -189,13 +263,21 @@ impl StandardCodingAgentExecutor for QwenCode {
         &self,
         current_dir: &Path,
         env: &ExecutionEnv,
+        auth_method_id: Option<&str>,
     ) -> Result<Option<AcpCapabilityProbe>, ExecutorError> {
+        let configured_auth_method_id = self.acp.as_ref().and_then(|options| match &options.auth {
+            Some(AcpAuthSelection::MethodId { method_id }) => Some(method_id.clone()),
+            _ => None,
+        });
         Ok(Some(
             super::acp::runtime::probe_acp_command(
                 self.build_command_builder()?.build_initial()?,
                 current_dir,
                 env,
                 &self.cmd,
+                auth_method_id
+                    .map(str::to_string)
+                    .or(configured_auth_method_id),
             )
             .await?,
         ))
@@ -304,6 +386,60 @@ mod tests {
             .build_initial()
             .expect("build initial")
             .into_parts_for_test()
+    }
+
+    #[test]
+    fn native_reasoning_settings_use_current_qwen_effort_scale() {
+        let mut qwen = qwen_with_approval(None);
+        qwen.thinking_effort = Some("xhigh".to_string());
+
+        assert_eq!(
+            qwen.native_reasoning_settings()
+                .expect("Qwen native reasoning settings"),
+            json!({
+                "model": {
+                    "reasoningEffort": "xhigh"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn acp_writes_native_qwen_reasoning_fallback() {
+        let workspace =
+            std::env::temp_dir().join(format!("openteams-qwen-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+        let mut qwen = qwen_with_approval(None);
+        qwen.thinking_effort = Some("high".to_string());
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let runtime_env = qwen
+            .acp_runtime_env(&workspace, &env)
+            .await
+            .expect("ACP runtime environment");
+        let settings_path = runtime_env
+            .get("QWEN_CODE_SYSTEM_SETTINGS_PATH")
+            .expect("Qwen system settings path");
+        let settings: Value = serde_json::from_slice(
+            &tokio::fs::read(settings_path)
+                .await
+                .expect("read Qwen system settings"),
+        )
+        .expect("parse Qwen system settings");
+
+        assert_eq!(settings["model"]["reasoningEffort"], json!("high"));
+        assert!(
+            settings["mcpServers"]
+                .as_object()
+                .expect("server map")
+                .is_empty()
+        );
+
+        tokio::fs::remove_dir_all(workspace)
+            .await
+            .expect("remove workspace");
     }
 
     #[test]
