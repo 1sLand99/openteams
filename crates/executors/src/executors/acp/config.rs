@@ -41,6 +41,26 @@ pub struct AcpConfigOverride {
     pub category_snapshot: Option<String>,
 }
 
+impl AcpConfigOverride {
+    pub(crate) fn controls_session_mode(&self) -> bool {
+        fn is_mode_key(value: &str) -> bool {
+            matches!(
+                value
+                    .chars()
+                    .filter(|character| character.is_alphanumeric())
+                    .flat_map(char::to_lowercase)
+                    .collect::<String>()
+                    .as_str(),
+                "mode" | "sessionmode" | "agentmode" | "workmode" | "workingmode"
+            )
+        }
+
+        self.category_snapshot.as_deref().is_some_and(is_mode_key)
+            || is_mode_key(&self.option_id)
+            || self.label_snapshot.as_deref().is_some_and(is_mode_key)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct AcpConfigChoice {
     pub value: String,
@@ -102,6 +122,51 @@ pub struct AcpCapabilityProbe {
     pub agent_capabilities: serde_json::Value,
     pub config_source: AcpConfigSource,
     pub config_options: Vec<AcpConfigOptionSnapshot>,
+}
+
+impl AcpCapabilityProbe {
+    pub fn model_ids(&self) -> Option<Vec<String>> {
+        let mut model_options = self
+            .config_options
+            .iter()
+            .filter(|option| is_model_config_option(option));
+        let option = model_options.next()?;
+        if model_options.next().is_some() {
+            return None;
+        }
+        let AcpConfigOptionKind::Select { options, .. } = &option.kind else {
+            return None;
+        };
+
+        let mut models = Vec::new();
+        for choice in options {
+            let value = choice.value.trim();
+            if !value.is_empty() && !models.iter().any(|model| model == value) {
+                models.push(value.to_string());
+            }
+        }
+        (!models.is_empty()).then_some(models)
+    }
+}
+
+fn is_model_config_option(option: &AcpConfigOptionSnapshot) -> bool {
+    fn semantic_key(value: &str) -> String {
+        value
+            .chars()
+            .filter(|character| character.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+
+    let category = semantic_key(option.category.as_deref().unwrap_or_default());
+    if !category.is_empty() {
+        return category == "model";
+    }
+
+    [&option.id, &option.name].iter().any(|value| {
+        let key = semantic_key(value);
+        key == "model" || key.ends_with("model")
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS, JsonSchema)]
@@ -230,7 +295,7 @@ pub struct AcpConfigSelection {
 pub struct AcpSessionPreferences {
     pub model: Option<String>,
     pub thought_level: Option<String>,
-    pub mode: Option<String>,
+    pub native_thought_level_fallback: bool,
     pub options: Vec<AcpConfigSelection>,
 }
 
@@ -335,5 +400,74 @@ mod tests {
             .expect_err("relative ACP directory must be rejected");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert!(error.to_string().contains("must be absolute"));
+    }
+
+    #[test]
+    fn session_mode_overrides_are_identified_for_removal() {
+        let mode = AcpConfigOverride {
+            option_id: "session-mode".to_string(),
+            value: AcpConfigValue::ValueId {
+                value: "plan".to_string(),
+            },
+            label_snapshot: Some("Mode".to_string()),
+            category_snapshot: Some("mode".to_string()),
+        };
+        let model = AcpConfigOverride {
+            option_id: "session-model".to_string(),
+            value: AcpConfigValue::ValueId {
+                value: "gemini-2.5-flash".to_string(),
+            },
+            label_snapshot: Some("Model".to_string()),
+            category_snapshot: Some("model".to_string()),
+        };
+
+        assert!(mode.controls_session_mode());
+        assert!(!model.controls_session_mode());
+    }
+
+    #[test]
+    fn capability_probe_reports_exact_acp_model_ids() {
+        let probe = AcpCapabilityProbe {
+            protocol_version: "1".to_string(),
+            agent_name: Some("gemini".to_string()),
+            agent_version: None,
+            auth_methods: Vec::new(),
+            supports_session_list: false,
+            supports_session_resume: false,
+            supports_session_close: false,
+            supports_session_delete: false,
+            supports_additional_directories: false,
+            agent_capabilities: serde_json::Value::Null,
+            config_source: AcpConfigSource::Stable,
+            config_options: vec![AcpConfigOptionSnapshot {
+                id: "session-model".to_string(),
+                name: "Model".to_string(),
+                description: None,
+                category: Some("model".to_string()),
+                kind: AcpConfigOptionKind::Select {
+                    current_value: "gemini-3.1-pro".to_string(),
+                    options: vec![
+                        AcpConfigChoice {
+                            value: "gemini-3.1-pro".to_string(),
+                            name: "Gemini 3.1 Pro".to_string(),
+                            description: None,
+                        },
+                        AcpConfigChoice {
+                            value: "gemini-3.1-flash".to_string(),
+                            name: "Gemini 3.1 Flash".to_string(),
+                            description: None,
+                        },
+                    ],
+                },
+            }],
+        };
+
+        assert_eq!(
+            probe.model_ids(),
+            Some(vec![
+                "gemini-3.1-pro".to_string(),
+                "gemini-3.1-flash".to_string(),
+            ])
+        );
     }
 }

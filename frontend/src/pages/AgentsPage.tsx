@@ -13,8 +13,6 @@ import {
   ListFilter,
   PanelLeftClose,
   PanelLeftOpen,
-  PencilLine,
-  Plus,
   RefreshCw,
   Settings,
   X,
@@ -45,6 +43,7 @@ import {
   type AgentRuntimeFilter,
   type RuntimeDisplayState,
 } from "./agent-runtime/agentRuntimeViewModel";
+import { findAcpSelectConfigOption } from "./team/teamUtils";
 import ampSchema from "../../../shared/schemas/amp.json";
 import claudeCodeSchema from "../../../shared/schemas/claude_code.json";
 import codexSchema from "../../../shared/schemas/codex.json";
@@ -987,196 +986,75 @@ function ConfigSchemaField({
 }
 
 function ModelConfigField({
-  runner,
-  models,
+  options,
   modelSource,
   value,
   onChange,
-  onModelSaved,
+  refreshingModels,
+  onRefreshModels,
   t,
 }: {
-  runner: BaseCodingAgent;
-  models: string[];
+  options: DropdownSelectOption[];
   modelSource: AgentRuntimeStatus["model_source"];
   value: JsonValue | undefined;
   onChange: (key: string, value: JsonValue | undefined) => void;
-  onModelSaved: (model: string) => Promise<void>;
+  refreshingModels: boolean;
+  onRefreshModels: () => Promise<void>;
   t: TranslateFn;
 }) {
   const selectedModel = typeof value === "string" ? value : "";
-  const modelFieldId = `agent-model-options-${runner}`;
   const sourceLabel = getModelSourceLabel(modelSource, t);
-  const [modelFormMode, setModelFormMode] = useState<"add" | "edit" | null>(
-    null,
-  );
-  const [editingModelName, setEditingModelName] = useState("");
-  const [newModelName, setNewModelName] = useState("");
-  const [savingModel, setSavingModel] = useState(false);
-  const [addModelError, setAddModelError] = useState<string | null>(null);
-  const [customModels, setCustomModels] = useState<string[]>([]);
-  const modelOptions = useMemo<DropdownSelectOption[]>(() => {
-    const uniqueModels = new Set<string>();
-    for (const model of [...models, ...customModels, selectedModel]) {
-      const trimmed = model.trim();
-      if (trimmed) uniqueModels.add(trimmed);
-    }
-
-    return [...uniqueModels].sort().map((model) => ({
-      id: model,
-      label: model,
-    }));
-  }, [customModels, models, selectedModel]);
-
-  useEffect(() => {
-    setModelFormMode(null);
-    setEditingModelName("");
-    setNewModelName("");
-    setAddModelError(null);
-    setCustomModels([]);
-  }, [runner]);
-
-  const handleSaveModel = async () => {
-    const trimmed = newModelName.trim();
-    if (!trimmed) {
-      setAddModelError(t("agents.model.add.empty"));
-      return;
-    }
-
-    setSavingModel(true);
-    setAddModelError(null);
-    try {
-      if (modelFormMode === "edit") {
-        await agentRuntimeApi.renameModel(runner, editingModelName, trimmed);
-        setCustomModels((current) => {
-          const next = current.filter((model) => model !== editingModelName);
-          return next.includes(trimmed) ? next : [...next, trimmed];
-        });
-      } else {
-        await agentRuntimeApi.addModel(runner, trimmed);
-        setCustomModels((current) =>
-          current.includes(trimmed) ? current : [...current, trimmed],
-        );
-      }
-      await onModelSaved(trimmed);
-      setEditingModelName("");
-      setNewModelName("");
-      setModelFormMode(null);
-    } catch (error) {
-      setAddModelError(
-        error instanceof Error ? error.message : t("agents.model.add.failed"),
-      );
-    } finally {
-      setSavingModel(false);
-    }
-  };
 
   return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-3 py-1.5">
-        <div
-          className="w-32 shrink-0 pt-1"
-          title={
-            models.length > 0
-              ? t("agents.model.field.description", { source: sourceLabel })
-              : t("agents.model.field.emptyDescription")
-          }
-        >
-          <label className="block truncate text-[12px] font-medium leading-[1.35] text-[var(--ink-subtle)]">
-            {t("agents.model.field.label")}
-          </label>
-        </div>
-        <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <DropdownSelect
-            value={selectedModel}
-            options={modelOptions}
-            placeholder={t("agents.model.field.placeholder")}
-            searchPlaceholder={t("agents.model.field.searchPlaceholder")}
-            emptyLabel={t("agents.model.field.noMatch")}
-            className="min-w-0 flex-1 hover:[&>button]:!border-white/10 hover:[&>button]:!bg-white/[0.04] focus-within:[&>button]:!border-white/20 focus-within:[&>button]:!bg-white/[0.04] [&>button]:h-8 [&>button]:!rounded-none [&>button]:!border-x-0 [&>button]:!border-b [&>button]:!border-t-0 [&>button]:!border-transparent [&>button]:!bg-transparent [&>button]:px-0 [&>button]:py-0 [&>button]:font-mono [&>button]:text-[12px]"
-            maxPanelHeightClassName="max-h-[280px]"
-            onChange={(nextValue) => {
-              const trimmed = nextValue.trim();
-              onChange("model", trimmed ? trimmed : null);
-              if (trimmed) {
-                setModelFormMode("edit");
-                setEditingModelName(trimmed);
-                setNewModelName(trimmed);
-                setAddModelError(null);
-              } else {
-                setModelFormMode(null);
-                setEditingModelName("");
-                setNewModelName("");
-                setAddModelError(null);
-              }
-            }}
-          />
-          <button
-            type="button"
-            onClick={() => {
-              setModelFormMode("add");
-              setEditingModelName("");
-              setNewModelName("");
-              setAddModelError(null);
-            }}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[6px] border border-transparent bg-transparent text-[var(--ink-tertiary)] transition-colors hover:border-white/20 hover:bg-white/[0.04] hover:text-[var(--ink)]"
-            title={t("agents.model.add.button")}
-            aria-label={t("agents.model.add.button")}
-          >
-            <Plus className="h-3.5 w-3.5" />
-          </button>
-        </div>
+    <div className="flex items-center gap-3 py-1.5">
+      <div
+        className="w-32 shrink-0 pt-1"
+        title={
+          options.length > 0
+            ? t("agents.model.field.description", { source: sourceLabel })
+            : t("agents.model.field.emptyDescription")
+        }
+      >
+        <label className="block truncate text-[12px] font-medium leading-[1.35] text-[var(--ink-subtle)]">
+          {t("agents.model.field.label")}
+        </label>
       </div>
-      {modelFormMode && (
-        <form
-          className="flex items-center gap-1.5 py-1.5 pl-[140px]"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void handleSaveModel();
+      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        <DropdownSelect
+          value={selectedModel}
+          options={options}
+          placeholder={t("agents.model.field.placeholder")}
+          searchPlaceholder={t("agents.model.field.searchPlaceholder")}
+          emptyLabel={t("agents.model.field.noMatch")}
+          className="min-w-0 flex-1 hover:[&>button]:!border-white/10 hover:[&>button]:!bg-white/[0.04] focus-within:[&>button]:!border-white/20 focus-within:[&>button]:!bg-white/[0.04] [&>button]:h-8 [&>button]:!rounded-none [&>button]:!border-x-0 [&>button]:!border-b [&>button]:!border-t-0 [&>button]:!border-transparent [&>button]:!bg-transparent [&>button]:px-0 [&>button]:py-0 [&>button]:font-mono [&>button]:text-[12px]"
+          maxPanelHeightClassName="max-h-[280px]"
+          onChange={(nextValue) => {
+            const trimmed = nextValue.trim();
+            onChange("model", trimmed ? trimmed : null);
           }}
+        />
+        <button
+          type="button"
+          onClick={() => void onRefreshModels()}
+          disabled={refreshingModels}
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[6px] border border-transparent bg-transparent text-[var(--ink-tertiary)] transition-colors hover:border-white/20 hover:bg-white/[0.04] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-60"
+          aria-label={
+            refreshingModels
+              ? t("agents.model.refreshing")
+              : t("agents.model.refresh")
+          }
+          title={
+            refreshingModels
+              ? t("agents.model.refreshing")
+              : t("agents.model.refresh")
+          }
+          data-tooltip-nowrap
         >
-          <input
-            id={`${modelFieldId}-new`}
-            value={newModelName}
-            onChange={(event) => {
-              setNewModelName(event.target.value);
-              setAddModelError(null);
-            }}
-            spellCheck={false}
-            placeholder={t("agents.model.add.placeholder")}
-            className="h-8 min-w-0 flex-1 rounded-none border-x-0 border-b border-t-0 border-transparent bg-transparent px-0 font-mono text-[12px] text-[var(--ink)] outline-none transition-all placeholder:text-[var(--ink-tertiary)] hover:border-white/10 hover:bg-white/[0.04] focus:border-white/20 focus:bg-white/[0.04]"
+          <RefreshCw
+            className={`h-3.5 w-3.5 ${refreshingModels ? "animate-spin" : ""}`}
           />
-          <button
-            type="submit"
-            disabled={savingModel}
-            className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap px-2 text-[13px] font-medium text-[var(--primary)] transition-colors hover:text-[var(--primary-hover)] focus-visible:outline-none focus-visible:text-[var(--primary-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {savingModel ? (
-              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <PencilLine className="h-3.5 w-3.5" />
-            )}
-            {savingModel
-              ? t("agents.model.add.saving")
-              : t("agents.model.add.save")}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setModelFormMode(null);
-              setEditingModelName("");
-              setNewModelName("");
-              setAddModelError(null);
-            }}
-            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[6px] border border-transparent bg-transparent text-[var(--ink-tertiary)] transition-colors hover:border-white/20 hover:bg-white/[0.04] hover:text-[var(--ink)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/10"
-            aria-label={t("agents.save.cancel")}
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </form>
-      )}
-      {addModelError && (
-        <p className="font-mono text-[14px] text-red-400">{addModelError}</p>
-      )}
+        </button>
+      </div>
     </div>
   );
 }
@@ -1189,6 +1067,8 @@ function AgentConfigSidebar({
   onClose,
   onSave,
   onDiagnosticsLoaded,
+  refreshingModels,
+  onRefreshModels,
   t,
 }: {
   runner: AgentRuntimeStatus;
@@ -1200,6 +1080,8 @@ function AgentConfigSidebar({
     envJson: Record<string, string> | null,
   ) => Promise<void>;
   onDiagnosticsLoaded: (diagnostics: AgentRuntimeDiagnostics) => void;
+  refreshingModels: boolean;
+  onRefreshModels: () => Promise<void>;
   t: TranslateFn;
 }) {
   const [formData, setFormData] = useState<
@@ -1217,6 +1099,7 @@ function AgentConfigSidebar({
     useState<AgentRuntimeDiagnostics | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+  const [refreshingModelOptions, setRefreshingModelOptions] = useState(false);
   const [autoSaveStatus, setAutoSaveStatus] = useState<
     "idle" | "saving" | "saved"
   >("idle");
@@ -1239,7 +1122,7 @@ function AgentConfigSidebar({
   );
   const currentDiagnostics =
     diagnostics?.runner_type === runner.runner_type ? diagnostics : null;
-  const envSummary = currentDiagnostics?.env_summary ?? runner.env_summary;
+  const envSummary = runner.env_summary;
   const configPath =
     currentDiagnostics?.config_path ??
     (diagnosticsLoading
@@ -1260,9 +1143,35 @@ function AgentConfigSidebar({
     ? t("agents.details.loading")
     : (currentDiagnostics?.resolved_command?.trim() ||
       t("agents.details.notReported"));
-  const modelOptions =
+  const acpModelOption = isAcpRunner(runner.runner_type)
+    ? findAcpSelectConfigOption(
+        currentDiagnostics?.acp_probe?.config_options ?? [],
+        "model",
+      )
+    : null;
+  const discoveredModels =
     currentDiagnostics?.discovered_models ?? runner.discovered_models;
-  const modelSource = currentDiagnostics?.model_source ?? runner.model_source;
+  const modelOptions = useMemo<DropdownSelectOption[]>(
+    () =>
+      acpModelOption
+        ? acpModelOption.options.map((choice) => ({
+            id: choice.value,
+            label: choice.name,
+            description: choice.description ?? undefined,
+          }))
+        : discoveredModels.map((model) => ({ id: model, label: model })),
+    [acpModelOption, discoveredModels],
+  );
+  const configuredModel =
+    typeof formData.model === "string" ? formData.model.trim() : "";
+  const modelValue =
+    configuredModel &&
+    modelOptions.some((option) => option.id === configuredModel)
+      ? configuredModel
+      : (acpModelOption?.current_value ?? configuredModel);
+  const modelSource = acpModelOption
+    ? "runner"
+    : (currentDiagnostics?.model_source ?? runner.model_source);
   const isDirty =
     envDirty || JSON.stringify(formData) !== JSON.stringify(initialFormData);
   const envSummaryText = useMemo(
@@ -1451,6 +1360,25 @@ function AgentConfigSidebar({
     };
   }, [runner.runner_type]);
 
+  const handleRefreshModelOptions = async () => {
+    setRefreshingModelOptions(true);
+    try {
+      await onRefreshModels();
+      const result = await agentRuntimeApi.getDiagnostics(runner.runner_type);
+      setDiagnostics(result);
+      setDiagnosticsError(null);
+      onDiagnosticsLoadedRef.current(result);
+    } catch (error) {
+      setDiagnosticsError(
+        error instanceof Error
+          ? error.message
+          : diagnosticsFailedLabelRef.current,
+      );
+    } finally {
+      setRefreshingModelOptions(false);
+    }
+  };
+
   const handleConfigFieldChange = (
     key: string,
     value: JsonValue | undefined,
@@ -1465,27 +1393,6 @@ function AgentConfigSidebar({
       }
       return next;
     });
-  };
-
-  const handleModelSaved = async (model: string) => {
-    const nextFormData = { ...formData, model };
-    const parsedEnv = envDirty ? parseEnvText(envText) : null;
-    draftRevisionRef.current += 1;
-    setFormData(nextFormData);
-    clearSavedStatusTimer();
-    setAutoSaveStatus("saving");
-    await onSave(
-      runner.runner_type,
-      nextFormData,
-      parsedEnv?.ok ? parsedEnv.value : null,
-    );
-    setInitialFormData(nextFormData);
-    if (parsedEnv?.ok) setEnvDirty(false);
-    setAutoSaveStatus("saved");
-    savedStatusTimerRef.current = window.setTimeout(() => {
-      setAutoSaveStatus("idle");
-      savedStatusTimerRef.current = null;
-    }, 1500);
   };
 
   return (
@@ -1623,23 +1530,23 @@ function AgentConfigSidebar({
           <div>
             {schemaFields.length === 0 ? (
               <ModelConfigField
-                runner={runner.runner_type}
-                models={modelOptions}
+                options={modelOptions}
                 modelSource={modelSource}
-                value={formData.model}
+                value={modelValue}
                 onChange={handleConfigFieldChange}
-                onModelSaved={handleModelSaved}
+                refreshingModels={refreshingModels || refreshingModelOptions}
+                onRefreshModels={handleRefreshModelOptions}
                 t={t}
               />
             ) : (
               <div className="space-y-1">
                 <ModelConfigField
-                  runner={runner.runner_type}
-                  models={modelOptions}
+                  options={modelOptions}
                   modelSource={modelSource}
-                  value={formData.model}
+                  value={modelValue}
                   onChange={handleConfigFieldChange}
-                  onModelSaved={handleModelSaved}
+                  refreshingModels={refreshingModels || refreshingModelOptions}
+                  onRefreshModels={handleRefreshModelOptions}
                   t={t}
                 />
                 {isAcpRunner(runner.runner_type) && (
@@ -1712,13 +1619,15 @@ export function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [runtimeLoaded, setRuntimeLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const [refreshingConfig, setRefreshingConfig] = useState(false);
+  const [refreshingModels, setRefreshingModels] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [selectedRunner, setSelectedRunner] =
     useState<AgentRuntimeStatus | null>(null);
   const [agentNavCollapsed, setAgentNavCollapsed] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const discoveryRefreshedNotice = t("agents.notice.discoveryRefreshed");
+  const configRefreshedNotice = t("agents.notice.configRefreshed");
   const configSavedNotice = t("agents.notice.configSaved");
 
   const statusFilterOptions = useMemo(() => createStatusFilterOptions(t), [t]);
@@ -1726,8 +1635,13 @@ export function AgentsPage() {
     setAgentNavCollapsed((current) => !current);
   }, []);
   const autoDismissNotices = useMemo(
-    () => new Set([discoveryRefreshedNotice, configSavedNotice]),
-    [configSavedNotice, discoveryRefreshedNotice],
+    () =>
+      new Set([
+        configRefreshedNotice,
+        discoveryRefreshedNotice,
+        configSavedNotice,
+      ]),
+    [configRefreshedNotice, configSavedNotice, discoveryRefreshedNotice],
   );
 
   useShortcutScope('agent-runtime', {
@@ -1863,8 +1777,29 @@ export function AgentsPage() {
     return () => window.clearTimeout(timeoutId);
   }, [autoDismissNotices, notice]);
 
-  const handleRefresh = async () => {
-    setRefreshing(true);
+  const handleRefreshConfig = async () => {
+    setRefreshingConfig(true);
+    setNotice(null);
+    try {
+      const response = await agentRuntimeApi.list();
+      updateRuntimeRunners(response.runners, { notifyErrors: true });
+      setRuntimeLoaded(true);
+      setLoadError(null);
+      setNotice(configRefreshedNotice);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : t("agents.refreshConfig.failed");
+      setNotice(message);
+      showToast(message);
+    } finally {
+      setRefreshingConfig(false);
+    }
+  };
+
+  const handleRefreshModels = async () => {
+    setRefreshingModels(true);
     setNotice(null);
     try {
       const response = await agentRuntimeApi.refresh();
@@ -1878,11 +1813,11 @@ export function AgentsPage() {
       );
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : t("agents.refresh.failed");
+        error instanceof Error ? error.message : t("agents.model.refresh.failed");
       setNotice(message);
       showToast(message);
     } finally {
-      setRefreshing(false);
+      setRefreshingModels(false);
     }
   };
 
@@ -1902,9 +1837,6 @@ export function AgentsPage() {
               version: diagnostics.version,
               last_checked_at: diagnostics.last_checked_at,
               last_error: diagnostics.last_error,
-              run_mode: diagnostics.run_mode,
-              env_summary: diagnostics.env_summary,
-              executor_options: diagnostics.executor_options,
             };
             return shouldApplyRuntimeSnapshot(item, next) ? next : item;
           }),
@@ -2005,14 +1937,23 @@ export function AgentsPage() {
           />
           <button
             type="button"
-            onClick={() => void handleRefresh()}
-            disabled={refreshing}
+            onClick={() => void handleRefreshConfig()}
+            disabled={refreshingConfig}
             className="flex h-7 w-7 items-center justify-center rounded-full border border-[var(--hairline)] bg-[var(--surface-2)] text-[var(--ink-tertiary)] transition hover:bg-[var(--surface-3)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-60"
-            aria-label={refreshing ? t("agents.refreshing") : t("agents.refresh")}
-            title={refreshing ? t("agents.refreshing") : t("agents.refresh")}
+            aria-label={
+              refreshingConfig
+                ? t("agents.refreshConfig.refreshing")
+                : t("agents.refreshConfig")
+            }
+            title={
+              refreshingConfig
+                ? t("agents.refreshConfig.refreshing")
+                : t("agents.refreshConfig")
+            }
+            data-tooltip-nowrap
           >
             <RefreshCw
-              className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`}
+              className={`h-3.5 w-3.5 ${refreshingConfig ? "animate-spin" : ""}`}
             />
           </button>
         </div>
@@ -2089,6 +2030,8 @@ export function AgentsPage() {
                 onClose={() => setSelectedRunner(null)}
                 onSave={handleSave}
                 onDiagnosticsLoaded={handleDiagnosticsLoaded}
+                refreshingModels={refreshingModels}
+                onRefreshModels={handleRefreshModels}
                 t={t}
               />
             ) : (
