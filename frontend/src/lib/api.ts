@@ -544,38 +544,23 @@ export const agentRuntimeApi = {
     );
     return handleApiResponse<AgentRuntimeStatus>(r);
   },
-  addModel: async (
-    runner: BaseCodingAgent,
-    modelName: string,
-  ): Promise<AgentRuntimeStatus> => {
-    const r = await makeRequest(
-      `/api/agents/runtime/${encodeURIComponent(runner)}/models`,
-      { method: "POST", body: jsonBody({ model_name: modelName }) },
-    );
-    return handleApiResponse<AgentRuntimeStatus>(r);
-  },
-  renameModel: async (
-    runner: BaseCodingAgent,
-    oldModelName: string,
-    newModelName: string,
-  ): Promise<AgentRuntimeStatus> => {
-    const r = await makeRequest(
-      `/api/agents/runtime/${encodeURIComponent(runner)}/models`,
-      {
-        method: "PUT",
-        body: jsonBody({
-          old_model_name: oldModelName,
-          new_model_name: newModelName,
-        }),
-      },
-    );
-    return handleApiResponse<AgentRuntimeStatus>(r);
-  },
   getDiagnostics: async (
     runner: BaseCodingAgent,
+    options?: {
+      workspacePath?: string;
+      authMethodId?: string;
+    },
   ): Promise<AgentRuntimeDiagnostics> => {
+    const query = new URLSearchParams();
+    if (options?.workspacePath) {
+      query.set("workspace_path", options.workspacePath);
+    }
+    if (options?.authMethodId) {
+      query.set("auth_method_id", options.authMethodId);
+    }
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
     const r = await makeRequest(
-      `/api/agents/runtime/${encodeURIComponent(runner)}/diagnostics`,
+      `/api/agents/runtime/${encodeURIComponent(runner)}/diagnostics${suffix}`,
       { cache: "no-store" },
     );
     return handleApiResponse<AgentRuntimeDiagnostics>(r);

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use ts_rs::TS;
 use workspace_utils::{msg_store::MsgStore, shell::resolve_executable_path_blocking};
 
@@ -86,6 +87,36 @@ impl Gemini {
         }
     }
 
+    fn native_thinking_settings(&self) -> Result<Value, ExecutorError> {
+        let Some(effort) = self
+            .thinking_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(json!({}));
+        };
+        let model = self
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("auto");
+        let thinking_config = gemini_thinking_config(model, effort)?;
+        Ok(json!({
+            "modelConfigs": {
+                "customOverrides": [{
+                    "match": { "model": model },
+                    "modelConfig": {
+                        "generateContentConfig": {
+                            "thinkingConfig": thinking_config
+                        }
+                    }
+                }]
+            }
+        }))
+    }
+
     async fn acp_harness(&self) -> Result<AcpAgentHarness, ExecutorError> {
         let options = self.acp.clone().unwrap_or_default();
         let approval_policy = match options.approval_mode.unwrap_or_default() {
@@ -105,10 +136,23 @@ impl Gemini {
         if let Some(AcpAuthSelection::MethodId { method_id }) = options.auth {
             harness = harness.with_auth_method_id(method_id);
         }
+        let config_overrides = options.config_overrides.as_deref().unwrap_or_default();
+        let has_model_override = config_overrides.iter().any(|selection| {
+            selection.category_snapshot.as_deref() == Some("model")
+                || selection.option_id.eq_ignore_ascii_case("model")
+        });
+        let has_thought_override = config_overrides.iter().any(|selection| {
+            selection.category_snapshot.as_deref() == Some("thought_level")
+                || selection
+                    .option_id
+                    .replace(['-', '_', ' '], "")
+                    .eq_ignore_ascii_case("thoughtlevel")
+        });
         if let Some(model) = self
             .model
             .as_deref()
             .filter(|value| !value.trim().is_empty())
+            .filter(|_| !has_model_override)
         {
             harness = harness.with_model(model);
         }
@@ -116,8 +160,12 @@ impl Gemini {
             .thinking_effort
             .as_deref()
             .filter(|value| !value.trim().is_empty())
+            .filter(|_| !has_thought_override)
         {
-            harness = harness.with_thought_level(effort);
+            harness = harness.with_native_thought_level_fallback(effort);
+        }
+        for selection in config_overrides {
+            harness = harness.with_config_override(selection);
         }
         let config_path = self.default_mcp_config_path();
         let canonical = match config_path {
@@ -142,18 +190,20 @@ impl Gemini {
         // ACP session. Its next-process retention cleanup groups files by the
         // session short ID and can delete the resumable transcript with that
         // placeholder. Disable vendor cleanup for OpenTeams-managed ACP runs.
-        let path = write_mcp_isolation_settings(
-            current_dir,
-            "gemini-acp-settings",
-            serde_json::json!({
-                "general": {
+        let mut settings = self.native_thinking_settings()?;
+        settings
+            .as_object_mut()
+            .expect("native Gemini settings are always an object")
+            .insert(
+                "general".to_string(),
+                json!({
                     "sessionRetention": {
                         "enabled": false
                     }
-                }
-            }),
-        )
-        .await?;
+                }),
+            );
+        let path =
+            write_mcp_isolation_settings(current_dir, "gemini-acp-settings", settings).await?;
         let mut runtime_env = Self::workspace_trusted_env(env);
         runtime_env.insert(
             "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
@@ -161,6 +211,55 @@ impl Gemini {
         );
         Ok(runtime_env)
     }
+}
+
+fn gemini_thinking_config(model: &str, effort: &str) -> Result<Value, ExecutorError> {
+    let normalized = effort.trim().to_ascii_lowercase();
+    let is_gemini_2_5 = model.to_ascii_lowercase().contains("gemini-2.5");
+
+    if let Ok(budget) = normalized.parse::<u32>() {
+        if !is_gemini_2_5 {
+            return Err(invalid_thinking_effort(format!(
+                "numeric Gemini thinking budgets require a Gemini 2.5 model, got `{model}`"
+            )));
+        }
+        return Ok(json!({ "thinkingBudget": budget }));
+    }
+
+    if is_gemini_2_5 {
+        let budget = match normalized.as_str() {
+            "off" | "none" => 0,
+            "low" => 1024,
+            "medium" => 4096,
+            "high" => 8192,
+            "xhigh" | "max" => 16384,
+            _ => {
+                return Err(invalid_thinking_effort(format!(
+                    "unsupported Gemini thinking effort `{effort}`"
+                )));
+            }
+        };
+        return Ok(json!({ "thinkingBudget": budget }));
+    }
+
+    let level = match normalized.as_str() {
+        "off" | "none" | "low" => "LOW",
+        "medium" => "MEDIUM",
+        "high" | "xhigh" | "max" => "HIGH",
+        _ => {
+            return Err(invalid_thinking_effort(format!(
+                "unsupported Gemini thinking effort `{effort}`"
+            )));
+        }
+    };
+    Ok(json!({ "thinkingLevel": level }))
+}
+
+fn invalid_thinking_effort(message: impl Into<String>) -> ExecutorError {
+    ExecutorError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        message.into(),
+    ))
 }
 
 #[async_trait]
@@ -195,14 +294,22 @@ impl StandardCodingAgentExecutor for Gemini {
         &self,
         current_dir: &Path,
         env: &ExecutionEnv,
+        auth_method_id: Option<&str>,
     ) -> Result<Option<AcpCapabilityProbe>, ExecutorError> {
         let runtime_env = Self::workspace_trusted_env(env);
+        let configured_auth_method_id = self.acp.as_ref().and_then(|options| match &options.auth {
+            Some(AcpAuthSelection::MethodId { method_id }) => Some(method_id.clone()),
+            _ => None,
+        });
         Ok(Some(
             super::acp::runtime::probe_acp_command(
                 self.build_command_builder()?.build_initial()?,
                 current_dir,
                 &runtime_env,
                 &self.cmd,
+                auth_method_id
+                    .map(str::to_string)
+                    .or(configured_auth_method_id),
             )
             .await?,
         ))
@@ -373,6 +480,71 @@ mod tests {
                 .as_object()
                 .expect("server map")
                 .is_empty()
+        );
+
+        tokio::fs::remove_dir_all(workspace)
+            .await
+            .expect("remove workspace");
+    }
+
+    #[test]
+    fn native_thinking_settings_map_gemini_model_families() {
+        assert_eq!(
+            gemini_thinking_config("gemini-3.1-pro-preview", "medium")
+                .expect("Gemini 3 thinking config"),
+            json!({ "thinkingLevel": "MEDIUM" })
+        );
+        assert_eq!(
+            gemini_thinking_config("gemini-2.5-flash", "high").expect("Gemini 2.5 thinking config"),
+            json!({ "thinkingBudget": 8192 })
+        );
+        assert_eq!(
+            gemini_thinking_config("gemini-2.5-pro", "12000")
+                .expect("explicit Gemini 2.5 thinking budget"),
+            json!({ "thinkingBudget": 12000 })
+        );
+    }
+
+    #[tokio::test]
+    async fn acp_writes_native_gemini_thinking_fallback() {
+        let workspace =
+            std::env::temp_dir().join(format!("openteams-gemini-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+        let gemini = Gemini {
+            append_prompt: AppendPrompt::default(),
+            model: Some("gemini-3.1-pro-preview".to_string()),
+            thinking_effort: Some("medium".to_string()),
+            acp: None,
+            cmd: CmdOverrides::default(),
+            acp_mcp_policy: AcpMcpPolicy::default(),
+            approvals: None,
+        };
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let runtime_env = gemini
+            .acp_runtime_env(&workspace, &env)
+            .await
+            .expect("ACP runtime environment");
+        let settings_path = runtime_env
+            .get("GEMINI_CLI_SYSTEM_SETTINGS_PATH")
+            .expect("Gemini system settings path");
+        let settings: Value = serde_json::from_slice(
+            &tokio::fs::read(settings_path)
+                .await
+                .expect("read Gemini system settings"),
+        )
+        .expect("parse Gemini system settings");
+
+        assert_eq!(
+            settings["modelConfigs"]["customOverrides"][0]["match"]["model"],
+            json!("gemini-3.1-pro-preview")
+        );
+        assert_eq!(
+            settings["modelConfigs"]["customOverrides"][0]["modelConfig"]["generateContentConfig"]
+                ["thinkingConfig"],
+            json!({ "thinkingLevel": "MEDIUM" })
         );
 
         tokio::fs::remove_dir_all(workspace)

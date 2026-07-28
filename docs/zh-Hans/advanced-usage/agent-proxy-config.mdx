@@ -1,28 +1,26 @@
 ---
-title: "Agent代理配置"
-description: "你可以为你的代理配置不同的模型"
-sidebarTitle: "Agent代理配置"
+title: "Agent 模型发现"
+description: "刷新并选择各 Agent CLI 实际支持的模型"
+sidebarTitle: "Agent 模型发现"
 ---
 
-## 添加代理配置
-您的代理Agent可能支持了新模型，或者您想使用的模型在内置配置中没有，因此您可以在代理配置中添加新的模型配置。
-（openteams-cli的模型配置会自动同步服务供应商中的模型，您无需手动配置）
+## 刷新 Agent 模型
+
+openteams 会读取各 Agent CLI 或 ACP 运行时报告的模型列表。Agent 页面不支持手动添加模型 ID，因为这不会让底层 CLI 获得相应模型能力。
 
 <Steps>
 <Step>
-进入`设置->代理`设置页面
+进入 `设置 -> Agents` 页面
 ![进入代理设置](../../images/zh/agent_setting.png)
 </Step>
 <Step>
-选择您要添加模型配置的代理，点击配置+按钮
-![进入代理设置](../../images/zh/add_agent_config.png)
+选择 Agent，然后点击**模型 ID**字段旁的**刷新模型**。openteams 会重新查询已安装的 CLI 或 ACP 运行时并更新模型列表。
 </Step>
 <Step>
-新建一个配置，输入配置名称
-![进入代理设置](../../images/zh/new_config.png)
-</Step>
-<Step>
-填写号配置信息，最重要的就是**模型名称**，这个必须填写正确否则Agent无法访问模型
-![进入代理设置](../../images/zh/fill_config.png)
+选择 Agent，然后在**模型 ID**字段中选择已发现的模型。
 </Step>
 </Steps>
+
+页面右上角的刷新按钮用于刷新 Agent 配置，不用于刷新模型列表。
+
+对于 openteams CLI 等由服务供应商提供模型的运行时，请在 `设置 -> 服务供应商` 中配置模型；Agent 模型列表会自动同步。

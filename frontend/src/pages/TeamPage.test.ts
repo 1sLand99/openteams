@@ -93,6 +93,19 @@ check(
 );
 
 check(
+  "failed member runs use warning presentation instead of error presentation",
+  sidebarSource.includes(
+    'state === "dead" &&\n          "border-[var(--notification-warning-border)] bg-[var(--notification-warning-bg)] text-[var(--notification-warning)]"',
+  ) &&
+    sidebarSource.includes(
+      'state === "dead" && "bg-[var(--notification-warning)]"',
+    ) &&
+    !sidebarSource.includes('state === "dead" && "border-red-500') &&
+    !sidebarSource.includes('state === "dead" && "bg-red-500"'),
+  sidebarSource,
+);
+
+check(
   "member invite navigation opens the team page add-member menu",
   appSource.includes("TEAM_MEMBER_INVITE_NAVIGATION_EVENT") &&
     appSource.includes('openPageTab("team", getPageTabLabel("team"))') &&
@@ -191,6 +204,17 @@ check(
     (permissionsTabSource.match(/<DropdownSelect/g) ?? []).length === 3 &&
     !permissionsTabSource.includes("<select"),
   { configTabSource, configTabsSource, permissionsTabSource },
+);
+
+check(
+  "ACP member permissions appear immediately without waiting for diagnostics",
+  configTabsSource.includes(
+    'props.runnerType === "GEMINI" || props.runnerType === "QWEN_CODE"',
+  ) &&
+    !configTabsSource.includes(
+      "const supportsAcpPermissions = props.acpProbeAvailable",
+    ),
+  configTabsSource,
 );
 
 check(

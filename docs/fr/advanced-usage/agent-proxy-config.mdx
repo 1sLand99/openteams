@@ -1,38 +1,29 @@
 ---
-title: "Configuration du proxy d'agent"
-description: "Vous pouvez configurer differents modeles pour vos agents."
-sidebarTitle: "Configuration du proxy d'agent"
+title: "Découverte des modèles d'agent"
+description: "Actualisez et sélectionnez les modèles réellement pris en charge par chaque CLI d'agent."
+sidebarTitle: "Découverte des modèles"
 ---
 
-## Ajouter une configuration d'agent
+## Actualiser les modèles d'agent
 
-Si votre agent prend en charge un nouveau modele, ou si le modele que vous souhaitez utiliser n'apparait pas dans la configuration integree, vous pouvez ajouter une nouvelle configuration de modele au niveau de l'agent.
-
-(La configuration des modeles dans openteams-cli se synchronise automatiquement avec les modeles du fournisseur de service. Vous n'avez donc pas besoin de les saisir manuellement.)
+openteams lit la liste de modèles signalée par chaque CLI d'agent ou environnement ACP. La page des agents ne permet pas d'ajouter manuellement un identifiant de modèle, car cela n'ajouterait pas sa prise en charge à la CLI sous-jacente.
 
 <Steps>
 <Step>
-Ouvrez la page `Parametres -> Agents`.
+Ouvrez la page `Paramètres -> Agents`.
 
 ![Acceder aux parametres des agents](../../images/en/agent_setting.png)
 </Step>
 
 <Step>
-Selectionnez l'agent auquel vous voulez ajouter une configuration de modele, puis cliquez sur le bouton de configuration `+`.
-
-![Ajouter une configuration d'agent](../../images/en/add_agent_config.png)
+Sélectionnez un agent, puis cliquez sur **Actualiser les modèles** à côté du champ **Modèle**. openteams interroge à nouveau la CLI ou l'environnement ACP installé et met à jour sa liste de modèles.
 </Step>
 
 <Step>
-Creez une nouvelle configuration et saisissez son nom.
-
-![Creer une nouvelle configuration](../../images/en/new_config.png)
-</Step>
-
-<Step>
-Renseignez les informations de configuration. Le champ le plus important est **le nom du modele** : il doit etre exact, sinon l'agent ne pourra pas acceder au modele.
-
-![Renseigner la configuration](../../images/en/fill_config.png)
+Sélectionnez un agent, puis choisissez un modèle détecté dans le champ **Modèle**.
 </Step>
 </Steps>
 
+Le bouton d'actualisation en haut à droite actualise la configuration de l'agent, pas la liste des modèles.
+
+Pour openteams CLI et les autres environnements basés sur un fournisseur, configurez les modèles dans `Paramètres -> Service Providers`. La liste des modèles de l'agent est synchronisée automatiquement.

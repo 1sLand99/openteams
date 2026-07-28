@@ -18,8 +18,9 @@ use std::{fmt::Display, str::FromStr};
 pub use client::AcpClient;
 pub use config::{
     AcpAccessMode, AcpApprovalMode, AcpApprovalPolicy, AcpAuthMethodInfo, AcpAuthSelection,
-    AcpCapabilityProbe, AcpClientServicePolicy, AcpConfigSelection, AcpExecutionOptions,
-    AcpRunConfig, AcpSessionPreferences,
+    AcpCapabilityProbe, AcpClientServicePolicy, AcpConfigChoice, AcpConfigOptionKind,
+    AcpConfigOptionSnapshot, AcpConfigOverride, AcpConfigSelection, AcpConfigSource,
+    AcpConfigValue, AcpExecutionOptions, AcpRunConfig, AcpSessionPreferences,
 };
 pub use harness::AcpAgentHarness;
 pub use normalize_logs::*;

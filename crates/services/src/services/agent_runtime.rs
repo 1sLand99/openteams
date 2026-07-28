@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        Arc, LazyLock,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -17,8 +17,7 @@ use executors::{
         AvailabilityInfo, BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor,
         acp::AcpCapabilityProbe, opencode::Opencode,
     },
-    model_sync::with_model,
-    profile::{ExecutorConfig, ExecutorConfigs, ProfileError, canonical_variant_key},
+    profile::{ExecutorConfig, ExecutorConfigs, ProfileError},
 };
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -34,19 +33,14 @@ const RUNTIME_DISCOVERY_CONCURRENCY: usize = 4;
 static BACKGROUND_RUNTIME_REFRESH_RUNNING: AtomicBool = AtomicBool::new(false);
 static RUNTIME_REFRESH_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
+static RUNTIME_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Error)]
 pub enum AgentRuntimeError {
     #[error("invalid environment variable key: {0}")]
     InvalidEnvKey(String),
-    #[error("invalid model name: {0}")]
-    InvalidModelName(String),
-    #[error("model not found in profile: {0}")]
-    ModelNotFound(String),
     #[error("unknown runner: {0}")]
     UnknownRunner(String),
-    #[error("runner does not support configurable models: {0}")]
-    UnsupportedModelRunner(BaseCodingAgent),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -226,9 +220,8 @@ async fn refresh_runtime_discovery_unlocked(
     current_dir: &Path,
 ) -> Result<AgentRuntimeRefreshResponse, AgentRuntimeError> {
     let path = store_path();
-    let mut store = read_store(&path)?;
+    let store = read_store(&path)?;
     let profiles = ExecutorConfigs::get_cached();
-    let mut errors = Vec::new();
     let current_dir = current_dir.to_path_buf();
     let store_snapshot = Arc::new(store.clone());
     let discovery_inputs = profiles
@@ -252,63 +245,10 @@ async fn refresh_runtime_discovery_unlocked(
     .collect::<Vec<_>>()
     .await;
 
-    for outcome in outcomes {
-        match outcome? {
-            RunnerDiscoveryOutcome::Skipped => {}
-            RunnerDiscoveryOutcome::ModelsDiscovered {
-                runner,
-                models,
-                detected_version,
-            } => {
-                let version = version_for_discovery_update(&store, runner, detected_version);
-                store.discoveries.insert(
-                    runner,
-                    AgentRuntimeDiscovery {
-                        models,
-                        version,
-                        last_checked_at: Utc::now(),
-                        last_error: None,
-                    },
-                );
-            }
-            RunnerDiscoveryOutcome::VersionOnly {
-                runner,
-                detected_version,
-            } => {
-                cache_version_only_discovery(&mut store, runner, detected_version);
-            }
-            RunnerDiscoveryOutcome::Failed {
-                runner,
-                message,
-                detected_version,
-                preserved_models,
-            } => {
-                store
-                    .discoveries
-                    .entry(runner)
-                    .and_modify(|entry| {
-                        entry.last_checked_at = Utc::now();
-                        entry.last_error = Some(message.clone());
-                        if let Some(version) = detected_version.clone() {
-                            entry.version = Some(version);
-                        }
-                    })
-                    .or_insert_with(|| AgentRuntimeDiscovery {
-                        models: Vec::new(),
-                        version: detected_version.clone(),
-                        last_checked_at: Utc::now(),
-                        last_error: Some(message.clone()),
-                    });
-                errors.push(AgentRuntimeRefreshError {
-                    runner_type: runner,
-                    message,
-                    preserved_models,
-                });
-            }
-        }
-    }
-
-    write_store(&path, &store)?;
+    let outcomes = outcomes.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let (store, errors) = update_store(&path, |latest| {
+        Ok(apply_discovery_outcomes(latest, outcomes))
+    })?;
     Ok(AgentRuntimeRefreshResponse {
         runners: build_statuses(&profiles, &store),
         errors,
@@ -363,6 +303,69 @@ enum RunnerDiscoveryOutcome {
     },
 }
 
+fn apply_discovery_outcomes(
+    store: &mut AgentRuntimeStore,
+    outcomes: Vec<RunnerDiscoveryOutcome>,
+) -> Vec<AgentRuntimeRefreshError> {
+    let mut errors = Vec::new();
+    for outcome in outcomes {
+        match outcome {
+            RunnerDiscoveryOutcome::Skipped => {}
+            RunnerDiscoveryOutcome::ModelsDiscovered {
+                runner,
+                models,
+                detected_version,
+            } => {
+                let version = version_for_discovery_update(store, runner, detected_version);
+                store.discoveries.insert(
+                    runner,
+                    AgentRuntimeDiscovery {
+                        models,
+                        version,
+                        last_checked_at: Utc::now(),
+                        last_error: None,
+                    },
+                );
+            }
+            RunnerDiscoveryOutcome::VersionOnly {
+                runner,
+                detected_version,
+            } => {
+                cache_version_only_discovery(store, runner, detected_version);
+            }
+            RunnerDiscoveryOutcome::Failed {
+                runner,
+                message,
+                detected_version,
+                preserved_models,
+            } => {
+                store
+                    .discoveries
+                    .entry(runner)
+                    .and_modify(|entry| {
+                        entry.last_checked_at = Utc::now();
+                        entry.last_error = Some(message.clone());
+                        if let Some(version) = detected_version.clone() {
+                            entry.version = Some(version);
+                        }
+                    })
+                    .or_insert_with(|| AgentRuntimeDiscovery {
+                        models: Vec::new(),
+                        version: detected_version.clone(),
+                        last_checked_at: Utc::now(),
+                        last_error: Some(message.clone()),
+                    });
+                errors.push(AgentRuntimeRefreshError {
+                    runner_type: runner,
+                    message,
+                    preserved_models,
+                });
+            }
+        }
+    }
+    errors
+}
+
 async fn discover_runner_runtime(
     runner: BaseCodingAgent,
     executor_config: &ExecutorConfig,
@@ -412,44 +415,45 @@ pub fn update_runtime_config(
     payload: UpdateAgentRuntimeConfig,
 ) -> Result<AgentRuntimeStatus, AgentRuntimeError> {
     let path = store_path();
-    let mut store = read_store(&path)?;
     let profiles = ExecutorConfigs::get_cached();
 
     if !profiles.executors.contains_key(&runner) {
         return Err(AgentRuntimeError::UnknownRunner(runner.to_string()));
     }
 
-    let mut config = store
-        .configs
-        .get(&runner)
-        .cloned()
-        .unwrap_or_else(|| default_config(runner));
-
-    if let Some(run_mode) = payload.run_mode {
-        config.run_mode = run_mode;
-    }
-    if let Some(env_json) = payload.env_json {
-        validate_env_json(&env_json)?;
-        config.env_json = env_json;
-    }
-    if let Some(executor_options) = payload.executor_options {
-        let mut executor = profiles
-            .executors
+    let (store, ()) = update_store(&path, |store| {
+        let mut config = store
+            .configs
             .get(&runner)
-            .and_then(|entry| {
-                entry
-                    .get_default()
-                    .or_else(|| entry.configurations.values().next())
-            })
             .cloned()
-            .ok_or_else(|| AgentRuntimeError::UnknownRunner(runner.to_string()))?;
-        apply_executor_options(runner, &mut executor, &executor_options)?;
-        config.executor_options = executor_options;
-    }
-    config.updated_at = Utc::now();
+            .unwrap_or_else(|| default_config(runner));
 
-    store.configs.insert(runner, config);
-    write_store(&path, &store)?;
+        if let Some(run_mode) = payload.run_mode {
+            config.run_mode = run_mode;
+        }
+        if let Some(env_json) = payload.env_json {
+            validate_env_json(&env_json)?;
+            config.env_json = env_json;
+        }
+        if let Some(executor_options) = payload.executor_options {
+            let mut executor = profiles
+                .executors
+                .get(&runner)
+                .and_then(|entry| {
+                    entry
+                        .get_default()
+                        .or_else(|| entry.configurations.values().next())
+                })
+                .cloned()
+                .ok_or_else(|| AgentRuntimeError::UnknownRunner(runner.to_string()))?;
+            apply_executor_options(runner, &mut executor, &executor_options)?;
+            config.executor_options = executor_options;
+        }
+        config.updated_at = Utc::now();
+
+        store.configs.insert(runner, config);
+        Ok(())
+    })?;
 
     let status = build_statuses(&profiles, &store)
         .into_iter()
@@ -458,76 +462,13 @@ pub fn update_runtime_config(
     Ok(status)
 }
 
-pub fn add_runtime_model(
-    runner: BaseCodingAgent,
-    model_name: String,
-) -> Result<AgentRuntimeStatus, AgentRuntimeError> {
-    let model = normalize_model_name(&model_name)?;
-    let mut profiles = ExecutorConfigs::get_cached();
-
-    let executor_config = profiles
-        .executors
-        .get_mut(&runner)
-        .ok_or_else(|| AgentRuntimeError::UnknownRunner(runner.to_string()))?;
-    let base = executor_config
-        .get_default()
-        .or_else(|| executor_config.configurations.values().next())
-        .cloned()
-        .ok_or_else(|| AgentRuntimeError::UnknownRunner(runner.to_string()))?;
-    let model_config =
-        with_model(&base, &model).ok_or(AgentRuntimeError::UnsupportedModelRunner(runner))?;
-    let variant_key = canonical_variant_key(&model);
-
-    if variant_key == "DEFAULT" {
-        return Err(AgentRuntimeError::InvalidModelName(model));
-    }
-
-    let changed = match executor_config.configurations.get(&variant_key) {
-        Some(existing) if existing == &model_config => false,
-        _ => {
-            executor_config
-                .configurations
-                .insert(variant_key, model_config);
-            true
-        }
-    };
-
-    if changed {
-        profiles.save_overrides()?;
-        ExecutorConfigs::reload();
-    }
-
-    runtime_status_for_runner(runner)
-}
-
-pub fn rename_runtime_model(
-    runner: BaseCodingAgent,
-    old_model_name: String,
-    new_model_name: String,
-) -> Result<AgentRuntimeStatus, AgentRuntimeError> {
-    let old_model = normalize_model_name(&old_model_name)?;
-    let new_model = normalize_model_name(&new_model_name)?;
-
-    if old_model == new_model {
-        return runtime_status_for_runner(runner);
-    }
-
-    let mut profiles = ExecutorConfigs::get_cached();
-    let defaults = ExecutorConfigs::from_defaults();
-
-    if rename_model_in_profiles(&mut profiles, &defaults, runner, &old_model, &new_model)? {
-        profiles.save_overrides()?;
-        ExecutorConfigs::reload();
-    }
-
-    runtime_status_for_runner(runner)
-}
-
 pub async fn runtime_diagnostics(
     runner: BaseCodingAgent,
+    probe_dir: &Path,
+    auth_method_id: Option<&str>,
 ) -> Result<AgentRuntimeDiagnostics, AgentRuntimeError> {
     let path = store_path();
-    let mut store = read_store(&path)?;
+    let store = read_store(&path)?;
     let profiles = ExecutorConfigs::get_cached();
     let config = profiles
         .executors
@@ -553,11 +494,6 @@ pub async fn runtime_diagnostics(
     } else {
         None
     };
-    if let Some(version) = detected_version.as_deref() {
-        cache_runner_version(&mut store, runner, version.to_string());
-        write_store(&path, &store)?;
-    }
-    let version = detected_version.or(status.version);
     let resolved_command = resolve_runtime_command(&runtime_executor).await;
     let command_source = resolved_command.as_ref().map(|_| {
         if cmd_overrides_for_executor(&runtime_executor)
@@ -573,24 +509,30 @@ pub async fn runtime_diagnostics(
             .to_string()
         }
     });
-    let (acp_probe, acp_probe_error) = if matches!(
-        runtime_executor,
-        CodingAgent::Gemini(_) | CodingAgent::QwenCode(_)
-    ) {
-        let probe_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        match runtime_executor.probe_acp(&probe_dir, &env).await {
-            Ok(probe) => (probe, None),
-            Err(error) => (None, Some(error.to_string())),
-        }
-    } else {
-        (None, None)
+    let (acp_probe, acp_probe_error) = match runtime_executor
+        .probe_acp(probe_dir, &env, auth_method_id)
+        .await
+    {
+        Ok(probe) => (probe, None),
+        Err(error) => (None, Some(error.to_string())),
     };
+    let latest_store = if let Some(version) = detected_version.as_deref() {
+        update_store(&path, |latest| {
+            cache_runner_version(latest, runner, version.to_string());
+            Ok(())
+        })?
+        .0
+    } else {
+        read_store(&path)?
+    };
+    let latest_status = build_status(runner, config, base, &latest_store);
+    let version = detected_version.or(latest_status.version.clone());
 
     Ok(AgentRuntimeDiagnostics {
-        runner_type: status.runner_type,
-        installed: status.installed,
-        executable: status.executable,
-        availability: status.availability,
+        runner_type: latest_status.runner_type,
+        installed: latest_status.installed,
+        executable: latest_status.executable,
+        availability: latest_status.availability,
         config_path: cli_config_path
             .clone()
             .unwrap_or_else(|| path.display().to_string()),
@@ -599,14 +541,14 @@ pub async fn runtime_diagnostics(
         command_source,
         acp_probe,
         acp_probe_error,
-        discovered_models: status.discovered_models,
-        model_source: status.model_source,
+        discovered_models: latest_status.discovered_models,
+        model_source: latest_status.model_source,
         version,
-        last_checked_at: status.last_checked_at,
-        last_error: status.last_error,
-        run_mode: status.run_mode,
-        env_summary: status.env_summary,
-        executor_options: status.executor_options,
+        last_checked_at: latest_status.last_checked_at,
+        last_error: latest_status.last_error,
+        run_mode: latest_status.run_mode,
+        env_summary: latest_status.env_summary,
+        executor_options: latest_status.executor_options,
     })
 }
 
@@ -926,6 +868,15 @@ async fn discover_models_for_executor(
     current_dir: &Path,
     env: &ExecutionEnv,
 ) -> Result<Option<Vec<String>>, String> {
+    if let Some(probe) = executor
+        .probe_acp(current_dir, env, None)
+        .await
+        .map_err(|err| err.to_string())?
+        && let Some(models) = probe.model_ids()
+    {
+        return Ok(Some(models));
+    }
+
     executor
         .list_models(current_dir, env)
         .await
@@ -1032,7 +983,7 @@ fn reasoning_capability_for_runner(
             options: strings(["none", "dynamic", "off", "low", "medium", "high"]),
         }),
         BaseCodingAgent::Gemini => Some(AgentRuntimeReasoningCapability::Effort {
-            options: strings(["off", "low", "medium", "high", "max"]),
+            options: strings(["low", "medium", "high"]),
         }),
         BaseCodingAgent::Opencode | BaseCodingAgent::OpenTeamsCli => {
             Some(AgentRuntimeReasoningCapability::Effort {
@@ -1040,7 +991,7 @@ fn reasoning_capability_for_runner(
             })
         }
         BaseCodingAgent::QwenCode => Some(AgentRuntimeReasoningCapability::Effort {
-            options: strings(["off", "low", "medium", "high", "max"]),
+            options: strings(["low", "medium", "high", "xhigh", "max"]),
         }),
         BaseCodingAgent::Amp
         | BaseCodingAgent::CursorAgent
@@ -1066,16 +1017,13 @@ fn models_for_runner(
     executor_config: &ExecutorConfig,
     store: &AgentRuntimeStore,
 ) -> Vec<String> {
-    let mut models = BTreeSet::new();
-
     if let Some(discovery) = store.discoveries.get(&runner)
         && !discovery.models.is_empty()
     {
-        models.extend(discovery.models.iter().cloned());
+        return discovery.models.clone();
     }
 
-    models.extend(configured_models(executor_config));
-    models.into_iter().collect()
+    configured_models(executor_config)
 }
 
 fn model_source_for_runner(
@@ -1124,100 +1072,6 @@ fn model_name(config: &CodingAgent) -> Option<&str> {
     }
 }
 
-fn rename_model_in_profiles(
-    profiles: &mut ExecutorConfigs,
-    defaults: &ExecutorConfigs,
-    runner: BaseCodingAgent,
-    old_model: &str,
-    new_model: &str,
-) -> Result<bool, AgentRuntimeError> {
-    let executor_config = profiles
-        .executors
-        .get_mut(&runner)
-        .ok_or_else(|| AgentRuntimeError::UnknownRunner(runner.to_string()))?;
-    let Some(target_key) = find_model_variant_key(executor_config, old_model) else {
-        return Err(AgentRuntimeError::ModelNotFound(old_model.to_string()));
-    };
-    let current_config = executor_config
-        .configurations
-        .get(&target_key)
-        .cloned()
-        .ok_or_else(|| AgentRuntimeError::ModelNotFound(old_model.to_string()))?;
-    let next_config = with_model(&current_config, new_model)
-        .ok_or(AgentRuntimeError::UnsupportedModelRunner(runner))?;
-
-    if next_config == current_config {
-        return Ok(false);
-    }
-
-    let next_key = canonical_variant_key(new_model);
-    if next_key == "DEFAULT" && target_key != "DEFAULT" {
-        return Err(AgentRuntimeError::InvalidModelName(new_model.to_string()));
-    }
-
-    let target_is_builtin = defaults
-        .executors
-        .get(&runner)
-        .is_some_and(|default_config| {
-            default_config.configurations.contains_key(&target_key)
-                || default_config
-                    .configurations
-                    .keys()
-                    .any(|key| canonical_variant_key(key) == target_key)
-        });
-
-    if target_key == "DEFAULT" || target_is_builtin {
-        executor_config
-            .configurations
-            .insert(target_key, next_config);
-        return Ok(true);
-    }
-
-    executor_config.configurations.remove(&target_key);
-    executor_config.configurations.insert(next_key, next_config);
-    Ok(true)
-}
-
-fn find_model_variant_key(executor_config: &ExecutorConfig, model: &str) -> Option<String> {
-    let canonical_key = canonical_variant_key(model);
-    if canonical_key != "DEFAULT"
-        && executor_config
-            .configurations
-            .get(&canonical_key)
-            .and_then(model_name)
-            == Some(model)
-    {
-        return Some(canonical_key);
-    }
-
-    let mut matching_keys = executor_config
-        .configurations
-        .iter()
-        .filter(|(key, config)| key.as_str() != "DEFAULT" && model_name(config) == Some(model))
-        .map(|(key, _)| key.clone())
-        .collect::<Vec<_>>();
-    matching_keys.sort();
-
-    matching_keys.into_iter().next().or_else(|| {
-        executor_config
-            .configurations
-            .get("DEFAULT")
-            .and_then(model_name)
-            .filter(|default_model| *default_model == model)
-            .map(|_| "DEFAULT".to_string())
-    })
-}
-
-fn runtime_status_for_runner(
-    runner: BaseCodingAgent,
-) -> Result<AgentRuntimeStatus, AgentRuntimeError> {
-    list_runtime_statuses()?
-        .runners
-        .into_iter()
-        .find(|status| status.runner_type == runner)
-        .ok_or_else(|| AgentRuntimeError::UnknownRunner(runner.to_string()))
-}
-
 fn default_config(runner: BaseCodingAgent) -> AgentRuntimeConfig {
     AgentRuntimeConfig {
         runner_type: runner,
@@ -1261,15 +1115,7 @@ fn validate_env_key(key: &str) -> Result<(), AgentRuntimeError> {
     Ok(())
 }
 
-fn normalize_model_name(model_name: &str) -> Result<String, AgentRuntimeError> {
-    let model = model_name.trim();
-    if model.is_empty() || model.contains('\n') || model.contains('\r') {
-        return Err(AgentRuntimeError::InvalidModelName(model.to_string()));
-    }
-    Ok(model.to_string())
-}
-
-fn read_store(path: &Path) -> Result<AgentRuntimeStore, AgentRuntimeError> {
+fn read_store_unlocked(path: &Path) -> Result<AgentRuntimeStore, AgentRuntimeError> {
     match std::fs::read_to_string(path) {
         Ok(content) => Ok(serde_json::from_str(&content)?),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(AgentRuntimeStore::default()),
@@ -1277,12 +1123,40 @@ fn read_store(path: &Path) -> Result<AgentRuntimeStore, AgentRuntimeError> {
     }
 }
 
-fn write_store(path: &Path, store: &AgentRuntimeStore) -> Result<(), AgentRuntimeError> {
+fn write_store_unlocked(path: &Path, store: &AgentRuntimeStore) -> Result<(), AgentRuntimeError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, serde_json::to_string_pretty(store)?)?;
     Ok(())
+}
+
+fn read_store(path: &Path) -> Result<AgentRuntimeStore, AgentRuntimeError> {
+    let _guard = RUNTIME_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    read_store_unlocked(path)
+}
+
+#[cfg(test)]
+fn write_store(path: &Path, store: &AgentRuntimeStore) -> Result<(), AgentRuntimeError> {
+    let _guard = RUNTIME_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    write_store_unlocked(path, store)
+}
+
+fn update_store<T>(
+    path: &Path,
+    update: impl FnOnce(&mut AgentRuntimeStore) -> Result<T, AgentRuntimeError>,
+) -> Result<(AgentRuntimeStore, T), AgentRuntimeError> {
+    let _guard = RUNTIME_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut store = read_store_unlocked(path)?;
+    let result = update(&mut store)?;
+    write_store_unlocked(path, &store)?;
+    Ok((store, result))
 }
 
 #[cfg(test)]
@@ -1396,6 +1270,35 @@ mod tests {
     }
 
     #[test]
+    fn successful_refresh_replaces_cached_cli_model_list() {
+        let runner = BaseCodingAgent::Gemini;
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: vec!["gemini-old".to_string()],
+                version: Some("gemini 1.0.0".to_string()),
+                last_checked_at: Utc::now(),
+                last_error: None,
+            },
+        );
+
+        let errors = apply_discovery_outcomes(
+            &mut store,
+            vec![RunnerDiscoveryOutcome::ModelsDiscovered {
+                runner,
+                models: vec!["gemini-new".to_string()],
+                detected_version: Some("gemini 1.1.0".to_string()),
+            }],
+        );
+
+        let discovery = store.discoveries.get(&runner).unwrap();
+        assert!(errors.is_empty());
+        assert_eq!(discovery.models, vec!["gemini-new"]);
+        assert_eq!(discovery.version.as_deref(), Some("gemini 1.1.0"));
+    }
+
+    #[test]
     fn refresh_failure_preserves_old_discovery_models() {
         let runner = BaseCodingAgent::Opencode;
         let mut configs = HashMap::new();
@@ -1467,7 +1370,7 @@ mod tests {
 
         assert_eq!(
             models_for_runner(runner, &executor_config, &store),
-            vec!["opencode/free-model", "profile/fallback-model"]
+            vec!["opencode/free-model"]
         );
         assert_eq!(
             model_source_for_runner(runner, &executor_config, &store),
@@ -1485,85 +1388,6 @@ mod tests {
             model_source_for_runner(runner, &executor_config, &store),
             AgentRuntimeModelSource::None
         );
-    }
-
-    #[test]
-    fn rename_custom_model_updates_original_variant_key() {
-        let runner = BaseCodingAgent::KimiCode;
-        let mut executor_config = ExecutorConfig::new_with_default(model_agent(Some("default")));
-        executor_config
-            .configurations
-            .insert("OLD_MODEL".to_string(), model_agent(Some("old-model")));
-        let defaults = ExecutorConfigs {
-            executors: HashMap::from([(
-                runner,
-                ExecutorConfig::new_with_default(model_agent(Some("default"))),
-            )]),
-        };
-        let mut profiles = ExecutorConfigs {
-            executors: HashMap::from([(runner, executor_config)]),
-        };
-
-        let changed =
-            rename_model_in_profiles(&mut profiles, &defaults, runner, "old-model", "new-model")
-                .unwrap();
-
-        let configurations = &profiles.executors[&runner].configurations;
-        assert!(changed);
-        assert!(!configurations.contains_key("OLD_MODEL"));
-        assert_eq!(
-            configurations.get("NEW_MODEL").and_then(model_name),
-            Some("new-model")
-        );
-    }
-
-    #[test]
-    fn rename_builtin_model_preserves_original_variant_key() {
-        let runner = BaseCodingAgent::KimiCode;
-        let mut executor_config = ExecutorConfig::new_with_default(model_agent(Some("default")));
-        executor_config
-            .configurations
-            .insert("OLD_MODEL".to_string(), model_agent(Some("old-model")));
-        let defaults = ExecutorConfigs {
-            executors: HashMap::from([(runner, executor_config.clone())]),
-        };
-        let mut profiles = ExecutorConfigs {
-            executors: HashMap::from([(runner, executor_config)]),
-        };
-
-        let changed =
-            rename_model_in_profiles(&mut profiles, &defaults, runner, "old-model", "new-model")
-                .unwrap();
-
-        let configurations = &profiles.executors[&runner].configurations;
-        assert!(changed);
-        assert!(configurations.contains_key("OLD_MODEL"));
-        assert!(!configurations.contains_key("NEW_MODEL"));
-        assert_eq!(
-            configurations.get("OLD_MODEL").and_then(model_name),
-            Some("new-model")
-        );
-    }
-
-    #[test]
-    fn rename_model_requires_existing_profile_model() {
-        let runner = BaseCodingAgent::KimiCode;
-        let executor_config = ExecutorConfig::new_with_default(model_agent(Some("default")));
-        let defaults = ExecutorConfigs {
-            executors: HashMap::from([(runner, executor_config.clone())]),
-        };
-        let mut profiles = ExecutorConfigs {
-            executors: HashMap::from([(runner, executor_config)]),
-        };
-
-        let error =
-            rename_model_in_profiles(&mut profiles, &defaults, runner, "missing", "new-model")
-                .unwrap_err();
-
-        assert!(matches!(
-            error,
-            AgentRuntimeError::ModelNotFound(model) if model == "missing"
-        ));
     }
 
     #[test]
@@ -1593,6 +1417,61 @@ mod tests {
         assert_eq!(restored_config.run_mode, AgentRunMode::Disabled);
         assert_eq!(restored_config.env_json["KIMI_API_KEY"], "secret");
         assert_eq!(restored_config.executor_options["model"], "kimi-k2.6");
+    }
+
+    #[test]
+    fn concurrent_config_and_discovery_updates_preserve_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime.json");
+        let runner = BaseCodingAgent::KimiCode;
+        write_store(&path, &AgentRuntimeStore::default()).unwrap();
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let config_path = path.clone();
+        let config_barrier = Arc::clone(&barrier);
+        let config_update = std::thread::spawn(move || {
+            config_barrier.wait();
+            update_store(&config_path, |store| {
+                let mut config = default_config(runner);
+                config.run_mode = AgentRunMode::Local;
+                config
+                    .env_json
+                    .insert("KIMI_API_KEY".to_string(), "new-secret".to_string());
+                config.executor_options = serde_json::json!({ "model": "kimi-k2.6" });
+                store.configs.insert(runner, config);
+                Ok(())
+            })
+            .unwrap();
+        });
+
+        let discovery_path = path.clone();
+        let discovery_barrier = Arc::clone(&barrier);
+        let discovery_update = std::thread::spawn(move || {
+            discovery_barrier.wait();
+            update_store(&discovery_path, |store| {
+                Ok(apply_discovery_outcomes(
+                    store,
+                    vec![RunnerDiscoveryOutcome::ModelsDiscovered {
+                        runner,
+                        models: vec!["kimi-k2.6".to_string()],
+                        detected_version: Some("kimi 1.0.0".to_string()),
+                    }],
+                ))
+            })
+            .unwrap();
+        });
+
+        config_update.join().unwrap();
+        discovery_update.join().unwrap();
+
+        let restored = read_store(&path).unwrap();
+        let config = restored.configs.get(&runner).unwrap();
+        assert_eq!(config.run_mode, AgentRunMode::Local);
+        assert_eq!(config.env_json["KIMI_API_KEY"], "new-secret");
+        assert_eq!(config.executor_options["model"], "kimi-k2.6");
+        let discovery = restored.discoveries.get(&runner).unwrap();
+        assert_eq!(discovery.models, vec!["kimi-k2.6"]);
+        assert_eq!(discovery.version.as_deref(), Some("kimi 1.0.0"));
     }
 
     #[test]
@@ -1685,5 +1564,21 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn reasoning_capabilities_match_current_qwen_and_gemini_controls() {
+        assert_eq!(
+            reasoning_capability_for_runner(BaseCodingAgent::QwenCode),
+            Some(AgentRuntimeReasoningCapability::Effort {
+                options: strings(["low", "medium", "high", "xhigh", "max"]),
+            })
+        );
+        assert_eq!(
+            reasoning_capability_for_runner(BaseCodingAgent::Gemini),
+            Some(AgentRuntimeReasoningCapability::Effort {
+                options: strings(["low", "medium", "high"]),
+            })
+        );
     }
 }

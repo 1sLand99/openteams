@@ -1,7 +1,10 @@
 use agent_client_protocol::schema::v1::{Meta, PromptResponse, SessionUpdate};
 use serde_json::Value;
 
-use crate::logs::TokenUsageInfo;
+use crate::{
+    logs::TokenUsageInfo,
+    model_identity::{canonical_runtime_model_id, model_ids_equivalent},
+};
 
 const INPUT_TOKEN_KEYS: &[&str] = &[
     "inputTokens",
@@ -97,7 +100,7 @@ impl AcpTokenUsageAccumulator {
         runtime_thread_id: String,
     ) {
         self.runtime_agent = runtime_agent;
-        self.runtime_model_id = runtime_model_id;
+        self.runtime_model_id = runtime_model_id.map(|model| canonical_runtime_model_id(&model));
         self.runtime_thread_id = Some(runtime_thread_id);
     }
 
@@ -165,9 +168,10 @@ impl AcpTokenUsageAccumulator {
             reasoning_output_tokens,
             cache_read_tokens,
             runtime_agent: self.runtime_agent.clone(),
-            runtime_model_id: amounts
-                .runtime_model_id
-                .or_else(|| self.runtime_model_id.clone()),
+            runtime_model_id: reconcile_runtime_model_id(
+                amounts.runtime_model_id,
+                self.runtime_model_id.as_deref(),
+            ),
             provider_id: None,
             runtime_thread_id: self.runtime_thread_id.clone(),
             usage_scope: Some(usage_scope.to_string()),
@@ -211,7 +215,8 @@ fn collect_usage_candidates(value: &Value, candidates: &mut Vec<UsageAmounts>) {
                     reasoning_output_tokens: first_u64(object, REASONING_TOKEN_KEYS),
                     cache_read_tokens: first_u64(object, CACHE_READ_TOKEN_KEYS),
                     model_context_window: first_u64(object, CONTEXT_WINDOW_KEYS),
-                    runtime_model_id: first_string(object, MODEL_KEYS),
+                    runtime_model_id: first_string(object, MODEL_KEYS)
+                        .map(|model| canonical_runtime_model_id(&model)),
                 });
             }
             for child in object.values() {
@@ -239,7 +244,7 @@ fn collect_model_ids(value: &Value, models: &mut Vec<String>) {
     match value {
         Value::Object(object) => {
             if let Some(model) = first_string(object, MODEL_KEYS) {
-                models.push(model);
+                models.push(canonical_runtime_model_id(&model));
             }
             for child in object.values() {
                 collect_model_ids(child, models);
@@ -267,6 +272,20 @@ fn first_string(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Optio
             .filter(|value| !value.trim().is_empty())
             .map(str::to_string)
     })
+}
+
+fn reconcile_runtime_model_id(
+    reported: Option<String>,
+    configured: Option<&str>,
+) -> Option<String> {
+    match (reported, configured) {
+        (Some(reported), Some(configured)) if model_ids_equivalent(&reported, configured) => {
+            Some(canonical_runtime_model_id(configured))
+        }
+        (Some(reported), _) => Some(canonical_runtime_model_id(&reported)),
+        (None, Some(configured)) => Some(canonical_runtime_model_id(configured)),
+        (None, None) => None,
+    }
 }
 
 fn nonnegative_u64(value: &Value) -> Option<u64> {
@@ -386,6 +405,42 @@ mod tests {
         assert_eq!(usage.snapshot_input_tokens, Some(1_000));
         assert_eq!(usage.snapshot_output_tokens, Some(250));
         assert_eq!(usage.snapshot_total_tokens, Some(1_250));
+    }
+
+    #[test]
+    fn canonicalizes_provider_qualified_runtime_model_ids() {
+        let mut accumulator = AcpTokenUsageAccumulator::default();
+        accumulator.set_runtime_identity(
+            Some("acp-agent".to_string()),
+            Some("gpt-5.6-luna(openai)".to_string()),
+            "session-1".to_string(),
+        );
+        accumulator.begin_turn();
+        let response = PromptResponse::new(StopReason::EndTurn).meta(meta(json!({
+            "usage": {
+                "inputTokens": 100,
+                "outputTokens": 20,
+                "model": "gpt-5.6-luna(openai)"
+            }
+        })));
+
+        let usage = accumulator.finish_turn(&response).expect("usage");
+        assert_eq!(usage.runtime_model_id.as_deref(), Some("gpt-5.6-luna"));
+    }
+
+    #[test]
+    fn preserves_a_different_reported_runtime_model() {
+        let mut accumulator = accumulator();
+        let response = PromptResponse::new(StopReason::EndTurn).meta(meta(json!({
+            "usage": {
+                "inputTokens": 100,
+                "outputTokens": 20,
+                "model": "actual-model"
+            }
+        })));
+
+        let usage = accumulator.finish_turn(&response).expect("usage");
+        assert_eq!(usage.runtime_model_id.as_deref(), Some("actual-model"));
     }
 
     #[test]

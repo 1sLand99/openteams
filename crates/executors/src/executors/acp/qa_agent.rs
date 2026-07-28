@@ -20,9 +20,11 @@ use agent_client_protocol::{
             InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
             NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
             PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
-            ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionNotification,
-            SessionResumeCapabilities, SessionUpdate, StopReason, TextContent, ToolCallUpdate,
-            ToolCallUpdateFields, Usage, UsageUpdate, WriteTextFileRequest,
+            ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionConfigOption,
+            SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOption,
+            SessionNotification, SessionResumeCapabilities, SessionUpdate,
+            SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
+            ToolCallUpdate, ToolCallUpdateFields, Usage, UsageUpdate, WriteTextFileRequest,
         },
     },
 };
@@ -32,6 +34,21 @@ use tokio::sync::Mutex;
 struct QaSession {
     cwd: PathBuf,
     mcp_names: Vec<String>,
+    model: String,
+}
+
+fn model_config_option(current_model: &str) -> SessionConfigOption {
+    SessionConfigOption::select(
+        "session-model",
+        "Model",
+        current_model.to_string(),
+        vec![
+            SessionConfigSelectOption::new("gpt-5.6-luna(openai)", "GPT 5.6 Luna (OpenAI)"),
+            SessionConfigSelectOption::new("gemini-2.5-flash", "Gemini 2.5 Flash"),
+            SessionConfigSelectOption::new("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
+        ],
+    )
+    .category(SessionConfigOptionCategory::Model)
 }
 
 fn mcp_names(servers: &[McpServer]) -> Vec<String> {
@@ -55,6 +72,7 @@ fn session_key(session_id: &agent_client_protocol::schema::v1::SessionId) -> Str
 pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
     let disable_follow_up = std::env::var_os("ACP_QA_DISABLE_FOLLOW_UP").is_some();
     let require_auth = std::env::var_os("ACP_QA_REQUIRE_AUTH").is_some();
+    let advertise_config = std::env::var_os("ACP_QA_CONFIG_OPTIONS").is_some();
     let authenticated = Arc::new(AtomicBool::new(false));
     let sessions = Arc::new(Mutex::new(HashMap::<String, QaSession>::new()));
 
@@ -66,6 +84,7 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
     let sessions_for_new = sessions.clone();
     let sessions_for_resume = sessions.clone();
     let sessions_for_load = sessions.clone();
+    let sessions_for_config = sessions.clone();
     let sessions_for_prompt = sessions.clone();
 
     Agent
@@ -122,9 +141,15 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     QaSession {
                         cwd: request.cwd,
                         mcp_names: mcp_names(&request.mcp_servers),
+                        model: "gemini-3.1-pro-preview".to_string(),
                     },
                 );
-                responder.respond(NewSessionResponse::new(session_id))
+                let response = NewSessionResponse::new(session_id);
+                responder.respond(if advertise_config {
+                    response.config_options(vec![model_config_option("gemini-3.1-pro-preview")])
+                } else {
+                    response
+                })
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -139,6 +164,7 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     QaSession {
                         cwd: request.cwd,
                         mcp_names: mcp_names(&request.mcp_servers),
+                        model: "gemini-3.1-pro-preview".to_string(),
                     },
                 );
                 responder.respond(ResumeSessionResponse::new())
@@ -156,9 +182,43 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     QaSession {
                         cwd: request.cwd,
                         mcp_names: mcp_names(&request.mcp_servers),
+                        model: "gemini-3.1-pro-preview".to_string(),
                     },
                 );
                 responder.respond(LoadSessionResponse::new())
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: SetSessionConfigOptionRequest, responder, _connection| {
+                if request.config_id.0.as_ref() != "session-model" {
+                    return responder
+                        .respond_with_error(agent_client_protocol::Error::invalid_params());
+                }
+                let SessionConfigOptionValue::ValueId { value } = request.value else {
+                    return responder
+                        .respond_with_error(agent_client_protocol::Error::invalid_params());
+                };
+                let selected = value.0.to_string();
+                if ![
+                    "gpt-5.6-luna(openai)",
+                    "gemini-2.5-flash",
+                    "gemini-3.1-pro-preview",
+                ]
+                .contains(&selected.as_str())
+                {
+                    return responder
+                        .respond_with_error(agent_client_protocol::Error::invalid_params());
+                }
+                let mut sessions = sessions_for_config.lock().await;
+                let Some(session) = sessions.get_mut(&session_key(&request.session_id)) else {
+                    return responder
+                        .respond_with_error(agent_client_protocol::Error::invalid_params());
+                };
+                session.model.clone_from(&selected);
+                responder.respond(SetSessionConfigOptionResponse::new(vec![
+                    model_config_option(&selected),
+                ]))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -241,8 +301,8 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                         request.session_id.clone(),
                         SessionUpdate::UsageUpdate(UsageUpdate::new(37, 128)),
                     ))?;
-                    let mcp = session
-                        .map(|session| session.mcp_names.join(","))
+                    let (mcp, model) = session
+                        .map(|session| (session.mcp_names.join(","), session.model))
                         .unwrap_or_default();
                     let content = if text.contains("[OPENTEAMS_SOURCE=openteams]") {
                         serde_json::json!([{
@@ -255,7 +315,9 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                         }])
                         .to_string()
                     } else {
-                        format!("QA ACP response: {text}; approval={approval}; mcp={mcp}")
+                        format!(
+                            "QA ACP response: {text}; approval={approval}; mcp={mcp}; model={model}"
+                        )
                     };
                     connection.send_notification(SessionNotification::new(
                         request.session_id.clone(),

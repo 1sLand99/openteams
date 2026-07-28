@@ -1,7 +1,7 @@
 ---
-title: "Agent Proxy Configuration"
-description: "Configure different models for your agents when the built-in model options do not cover your setup."
-sidebarTitle: "Agent Proxy Configuration"
+title: "Agent Model Discovery"
+description: "Refresh and select models reported by each agent CLI."
+sidebarTitle: "Agent Model Discovery"
 ---
 
 {(() => {
@@ -55,11 +55,9 @@ sidebarTitle: "Agent Proxy Configuration"
   return null;
 })()}
 
-## Add an agent configuration
+## Refresh agent models
 
-If your agent supports a new model, or the model you want to use is not available in the built-in configuration, you can add a new model configuration at the agent level.
-
-(openteams CLI model settings are automatically synced from the configured provider models, so you do not need to enter those manually.)
+openteams reads the model list reported by each agent CLI or ACP runtime. Model IDs cannot be added manually on the agent page because doing so would not add support to the underlying CLI.
 
 <Steps>
 <Step>
@@ -69,21 +67,14 @@ Open `Settings -> Agents`.
 </Step>
 
 <Step>
-Select the agent you want to configure, then click the `+` button to add a configuration.
-
-![Add an agent configuration](../images/en/add_agent_config.png)
+Select an agent, then click **Refresh models** beside the **Model** field. openteams queries the installed CLI or ACP runtime again and updates its model list.
 </Step>
 
 <Step>
-Create a new configuration and enter a configuration name.
-
-![Create a new configuration](../images/en/new_config.png)
-</Step>
-
-<Step>
-Fill in the configuration details. The most important field is the **model name**. It must be correct, otherwise the agent will not be able to access the model.
-
-![Fill in the configuration](../images/en/fill_config.png)
+Select an agent, then choose one of its discovered models from the **Model** field.
 </Step>
 </Steps>
 
+The refresh button in the top-right corner refreshes the agent configuration, not the model list.
+
+For openteams CLI and other provider-based runtimes, configure provider models under `Settings -> Service Providers`; the agent model list is synchronized from those providers.
