@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::services::inbox::InboxService;
 
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_DISPLAY_INPUT_BYTES: usize = 16 * 1024;
 
 static WAITERS: LazyLock<DashMap<Uuid, oneshot::Sender<String>>> = LazyLock::new(DashMap::new);
@@ -711,6 +711,11 @@ mod approval_flow_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_timeout_is_thirty_minutes() {
+        assert_eq!(APPROVAL_TIMEOUT, Duration::from_secs(30 * 60));
+    }
 
     #[test]
     fn display_input_is_recursively_redacted() {
