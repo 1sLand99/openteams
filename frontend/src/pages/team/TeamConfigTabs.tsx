@@ -40,6 +40,7 @@ import {
   defaultOptionId,
   cx,
   effectiveAcpConfigValue,
+  findAcpSelectConfigOption,
   type ProjectMemberWithExecution,
 } from "./teamUtils";
 
@@ -64,9 +65,7 @@ type TeamConfigTabsProps = {
   acpAuthMethodId: string;
   acpConfigOptions: AcpConfigOptionSnapshot[];
   acpConfigOverrides: AcpConfigOverride[];
-  acpProbeAvailable: boolean;
-  acpProbeError: string | null;
-  acpProbeLoading: boolean;
+  reasoningUnsupported: boolean;
   allowedSkillIds: string[];
   capability: AgentRuntimeReasoningCapability | null;
   configuredMcpServerKeys: string[];
@@ -130,107 +129,6 @@ type TeamConfigTabsProps = {
   setThinkingEffort: (value: string) => void;
   setWorkspacePath: (value: string) => void;
 };
-
-function AcpConfigRows({
-  legacyModelName,
-  legacyThinkingEffort,
-  onChange,
-  options,
-  overrides,
-  probeError,
-  probeLoading,
-  t,
-}: {
-  legacyModelName: string;
-  legacyThinkingEffort: string;
-  onChange: (
-    option: AcpConfigOptionSnapshot,
-    value: AcpConfigValue,
-  ) => void;
-  options: AcpConfigOptionSnapshot[];
-  overrides: AcpConfigOverride[];
-  probeError: string | null;
-  probeLoading: boolean;
-  t: TranslateFn;
-}) {
-  return (
-    <>
-      {probeLoading && options.length === 0 && (
-        <p className="text-[12px] text-[var(--ink-tertiary)]">
-          {t("teamPage.config.acpLoading")}
-        </p>
-      )}
-      {probeError && options.length === 0 && (
-        <p className="text-[12px] text-[var(--warning)]">{probeError}</p>
-      )}
-      {options.map((option) => {
-        const value = effectiveAcpConfigValue(
-          option,
-          overrides,
-          legacyModelName,
-          legacyThinkingEffort,
-        );
-        if (option.type === "boolean") {
-          const enabled =
-            value.type === "boolean" ? value.value : option.current_value;
-          return (
-            <SettingRow
-              key={option.id}
-              title={option.name}
-              description={option.description ?? undefined}
-            >
-              <button
-                type="button"
-                onClick={() =>
-                  onChange(option, { type: "boolean", value: !enabled })
-                }
-                aria-label={option.name}
-                aria-pressed={enabled}
-                className={cx(
-                  "relative h-6 w-11 rounded-full border transition-colors",
-                  enabled
-                    ? "border-[var(--primary)] bg-[var(--primary)]"
-                    : "border-[var(--hairline-strong)] bg-[var(--surface-3)]",
-                )}
-              >
-                <span
-                  className={cx(
-                    "absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform",
-                    enabled ? "translate-x-5" : "translate-x-0",
-                  )}
-                />
-              </button>
-            </SettingRow>
-          );
-        }
-
-        const selected =
-          value.type === "value_id" ? value.value : option.current_value;
-        return (
-          <SettingRow
-            key={option.id}
-            title={option.name}
-            description={option.description ?? undefined}
-          >
-            <DropdownSelect
-              value={selected}
-              options={option.options.map((choice) => ({
-                id: choice.value,
-                label: choice.name,
-                description: choice.description ?? undefined,
-              }))}
-              searchPlaceholder={option.name}
-              className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
-              onChange={(nextValue) =>
-                onChange(option, { type: "value_id", value: nextValue })
-              }
-            />
-          </SettingRow>
-        );
-      })}
-    </>
-  );
-}
 
 function ConfigSection({
   bodyClassName,
@@ -633,9 +531,7 @@ function SkillMarkdownPanel({
 function ConfigTab({
   acpConfigOptions,
   acpConfigOverrides,
-  acpProbeAvailable,
-  acpProbeError,
-  acpProbeLoading,
+  reasoningUnsupported,
   capability,
   isLeader,
   legacyModelName,
@@ -692,6 +588,31 @@ function ConfigTab({
   | "skillsError"
   | "skillsLoading"
 >) {
+  const acpModelOption = findAcpSelectConfigOption(
+    acpConfigOptions,
+    "model",
+  );
+  const acpThoughtLevelOption = findAcpSelectConfigOption(
+    acpConfigOptions,
+    "thought_level",
+  );
+  const acpModelValue = acpModelOption
+    ? effectiveAcpConfigValue(
+        acpModelOption,
+        acpConfigOverrides,
+        legacyModelName,
+        legacyThinkingEffort,
+      )
+    : null;
+  const acpThoughtLevelValue = acpThoughtLevelOption
+    ? effectiveAcpConfigValue(
+        acpThoughtLevelOption,
+        acpConfigOverrides,
+        legacyModelName,
+        legacyThinkingEffort,
+      )
+    : null;
+
   return (
     <div className="space-y-0">
       <div
@@ -741,81 +662,101 @@ function ConfigTab({
             />
           </SettingRow>
 
-          {acpConfigOptions.length > 0 ? (
-            <AcpConfigRows
-              legacyModelName={legacyModelName}
-              legacyThinkingEffort={legacyThinkingEffort}
-              onChange={onAcpConfigValueChange}
-              options={acpConfigOptions}
-              overrides={acpConfigOverrides}
-              probeError={acpProbeError}
-              probeLoading={acpProbeLoading}
-              t={t}
-            />
-          ) : acpProbeLoading ? (
-            <AcpConfigRows
-              legacyModelName={legacyModelName}
-              legacyThinkingEffort={legacyThinkingEffort}
-              onChange={onAcpConfigValueChange}
-              options={[]}
-              overrides={acpConfigOverrides}
-              probeError={acpProbeError}
-              probeLoading
-              t={t}
-            />
-          ) : acpProbeAvailable ? (
-            <p className="text-[12px] text-[var(--ink-tertiary)]">
-              {t("teamPage.config.acpUnsupported")}
-            </p>
-          ) : (
-            <>
-              <SettingRow
-                title={t("teamPage.form.model")}
-                description={t("teamPage.form.modelDesc")}
-              >
-                <DropdownSelect
-                  value={selectedModelValue}
-                  options={modelOptions}
-                  searchPlaceholder={t("teamPage.search.models")}
-                  className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
-                  onChange={(value) =>
-                    setModelName(value === defaultOptionId ? "" : value)
-                  }
-                />
-              </SettingRow>
-
-              <SettingRow
-                title={t("teamPage.form.reasoning")}
-                description={t("teamPage.form.reasoningDesc")}
-              >
-                <DropdownSelect
-                  value={selectedReasoningValue}
-                  options={reasoningOptions}
-                  showSearch={false}
-                  className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
-                  onChange={(value) => {
-                    const nextValue =
-                      value === defaultOptionId ? "" : value;
-                    if (capability?.kind === "variant") {
-                      setModelVariant(nextValue);
-                    } else {
-                      setThinkingEffort(nextValue);
-                    }
-                  }}
-                />
-              </SettingRow>
-              <AcpConfigRows
-                legacyModelName={legacyModelName}
-                legacyThinkingEffort={legacyThinkingEffort}
-                onChange={onAcpConfigValueChange}
-                options={[]}
-                overrides={acpConfigOverrides}
-                probeError={acpProbeError}
-                probeLoading={acpProbeLoading}
-                t={t}
+          <SettingRow
+            title={t("teamPage.form.model")}
+            description={t("teamPage.form.modelDesc")}
+          >
+            {acpModelOption ? (
+              <DropdownSelect
+                value={
+                  acpModelValue?.type === "value_id"
+                    ? acpModelValue.value
+                    : acpModelOption.current_value
+                }
+                options={acpModelOption.options.map((choice) => ({
+                  id: choice.value,
+                  label: choice.name,
+                  description: choice.description ?? undefined,
+                }))}
+                searchPlaceholder={t("teamPage.search.models")}
+                className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
+                onChange={(value) =>
+                  onAcpConfigValueChange(acpModelOption, {
+                    type: "value_id",
+                    value,
+                  })
+                }
               />
-            </>
-          )}
+            ) : (
+              <DropdownSelect
+                value={selectedModelValue}
+                options={modelOptions}
+                searchPlaceholder={t("teamPage.search.models")}
+                className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
+                onChange={(value) =>
+                  setModelName(value === defaultOptionId ? "" : value)
+                }
+              />
+            )}
+          </SettingRow>
+
+          <SettingRow
+            title={t("teamPage.form.reasoning")}
+            description={t("teamPage.form.reasoningDesc")}
+          >
+            {acpThoughtLevelOption ? (
+              <DropdownSelect
+                value={
+                  acpThoughtLevelValue?.type === "value_id"
+                    ? acpThoughtLevelValue.value
+                    : acpThoughtLevelOption.current_value
+                }
+                options={acpThoughtLevelOption.options.map((choice) => ({
+                  id: choice.value,
+                  label: choice.name,
+                  description: choice.description ?? undefined,
+                }))}
+                showSearch={false}
+                className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
+                onChange={(value) =>
+                  onAcpConfigValueChange(acpThoughtLevelOption, {
+                    type: "value_id",
+                    value,
+                  })
+                }
+              />
+            ) : reasoningUnsupported ? (
+              <DropdownSelect
+                value="__openteams_reasoning_unsupported__"
+                options={[
+                  {
+                    id: "__openteams_reasoning_unsupported__",
+                    label: t("teamPage.options.reasoningUnsupported"),
+                  },
+                ]}
+                disabled
+                showSearch={false}
+                className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
+                onChange={() => undefined}
+              />
+            ) : (
+              <DropdownSelect
+                value={selectedReasoningValue}
+                options={reasoningOptions}
+                showSearch={false}
+                className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
+                onChange={(value) => {
+                  const nextValue =
+                    value === defaultOptionId ? "" : value;
+                  if (capability?.kind === "variant") {
+                    setModelVariant(nextValue);
+                  } else {
+                    setThinkingEffort(nextValue);
+                  }
+                }}
+              />
+            )}
+          </SettingRow>
 
           <SettingRow
             title={t("teamPage.form.workspacePath")}
@@ -1311,7 +1252,8 @@ function TeamProtocolTab({
 export function TeamConfigTabs(props: TeamConfigTabsProps) {
   const [activeTab, setActiveTab] = useState<MemberConfigTab>("config");
   const { selectedMember, t } = props;
-  const supportsAcpPermissions = props.acpProbeAvailable;
+  const supportsAcpPermissions =
+    props.runnerType === "GEMINI" || props.runnerType === "QWEN_CODE";
   const effectiveActiveTab = selectedMember
     ? activeTab === "permissions" && !supportsAcpPermissions
       ? "config"

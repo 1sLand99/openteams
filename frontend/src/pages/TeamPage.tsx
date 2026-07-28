@@ -52,11 +52,14 @@ import {
   canonicalRuntimeModelId,
   defaultOptionId,
   effectiveAcpConfigValue,
+  findAcpSelectConfigOption,
   memberName,
   nonLeadRole,
   normalizeRunnerType,
   resolveUniqueAcpChoice,
   trimOrNull,
+  withoutAcpModeOverrides,
+  withoutAcpThoughtLevelOverrides,
   type ProjectMemberWithExecution,
 } from "./team/teamUtils";
 import {
@@ -298,7 +301,9 @@ const resolveMemberFormState = (
       config.acp?.auth?.type === "method_id"
         ? config.acp.auth.method_id
         : "",
-    acpConfigOverrides: config.acp?.config_overrides ?? [],
+    acpConfigOverrides: withoutAcpModeOverrides(
+      config.acp?.config_overrides ?? [],
+    ),
     allowedSkillIds: member.allowed_skill_ids ?? [],
     isLeader: member.role === "lead",
     memberName: member.member_name?.trim() ?? "",
@@ -570,6 +575,13 @@ export function TeamPage() {
   const acpConfigOptions = acpProbeIsCurrent
     ? (acpProbe?.config_options ?? [])
     : [];
+  const acpProbeAvailable = acpProbeIsCurrent && acpProbe !== null;
+  const acpThoughtLevelSupported =
+    findAcpSelectConfigOption(acpConfigOptions, "thought_level") !== null;
+  const reasoningUnsupported =
+    capability === null && !acpThoughtLevelSupported;
+  const nativeReasoningFallbackActive =
+    capability !== null && acpProbeAvailable && !acpThoughtLevelSupported;
   const handleAcpConfigValueChange = (
     option: AcpConfigOptionSnapshot,
     value: AcpConfigValue,
@@ -1059,6 +1071,12 @@ export function TeamPage() {
         nextMemberName === fallbackAgentName
           ? null
           : trimOrNull(draft.memberName);
+      const supportedConfigOverrides =
+        reasoningUnsupported || nativeReasoningFallbackActive
+          ? withoutAcpThoughtLevelOverrides(
+              withoutAcpModeOverrides(draft.acpConfigOverrides),
+            )
+          : withoutAcpModeOverrides(draft.acpConfigOverrides);
       const memberUpdate = projectApi.updateMember(
         selectedProjectId,
         selectedMember.id,
@@ -1073,17 +1091,17 @@ export function TeamPage() {
             runner_type: draft.runnerType,
             model_name: trimOrNull(draft.modelName),
             thinking_effort:
-              capability?.kind === "effort"
+              !reasoningUnsupported && capability?.kind === "effort"
                 ? trimOrNull(draft.thinkingEffort)
                 : null,
             model_variant:
-              capability?.kind === "variant"
+              !reasoningUnsupported && capability?.kind === "variant"
                 ? trimOrNull(draft.modelVariant)
                 : null,
             acp:
               (acpProbeIsCurrent && acpProbe !== null) ||
               selectedMember.execution_config?.acp != null ||
-              draft.acpConfigOverrides.length > 0
+              supportedConfigOverrides.length > 0
                 ? {
                     access_mode: draft.acpAccessMode || null,
                     approval_mode: draft.acpApprovalMode || null,
@@ -1105,8 +1123,8 @@ export function TeamPage() {
                             .filter(Boolean)
                         : null,
                     config_overrides:
-                      draft.acpConfigOverrides.length > 0
-                        ? draft.acpConfigOverrides
+                      supportedConfigOverrides.length > 0
+                        ? supportedConfigOverrides
                         : null,
                   }
                 : null,
@@ -1704,9 +1722,7 @@ export function TeamPage() {
               acpAuthMethodId={acpAuthMethodId}
               acpConfigOptions={acpConfigOptions}
               acpConfigOverrides={acpConfigOverrides}
-              acpProbeAvailable={acpProbeIsCurrent && acpProbe !== null}
-              acpProbeError={acpProbeError}
-              acpProbeLoading={acpProbeLoading}
+              reasoningUnsupported={reasoningUnsupported}
               capability={capability}
               configuredMcpServerKeys={configuredMcpServerKeys}
               isLeader={isLeader}
