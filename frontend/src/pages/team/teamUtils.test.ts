@@ -4,7 +4,10 @@ import {
   acpOptionSemanticCategory,
   canonicalRuntimeModelId,
   effectiveAcpConfigValue,
+  findAcpSelectConfigOption,
   resolveUniqueAcpChoice,
+  withoutAcpModeOverrides,
+  withoutAcpThoughtLevelOverrides,
 } from "./teamUtils";
 
 const modelOption: AcpConfigOptionSnapshot = {
@@ -34,6 +37,19 @@ assert.equal(
 );
 assert.equal(acpOptionSemanticCategory(modelOption), "model");
 assert.equal(
+  acpOptionSemanticCategory({
+    ...modelOption,
+    id: "session-mode",
+    name: "Mode",
+    category: "mode",
+  }),
+  null,
+);
+assert.equal(
+  findAcpSelectConfigOption([modelOption], "model")?.id,
+  "session-model",
+);
+assert.equal(
   resolveUniqueAcpChoice("gpt-5.6-luna", modelOption.options)?.value,
   "gpt-5.6-luna(openai)",
 );
@@ -55,5 +71,36 @@ const ambiguous = [
   },
 ];
 assert.equal(resolveUniqueAcpChoice("gpt-5.6-luna", ambiguous), null);
+
+const overrides = [
+  {
+    option_id: "session-mode",
+    value: { type: "value_id" as const, value: "plan" },
+    label_snapshot: "Mode",
+    category_snapshot: "mode",
+  },
+  {
+    option_id: "thought-level",
+    value: { type: "value_id" as const, value: "high" },
+    label_snapshot: "Thought Level",
+    category_snapshot: "thought_level",
+  },
+  {
+    option_id: "session-model",
+    value: { type: "value_id" as const, value: "gemini-2.5-flash" },
+    label_snapshot: "Model",
+    category_snapshot: "model",
+  },
+];
+assert.deepEqual(
+  withoutAcpModeOverrides(overrides).map((override) => override.option_id),
+  ["thought-level", "session-model"],
+);
+assert.deepEqual(
+  withoutAcpThoughtLevelOverrides(overrides).map(
+    (override) => override.option_id,
+  ),
+  ["session-mode", "session-model"],
+);
 
 console.log("Team ACP config matching: PASS");

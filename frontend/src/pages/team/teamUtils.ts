@@ -156,17 +156,24 @@ export const resolveUniqueAcpChoice = (
   return ambiguous ? null : (best?.choice ?? null);
 };
 
+export type AcpConfigSemanticCategory = "model" | "thought_level";
+
+const semanticConfigKey = (value: string) =>
+  value
+    .toLocaleLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .join("");
+
 export const acpOptionSemanticCategory = (
   option: AcpConfigOptionSnapshot,
-): string | null => {
-  if (option.category) return option.category;
-  const keys = [option.id, option.name].map((value) =>
-    value
-      .toLocaleLowerCase()
-      .split(/[^\p{L}\p{N}]+/u)
-      .filter(Boolean)
-      .join(""),
-  );
+): AcpConfigSemanticCategory | null => {
+  const categoryKey = semanticConfigKey(option.category ?? "");
+  if (categoryKey === "model") return "model";
+  if (categoryKey === "thoughtlevel") return "thought_level";
+  if (categoryKey) return null;
+
+  const keys = [option.id, option.name].map(semanticConfigKey);
   if (keys.some((key) => key === "model" || key.endsWith("model"))) {
     return "model";
   }
@@ -177,11 +184,61 @@ export const acpOptionSemanticCategory = (
   ) {
     return "thought_level";
   }
-  if (keys.some((key) => key === "mode" || key.endsWith("mode"))) {
-    return "mode";
-  }
   return null;
 };
+
+export type AcpSelectConfigOptionSnapshot = AcpConfigOptionSnapshot & {
+  type: "select";
+  current_value: string;
+  options: AcpConfigChoice[];
+};
+
+export const findAcpSelectConfigOption = (
+  options: AcpConfigOptionSnapshot[],
+  category: AcpConfigSemanticCategory,
+): AcpSelectConfigOptionSnapshot | null => {
+  const matches = options.filter(
+    (option): option is AcpSelectConfigOptionSnapshot =>
+      option.type === "select" &&
+      acpOptionSemanticCategory(option) === category,
+  );
+  return matches.length === 1 ? matches[0] : null;
+};
+
+const isModeConfigKey = (value?: string | null) => {
+  const key = semanticConfigKey(value ?? "");
+  return (
+    key === "mode" ||
+    key === "sessionmode" ||
+    key === "agentmode" ||
+    key === "workmode" ||
+    key === "workingmode"
+  );
+};
+
+export const withoutAcpModeOverrides = (
+  overrides: AcpConfigOverride[],
+): AcpConfigOverride[] =>
+  overrides.filter(
+    (override) =>
+      !isModeConfigKey(override.category_snapshot) &&
+      !isModeConfigKey(override.option_id) &&
+      !isModeConfigKey(override.label_snapshot),
+  );
+
+export const withoutAcpThoughtLevelOverrides = (
+  overrides: AcpConfigOverride[],
+): AcpConfigOverride[] =>
+  overrides.filter((override) => {
+    const categoryKey = semanticConfigKey(override.category_snapshot ?? "");
+    if (categoryKey === "thoughtlevel") return false;
+    if (categoryKey) return true;
+    return ![override.option_id, override.label_snapshot ?? ""]
+      .map(semanticConfigKey)
+      .some(
+        (key) => key === "thoughtlevel" || key.endsWith("thoughtlevel"),
+      );
+  });
 
 export const effectiveAcpConfigValue = (
   option: AcpConfigOptionSnapshot,

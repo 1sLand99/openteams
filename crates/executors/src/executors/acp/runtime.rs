@@ -111,12 +111,16 @@ impl AcpAgentHarness {
         self
     }
 
-    pub fn with_mode(mut self, mode: impl Into<String>) -> Self {
-        self.config.session.mode = Some(mode.into());
+    pub fn with_native_thought_level_fallback(mut self, thought_level: impl Into<String>) -> Self {
+        self.config.session.thought_level = Some(thought_level.into());
+        self.config.session.native_thought_level_fallback = true;
         self
     }
 
     pub fn with_config_override(mut self, selection: &super::AcpConfigOverride) -> Self {
+        if selection.controls_session_mode() {
+            return self;
+        }
         self.config.session.options.push(super::AcpConfigSelection {
             option_id: selection.option_id.clone(),
             value: selection.value.to_protocol(),
@@ -1002,11 +1006,6 @@ async fn apply_session_preferences(
             preferences.thought_level.as_ref(),
             "thought level",
         ),
-        (
-            SessionConfigOptionCategory::Mode,
-            preferences.mode.as_ref(),
-            "mode",
-        ),
     ];
 
     for (category, desired, label) in category_preferences {
@@ -1021,11 +1020,16 @@ async fn apply_session_preferences(
         }) {
             continue;
         }
-        let option = find_category_option(options, &category).ok_or_else(|| {
-            invalid_config(format!(
+        let Some(option) = find_category_option(options, &category) else {
+            if category == SessionConfigOptionCategory::ThoughtLevel
+                && preferences.native_thought_level_fallback
+            {
+                continue;
+            }
+            return Err(invalid_config(format!(
                 "ACP {label} preference `{desired}` cannot be applied: the Agent did not advertise one unambiguous option"
-            ))
-        })?;
+            )));
+        };
         let value = resolve_preference_value(&option, desired, &category).ok_or_else(|| {
             invalid_config(format!(
                 "ACP {label} preference `{desired}` was not advertised or matched multiple values"
@@ -1069,7 +1073,7 @@ async fn apply_legacy_session_preferences(
     preferences: &AcpSessionPreferences,
     legacy_models: Option<&LegacySessionModelState>,
 ) -> agent_client_protocol::Result<Option<String>> {
-    if preferences.thought_level.is_some() || preferences.mode.is_some() {
+    if preferences.thought_level.is_some() && !preferences.native_thought_level_fallback {
         return Err(invalid_config(
             "ACP Agent only advertises the legacy model selector; other requested session preferences are unsupported",
         ));
@@ -1190,7 +1194,6 @@ fn option_matches_category(
     let expected = match category {
         SessionConfigOptionCategory::Model => "model",
         SessionConfigOptionCategory::ThoughtLevel => "thoughtlevel",
-        SessionConfigOptionCategory::Mode => "mode",
         _ => return false,
     };
     [&*option.id.0, option.name.as_str()].iter().any(|value| {
@@ -1386,6 +1389,17 @@ mod tests {
             &option,
             &SessionConfigOptionValue::value_id("false")
         ));
+    }
+
+    #[test]
+    fn native_thought_level_fallback_keeps_acp_preference_optional() {
+        let harness = AcpAgentHarness::new().with_native_thought_level_fallback("high");
+
+        assert_eq!(
+            harness.config.session.thought_level.as_deref(),
+            Some("high")
+        );
+        assert!(harness.config.session.native_thought_level_fallback);
     }
 
     #[test]
