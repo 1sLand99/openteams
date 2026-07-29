@@ -52,10 +52,10 @@ struct WorkflowRuntimeRunRecord {
     output_path: PathBuf,
     meta_path: PathBuf,
     baseline: WorkspaceChangeBaseline,
-    execution_id: Uuid,
+    execution_id: Option<Uuid>,
     workflow_agent_session_id: Option<Uuid>,
-    step_id: Uuid,
-    step_key: String,
+    step_id: Option<Uuid>,
+    step_key: Option<String>,
     started_at: chrono::DateTime<Utc>,
     analytics: Option<AnalyticsService>,
     analytics_started: bool,
@@ -118,12 +118,9 @@ async fn start_workflow_runtime_run_record(
     session_agent: &ChatSessionAgent,
     workspace_path: &std::path::Path,
     prompt: &str,
+    workflow_session: Option<&WorkflowAgentSession>,
     stream_context: Option<&WorkflowRuntimeStreamContext>,
 ) -> Result<Option<WorkflowRuntimeRunRecord>, WorkflowRuntimeError> {
-    let Some(context) = stream_context else {
-        return Ok(None);
-    };
-
     let run_id = Uuid::new_v4();
     let run_index = ChatRun::next_run_index(&db.pool, session_agent.id).await?;
     let run_records_dir = workspace_run_records_dir(workspace_path, session.id);
@@ -162,15 +159,30 @@ async fn start_workflow_runtime_run_record(
         output_path,
         meta_path,
         baseline,
-        execution_id: context.execution_id,
-        workflow_agent_session_id: context.workflow_agent_session_id,
-        step_id: context.step_id,
-        step_key: context.step_key.clone(),
+        execution_id: stream_context
+            .map(|context| context.execution_id)
+            .or_else(|| workflow_session.map(|item| item.workflow_execution_id)),
+        workflow_agent_session_id: stream_context
+            .and_then(|context| context.workflow_agent_session_id)
+            .or_else(|| workflow_session.map(|item| item.id)),
+        step_id: stream_context.map(|context| context.step_id),
+        step_key: stream_context.map(|context| context.step_key.clone()),
         started_at: Utc::now(),
-        analytics: context.chat_runner.analytics_service().cloned(),
+        analytics: stream_context
+            .and_then(|context| context.chat_runner.analytics_service().cloned()),
         analytics_started: false,
         acp_full_access: false,
     }))
+}
+
+fn with_workflow_run_context(
+    event: AnalyticsEvent,
+    record: &WorkflowRuntimeRunRecord,
+) -> AnalyticsEvent {
+    match record.execution_id {
+        Some(execution_id) => event.with_workflow(execution_id, record.step_id),
+        None => event,
+    }
 }
 
 async fn finish_workflow_runtime_run_record(
@@ -237,10 +249,10 @@ async fn finish_workflow_runtime_run_record(
             .then(|| assistant_output.chars().take(2048).collect()),
         total_tokens: token_usage.map(|usage| usage.total_tokens),
         token_usage: token_usage.cloned(),
-        workflow_execution_id: Some(record.execution_id),
+        workflow_execution_id: record.execution_id,
         workflow_agent_session_id: record.workflow_agent_session_id,
-        workflow_step_id: Some(record.step_id),
-        workflow_step_key: Some(record.step_key.clone()),
+        workflow_step_id: record.step_id,
+        workflow_step_key: record.step_key.clone(),
         log_bytes_total: None,
         log_bytes_persisted: None,
         live_bytes_dropped: None,
@@ -263,7 +275,7 @@ async fn finish_workflow_runtime_run_record(
     let duration_ms = (finished_at - record.started_at).num_milliseconds().max(0);
     if let Some(analytics) = &record.analytics {
         if record.analytics_started {
-            analytics.record_event(
+            analytics.record_event(with_workflow_run_context(
                 AnalyticsEvent::new(AnalyticsEventPayload::AgentRunCompleted {
                     agent_id: None,
                     run_kind: "workflow".to_string(),
@@ -272,12 +284,12 @@ async fn finish_workflow_runtime_run_record(
                     duration_bucket: duration_bucket(duration_ms).to_string(),
                 })
                 .with_session(session.id)
-                .with_run(record.run_id)
-                .with_workflow(record.execution_id, Some(record.step_id)),
-            );
+                .with_run(record.run_id),
+                record,
+            ));
         }
         if error_summary.is_some() {
-            analytics.record_event(
+            analytics.record_event(with_workflow_run_context(
                 AnalyticsEvent::new(AnalyticsEventPayload::AgentError {
                     run_kind: Some("workflow".to_string()),
                     phase: Some(
@@ -288,9 +300,9 @@ async fn finish_workflow_runtime_run_record(
                     agent_role: None,
                 })
                 .with_session(session.id)
-                .with_run(record.run_id)
-                .with_workflow(record.execution_id, Some(record.step_id)),
-            );
+                .with_run(record.run_id),
+                record,
+            ));
         }
     }
 
@@ -541,6 +553,7 @@ async fn run_workflow_agent_prompt_inner(
         &effective_session_agent,
         &workspace_path,
         &prompt,
+        workflow_session,
         stream_context.as_ref(),
     )
     .await?;
@@ -548,12 +561,12 @@ async fn run_workflow_agent_prompt_inner(
         session_id: session.id,
         execution_id: runtime_run_record
             .as_ref()
-            .map(|record| record.execution_id)
+            .and_then(|record| record.execution_id)
             .or_else(|| workflow_session.map(|item| item.workflow_execution_id)),
         step_id,
         step_key: runtime_run_record
             .as_ref()
-            .map(|record| record.step_key.clone())
+            .and_then(|record| record.step_key.clone())
             .or_else(|| extract_workflow_prompt_step_key(&prompt)),
         agent_id: agent.id,
         agent_name: agent.name.clone(),
@@ -606,8 +619,8 @@ async fn run_workflow_agent_prompt_inner(
             tracing::warn!(
                 session_id = %session.id,
                 session_agent_id = %effective_session_agent.id,
-                workflow_execution_id = %record.execution_id,
-                workflow_step_id = %step_id,
+                workflow_execution_id = ?record.execution_id,
+                workflow_step_id = ?record.step_id,
                 run_id = %record.run_id,
                 "ACP Full Access enabled for workflow run"
             );
@@ -625,8 +638,8 @@ async fn run_workflow_agent_prompt_inner(
             session_agent_id: effective_session_agent.id,
             run_id: run_record.run_id,
             runner: effective_execution.runner_type.to_string(),
-            workflow_execution_id: Some(run_record.execution_id),
-            workflow_step_id: Some(step_id),
+            workflow_execution_id: run_record.execution_id,
+            workflow_step_id: run_record.step_id,
         },
     ));
 
@@ -694,16 +707,16 @@ async fn run_workflow_agent_prompt_inner(
     if let Some(record) = runtime_run_record.as_mut() {
         record.analytics_started = true;
         if let Some(analytics) = &record.analytics {
-            analytics.record_event(
+            analytics.record_event(with_workflow_run_context(
                 AnalyticsEvent::new(AnalyticsEventPayload::AgentRunStarted {
                     agent_id: agent.id,
                     run_kind: "workflow".to_string(),
                     executor_profile: None,
                 })
                 .with_session(session.id)
-                .with_run(record.run_id)
-                .with_workflow(record.execution_id, Some(record.step_id)),
-            );
+                .with_run(record.run_id),
+                record,
+            ));
         }
     }
     executor.normalize_logs(msg_store.clone(), workspace_path.as_path());
