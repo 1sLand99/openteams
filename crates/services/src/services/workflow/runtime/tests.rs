@@ -82,6 +82,30 @@ mod tests {
                 created_at          TEXT    NOT NULL DEFAULT (datetime('now', 'subsec')),
                 updated_at          TEXT    NOT NULL DEFAULT (datetime('now', 'subsec'))
             );
+
+            CREATE TABLE chat_runs (
+                id                       BLOB    NOT NULL PRIMARY KEY,
+                session_id               BLOB    NOT NULL,
+                session_agent_id         BLOB    NOT NULL,
+                workspace_path           TEXT,
+                run_index                INTEGER NOT NULL,
+                run_dir                  TEXT    NOT NULL,
+                input_path               TEXT,
+                output_path              TEXT,
+                raw_log_path             TEXT,
+                meta_path                TEXT,
+                log_state                TEXT    NOT NULL DEFAULT 'live',
+                artifact_state           TEXT    NOT NULL DEFAULT 'full',
+                log_truncated            INTEGER NOT NULL DEFAULT 0,
+                log_capture_degraded     INTEGER NOT NULL DEFAULT 0,
+                pruned_at                TEXT,
+                prune_reason             TEXT,
+                retention_summary_json   TEXT,
+                created_at               TEXT    NOT NULL DEFAULT (datetime('now', 'subsec'))
+            );
+
+            CREATE UNIQUE INDEX idx_chat_runs_unique
+                ON chat_runs(session_agent_id, run_index);
             "#,
         )
         .execute(&pool)
@@ -178,6 +202,55 @@ mod tests {
             "edges": []
         })
         .to_string()
+    }
+
+    #[tokio::test]
+    async fn plan_generation_without_stream_context_persists_run_record() {
+        let db = setup_runtime_worktree_db().await;
+        let workspace = tempfile::TempDir::new().expect("create workflow workspace");
+        let session = sample_chat_session(
+            ChatSessionWorktreeMode::Inherit,
+            Some(workspace.path().to_string_lossy().to_string()),
+        );
+        let (session_agents, _) = sample_agent_views();
+        let mut session_agent = session_agents[0].clone();
+        session_agent.session_id = session.id;
+        let prompt = "# Workflow Plan Generation\n\nReturn a workflow plan.";
+
+        let record = start_workflow_runtime_run_record(
+            &db,
+            &session,
+            &session_agent,
+            workspace.path(),
+            prompt,
+            None,
+            None,
+        )
+        .await
+        .expect("persist plan-generation run")
+        .expect("plan generation must have a run record");
+
+        assert_eq!(record.execution_id, None);
+        assert_eq!(record.workflow_agent_session_id, None);
+        assert_eq!(record.step_id, None);
+        assert_eq!(record.step_key, None);
+
+        let persisted = ChatRun::find_by_id(&db.pool, record.run_id)
+            .await
+            .expect("query plan-generation run")
+            .expect("plan-generation run exists");
+        assert_eq!(persisted.session_id, session.id);
+        assert_eq!(persisted.session_agent_id, session_agent.id);
+        assert_eq!(persisted.workspace_path.as_deref(), workspace.path().to_str());
+        assert_eq!(
+            std::fs::read_to_string(
+                persisted
+                    .input_path
+                    .expect("plan-generation input path must be recorded")
+            )
+            .expect("read plan-generation input"),
+            prompt
+        );
     }
 
     #[test]
