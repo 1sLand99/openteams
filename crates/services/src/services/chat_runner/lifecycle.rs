@@ -1699,6 +1699,7 @@ impl ChatRunner {
 
         let chain_depth = self.extract_chain_depth(&source_message.meta);
         let protocol_retry_attempt = Self::extract_protocol_retry_attempt(&source_message.meta);
+        let protocol_retry_meta = source_message.meta.get("protocol_retry").cloned();
 
         let result = async {
             let workspace_path = self
@@ -2160,6 +2161,7 @@ impl ChatRunner {
                 prompt_language,
                 run_started_at,
                 protocol_retry_attempt,
+                protocol_retry_meta,
                 track_source_message,
                 startup_timing.clone(),
                 effective_execution.runner_type == BaseCodingAgent::Codex,

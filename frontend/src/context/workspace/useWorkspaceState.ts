@@ -325,6 +325,11 @@ export const useWorkspaceState = () => {
   const pendingApprovalSessionIdsRef = useRef<ReadonlySet<string>>(
     new Set(),
   );
+  const [waitingApprovalSessionIds, setWaitingApprovalSessionIds] =
+    useState<ReadonlySet<string>>(() => new Set());
+  const waitingApprovalSessionIdsRef = useRef<ReadonlySet<string>>(
+    new Set(),
+  );
   const [workflowCardAsync, setWorkflowCardAsync] = useState<
     AsyncResourceState<WorkflowCardProjection | null>
   >(() => initialAsync(null));
@@ -1219,6 +1224,9 @@ export const useWorkspaceState = () => {
     pendingApprovalSessionIds,
     setPendingApprovalSessionIds,
     pendingApprovalSessionIdsRef,
+    waitingApprovalSessionIds,
+    setWaitingApprovalSessionIds,
+    waitingApprovalSessionIdsRef,
     workflowCardAsync,
     setWorkflowCardAsync,
     workspaceChangesAsync,

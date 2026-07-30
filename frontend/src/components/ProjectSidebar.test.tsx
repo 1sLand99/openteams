@@ -1069,7 +1069,7 @@ check(
 check(
   "uses CircleDot (not Box) for pending approval sessions in source",
   componentSource.includes("hasPendingApproval") &&
-    componentSource.includes("hasPendingApproval\n                        ? CircleDot"),
+    componentSource.includes("hasPendingApproval\n                      ? CircleDot"),
   componentSource,
 );
 check(
@@ -1091,6 +1091,38 @@ check(
   "prioritizes pending approval sessions in sort order",
   approvalPriorityOrderIds[0] === "sess-8",
   approvalPriorityOrderIds,
+);
+const runningAndApprovalSessionHtml = renderToStaticMarkup(
+  <ProjectSidebar
+    shellOptions={mockShellOptions}
+    sessions={[
+      {
+        ...mockWorkspaceBootstrap.sessions[0],
+        hasRunningAgent: true,
+        hasPendingApproval: true,
+      },
+    ]}
+    activeSessionId="another-session"
+    activePage="workspace"
+    weeklyCost={mockWorkspaceBootstrap.defaults.weeklyCost}
+    onNavigate={() => undefined}
+    onSessionSelect={() => undefined}
+    onPrimaryAction={() => undefined}
+    onProjectAction={() => undefined}
+  />,
+);
+check(
+  "shows CircleDot (not spinner) when running and pending approval coexist",
+  !runningAndApprovalSessionHtml.includes("animate-spin") &&
+    runningAndApprovalSessionHtml.includes("text-[var(--primary)]") &&
+    runningAndApprovalSessionHtml.includes("waiting for approval") &&
+    !runningAndApprovalSessionHtml.includes("agent running"),
+  runningAndApprovalSessionHtml,
+);
+check(
+  "pending approval icon takes priority over running in source decision tree",
+  componentSource.includes("hasPendingApproval\n                      ? CircleDot\n                      : isRunning"),
+  componentSource,
 );
 
 if (failures > 0) {

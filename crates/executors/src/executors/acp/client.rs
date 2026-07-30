@@ -10,8 +10,8 @@ use agent_client_protocol::schema::v1::{
     KillTerminalResponse, PermissionOptionKind, PromptResponse, ReadTextFileRequest,
     ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, TerminalExitStatus, TerminalId,
-    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
+    SelectedPermissionOutcome, SessionNotification, SessionUpdate, TerminalExitStatus, TerminalId,
+    TerminalOutputRequest, TerminalOutputResponse, ToolCallStatus, WaitForTerminalExitRequest,
     WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
@@ -33,7 +33,10 @@ use crate::{
         AcpApprovalPolicy, AcpClientServicePolicy, AcpEvent, ApprovalResponse, events,
         output::AcpOutput, usage::AcpTokenUsageAccumulator,
     },
-    logs::TokenUsageInfo,
+    logs::{
+        TokenUsageInfo,
+        api_errors::{DetectedApiError, detect_api_error},
+    },
 };
 
 /// State shared by stable ACP client callbacks.
@@ -49,6 +52,7 @@ pub struct AcpClient {
     terminal_env: HashMap<String, String>,
     terminals: Arc<Mutex<HashMap<String, TerminalRecord>>>,
     token_usage: Arc<Mutex<AcpTokenUsageAccumulator>>,
+    terminal_api_error: Arc<Mutex<Option<DetectedApiError>>>,
 }
 
 impl AcpClient {
@@ -77,6 +81,7 @@ impl AcpClient {
                 .collect(),
             terminals: Arc::new(Mutex::new(HashMap::new())),
             token_usage: Arc::new(Mutex::new(AcpTokenUsageAccumulator::default())),
+            terminal_api_error: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -98,6 +103,12 @@ impl AcpClient {
             .lock()
             .await
             .observe_session_update(&notification.update);
+        if let Some(error) = detect_tool_result_api_error(&notification.update) {
+            let mut terminal_api_error = self.terminal_api_error.lock().await;
+            if terminal_api_error.is_none() {
+                *terminal_api_error = Some(error);
+            }
+        }
         self.send_event(events::event_from_notification(notification))
             .await;
         Ok(())
@@ -125,6 +136,11 @@ impl AcpClient {
 
     pub async fn begin_token_usage_turn(&self) {
         self.token_usage.lock().await.begin_turn();
+        *self.terminal_api_error.lock().await = None;
+    }
+
+    pub async fn take_terminal_api_error(&self) -> Option<DetectedApiError> {
+        self.terminal_api_error.lock().await.take()
     }
 
     pub async fn request_permission(
@@ -534,6 +550,57 @@ impl AcpClient {
     }
 }
 
+fn detect_tool_result_api_error(update: &SessionUpdate) -> Option<DetectedApiError> {
+    let (raw_output, failed_content) = match update {
+        SessionUpdate::ToolCall(tool_call) => (
+            tool_call.raw_output.as_ref(),
+            (tool_call.status == ToolCallStatus::Failed).then_some(&tool_call.content),
+        ),
+        SessionUpdate::ToolCallUpdate(update) => (
+            update.fields.raw_output.as_ref(),
+            (update.fields.status == Some(ToolCallStatus::Failed))
+                .then_some(update.fields.content.as_ref())
+                .flatten(),
+        ),
+        _ => return None,
+    };
+
+    raw_output
+        .and_then(detect_explicit_api_error_value)
+        .or_else(|| {
+            failed_content
+                .and_then(|value| serde_json::to_string(value).ok())
+                .and_then(|value| detect_api_error(&value))
+        })
+}
+
+fn detect_explicit_api_error_value(value: &serde_json::Value) -> Option<DetectedApiError> {
+    match value {
+        serde_json::Value::Object(fields) => fields.iter().find_map(|(key, value)| {
+            let normalized_key = key.to_ascii_lowercase();
+            let is_error_field = normalized_key == "error"
+                || normalized_key == "errors"
+                || normalized_key.ends_with("_error")
+                || normalized_key.ends_with("_errors")
+                || normalized_key == "failure"
+                || normalized_key == "failures";
+            if is_error_field && let Some(error) = detect_api_error(&value.to_string()) {
+                return Some(error);
+            }
+            detect_explicit_api_error_value(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().find_map(detect_explicit_api_error_value),
+        serde_json::Value::String(message)
+            if message
+                .to_ascii_lowercase()
+                .contains("[provider.api_error]") =>
+        {
+            detect_api_error(message)
+        }
+        _ => None,
+    }
+}
+
 fn permission_option_kind_wire(kind: PermissionOptionKind) -> &'static str {
     match kind {
         PermissionOptionKind::AllowOnce => "allow_once",
@@ -681,11 +748,12 @@ fn select_lines(content: &str, line: Option<u32>, limit: Option<u32>) -> String 
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::schema::v1::{
-        CreateTerminalRequest, PermissionOption, SessionId, TerminalOutputRequest, ToolCallId,
-        ToolCallUpdate, ToolCallUpdateFields, WaitForTerminalExitRequest,
+        CreateTerminalRequest, PermissionOption, SessionId, SessionUpdate, TerminalOutputRequest,
+        ToolCallId, ToolCallUpdate, ToolCallUpdateFields, WaitForTerminalExitRequest,
     };
 
     use super::*;
+    use crate::logs::NormalizedEntryError;
 
     fn request(kinds: &[PermissionOptionKind]) -> RequestPermissionRequest {
         RequestPermissionRequest::new(
@@ -714,6 +782,40 @@ mod tests {
             response.outcome,
             RequestPermissionOutcome::Cancelled
         ));
+    }
+
+    #[test]
+    fn tool_result_usage_limit_is_promoted_to_terminal_api_error() {
+        let update = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            ToolCallId::new("agent-swarm"),
+            ToolCallUpdateFields::new().raw_output(serde_json::json!({
+                "subagents": [{
+                    "status": "failed",
+                    "error": "[provider.api_error] 403 You've reached your usage limit for this billing cycle"
+                }]
+            })),
+        ));
+
+        let error = detect_tool_result_api_error(&update)
+            .expect("nested provider error should be detected");
+        assert!(matches!(
+            error.error_type,
+            NormalizedEntryError::QuotaExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn successful_tool_content_that_mentions_rate_limits_is_not_terminal() {
+        let update = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            ToolCallId::new("read-file"),
+            ToolCallUpdateFields::new()
+                .status(ToolCallStatus::Completed)
+                .raw_output(serde_json::json!({
+                    "content": "This source file handles rate limit exceeded errors."
+                })),
+        ));
+
+        assert!(detect_tool_result_api_error(&update).is_none());
     }
 
     #[test]

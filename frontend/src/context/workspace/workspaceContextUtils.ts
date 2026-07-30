@@ -522,6 +522,7 @@ export type SessionRunningIndicators = {
   workflowSidebarState: WorkflowSidebarState;
   pendingWorkflowInputId: string | null;
   pendingWorkflowReviewId: string | null;
+  hasPendingApproval: boolean;
 };
 
 export const loadSessionRunningIndicators = async (
@@ -555,6 +556,11 @@ export const loadSessionRunningIndicators = async (
             workflowStatus.pending_workflow_input_id ?? null,
           pendingWorkflowReviewId:
             workflowStatus.pending_workflow_review_id ?? null,
+          hasPendingApproval: sessionAgents.some(
+            (sa) =>
+              !ignoredSessionAgentIds?.has(sa.id) &&
+              sa.state === 'waitingapproval',
+          ),
         },
       ] as const;
     }),

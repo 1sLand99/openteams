@@ -1337,6 +1337,7 @@ impl ChatRunner {
         prompt_language: ResolvedPromptLanguage,
         run_started_at: chrono::DateTime<Utc>,
         protocol_retry_attempt: u32,
+        protocol_retry_meta: Option<serde_json::Value>,
         track_source_message: bool,
         startup_timing: Arc<startup_timing::RunStartupTiming>,
         suppress_codex_tool_runtime_details: bool,
@@ -1880,6 +1881,9 @@ impl ChatRunner {
                             "snapshot_cache_read_tokens": token_usage.snapshot_cache_read_tokens,
                             "is_estimated": token_usage.is_estimated,
                         });
+                        if let Some(protocol_retry_meta) = protocol_retry_meta.as_ref() {
+                            meta["protocol_retry"] = protocol_retry_meta.clone();
+                        }
 
                         let visible_error_content =
                             if matches!(completion_status, RunCompletionStatus::Failed)
@@ -2058,6 +2062,7 @@ impl ChatRunner {
                                 Some(&token_usage),
                                 run_model.as_deref(),
                                 protocol_retry_attempt,
+                                protocol_retry_meta.as_ref(),
                             )
                             .await;
 
@@ -2167,7 +2172,36 @@ impl ChatRunner {
                                         protocol_retry_attempt,
                                         "retryable protocol parse failure occurred during failed run; skipping retry dispatch"
                                     );
-                                    if latest_assistant.trim().is_empty() {
+                                    if let Some(visible_error_content) = visible_error_content {
+                                        match runner
+                                            .persist_agent_error_message(
+                                                session_id,
+                                                session_agent_id,
+                                                agent_id,
+                                                run_id,
+                                                &agent_name,
+                                                source_message_id,
+                                                client_message_id.as_deref(),
+                                                visible_error_content,
+                                                error_type.as_ref(),
+                                                run_model.as_deref(),
+                                                protocol_retry_meta.as_ref(),
+                                            )
+                                            .await
+                                        {
+                                            Ok(()) => 1,
+                                            Err(err) => {
+                                                tracing::warn!(
+                                                    session_id = %session_id,
+                                                    run_id = %run_id,
+                                                    agent_id = %agent_id,
+                                                    error = %err,
+                                                    "failed to persist visible error for failed retryable protocol parse"
+                                                );
+                                                0
+                                            }
+                                        }
+                                    } else if latest_assistant.trim().is_empty() {
                                         0
                                     } else if let Err(err) = runner
                                         .persist_raw_agent_message_and_work_record(
@@ -2186,6 +2220,7 @@ impl ChatRunner {
                                             Some(&token_usage),
                                             run_model.as_deref(),
                                             None,
+                                            protocol_retry_meta.as_ref(),
                                         )
                                         .await
                                     {
@@ -2209,8 +2244,41 @@ impl ChatRunner {
                                         code = ?code,
                                         detail = ?detail,
                                         protocol_retry_attempt,
-                                        "protocol parse failure is retryable; retrying without persisting retry feedback"
+                                        "protocol parse failure is retryable; persisting attempt activity and retrying"
                                     );
+
+                                    let retry_attempt_message_count = match runner
+                                        .persist_protocol_retry_attempt_message(
+                                            session_id,
+                                            session_agent_id,
+                                            agent_id,
+                                            run_id,
+                                            &agent_name,
+                                            source_message_id,
+                                            client_message_id.as_deref(),
+                                            chain_depth,
+                                            prompt_language,
+                                            protocol_retry_attempt,
+                                            protocol_retry_meta.as_ref(),
+                                            &code,
+                                            detail.as_deref(),
+                                            Some(&token_usage),
+                                            run_model.as_deref(),
+                                        )
+                                        .await
+                                    {
+                                        Ok(()) => 1,
+                                        Err(err) => {
+                                            tracing::warn!(
+                                                session_id = %session_id,
+                                                run_id = %run_id,
+                                                agent_id = %agent_id,
+                                                error = %err,
+                                                "failed to persist protocol retry attempt message"
+                                            );
+                                            0
+                                        }
+                                    };
 
                                     let error_desc =
                                         detail.as_deref().unwrap_or("Invalid JSON output");
@@ -2249,7 +2317,7 @@ impl ChatRunner {
                                         retry_message,
                                         track_source_message,
                                     ));
-                                    0
+                                    retry_attempt_message_count
                                 }
                             }
                             Err(err) => {
@@ -2289,6 +2357,7 @@ impl ChatRunner {
                                     visible_error_content,
                                     error_type.as_ref(),
                                     run_model.as_deref(),
+                                    protocol_retry_meta.as_ref(),
                                 )
                                 .await
                             {

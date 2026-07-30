@@ -2883,18 +2883,22 @@ export function ProjectSidebar({
                     !isRunning && Boolean(session.hasWorkflowError);
                   const hasUnreadAgentCompletion =
                     !isRunning && Boolean(session.hasUnreadAgentCompletion);
-                  const hasPendingApproval =
-                    !isRunning && Boolean(session.hasPendingApproval);
+                  const hasPendingApproval = Boolean(session.hasPendingApproval);
                   const pinned = isPinnedSession(session);
                   const SessionIcon =
-                    isRunning
-                      ? LoaderCircle
-                      : hasPendingWorkflowReview ||
-                          hasPendingWorkflowInput ||
-                          hasPendingApproval
-                        ? CircleDot
-                        : Box;
-                  const sessionLabel = workflowReviewing
+                    hasPendingApproval
+                      ? CircleDot
+                      : isRunning
+                        ? LoaderCircle
+                        : hasPendingWorkflowReview || hasPendingWorkflowInput
+                          ? CircleDot
+                          : Box;
+                  const sessionLabel = hasPendingApproval
+                    ? `${displayTitle} - ${translate(
+                        "sidebar.sessionWaitingApproval",
+                        "waiting for approval",
+                      )}`
+                    : workflowReviewing
                     ? `${displayTitle} - ${translate(
                         "sidebar.sessionReviewing",
                         "reviewing",
@@ -2913,11 +2917,6 @@ export function ProjectSidebar({
                     ? `${displayTitle} - ${translate(
                         "sidebar.sessionNeedsInput",
                         "waiting for input",
-                      )}`
-                    : hasPendingApproval
-                    ? `${displayTitle} - ${translate(
-                        "sidebar.sessionWaitingApproval",
-                        "waiting for approval",
                       )}`
                     : hasWorkflowError
                     ? `${displayTitle} - ${translate(
@@ -2948,11 +2947,12 @@ export function ProjectSidebar({
                     >
                       <SessionIcon
                         className={`h-3.5 w-3.5 shrink-0 ${
-                          isRunning
+                          hasPendingApproval
+                            ? "text-[var(--primary)]"
+                            : isRunning
                             ? "animate-spin text-[var(--primary)]"
                             : hasPendingWorkflowReview ||
-                              hasPendingWorkflowInput ||
-                              hasPendingApproval
+                              hasPendingWorkflowInput
                             ? "text-[var(--primary)]"
                             : hasWorkflowError
                             ? "text-[var(--primary)]"

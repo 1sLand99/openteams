@@ -1042,6 +1042,9 @@ async fn run_connection(
             .await
             .map_err(|_| agent_client_protocol::Error::internal_error())?;
     }
+    if let Some(error) = client.take_terminal_api_error().await {
+        return Err(agent_client_protocol::Error::internal_error().data(error.message));
+    }
     output
         .send(AcpEvent::Done(
             serde_json::to_string(&response.stop_reason).unwrap_or_default(),
