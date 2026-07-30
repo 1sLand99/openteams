@@ -374,11 +374,18 @@ check(
 );
 
 check(
-  'issue detail more menu renames and deletes project work items',
+  'issue detail supports inline rename and deletes project work items',
   issueDetailSource.includes('handleRenameIssue') &&
     issueDetailSource.includes('handleDeleteIssue') &&
     issueDetailSource.includes('onIssueDeleted?.(current.id)') &&
+    issueDetailSource.includes("onClick={() => setTitleEditing(true)}") &&
+    issueDetailSource.includes('void handleSaveTitleDraft();') &&
+    issueDetailSource.includes('onBlur={() => {') &&
+    !issueDetailSource.includes('<Save aria-hidden="true"') &&
     issueDetailSource.includes('role="menu"') &&
+    issueDetailSource.includes('border-[var(--hairline-strong)]') &&
+    issueDetailSource.includes('bg-[var(--surface-1)]') &&
+    issueDetailSource.includes('hover:bg-[var(--surface-3)]') &&
     issueDetailSource.includes('<ConfirmationDialog') &&
     confirmationDialogSource.includes('role="alertdialog"') &&
     issueDetailSource.includes('<Trash2') &&
