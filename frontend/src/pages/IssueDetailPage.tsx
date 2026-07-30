@@ -1510,7 +1510,7 @@ export function IssueDetailPage({
           <section className="min-w-0 pl-2 pr-1 pt-6">
             {titleEditing ? (
               <form
-                className="min-w-0"
+                className="w-full min-w-0"
                 onSubmit={(event) => {
                   event.preventDefault();
                   void handleSaveTitleDraft();
@@ -1520,7 +1520,7 @@ export function IssueDetailPage({
                   ref={titleInputRef}
                   tabIndex={-1}
                   value={titleDraft}
-                  className="h-10 min-w-0 flex-1 rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-2.5 text-[23px] font-bold leading-tight text-[var(--ink)] outline-none transition placeholder:text-[var(--ink-tertiary)] focus:border-[var(--hairline-strong)]"
+                  className="h-10 w-full min-w-0 rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-2.5 text-[23px] font-bold leading-tight text-[var(--ink)] outline-none transition placeholder:text-[var(--ink-tertiary)] focus:border-[var(--hairline-strong)]"
                   placeholder={tr(
                     'issue.detail.actions.namePlaceholder',
                     'Issue name',

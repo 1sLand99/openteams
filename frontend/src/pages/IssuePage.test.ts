@@ -381,6 +381,8 @@ check(
     issueDetailSource.includes("onClick={() => setTitleEditing(true)}") &&
     issueDetailSource.includes('void handleSaveTitleDraft();') &&
     issueDetailSource.includes('onBlur={() => {') &&
+    issueDetailSource.includes('className="w-full min-w-0"') &&
+    issueDetailSource.includes('className="h-10 w-full min-w-0') &&
     !issueDetailSource.includes('<Save aria-hidden="true"') &&
     issueDetailSource.includes('role="menu"') &&
     issueDetailSource.includes('border-[var(--hairline-strong)]') &&
