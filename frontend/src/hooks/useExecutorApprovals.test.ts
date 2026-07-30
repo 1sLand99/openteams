@@ -108,5 +108,9 @@ assert.ok(traySource.includes('emptyDismissTimerRef'));
 assert.ok(traySource.includes('const command = approvalCommand(request)'));
 assert.ok(traySource.includes('title={command}'));
 assert.ok(traySource.includes('className="min-w-0 truncate'));
+assert.ok(
+  traySource.includes('grid grid-cols-[minmax(0,1fr)_auto]'),
+);
+assert.ok(traySource.includes('items-baseline gap-2 overflow-hidden'));
 
 console.log('executor approval incremental state tests passed');
