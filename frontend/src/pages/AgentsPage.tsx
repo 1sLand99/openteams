@@ -190,7 +190,9 @@ const isHiddenConfigField = (
     (fieldKey === "variant" || fieldKey === "agent"));
 
 const isAcpRunner = (runner: BaseCodingAgent): boolean =>
-  runner === "GEMINI" || runner === "QWEN_CODE";
+  runner === "GEMINI" ||
+  runner === "QWEN_CODE" ||
+  runner === "KIMI_CODE";
 
 const formatRunnerKey = (runner: BaseCodingAgent): string =>
   runner.toLowerCase().replaceAll("_", " ");
@@ -601,7 +603,7 @@ function AcpRuntimeConfigField({
     window.setTimeout(() => void onCommit(), 0);
   };
   const inputClass =
-    "h-8 w-full border-x-0 border-b border-t-0 border-transparent bg-transparent px-0 font-mono text-[12px] text-[var(--ink)] outline-none hover:border-white/10 focus:border-white/20";
+    "h-8 w-full rounded-[6px] border border-[var(--hairline-strong)] bg-[var(--surface-3)] px-2 font-mono text-[12px] text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-tertiary)] hover:border-[var(--hairline-tertiary)] focus:border-[var(--primary-focus)] focus:ring-1 focus:ring-[var(--primary-focus)]/40";
   const labelClass =
     "block truncate text-[12px] font-medium leading-[1.35] text-[var(--ink-subtle)]";
   const dropdownClass =
@@ -859,10 +861,10 @@ function ConfigSchemaField({
               void onCommit?.();
             }}
             className={cx(
-              "relative h-5 w-9 rounded-full transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/20",
+              "relative h-5 w-9 rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/20",
               checked
-                ? "bg-[var(--primary)]/80"
-                : "bg-white/[0.035] ring-1 ring-inset ring-white/10 hover:bg-white/[0.06]",
+                ? "border-transparent bg-[var(--primary)]/80"
+                : "border-[var(--hairline-strong)] bg-[var(--surface-4)] hover:bg-[var(--hairline)]",
             )}
           >
             <span
@@ -870,7 +872,7 @@ function ConfigSchemaField({
                 "absolute top-1/2 h-3.5 w-3.5 -translate-y-1/2 rounded-full transition-all",
                 checked
                   ? "left-[18px] bg-white shadow-[0_0_10px_rgba(255,255,255,0.18)]"
-                  : "left-1 bg-white/35",
+                  : "left-1 bg-[var(--ink-tertiary)]",
               )}
             />
           </button>

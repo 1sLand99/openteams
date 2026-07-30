@@ -101,6 +101,10 @@ assert.match(
 );
 assert.match(
   source,
+  /const isAcpRunner[\s\S]*?runner === "GEMINI"[\s\S]*?runner === "QWEN_CODE"[\s\S]*?runner === "KIMI_CODE"/u,
+);
+assert.match(
+  source,
   /agentRuntimeApi[\s\S]*?\.getDiagnostics\(runner\.runner_type\)[\s\S]*?\[refreshRevision, runner\.runner_type\]/u,
 );
 assert.doesNotMatch(source, /\[\.\.\.models, selectedModel\]/u);

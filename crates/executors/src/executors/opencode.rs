@@ -1,9 +1,10 @@
 use std::{
     collections::{BTreeSet, HashSet},
-    io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -73,6 +74,7 @@ struct OpencodeServer {
     base_url: String,
     server_password: ServerPassword,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
+    _runtime_lease: OpencodeRuntimeLease,
 }
 
 impl Drop for OpencodeServer {
@@ -91,6 +93,9 @@ impl Drop for OpencodeServer {
 type ServerPassword = String;
 const MAX_SERVER_LOG_LINES: usize = 200;
 const MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_OPENCODE_RUNTIME_DIRS: usize = 16;
+const MAX_OPENCODE_RUNTIME_BYTES: u64 = 256 * 1024 * 1024;
+const OPENCODE_RUNTIME_LAST_USED_MARKER: &str = ".last_used";
 
 impl Opencode {
     pub const PACKAGE_VERSION: &'static str = "1.17.18";
@@ -191,7 +196,8 @@ impl Opencode {
         env.clone()
             .with_profile(&self.cmd)
             .apply_to_command(&mut command);
-        apply_isolated_opencode_env(&mut command, current_dir, Self::PACKAGE_VERSION)?;
+        let _runtime_lease =
+            apply_isolated_opencode_env(&mut command, current_dir, Self::PACKAGE_VERSION)?;
 
         let output = tokio::time::timeout(MODEL_DISCOVERY_TIMEOUT, command.output())
             .await
@@ -219,7 +225,15 @@ impl Opencode {
         &self,
         current_dir: &Path,
         env: &ExecutionEnv,
-    ) -> Result<(AsyncGroupChild, ServerPassword, String), ExecutorError> {
+    ) -> Result<
+        (
+            AsyncGroupChild,
+            ServerPassword,
+            String,
+            OpencodeRuntimeLease,
+        ),
+        ExecutorError,
+    > {
         let command_parts = self.build_command_builder()?.build_initial()?;
         let (program_path, args) = command_parts.into_resolved().await?;
 
@@ -248,11 +262,12 @@ impl Opencode {
         env.clone()
             .with_profile(&self.cmd)
             .apply_to_command(&mut command);
-        apply_isolated_opencode_env(&mut command, current_dir, Self::PACKAGE_VERSION)?;
+        let runtime_lease =
+            apply_isolated_opencode_env(&mut command, current_dir, Self::PACKAGE_VERSION)?;
 
         let child = command.group_spawn()?;
 
-        Ok((child, server_password, startup_command))
+        Ok((child, server_password, startup_command, runtime_lease))
     }
 
     /// Handles process spawning and waits for the server URL used by slash commands.
@@ -261,7 +276,7 @@ impl Opencode {
         current_dir: &Path,
         env: &ExecutionEnv,
     ) -> Result<OpencodeServer, ExecutorError> {
-        let (mut child, server_password, startup_command) =
+        let (mut child, server_password, startup_command, runtime_lease) =
             self.spawn_server_process(current_dir, env).await?;
         let Some(server_stdout) = child.inner().stdout.take() else {
             let _ = workspace_utils::process::kill_process_group(&mut child).await;
@@ -291,6 +306,7 @@ impl Opencode {
             base_url,
             server_password,
             stderr_task,
+            _runtime_lease: runtime_lease,
         })
     }
 
@@ -308,7 +324,7 @@ impl Opencode {
             self.append_prompt.combine_prompt(prompt)
         };
 
-        let (mut child, server_password, _startup_command) =
+        let (mut child, server_password, _startup_command, runtime_lease) =
             self.spawn_server_process(current_dir, env).await?;
         let Some(server_stdout) = child.inner().stdout.take() else {
             let _ = workspace_utils::process::kill_process_group(&mut child).await;
@@ -342,6 +358,7 @@ impl Opencode {
         let repo_context = env.repo_context.clone();
 
         tokio::spawn(async move {
+            let _runtime_lease = runtime_lease;
             // Wait for server to print listening URL
             let base_url = match wait_for_server_url(server_stdout, Some(log_writer.clone())).await
             {
@@ -440,9 +457,9 @@ fn apply_isolated_opencode_env(
     command: &mut Command,
     current_dir: &Path,
     package_version: &str,
-) -> io::Result<()> {
-    let runtime_root = openteams_home_dir()?
-        .join("opencode")
+) -> io::Result<OpencodeRuntimeLease> {
+    let opencode_root = openteams_home_dir()?.join("opencode");
+    let runtime_root = opencode_root
         .join(format!(
             "opencode-ai-{}",
             sanitize_path_segment(package_version)
@@ -452,14 +469,311 @@ fn apply_isolated_opencode_env(
     let state_home = runtime_root.join("state");
     let opencode_data_dir = data_home.join("opencode");
 
+    let runtime_lease = OpencodeRuntimeLease::acquire(&opencode_root, &runtime_root)?;
     std::fs::create_dir_all(&opencode_data_dir)?;
     std::fs::create_dir_all(&state_home)?;
     mirror_user_opencode_auth(&opencode_data_dir)?;
+    if let Err(err) = touch_opencode_runtime(&runtime_root) {
+        tracing::warn!(
+            runtime_dir = %runtime_root.display(),
+            "Failed to update OpenCode runtime usage marker: {err}"
+        );
+    }
+    match prune_opencode_runtime_dirs(
+        &opencode_root,
+        &runtime_root,
+        MAX_OPENCODE_RUNTIME_DIRS,
+        MAX_OPENCODE_RUNTIME_BYTES,
+    ) {
+        Ok(result) => {
+            if result.removed_dirs > 0 {
+                tracing::info!(
+                    removed_dirs = result.removed_dirs,
+                    removed_bytes = result.removed_bytes,
+                    remaining_dirs = result.remaining_dirs,
+                    remaining_bytes = result.remaining_bytes,
+                    "Pruned isolated OpenCode runtime directories"
+                );
+            }
+            if result.remaining_dirs > MAX_OPENCODE_RUNTIME_DIRS
+                || result.remaining_bytes > MAX_OPENCODE_RUNTIME_BYTES
+            {
+                tracing::warn!(
+                    remaining_dirs = result.remaining_dirs,
+                    remaining_bytes = result.remaining_bytes,
+                    "OpenCode runtime directory remains over its retention limit"
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!("Failed to prune isolated OpenCode runtime directories: {err}");
+        }
+    }
 
     command
         .env("XDG_DATA_HOME", data_home)
         .env("XDG_STATE_HOME", state_home);
-    Ok(())
+    Ok(runtime_lease)
+}
+
+#[derive(Debug)]
+struct OpencodeRuntimeLease {
+    _lock_file: fs::File,
+}
+
+impl OpencodeRuntimeLease {
+    fn acquire(opencode_root: &Path, runtime_dir: &Path) -> io::Result<Self> {
+        let lock_path = opencode_runtime_lock_path(opencode_root, runtime_dir);
+        let lock_parent = lock_path.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "OpenCode lock path has no parent",
+            )
+        })?;
+        fs::create_dir_all(lock_parent)?;
+        let lock_file = open_opencode_runtime_lock(&lock_path)?;
+        lock_file.lock_shared()?;
+        Ok(Self {
+            _lock_file: lock_file,
+        })
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OpencodeRuntimePruneResult {
+    removed_dirs: usize,
+    removed_bytes: u64,
+    remaining_dirs: usize,
+    remaining_bytes: u64,
+}
+
+#[derive(Debug)]
+struct OpencodeRuntimeDir {
+    path: PathBuf,
+    version_dir: PathBuf,
+    last_used: SystemTime,
+    bytes: u64,
+    protected: bool,
+}
+
+fn touch_opencode_runtime(runtime_dir: &Path) -> io::Result<()> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+    let mut marker = fs::File::create(runtime_dir.join(OPENCODE_RUNTIME_LAST_USED_MARKER))?;
+    marker.write_all(timestamp.as_bytes())
+}
+
+fn prune_opencode_runtime_dirs(
+    opencode_root: &Path,
+    protected_runtime: &Path,
+    max_dirs: usize,
+    max_bytes: u64,
+) -> io::Result<OpencodeRuntimePruneResult> {
+    fs::create_dir_all(opencode_root.join(".locks"))?;
+    let mut runtimes = discover_opencode_runtime_dirs(opencode_root, protected_runtime)?;
+    runtimes.sort_by(|left, right| {
+        left.last_used
+            .cmp(&right.last_used)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    let mut result = OpencodeRuntimePruneResult {
+        remaining_dirs: runtimes.len(),
+        remaining_bytes: runtimes
+            .iter()
+            .fold(0_u64, |total, runtime| total.saturating_add(runtime.bytes)),
+        ..Default::default()
+    };
+    let mut version_dirs = HashSet::new();
+
+    for runtime in runtimes {
+        if result.remaining_dirs <= max_dirs && result.remaining_bytes <= max_bytes {
+            break;
+        }
+        if runtime.protected {
+            continue;
+        }
+
+        let lock_path = opencode_runtime_lock_path(opencode_root, &runtime.path);
+        let lock_file = match open_opencode_runtime_lock(&lock_path) {
+            Ok(file) => file,
+            Err(err) => {
+                tracing::warn!(
+                    runtime_dir = %runtime.path.display(),
+                    "Failed to open OpenCode runtime retention lock: {err}"
+                );
+                continue;
+            }
+        };
+        match lock_file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => continue,
+            Err(fs::TryLockError::Error(err)) => {
+                tracing::warn!(
+                    runtime_dir = %runtime.path.display(),
+                    "Failed to lock stale OpenCode runtime directory: {err}"
+                );
+                continue;
+            }
+        }
+
+        match fs::remove_dir_all(&runtime.path) {
+            Ok(()) => {
+                result.removed_dirs += 1;
+                result.removed_bytes = result.removed_bytes.saturating_add(runtime.bytes);
+                result.remaining_dirs = result.remaining_dirs.saturating_sub(1);
+                result.remaining_bytes = result.remaining_bytes.saturating_sub(runtime.bytes);
+                version_dirs.insert(runtime.version_dir);
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                result.remaining_dirs = result.remaining_dirs.saturating_sub(1);
+                result.remaining_bytes = result.remaining_bytes.saturating_sub(runtime.bytes);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    runtime_dir = %runtime.path.display(),
+                    "Failed to remove stale OpenCode runtime directory: {err}"
+                );
+            }
+        }
+    }
+
+    for version_dir in version_dirs {
+        match fs::remove_dir(&version_dir) {
+            Ok(()) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::NotFound
+                ) => {}
+            Err(err) => {
+                tracing::debug!(
+                    version_dir = %version_dir.display(),
+                    "Failed to remove empty OpenCode version directory: {err}"
+                );
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn open_opencode_runtime_lock(lock_path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+}
+
+fn opencode_runtime_lock_path(opencode_root: &Path, runtime_dir: &Path) -> PathBuf {
+    let relative_runtime = runtime_dir
+        .strip_prefix(opencode_root)
+        .unwrap_or(runtime_dir);
+    let mut hasher = Sha256::new();
+    hasher.update(relative_runtime.to_string_lossy().as_bytes());
+    opencode_root
+        .join(".locks")
+        .join(format!("{:x}.lock", hasher.finalize()))
+}
+
+fn discover_opencode_runtime_dirs(
+    opencode_root: &Path,
+    protected_runtime: &Path,
+) -> io::Result<Vec<OpencodeRuntimeDir>> {
+    let mut runtimes = Vec::new();
+    let version_entries = match fs::read_dir(opencode_root) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(runtimes),
+        Err(err) => return Err(err),
+    };
+
+    for version_entry in version_entries.flatten() {
+        let version_path = version_entry.path();
+        let Ok(file_type) = version_entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir()
+            || !version_entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("opencode-ai-")
+        {
+            continue;
+        }
+        let Ok(workspace_entries) = fs::read_dir(&version_path) else {
+            continue;
+        };
+
+        for workspace_entry in workspace_entries.flatten() {
+            let Ok(file_type) = workspace_entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() || !is_workspace_runtime_dir_name(&workspace_entry.file_name()) {
+                continue;
+            }
+
+            let path = workspace_entry.path();
+            let (bytes, newest_modified) = opencode_runtime_usage(&path);
+            let marker_modified = fs::metadata(path.join(OPENCODE_RUNTIME_LAST_USED_MARKER))
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            let directory_modified = workspace_entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH);
+            let last_used = marker_modified
+                .into_iter()
+                .chain(newest_modified)
+                .max()
+                .unwrap_or(directory_modified);
+
+            runtimes.push(OpencodeRuntimeDir {
+                protected: path == protected_runtime,
+                path,
+                version_dir: version_path.clone(),
+                last_used,
+                bytes,
+            });
+        }
+    }
+
+    Ok(runtimes)
+}
+
+fn is_workspace_runtime_dir_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name.len() == 16 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn opencode_runtime_usage(runtime_dir: &Path) -> (u64, Option<SystemTime>) {
+    let mut bytes = 0_u64;
+    let mut newest_modified = None;
+
+    for entry in walkdir::WalkDir::new(runtime_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_file() {
+            bytes = bytes.saturating_add(metadata.len());
+        }
+        if let Ok(modified) = metadata.modified() {
+            newest_modified =
+                Some(newest_modified.map_or(modified, |current: SystemTime| current.max(modified)));
+        }
+    }
+
+    (bytes, newest_modified)
 }
 
 fn openteams_home_dir() -> io::Result<PathBuf> {
@@ -1145,14 +1459,272 @@ fn merge_compaction_config(existing_json: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, path::PathBuf};
+    use std::{
+        collections::HashSet,
+        fs,
+        path::{Path, PathBuf},
+        time::{Duration, SystemTime},
+    };
 
     use serde_json::json;
+    use tempfile::TempDir;
 
     use super::{
-        opencode_auth_path, opencode_auth_provider_ids, opencode_config_paths,
-        opencode_config_provider_ids, parse_models_command_output,
+        OPENCODE_RUNTIME_LAST_USED_MARKER, OpencodeRuntimeLease, opencode_auth_path,
+        opencode_auth_provider_ids, opencode_config_paths, opencode_config_provider_ids,
+        opencode_runtime_usage, parse_models_command_output, prune_opencode_runtime_dirs,
+        touch_opencode_runtime,
     };
+
+    fn create_runtime(
+        root: &Path,
+        version: &str,
+        workspace_key: &str,
+        payload_bytes: usize,
+        last_used: SystemTime,
+    ) -> PathBuf {
+        let runtime = root.join(version).join(workspace_key);
+        fs::create_dir_all(runtime.join("data").join("opencode"))
+            .expect("create runtime directory");
+        fs::create_dir_all(runtime.join("state")).expect("create runtime state directory");
+        fs::write(
+            runtime.join("data").join("opencode").join("payload.bin"),
+            vec![b'x'; payload_bytes],
+        )
+        .expect("write runtime payload");
+        touch_opencode_runtime(&runtime).expect("create last-used marker");
+        fs::File::options()
+            .write(true)
+            .open(runtime.join(OPENCODE_RUNTIME_LAST_USED_MARKER))
+            .expect("open last-used marker")
+            .set_times(fs::FileTimes::new().set_modified(last_used))
+            .expect("set last-used marker timestamp");
+        runtime
+    }
+
+    #[test]
+    fn opencode_runtime_pruning_applies_directory_limit_across_versions_by_lru() {
+        let temp = TempDir::new().expect("create temp directory");
+        let root = temp.path().join("opencode");
+        let now = SystemTime::now();
+        let oldest = create_runtime(
+            &root,
+            "opencode-ai-1.16.0",
+            "0000000000000001",
+            8,
+            now + Duration::from_secs(1),
+        );
+        let newer = create_runtime(
+            &root,
+            "opencode-ai-1.17.0",
+            "0000000000000002",
+            8,
+            now + Duration::from_secs(2),
+        );
+        let protected = create_runtime(
+            &root,
+            "opencode-ai-1.17.18",
+            "0000000000000003",
+            8,
+            now + Duration::from_secs(3),
+        );
+
+        let result =
+            prune_opencode_runtime_dirs(&root, &protected, 2, u64::MAX).expect("prune runtimes");
+
+        assert_eq!(result.removed_dirs, 1);
+        assert_eq!(result.remaining_dirs, 2);
+        assert!(!oldest.exists(), "oldest runtime should be evicted first");
+        assert!(
+            !root.join("opencode-ai-1.16.0").exists(),
+            "empty old version directory should be removed"
+        );
+        assert!(newer.exists());
+        assert!(protected.exists());
+    }
+
+    #[test]
+    fn opencode_runtime_pruning_applies_total_byte_limit() {
+        let temp = TempDir::new().expect("create temp directory");
+        let root = temp.path().join("opencode");
+        let now = SystemTime::now();
+        let oldest = create_runtime(
+            &root,
+            "opencode-ai-1.16.0",
+            "1000000000000001",
+            128,
+            now + Duration::from_secs(1),
+        );
+        let retained = create_runtime(
+            &root,
+            "opencode-ai-1.17.18",
+            "1000000000000002",
+            64,
+            now + Duration::from_secs(2),
+        );
+        let protected = create_runtime(
+            &root,
+            "opencode-ai-1.17.18",
+            "1000000000000003",
+            32,
+            now + Duration::from_secs(3),
+        );
+        let oldest_bytes = opencode_runtime_usage(&oldest).0;
+        let retained_bytes = opencode_runtime_usage(&retained).0;
+        let protected_bytes = opencode_runtime_usage(&protected).0;
+        let byte_limit = retained_bytes + protected_bytes;
+
+        let result = prune_opencode_runtime_dirs(&root, &protected, usize::MAX, byte_limit)
+            .expect("prune runtimes");
+
+        assert_eq!(result.removed_dirs, 1);
+        assert_eq!(result.removed_bytes, oldest_bytes);
+        assert_eq!(result.remaining_bytes, byte_limit);
+        assert!(!oldest.exists());
+        assert!(retained.exists());
+        assert!(protected.exists());
+    }
+
+    #[test]
+    fn opencode_runtime_pruning_never_removes_protected_runtime() {
+        let temp = TempDir::new().expect("create temp directory");
+        let root = temp.path().join("opencode");
+        let now = SystemTime::now();
+        let protected = create_runtime(
+            &root,
+            "opencode-ai-1.17.18",
+            "2000000000000001",
+            128,
+            now + Duration::from_secs(1),
+        );
+        let newer = create_runtime(
+            &root,
+            "opencode-ai-1.17.18",
+            "2000000000000002",
+            8,
+            now + Duration::from_secs(2),
+        );
+
+        let result = prune_opencode_runtime_dirs(&root, &protected, 1, 1).expect("prune runtimes");
+
+        assert_eq!(result.removed_dirs, 1);
+        assert_eq!(result.remaining_dirs, 1);
+        assert!(
+            result.remaining_bytes > 1,
+            "a protected runtime may keep the soft byte cap exceeded"
+        );
+        assert!(protected.exists());
+        assert!(!newer.exists());
+    }
+
+    #[test]
+    fn opencode_runtime_pruning_skips_runtime_with_active_lease() {
+        let temp = TempDir::new().expect("create temp directory");
+        let root = temp.path().join("opencode");
+        let now = SystemTime::now();
+        let leased = create_runtime(
+            &root,
+            "opencode-ai-1.17.18",
+            "2500000000000001",
+            8,
+            now + Duration::from_secs(1),
+        );
+        let removable = create_runtime(
+            &root,
+            "opencode-ai-1.17.18",
+            "2500000000000002",
+            8,
+            now + Duration::from_secs(2),
+        );
+        let protected = create_runtime(
+            &root,
+            "opencode-ai-1.17.18",
+            "2500000000000003",
+            8,
+            now + Duration::from_secs(3),
+        );
+        let _lease =
+            OpencodeRuntimeLease::acquire(&root, &leased).expect("acquire shared runtime lease");
+
+        let result =
+            prune_opencode_runtime_dirs(&root, &protected, 2, u64::MAX).expect("prune runtimes");
+
+        assert_eq!(result.removed_dirs, 1);
+        assert_eq!(result.remaining_dirs, 2);
+        assert!(leased.exists(), "leased runtime must not be deleted");
+        assert!(
+            !removable.exists(),
+            "pruning should continue to the next unlocked runtime"
+        );
+        assert!(protected.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn opencode_runtime_pruning_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("create temp directory");
+        let root = temp.path().join("opencode");
+        let external = temp.path().join("external");
+        let external_nested = external.join("nested");
+        let external_candidate = external.join("candidate");
+        fs::create_dir_all(&external_nested).expect("create external nested directory");
+        fs::create_dir_all(&external_candidate).expect("create external candidate directory");
+        let nested_sentinel = external_nested.join("nested-sentinel.txt");
+        let candidate_sentinel = external_candidate.join("candidate-sentinel.txt");
+        fs::write(&nested_sentinel, vec![b's'; 4096]).expect("write nested sentinel");
+        fs::write(&candidate_sentinel, vec![b's'; 4096]).expect("write candidate sentinel");
+
+        let now = SystemTime::now();
+        let stale = create_runtime(
+            &root,
+            "opencode-ai-1.17.18",
+            "3000000000000001",
+            8,
+            now + Duration::from_secs(1),
+        );
+        symlink(&external_nested, stale.join("external-link"))
+            .expect("link runtime to external directory");
+        let protected = create_runtime(
+            &root,
+            "opencode-ai-1.17.18",
+            "3000000000000002",
+            8,
+            now + Duration::from_secs(2),
+        );
+        symlink(
+            &external_candidate,
+            root.join("opencode-ai-1.17.18").join("3000000000000003"),
+        )
+        .expect("link candidate runtime to external directory");
+        fs::create_dir_all(root.join("manual-layout")).expect("create unknown layout");
+
+        let stale_bytes = opencode_runtime_usage(&stale).0;
+        assert!(
+            stale_bytes < 4096,
+            "external symlink target must not contribute to runtime size"
+        );
+
+        let result =
+            prune_opencode_runtime_dirs(&root, &protected, 1, u64::MAX).expect("prune runtimes");
+
+        assert_eq!(result.removed_dirs, 1);
+        assert!(!stale.exists());
+        assert!(protected.exists());
+        assert!(
+            nested_sentinel.exists(),
+            "deleting a runtime must not delete a nested symlink target"
+        );
+        assert!(
+            candidate_sentinel.exists(),
+            "a symlink masquerading as a runtime directory must be ignored"
+        );
+        assert!(
+            root.join("manual-layout").exists(),
+            "unknown top-level layouts must remain untouched"
+        );
+    }
 
     #[test]
     fn opencode_models_command_parser_filters_free_models() {

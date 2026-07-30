@@ -139,6 +139,7 @@ impl CodingAgent {
         match self {
             Self::Gemini(config) => config.acp_mcp_policy = policy,
             Self::QwenCode(config) => config.acp_mcp_policy = policy,
+            Self::KimiCode(config) => config.acp_mcp_policy = policy,
             #[cfg(feature = "qa-mode")]
             Self::AcpQa(config) => config.acp_mcp_policy = policy,
             _ => {}
@@ -223,7 +224,10 @@ impl CodingAgent {
             }
             Self::CursorAgent(_) => vec![BaseAgentCapability::SetupHelper],
             Self::Copilot(_) => vec![],
-            Self::KimiCode(_) => vec![BaseAgentCapability::SetupHelper],
+            Self::KimiCode(_) => vec![
+                BaseAgentCapability::SessionFork,
+                BaseAgentCapability::SetupHelper,
+            ],
             #[cfg(feature = "qa-mode")]
             Self::QaMock(_) | Self::AcpQa(_) => vec![],
         }

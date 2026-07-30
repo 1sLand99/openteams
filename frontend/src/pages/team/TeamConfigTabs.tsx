@@ -1253,7 +1253,9 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
   const [activeTab, setActiveTab] = useState<MemberConfigTab>("config");
   const { selectedMember, t } = props;
   const supportsAcpPermissions =
-    props.runnerType === "GEMINI" || props.runnerType === "QWEN_CODE";
+    props.runnerType === "GEMINI" ||
+    props.runnerType === "QWEN_CODE" ||
+    props.runnerType === "KIMI_CODE";
   const effectiveActiveTab = selectedMember
     ? activeTab === "permissions" && !supportsAcpPermissions
       ? "config"

@@ -8,8 +8,10 @@ use executors::{
     executors::{
         ExecutorError, ExecutorExitResult, StandardCodingAgentExecutor,
         acp::{
-            AcpConfigSource, AcpEvent, AcpQaExecutor, events::AcpRuntimeEvent,
-            runtime::probe_acp_command,
+            AcpAgentHarness, AcpApprovalPolicy, AcpClientServicePolicy, AcpConfigOverride,
+            AcpConfigSource, AcpConfigValue, AcpEvent, AcpQaExecutor,
+            events::AcpRuntimeEvent,
+            runtime::{probe_acp_command, probe_acp_command_without_session},
         },
     },
 };
@@ -40,6 +42,37 @@ async fn run_turn(
             .await
             .expect("spawn ACP turn"),
     };
+    let stdout = spawned
+        .child
+        .inner()
+        .stdout
+        .take()
+        .expect("replacement stdout");
+    let mut lines = BufReader::new(stdout).lines();
+    let mut events = Vec::new();
+    while let Ok(Ok(Some(line))) =
+        tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await
+    {
+        let event = serde_json::from_str::<AcpRuntimeEvent>(&line)
+            .expect("typed ACP event")
+            .payload;
+        let done = matches!(event, AcpEvent::Done(_));
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    let exit = spawned.exit_signal.take().expect("exit signal");
+    let result = tokio::time::timeout(Duration::from_secs(5), exit)
+        .await
+        .expect("exit signal timeout")
+        .expect("exit signal sender");
+    (events, result)
+}
+
+async fn read_spawned_turn(
+    mut spawned: executors::executors::SpawnedChild,
+) -> (Vec<AcpEvent>, ExecutorExitResult) {
     let stdout = spawned
         .child
         .inner()
@@ -291,6 +324,131 @@ async fn stable_config_option_is_applied_verified_and_used_for_usage_identity() 
 }
 
 #[tokio::test]
+async fn required_session_mode_is_enforced_for_new_and_resumed_sessions() {
+    let workspace = std::env::temp_dir().join(format!("openteams-acp-qa-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&workspace)
+        .await
+        .expect("create workspace");
+    let mut env = ExecutionEnv::new(
+        RepoContext::new(workspace.clone(), Vec::new()),
+        false,
+        String::new(),
+    );
+    env.insert("ACP_QA_MODE_OPTIONS", "1");
+
+    let unsafe_override = AcpConfigOverride {
+        option_id: "mode".to_string(),
+        value: AcpConfigValue::ValueId {
+            value: "yolo".to_string(),
+        },
+        label_snapshot: Some("Mode".to_string()),
+        category_snapshot: Some("mode".to_string()),
+    };
+    let harness = AcpAgentHarness::new()
+        .with_approval_policy(AcpApprovalPolicy::Ask)
+        .with_required_session_mode("mode", "default")
+        .with_config_override(&unsafe_override)
+        .with_client_services(AcpClientServicePolicy {
+            terminal: true,
+            ..AcpClientServicePolicy::default()
+        });
+    let command = || CommandParts::new(env!("CARGO_BIN_EXE_acp-qa-agent").to_string(), Vec::new());
+
+    let first = harness
+        .spawn_with_command(
+            &workspace,
+            "first safe turn".to_string(),
+            command(),
+            &env,
+            &CmdOverrides::default(),
+            None,
+        )
+        .await
+        .expect("spawn first safe turn");
+    let (first_events, first_exit) = read_spawned_turn(first).await;
+    assert!(matches!(first_exit, ExecutorExitResult::Success));
+    assert!(first_events.iter().any(|event| {
+        matches!(
+            event,
+            AcpEvent::Message(chunk)
+                if serde_json::to_string(chunk)
+                    .is_ok_and(|json| json.contains("mode=default"))
+        )
+    }));
+    let session_id = first_events
+        .iter()
+        .find_map(|event| match event {
+            AcpEvent::SessionStart(session_id) => Some(session_id.clone()),
+            _ => None,
+        })
+        .expect("session id");
+
+    let resumed = harness
+        .spawn_follow_up_with_command(
+            &workspace,
+            "resumed safe turn".to_string(),
+            &session_id,
+            command(),
+            &env,
+            &CmdOverrides::default(),
+            None,
+        )
+        .await
+        .expect("spawn resumed safe turn");
+    let (resumed_events, resumed_exit) = read_spawned_turn(resumed).await;
+    assert!(matches!(resumed_exit, ExecutorExitResult::Success));
+    assert!(resumed_events.iter().any(|event| {
+        matches!(
+            event,
+            AcpEvent::Message(chunk)
+                if serde_json::to_string(chunk)
+                    .is_ok_and(|json| json.contains("mode=default"))
+        )
+    }));
+
+    tokio::fs::remove_dir_all(workspace)
+        .await
+        .expect("remove workspace");
+}
+
+#[tokio::test]
+async fn required_session_mode_rejects_an_unverified_agent_response() {
+    let workspace = std::env::temp_dir().join(format!("openteams-acp-qa-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&workspace)
+        .await
+        .expect("create workspace");
+    let mut env = ExecutionEnv::new(
+        RepoContext::new(workspace.clone(), Vec::new()),
+        false,
+        String::new(),
+    );
+    env.insert("ACP_QA_MODE_OPTIONS", "1");
+    env.insert("ACP_QA_REFUSE_MODE_SET", "1");
+    let harness = AcpAgentHarness::new().with_required_session_mode("mode", "default");
+
+    let error = harness
+        .spawn_with_command(
+            &workspace,
+            "this prompt must not be sent".to_string(),
+            CommandParts::new(env!("CARGO_BIN_EXE_acp-qa-agent").to_string(), Vec::new()),
+            &env,
+            &CmdOverrides::default(),
+            None,
+        )
+        .await
+        .expect_err("unverified mode response must fail startup");
+    assert!(
+        error
+            .to_string()
+            .contains("did not activate the requested value for `mode`")
+    );
+
+    tokio::fs::remove_dir_all(workspace)
+        .await
+        .expect("remove workspace");
+}
+
+#[tokio::test]
 async fn capability_probe_discovers_stable_config_options() {
     let workspace = std::env::temp_dir().join(format!("openteams-acp-qa-{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&workspace)
@@ -316,6 +474,38 @@ async fn capability_probe_discovers_stable_config_options() {
     assert_eq!(probe.config_source, AcpConfigSource::Stable);
     assert_eq!(probe.config_options.len(), 1);
     assert_eq!(probe.config_options[0].id, "session-model");
+
+    tokio::fs::remove_dir_all(workspace)
+        .await
+        .expect("remove workspace");
+}
+
+#[tokio::test]
+async fn initialize_only_capability_probe_skips_session_config_options() {
+    let workspace = std::env::temp_dir().join(format!("openteams-acp-qa-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&workspace)
+        .await
+        .expect("create workspace");
+    let mut env = ExecutionEnv::new(
+        RepoContext::new(workspace.clone(), Vec::new()),
+        false,
+        String::new(),
+    );
+    env.insert("ACP_QA_CONFIG_OPTIONS", "1");
+
+    let probe = probe_acp_command_without_session(
+        CommandParts::new(env!("CARGO_BIN_EXE_acp-qa-agent").to_string(), Vec::new()),
+        &workspace,
+        &env,
+        &CmdOverrides::default(),
+        None,
+    )
+    .await
+    .expect("probe ACP initialization");
+
+    assert_eq!(probe.protocol_version, "1");
+    assert_eq!(probe.config_source, AcpConfigSource::None);
+    assert!(probe.config_options.is_empty());
 
     tokio::fs::remove_dir_all(workspace)
         .await

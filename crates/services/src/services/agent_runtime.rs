@@ -503,7 +503,9 @@ pub async fn runtime_diagnostics(
             "override".to_string()
         } else {
             match &runtime_executor {
-                CodingAgent::Gemini(_) | CodingAgent::QwenCode(_) => "native",
+                CodingAgent::Gemini(_) | CodingAgent::QwenCode(_) | CodingAgent::KimiCode(_) => {
+                    "native"
+                }
                 _ => "default",
             }
             .to_string()
@@ -993,10 +995,10 @@ fn reasoning_capability_for_runner(
         BaseCodingAgent::QwenCode => Some(AgentRuntimeReasoningCapability::Effort {
             options: strings(["low", "medium", "high", "xhigh", "max"]),
         }),
-        BaseCodingAgent::Amp
-        | BaseCodingAgent::CursorAgent
-        | BaseCodingAgent::Copilot
-        | BaseCodingAgent::KimiCode => None,
+        BaseCodingAgent::KimiCode => Some(AgentRuntimeReasoningCapability::Effort {
+            options: strings(["low", "high", "max"]),
+        }),
+        BaseCodingAgent::Amp | BaseCodingAgent::CursorAgent | BaseCodingAgent::Copilot => None,
         #[cfg(feature = "qa-mode")]
         BaseCodingAgent::QaMock | BaseCodingAgent::AcpQa => None,
     }
@@ -1169,7 +1171,11 @@ mod tests {
         CodingAgent::KimiCode(KimiCode {
             append_prompt: AppendPrompt::default(),
             model: model.map(str::to_string),
+            thinking_effort: None,
+            acp: None,
             cmd: Default::default(),
+            acp_mcp_policy: Default::default(),
+            approvals: None,
         })
     }
 
@@ -1567,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_capabilities_match_current_qwen_and_gemini_controls() {
+    fn reasoning_capabilities_match_current_acp_controls() {
         assert_eq!(
             reasoning_capability_for_runner(BaseCodingAgent::QwenCode),
             Some(AgentRuntimeReasoningCapability::Effort {
@@ -1578,6 +1584,12 @@ mod tests {
             reasoning_capability_for_runner(BaseCodingAgent::Gemini),
             Some(AgentRuntimeReasoningCapability::Effort {
                 options: strings(["low", "medium", "high"]),
+            })
+        );
+        assert_eq!(
+            reasoning_capability_for_runner(BaseCodingAgent::KimiCode),
+            Some(AgentRuntimeReasoningCapability::Effort {
+                options: strings(["low", "high", "max"]),
             })
         );
     }
