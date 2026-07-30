@@ -990,16 +990,12 @@ function ModelConfigField({
   modelSource,
   value,
   onChange,
-  refreshingModels,
-  onRefreshModels,
   t,
 }: {
   options: DropdownSelectOption[];
   modelSource: AgentRuntimeStatus["model_source"];
   value: JsonValue | undefined;
   onChange: (key: string, value: JsonValue | undefined) => void;
-  refreshingModels: boolean;
-  onRefreshModels: () => Promise<void>;
   t: TranslateFn;
 }) {
   const selectedModel = typeof value === "string" ? value : "";
@@ -1033,27 +1029,6 @@ function ModelConfigField({
             onChange("model", trimmed ? trimmed : null);
           }}
         />
-        <button
-          type="button"
-          onClick={() => void onRefreshModels()}
-          disabled={refreshingModels}
-          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[6px] border border-transparent bg-transparent text-[var(--ink-tertiary)] transition-colors hover:border-white/20 hover:bg-white/[0.04] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-60"
-          aria-label={
-            refreshingModels
-              ? t("agents.model.refreshing")
-              : t("agents.model.refresh")
-          }
-          title={
-            refreshingModels
-              ? t("agents.model.refreshing")
-              : t("agents.model.refresh")
-          }
-          data-tooltip-nowrap
-        >
-          <RefreshCw
-            className={`h-3.5 w-3.5 ${refreshingModels ? "animate-spin" : ""}`}
-          />
-        </button>
       </div>
     </div>
   );
@@ -1067,8 +1042,7 @@ function AgentConfigSidebar({
   onClose,
   onSave,
   onDiagnosticsLoaded,
-  refreshingModels,
-  onRefreshModels,
+  refreshRevision,
   t,
 }: {
   runner: AgentRuntimeStatus;
@@ -1080,8 +1054,7 @@ function AgentConfigSidebar({
     envJson: Record<string, string> | null,
   ) => Promise<void>;
   onDiagnosticsLoaded: (diagnostics: AgentRuntimeDiagnostics) => void;
-  refreshingModels: boolean;
-  onRefreshModels: () => Promise<void>;
+  refreshRevision: number;
   t: TranslateFn;
 }) {
   const [formData, setFormData] = useState<
@@ -1099,7 +1072,6 @@ function AgentConfigSidebar({
     useState<AgentRuntimeDiagnostics | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
-  const [refreshingModelOptions, setRefreshingModelOptions] = useState(false);
   const [autoSaveStatus, setAutoSaveStatus] = useState<
     "idle" | "saving" | "saved"
   >("idle");
@@ -1358,26 +1330,7 @@ function AgentConfigSidebar({
     return () => {
       active = false;
     };
-  }, [runner.runner_type]);
-
-  const handleRefreshModelOptions = async () => {
-    setRefreshingModelOptions(true);
-    try {
-      await onRefreshModels();
-      const result = await agentRuntimeApi.getDiagnostics(runner.runner_type);
-      setDiagnostics(result);
-      setDiagnosticsError(null);
-      onDiagnosticsLoadedRef.current(result);
-    } catch (error) {
-      setDiagnosticsError(
-        error instanceof Error
-          ? error.message
-          : diagnosticsFailedLabelRef.current,
-      );
-    } finally {
-      setRefreshingModelOptions(false);
-    }
-  };
+  }, [refreshRevision, runner.runner_type]);
 
   const handleConfigFieldChange = (
     key: string,
@@ -1534,8 +1487,6 @@ function AgentConfigSidebar({
                 modelSource={modelSource}
                 value={modelValue}
                 onChange={handleConfigFieldChange}
-                refreshingModels={refreshingModels || refreshingModelOptions}
-                onRefreshModels={handleRefreshModelOptions}
                 t={t}
               />
             ) : (
@@ -1545,8 +1496,6 @@ function AgentConfigSidebar({
                   modelSource={modelSource}
                   value={modelValue}
                   onChange={handleConfigFieldChange}
-                  refreshingModels={refreshingModels || refreshingModelOptions}
-                  onRefreshModels={handleRefreshModelOptions}
                   t={t}
                 />
                 {isAcpRunner(runner.runner_type) && (
@@ -1620,13 +1569,12 @@ export function AgentsPage() {
   const [runtimeLoaded, setRuntimeLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshingConfig, setRefreshingConfig] = useState(false);
-  const [refreshingModels, setRefreshingModels] = useState(false);
+  const [refreshRevision, setRefreshRevision] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [selectedRunner, setSelectedRunner] =
     useState<AgentRuntimeStatus | null>(null);
   const [agentNavCollapsed, setAgentNavCollapsed] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const discoveryRefreshedNotice = t("agents.notice.discoveryRefreshed");
   const configRefreshedNotice = t("agents.notice.configRefreshed");
   const configSavedNotice = t("agents.notice.configSaved");
 
@@ -1638,10 +1586,9 @@ export function AgentsPage() {
     () =>
       new Set([
         configRefreshedNotice,
-        discoveryRefreshedNotice,
         configSavedNotice,
       ]),
-    [configRefreshedNotice, configSavedNotice, discoveryRefreshedNotice],
+    [configRefreshedNotice, configSavedNotice],
   );
 
   useShortcutScope('agent-runtime', {
@@ -1781,11 +1728,18 @@ export function AgentsPage() {
     setRefreshingConfig(true);
     setNotice(null);
     try {
-      const response = await agentRuntimeApi.list();
+      const response = await agentRuntimeApi.refresh();
       updateRuntimeRunners(response.runners, { notifyErrors: true });
       setRuntimeLoaded(true);
       setLoadError(null);
-      setNotice(configRefreshedNotice);
+      setRefreshRevision((current) => current + 1);
+      setNotice(
+        response.errors.length > 0
+          ? t("agents.notice.refreshFailedCount", {
+              count: response.errors.length,
+            })
+          : configRefreshedNotice,
+      );
     } catch (error) {
       const message =
         error instanceof Error
@@ -1795,29 +1749,6 @@ export function AgentsPage() {
       showToast(message);
     } finally {
       setRefreshingConfig(false);
-    }
-  };
-
-  const handleRefreshModels = async () => {
-    setRefreshingModels(true);
-    setNotice(null);
-    try {
-      const response = await agentRuntimeApi.refresh();
-      updateRuntimeRunners(response.runners, { notifyErrors: true });
-      setNotice(
-        response.errors.length > 0
-          ? t("agents.notice.refreshFailedCount", {
-              count: response.errors.length,
-            })
-          : discoveryRefreshedNotice,
-      );
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : t("agents.model.refresh.failed");
-      setNotice(message);
-      showToast(message);
-    } finally {
-      setRefreshingModels(false);
     }
   };
 
@@ -2030,8 +1961,7 @@ export function AgentsPage() {
                 onClose={() => setSelectedRunner(null)}
                 onSave={handleSave}
                 onDiagnosticsLoaded={handleDiagnosticsLoaded}
-                refreshingModels={refreshingModels}
-                onRefreshModels={handleRefreshModels}
+                refreshRevision={refreshRevision}
                 t={t}
               />
             ) : (

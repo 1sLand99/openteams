@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 const source = readFileSync(new URL('./AgentsPage.tsx', import.meta.url), 'utf8');
 const apiSource = readFileSync(new URL('../lib/api.ts', import.meta.url), 'utf8');
 
-assert.match(source, /useEffect\(\(\) => \{[\s\S]*?agentRuntimeApi[\s\S]*?\.getDiagnostics\(runner\.runner_type\)[\s\S]*?\}, \[runner\.runner_type\]\);/u);
+assert.match(source, /useEffect\(\(\) => \{[\s\S]*?agentRuntimeApi[\s\S]*?\.getDiagnostics\(runner\.runner_type\)[\s\S]*?\}, \[refreshRevision, runner\.runner_type\]\);/u);
 assert.doesNotMatch(source, /diagnosticsRefreshKey|refreshKey/iu);
 assert.match(
   source,
@@ -64,6 +64,15 @@ assert.match(
   source,
   /label=\{t\("agents\.details\.baseCommand"\)\}[\s\S]*?value=\{baseCommand\}/u,
 );
+assert.match(
+  source,
+  /t\("agents\.details\.commandHint"\)/u,
+);
+assert.match(
+  source,
+  /currentDiagnostics &&[\s\S]*?!currentDiagnostics\.installed[\s\S]*?!diagnosticsLoading[\s\S]*?t\("agents\.details\.nativeCliMissing"\)/u,
+);
+assert.doesNotMatch(source, /npx/iu);
 assert.match(source, /const envSummary = runner\.env_summary;/u);
 assert.doesNotMatch(
   source,
@@ -84,22 +93,20 @@ const modelField = source.slice(
 assert.doesNotMatch(modelField, /agentRuntimeApi\.(addModel|renameModel)/u);
 assert.doesNotMatch(modelField, /<input|<form|agents\.model\.add/u);
 assert.match(modelField, /options=\{options\}/u);
-assert.match(modelField, /onClick=\{\(\) => void onRefreshModels\(\)\}/u);
-assert.match(modelField, /t\("agents\.model\.refresh"\)/u);
-assert.match(modelField, /data-tooltip-nowrap/u);
+assert.doesNotMatch(modelField, /onRefreshModels|agents\.model\.refresh/u);
+assert.doesNotMatch(modelField, /<button/u);
 assert.match(
   source,
   /findAcpSelectConfigOption\([\s\S]*?currentDiagnostics\?\.acp_probe\?\.config_options[\s\S]*?"model"/u,
 );
 assert.match(
   source,
-  /await onRefreshModels\(\);[\s\S]*?agentRuntimeApi\.getDiagnostics\(runner\.runner_type\)/u,
+  /agentRuntimeApi[\s\S]*?\.getDiagnostics\(runner\.runner_type\)[\s\S]*?\[refreshRevision, runner\.runner_type\]/u,
 );
 assert.doesNotMatch(source, /\[\.\.\.models, selectedModel\]/u);
-assert.match(source, /await agentRuntimeApi\.refresh\(\)/u);
 assert.match(
   source,
-  /const handleRefreshConfig = async \(\) => \{[\s\S]*?await agentRuntimeApi\.list\(\)/u,
+  /const handleRefreshConfig = async \(\) => \{[\s\S]*?await agentRuntimeApi\.refresh\(\)[\s\S]*?setRefreshRevision/u,
 );
 const headerRefreshButton = source.slice(
   source.indexOf('onClick={() => void handleRefreshConfig()}'),
