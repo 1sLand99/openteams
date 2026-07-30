@@ -8,7 +8,10 @@ import React, {
 } from "react";
 import { createPortal } from "react-dom";
 import { Bell, Check, LoaderCircle } from "lucide-react";
-import { approvalOptionLabel } from "@/components/approvals/executorApprovalPresentation";
+import {
+  approvalCommand,
+  approvalOptionLabel,
+} from "@/components/approvals/executorApprovalPresentation";
 import { useAppScale } from "@/context/AppScaleContext";
 import { executorApprovalsApi } from "@/lib/api";
 import type { Session } from "@/types";
@@ -231,6 +234,7 @@ function ExecutorApprovalInboxActions({
     (left, right) =>
       approvalOptionOrder(left.kind) - approvalOptionOrder(right.kind),
   );
+  const command = approvalCommand(request);
 
   return (
     <div
@@ -238,6 +242,14 @@ function ExecutorApprovalInboxActions({
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
     >
+      {command && (
+        <code
+          title={command}
+          className="w-full truncate font-mono text-[11px] text-[var(--ink-muted)]"
+        >
+          {command}
+        </code>
+      )}
       {orderedOptions.map((option) => (
         <button
           key={option.option_id}

@@ -320,6 +320,11 @@ export const useWorkspaceState = () => {
   const [inboxItemsAsync, setInboxItemsAsync] = useState<
     AsyncResourceState<InboxItem[]>
   >(() => initialAsync([]));
+  const [pendingApprovalSessionIds, setPendingApprovalSessionIds] =
+    useState<ReadonlySet<string>>(() => new Set());
+  const pendingApprovalSessionIdsRef = useRef<ReadonlySet<string>>(
+    new Set(),
+  );
   const [workflowCardAsync, setWorkflowCardAsync] = useState<
     AsyncResourceState<WorkflowCardProjection | null>
   >(() => initialAsync(null));
@@ -1211,6 +1216,9 @@ export const useWorkspaceState = () => {
     setInboxSummaryAsync,
     inboxItemsAsync,
     setInboxItemsAsync,
+    pendingApprovalSessionIds,
+    setPendingApprovalSessionIds,
+    pendingApprovalSessionIdsRef,
     workflowCardAsync,
     setWorkflowCardAsync,
     workspaceChangesAsync,

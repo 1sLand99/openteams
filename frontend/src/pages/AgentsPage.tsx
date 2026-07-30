@@ -377,7 +377,7 @@ function AgentNavStatusDot({
   return (
     <span
       className={cx(
-        "h-1 w-1 shrink-0 rounded-full",
+        "h-1.5 w-1.5 shrink-0 rounded-full",
         overlay &&
           "absolute -right-0.5 -top-0.5 ring-2 ring-[var(--surface-2)]",
         state === "available" && "bg-[var(--success)]",
@@ -508,12 +508,8 @@ function AgentRow({
         }
       }}
       className={cx(
-        "group cursor-pointer px-2 py-1 transition-opacity focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/20",
+        "group cursor-pointer px-2 py-0.5 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--primary)]/40",
         collapsed ? "flex justify-center" : "block",
-        selected && "opacity-100",
-        !selected && state === "available" && "opacity-75 hover:opacity-95",
-        !selected && state === "error" && "opacity-65 hover:opacity-90",
-        !selected && state === "not_installed" && "opacity-40 hover:opacity-65",
       )}
       title={runnerLabel}
     >
@@ -522,11 +518,11 @@ function AgentRow({
           "flex min-w-0 items-center gap-3 rounded-[7px] transition-colors",
           collapsed ? "h-10 w-10 justify-center" : "px-2.5 py-2",
           selected
-            ? "bg-[#f3eee3]/[0.045] text-[var(--ink)] shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] backdrop-blur-[1px]"
+            ? "bg-[var(--surface-3)] text-[var(--ink)]"
             : cx(
-                "group-hover:bg-white/[0.025]",
+                "group-hover:bg-[var(--surface-3)]/60",
                 state === "available" && "text-[var(--ink)]",
-                state === "error" && "text-red-300",
+                state === "error" && "text-red-400",
                 state === "not_installed" && "text-[var(--ink-tertiary)]",
               ),
         )}
@@ -607,16 +603,19 @@ function AcpRuntimeConfigField({
   const labelClass =
     "block truncate text-[12px] font-medium leading-[1.35] text-[var(--ink-subtle)]";
   const dropdownClass =
-    "w-full min-w-0 hover:[&>button]:!border-white/10 hover:[&>button]:!bg-white/[0.04] focus-within:[&>button]:!border-white/20 focus-within:[&>button]:!bg-white/[0.04] [&>button]:h-8 [&>button]:!rounded-none [&>button]:!border-x-0 [&>button]:!border-b [&>button]:!border-t-0 [&>button]:!border-transparent [&>button]:!bg-transparent [&>button]:px-0 [&>button]:py-0 [&>button]:font-mono [&>button]:text-[12px]";
+    "w-full min-w-0 hover:[&>button]:!border-[var(--hairline-strong)] hover:[&>button]:!bg-[var(--surface-3)]/50 focus-within:[&>button]:!border-[var(--primary)]/50 focus-within:[&>button]:!bg-[var(--surface-3)]/50 [&>button]:h-8 [&>button]:!rounded-none [&>button]:!border-x-0 [&>button]:!border-b [&>button]:!border-t-0 [&>button]:!border-transparent [&>button]:!bg-transparent [&>button]:px-0 [&>button]:py-0 [&>button]:font-mono [&>button]:text-[12px]";
 
   return (
     <div className="space-y-1">
       <div className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
-        <span className={labelClass}>文件权限</span>
+        <span className={labelClass}>{t("agents.acp.accessMode.label")}</span>
         <DropdownSelect
           value={accessMode}
           options={[
-            { id: "workspace_only", label: "仅工作区" },
+            {
+              id: "workspace_only",
+              label: t("agents.acp.accessMode.workspaceOnly"),
+            },
             {
               id: "full_access",
               label: t("permissions.fullAccessHighRisk"),
@@ -634,13 +633,13 @@ function AcpRuntimeConfigField({
         />
       </div>
       <div className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
-        <span className={labelClass}>审批策略</span>
+        <span className={labelClass}>{t("agents.acp.approval.label")}</span>
         <DropdownSelect
           value={approvalMode}
           options={[
-            { id: "ask", label: "每次询问" },
-            { id: "auto_allow", label: "自动允许（高风险）" },
-            { id: "auto_reject", label: "自动拒绝" },
+            { id: "ask", label: t("agents.acp.approval.ask") },
+            { id: "auto_allow", label: t("agents.acp.approval.autoAllow") },
+            { id: "auto_reject", label: t("agents.acp.approval.autoReject") },
           ]}
           showSearch={false}
           className={dropdownClass}
@@ -654,12 +653,12 @@ function AcpRuntimeConfigField({
         />
       </div>
       <div className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
-        <span className={labelClass}>认证方式</span>
+        <span className={labelClass}>{t("agents.acp.auth.label")}</span>
         <DropdownSelect
           value={authMode}
           options={[
-            { id: "auto", label: "自动（CLI 登录态）" },
-            { id: "method_id", label: "指定方法 ID" },
+            { id: "auto", label: t("agents.acp.auth.auto") },
+            { id: "method_id", label: t("agents.acp.auth.methodId") },
           ]}
           showSearch={false}
           className={dropdownClass}
@@ -675,7 +674,9 @@ function AcpRuntimeConfigField({
       </div>
       {authMode === "method_id" && (
         <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
-          <span className={labelClass}>认证方法 ID</span>
+          <span className={labelClass}>
+            {t("agents.acp.auth.methodIdLabel")}
+          </span>
           <input
             value={authMethodId}
             className={inputClass}
@@ -696,12 +697,14 @@ function AcpRuntimeConfigField({
         </label>
       )}
       <label className="grid grid-cols-[128px_minmax(0,1fr)] items-start gap-3 py-1.5">
-        <span className={`${labelClass} pt-1`}>附加目录</span>
+        <span className={`${labelClass} pt-1`}>
+          {t("agents.acp.directories.label")}
+        </span>
         <textarea
           value={directories.join("\n")}
           rows={3}
           className={`${inputClass} h-auto resize-y py-1.5`}
-          placeholder="/absolute/path，每行一个"
+          placeholder={t("agents.acp.directories.placeholder")}
           onChange={(event) =>
             onChange(
               "acp",
@@ -722,16 +725,16 @@ function AcpRuntimeConfigField({
           title={
             pendingRiskyChange === "full_access"
               ? t("permissions.fullAccessAgentConfirmTitle")
-              : "启用自动允许？"
+              : t("agents.acp.confirm.autoAllowTitle")
           }
           description={
             pendingRiskyChange === "full_access"
               ? t("permissions.fullAccessAgentConfirmDescription")
-              : "自动允许会跳过 ACP 工具确认。请仅对可信 Agent 启用。"
+              : t("agents.acp.confirm.autoAllowDescription")
           }
-          confirmLabel="确认启用"
-          cancelLabel="取消"
-          escLabel="Esc 取消"
+          confirmLabel={t("agents.acp.confirm.confirm")}
+          cancelLabel={t("agents.acp.confirm.cancel")}
+          escLabel={t("agents.acp.confirm.esc")}
           tone="warning"
           onCancel={() => setPendingRiskyChange(null)}
           onConfirm={() => {
@@ -805,7 +808,7 @@ function ConfigSchemaField({
   );
 
   const inputBaseClass =
-    "w-full rounded-none border-x-0 border-b border-t-0 border-transparent bg-transparent px-0 py-1.5 font-mono text-[12px] leading-[1.55] text-[var(--ink)] outline-none transition-all placeholder:text-[var(--ink-tertiary)] hover:border-white/10 hover:bg-white/[0.04] focus:border-white/20 focus:bg-white/[0.04]";
+    "w-full rounded-none border-x-0 border-b border-t-0 border-transparent bg-transparent px-0 py-1.5 font-mono text-[12px] leading-[1.55] text-[var(--ink)] outline-none transition-all placeholder:text-[var(--ink-tertiary)] hover:border-[var(--hairline-strong)] hover:bg-[var(--surface-3)]/50 focus:border-[var(--primary)]/50 focus:bg-[var(--surface-3)]/50";
 
   if (property.enum) {
     const hasNullOption = property.enum.some((item) => item === null);
@@ -830,7 +833,7 @@ function ConfigSchemaField({
           value={selectedValue}
           options={options}
           showSearch={options.length > 8}
-          className="min-w-0 flex-1 hover:[&>button]:!border-white/10 hover:[&>button]:!bg-white/[0.04] focus-within:[&>button]:!border-white/20 focus-within:[&>button]:!bg-white/[0.04] [&>button]:h-8 [&>button]:!rounded-none [&>button]:!border-x-0 [&>button]:!border-b [&>button]:!border-t-0 [&>button]:!border-transparent [&>button]:!bg-transparent [&>button]:px-0 [&>button]:py-0 [&>button]:font-mono [&>button]:text-[12px]"
+          className="min-w-0 flex-1 hover:[&>button]:!border-[var(--hairline-strong)] hover:[&>button]:!bg-[var(--surface-3)]/50 focus-within:[&>button]:!border-[var(--primary)]/50 focus-within:[&>button]:!bg-[var(--surface-3)]/50 [&>button]:h-8 [&>button]:!rounded-none [&>button]:!border-x-0 [&>button]:!border-b [&>button]:!border-t-0 [&>button]:!border-transparent [&>button]:!bg-transparent [&>button]:px-0 [&>button]:py-0 [&>button]:font-mono [&>button]:text-[12px]"
           panelClassName="max-w-none"
           onChange={(nextValue) =>
             onChange(fieldKey, nextValue === nullOptionId ? null : nextValue)
@@ -861,7 +864,7 @@ function ConfigSchemaField({
               void onCommit?.();
             }}
             className={cx(
-              "relative h-5 w-9 rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/20",
+              "relative h-5 w-9 rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--primary)]/40",
               checked
                 ? "border-transparent bg-[var(--primary)]/80"
                 : "border-[var(--hairline-strong)] bg-[var(--surface-4)] hover:bg-[var(--hairline)]",
@@ -1024,7 +1027,7 @@ function ModelConfigField({
           placeholder={t("agents.model.field.placeholder")}
           searchPlaceholder={t("agents.model.field.searchPlaceholder")}
           emptyLabel={t("agents.model.field.noMatch")}
-          className="min-w-0 flex-1 hover:[&>button]:!border-white/10 hover:[&>button]:!bg-white/[0.04] focus-within:[&>button]:!border-white/20 focus-within:[&>button]:!bg-white/[0.04] [&>button]:h-8 [&>button]:!rounded-none [&>button]:!border-x-0 [&>button]:!border-b [&>button]:!border-t-0 [&>button]:!border-transparent [&>button]:!bg-transparent [&>button]:px-0 [&>button]:py-0 [&>button]:font-mono [&>button]:text-[12px]"
+          className="min-w-0 flex-1 hover:[&>button]:!border-[var(--hairline-strong)] hover:[&>button]:!bg-[var(--surface-3)]/50 focus-within:[&>button]:!border-[var(--primary)]/50 focus-within:[&>button]:!bg-[var(--surface-3)]/50 [&>button]:h-8 [&>button]:!rounded-none [&>button]:!border-x-0 [&>button]:!border-b [&>button]:!border-t-0 [&>button]:!border-transparent [&>button]:!bg-transparent [&>button]:px-0 [&>button]:py-0 [&>button]:font-mono [&>button]:text-[12px]"
           maxPanelHeightClassName="max-h-[280px]"
           onChange={(nextValue) => {
             const trimmed = nextValue.trim();
@@ -1367,7 +1370,7 @@ function AgentConfigSidebar({
                 </h2>
                 <StatusBadge runner={runner} t={t} size="normal" />
               </div>
-              <p className="mt-1 truncate font-mono text-[14px] leading-[1.35] text-[var(--ink-tertiary)] tracking-wider">
+              <p className="mt-0.5 truncate font-mono text-[12px] leading-[1.45] text-[var(--ink-tertiary)]">
                 {cliVersion}
               </p>
             </div>
@@ -1375,12 +1378,14 @@ function AgentConfigSidebar({
           <div className="flex items-center gap-2">
             <div className="min-w-[74px]">
               {autoSaveStatus !== "idle" && (
-                <div className="flex items-center justify-end gap-1.5 font-mono text-[11px] text-white/35 transition-opacity">
+                <div className="flex items-center justify-end gap-1.5 font-mono text-[11px] text-[var(--ink-tertiary)] transition-opacity">
                   {autoSaveStatus === "saving" && (
                     <RefreshCw className="h-2.5 w-2.5 animate-spin" />
                   )}
                   <span>
-                    {autoSaveStatus === "saving" ? "Saving..." : "Saved"}
+                    {autoSaveStatus === "saving"
+                      ? t("agents.save.saving")
+                      : t("agents.save.saved")}
                   </span>
                 </div>
               )}
@@ -1399,10 +1404,10 @@ function AgentConfigSidebar({
 
       <div
         className={cx(
-          "min-h-0 flex-1 overflow-y-auto px-5 py-4 ot-scroll-area-styled",
+          "min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5 ot-scroll-area-styled",
         )}
       >
-        <section className="pb-5">
+        <section className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] p-4">
           <h3 className="mb-3 text-[11px] font-semibold tracking-[0.12em] text-[var(--ink-subtle)] uppercase">
             {t("agents.details.runtime")}
           </h3>
@@ -1432,7 +1437,7 @@ function AgentConfigSidebar({
           )}
         </section>
 
-        <section className="border-t border-white/10 py-5">
+        <section className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] p-4">
           <h3 className="mb-3 text-[11px] font-semibold tracking-[0.12em] text-[var(--ink-subtle)] uppercase">
             {t("agents.env.title")}
           </h3>
@@ -1459,10 +1464,10 @@ function AgentConfigSidebar({
               }
               placeholder={t("agents.env.placeholder")}
               className={cx(
-                "block w-full resize-y rounded-[6px] border bg-transparent px-2.5 py-2 font-mono text-[12px] leading-[1.55] text-[var(--ink)] outline-none transition-all placeholder:text-[var(--ink-tertiary)] hover:bg-white/[0.025] focus:bg-transparent focus:ring-1",
+                "block w-full resize-y rounded-[6px] border bg-transparent px-2.5 py-2 font-mono text-[12px] leading-[1.55] text-[var(--ink)] outline-none transition-all placeholder:text-[var(--ink-tertiary)] hover:bg-[var(--surface-3)]/50 focus:bg-transparent focus:ring-1",
                 envValidationError
                   ? "border-red-400/50 focus:border-red-400/70 focus:ring-red-400/20"
-                  : "border-transparent hover:border-white/10 focus:border-white/20 focus:ring-white/10",
+                  : "border-transparent hover:border-[var(--hairline-strong)] focus:border-[var(--primary)]/50 focus:ring-[var(--primary)]/15",
               )}
             />
             {envValidationError && (
@@ -1477,7 +1482,7 @@ function AgentConfigSidebar({
           </div>
         </section>
 
-        <section className="border-t border-white/10 py-5">
+        <section className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] p-4">
           <h3 className="mb-3 text-[11px] font-semibold tracking-[0.12em] text-[var(--ink-subtle)] uppercase">
             {t("agents.config.title")}
           </h3>
@@ -1545,7 +1550,7 @@ function AgentConfigEmptyState({ t }: { t: TranslateFn }) {
       )}
     >
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-6 text-center">
-        <span className="flex h-10 w-10 items-center justify-center rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-2)] text-[var(--ink-tertiary)]">
+        <span className="flex h-10 w-10 items-center justify-center rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] text-[var(--ink-tertiary)]">
           <Settings className="h-5 w-5" />
         </span>
         <h3 className="mt-3 text-[14px] font-medium text-[var(--ink)]">
@@ -1674,6 +1679,32 @@ export function AgentsPage() {
       sortRunnersByAvailability(filterRuntimeRunners(runners, "", filter)),
     [filter, runners],
   );
+  const runnerGroups = useMemo(() => {
+    const groups: Array<{
+      state: RuntimeDisplayState;
+      label: string;
+      items: AgentRuntimeStatus[];
+    }> = [];
+    for (const runner of filteredRunners) {
+      const state = getRuntimeDisplayState(runner);
+      const last = groups[groups.length - 1];
+      if (last && last.state === state) {
+        last.items.push(runner);
+        continue;
+      }
+      groups.push({
+        state,
+        label:
+          state === "available"
+            ? t("agents.filter.available")
+            : state === "error"
+              ? t("agents.filter.error")
+              : t("agents.filter.notInstalled"),
+        items: [runner],
+      });
+    }
+    return groups;
+  }, [filteredRunners, t]);
   const suppressRuntimePlaceholder =
     !runtimeLoaded || (loading && runners.length === 0);
 
@@ -1896,12 +1927,12 @@ export function AgentsPage() {
         {(loadError || notice) && (
           <div className="shrink-0 space-y-2 border-b border-[var(--hairline)] p-3">
             {loadError && (
-              <div className="rounded-[8px] border border-red-500/30 bg-red-500/10 p-3 text-[14px] text-red-300">
+              <div className="rounded-[8px] border border-red-500/30 bg-red-500/10 p-3 text-[14px] text-red-400">
                 <span className="inline-flex items-center gap-2 font-medium">
                   <AlertTriangle className="h-4 w-4" />
                   {t("agents.load.failedTitle")}
                 </span>
-                <p className="mt-1 text-red-300/80">{loadError}</p>
+                <p className="mt-1 text-red-400/80">{loadError}</p>
               </div>
             )}
             {notice && (
@@ -1922,7 +1953,7 @@ export function AgentsPage() {
         >
           <div
             className={cx(
-              "min-h-0 flex-1 overflow-y-auto border-r border-white/10 py-3 ot-scroll-area-styled",
+              "min-h-0 flex-1 overflow-y-auto border-r border-[var(--hairline)] py-3 ot-scroll-area-styled",
               agentNavCollapsed ? "px-1.5" : "px-2",
             )}
           >
@@ -1940,14 +1971,30 @@ export function AgentsPage() {
               </div>
             ) : (
               <div className="space-y-0.5">
-                {filteredRunners.map((runner) => (
-                  <AgentRow
-                    key={runner.runner_type}
-                    runner={runner}
-                    selected={selectedRunner?.runner_type === runner.runner_type}
-                    collapsed={agentNavCollapsed}
-                    onOpenConfig={() => handleOpenConfig(runner)}
-                  />
+                {runnerGroups.map((group, groupIndex) => (
+                  <div key={group.state}>
+                    {!agentNavCollapsed && runnerGroups.length > 1 && (
+                      <p
+                        className={cx(
+                          "px-2.5 pb-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-tertiary)]",
+                          groupIndex === 0 ? "pt-1" : "pt-4",
+                        )}
+                      >
+                        {group.label}
+                      </p>
+                    )}
+                    {group.items.map((runner) => (
+                      <AgentRow
+                        key={runner.runner_type}
+                        runner={runner}
+                        selected={
+                          selectedRunner?.runner_type === runner.runner_type
+                        }
+                        collapsed={agentNavCollapsed}
+                        onOpenConfig={() => handleOpenConfig(runner)}
+                      />
+                    ))}
+                  </div>
                 ))}
               </div>
             )}

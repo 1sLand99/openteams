@@ -180,7 +180,8 @@ const hasSidebarPrioritySessionActivity = (session: Session): boolean =>
   Boolean(session.hasUnreadAgentCompletion) ||
   Boolean(session.hasPendingWorkflowInput) ||
   Boolean(session.hasPendingWorkflowReview) ||
-  Boolean(session.hasWorkflowError);
+  Boolean(session.hasWorkflowError) ||
+  Boolean(session.hasPendingApproval);
 
 const isPinnedSession = (session: Session): boolean => Boolean(session.pinnedAt);
 
@@ -2882,11 +2883,15 @@ export function ProjectSidebar({
                     !isRunning && Boolean(session.hasWorkflowError);
                   const hasUnreadAgentCompletion =
                     !isRunning && Boolean(session.hasUnreadAgentCompletion);
+                  const hasPendingApproval =
+                    !isRunning && Boolean(session.hasPendingApproval);
                   const pinned = isPinnedSession(session);
                   const SessionIcon =
                     isRunning
                       ? LoaderCircle
-                      : hasPendingWorkflowReview || hasPendingWorkflowInput
+                      : hasPendingWorkflowReview ||
+                          hasPendingWorkflowInput ||
+                          hasPendingApproval
                         ? CircleDot
                         : Box;
                   const sessionLabel = workflowReviewing
@@ -2908,6 +2913,11 @@ export function ProjectSidebar({
                     ? `${displayTitle} - ${translate(
                         "sidebar.sessionNeedsInput",
                         "waiting for input",
+                      )}`
+                    : hasPendingApproval
+                    ? `${displayTitle} - ${translate(
+                        "sidebar.sessionWaitingApproval",
+                        "waiting for approval",
                       )}`
                     : hasWorkflowError
                     ? `${displayTitle} - ${translate(
@@ -2940,7 +2950,9 @@ export function ProjectSidebar({
                         className={`h-3.5 w-3.5 shrink-0 ${
                           isRunning
                             ? "animate-spin text-[var(--primary)]"
-                            : hasPendingWorkflowReview || hasPendingWorkflowInput
+                            : hasPendingWorkflowReview ||
+                              hasPendingWorkflowInput ||
+                              hasPendingApproval
                             ? "text-[var(--primary)]"
                             : hasWorkflowError
                             ? "text-[var(--primary)]"

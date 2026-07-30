@@ -1,6 +1,7 @@
 import type {
   ChatExecutorApprovalOption,
   ChatExecutorApprovalRequest,
+  JsonValue,
 } from '../../../../shared/types';
 
 export type ApprovalTranslate = (
@@ -36,6 +37,27 @@ export const partitionApprovalOptions = (
       option.kind !== 'allow_once' && option.kind !== 'allow_always',
   ),
 });
+
+type JsonObject = { [key: string]: JsonValue | undefined };
+
+const asJsonObject = (value: JsonValue | undefined): JsonObject | null =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value
+    : null;
+
+export const approvalCommand = (
+  request: ChatExecutorApprovalRequest,
+): string | null => {
+  const displayInput = asJsonObject(request.display_input);
+  const toolCall = asJsonObject(
+    displayInput?.tool_call ?? displayInput?.toolCall,
+  );
+  const rawInput = asJsonObject(
+    toolCall?.rawInput ?? toolCall?.raw_input,
+  );
+  const command = rawInput?.command ?? toolCall?.command ?? displayInput?.command;
+  return typeof command === 'string' && command.trim() ? command : null;
+};
 
 export type ApprovalRequestGroup = {
   sessionAgentId: string;
