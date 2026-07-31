@@ -406,34 +406,28 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn command_builder_uses_kimi_acp_subcommand() {
-        let parts = kimi()
+    #[test]
+    fn command_builder_uses_kimi_acp_subcommand() {
+        let (_program, args) = kimi()
             .build_command_builder()
             .unwrap()
             .build_initial()
             .unwrap()
-            .into_resolved()
-            .await
-            .unwrap();
-        let (_program, args) = parts;
+            .into_parts_for_test();
         assert!(args.iter().any(|arg| arg == "acp"));
         assert!(!args.iter().any(|arg| arg == "--print"));
         assert!(!args.iter().any(|arg| arg == "--output-format"));
         assert!(!args.iter().any(|arg| arg == "--model"));
     }
 
-    #[tokio::test]
-    async fn model_discovery_uses_provider_list_json() {
-        let parts = kimi()
+    #[test]
+    fn model_discovery_uses_provider_list_json() {
+        let (_program, args) = kimi()
             .provider_list_command()
             .unwrap()
             .build_initial()
             .unwrap()
-            .into_resolved()
-            .await
-            .unwrap();
-        let (_program, args) = parts;
+            .into_parts_for_test();
         assert_eq!(args, vec!["provider", "list", "--json"]);
     }
 
