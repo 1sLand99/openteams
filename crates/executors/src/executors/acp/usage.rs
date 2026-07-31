@@ -397,14 +397,18 @@ mod tests {
     #[test]
     fn standard_acp_usage_is_a_session_snapshot() {
         let mut accumulator = accumulator();
-        let response =
-            PromptResponse::new(StopReason::EndTurn).usage(Usage::new(1_250, 1_000, 250));
+        // Kimi's ACP adapter reports the SDK session total using the standard
+        // PromptResponse usage shape. Cache tokens are separate from the
+        // billable input/output total carried by TokenUsageInfo.
+        let response = PromptResponse::new(StopReason::EndTurn)
+            .usage(Usage::new(1_650, 1_000, 250).cached_read_tokens(400));
 
         let usage = accumulator.finish_turn(&response).expect("usage");
         assert_eq!(usage.usage_scope.as_deref(), Some("thread_total_snapshot"));
         assert_eq!(usage.snapshot_input_tokens, Some(1_000));
         assert_eq!(usage.snapshot_output_tokens, Some(250));
         assert_eq!(usage.snapshot_total_tokens, Some(1_250));
+        assert_eq!(usage.snapshot_cache_read_tokens, Some(400));
     }
 
     #[test]
