@@ -44,6 +44,7 @@ description: "与 OpenTeams 功能回归测试操作手册逐用例对应的详�
 | REG_ROOT |  |
 | REG_REPO_A |  |
 | REG_REPO_B |  |
+| REG_CLI_REPO |  |
 | 测试前 `git status --short` |  |
 | 测试后 `git status --short` |  |
 
@@ -62,15 +63,15 @@ description: "与 OpenTeams 功能回归测试操作手册逐用例对应的详�
 | BLOCKED |  |
 | SKIPPED |  |
 | NOT_RUN |  |
-| 合计 | 56 |
+| 合计 | 72 |
 
 ### 3.2 按优先级
 
 | 优先级 | 总数 | PASS | FAIL | BLOCKED | SKIPPED | NOT_RUN |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| P0 | 29 |  |  |  |  |  |
-| P1 | 25 |  |  |  |  |  |
-| P2 | 2 |  |  |  |  |  |
+| P0 | 32 |  |  |  |  |  |
+| P1 | 37 |  |  |  |  |  |
+| P2 | 3 |  |  |  |  |  |
 
 ### 3.3 缺陷
 
@@ -127,6 +128,22 @@ description: "与 OpenTeams 功能回归测试操作手册逐用例对应的详�
 | MEM-003 | P1 | `NOT_RUN` |  |  |  |  |
 | MEM-004 | P1 | `NOT_RUN` |  |  |  |  |
 | MEM-005 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-001 | P0 | `NOT_RUN` |  |  |  |  |
+| CLI-101 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-102 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-103 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-104 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-105 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-106 | P0 | `NOT_RUN` |  |  |  |  |
+| CLI-107 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-108 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-109 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-110 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-111 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-201 | P0 | `NOT_RUN` |  |  |  |  |
+| CLI-202 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-203 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-204 | P2 | `NOT_RUN` |  |  |  |  |
 | CHAT-001 | P0 | `NOT_RUN` |  |  |  |  |
 | CHAT-002 | P1 | `NOT_RUN` |  |  |  |  |
 | CHAT-003 | P1 | `NOT_RUN` |  |  |  |  |
@@ -163,7 +180,34 @@ description: "与 OpenTeams 功能回归测试操作手册逐用例对应的详�
 | STA-002 | P1 | `NOT_RUN` |  |  |  |  |
 | STA-003 | P1 | `NOT_RUN` |  |  |  |  |
 
-## 6. 非通过用例和重试明细
+## 6. CLI Agent 兼容性矩阵
+
+每个生产 runner 必须填写一行。`实际命令`只记录可执行文件/包和非敏感参数，不记录环境秘密。
+
+| Agent | runner key | 安装/认证 | 版本 | command source | model/mode | 首次运行 | 续聊 | 文件/Diff | Stop 后恢复 | MCP/Skill | 结果 | 用例/证据 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | `CLAUDE_CODE` |  |  |  |  |  |  |  |  |  |  | CLI-101 |
+| Amp | `AMP` |  |  |  |  |  |  |  |  |  |  | CLI-102 |
+| Gemini CLI | `GEMINI` |  |  |  |  |  |  |  |  |  |  | CLI-103 |
+| OpenAI Codex | `CODEX` |  |  |  |  |  |  |  |  |  |  | CLI-104 |
+| OpenCode | `OPENCODE` |  |  |  |  |  |  |  |  |  |  | CLI-105 |
+| OpenTeams CLI | `OPEN_TEAMS_CLI` |  |  |  |  |  |  |  |  |  |  | CLI-106 |
+| Cursor Agent CLI | `CURSOR_AGENT` |  |  |  |  |  |  |  |  |  |  | CLI-107 |
+| Qwen Code | `QWEN_CODE` |  |  |  |  |  |  |  |  |  |  | CLI-108 |
+| GitHub Copilot CLI | `COPILOT` |  |  |  |  |  |  |  |  |  |  | CLI-109 |
+| Factory Droid | `DROID` |  |  |  |  |  |  |  |  |  |  | CLI-110 |
+| Kimi Code | `KIMI_CODE` |  |  |  |  |  |  |  |  |  |  | CLI-111 |
+| Claude Code Router | `CLAUDE_CODE` 变体 |  |  |  |  |  |  |  |  |  |  | CLI-204 |
+
+### 跨 Runner 验证
+
+- CLI-201 会话/日志/工作区隔离结果：
+- CLI-202 ACP runner 兼容结果：
+- CLI-203 MCP/Native Skill 兼容结果：
+- 未安装或未认证项及责任方：
+- 是否发现静默 fallback：
+
+## 7. 非通过用例和重试明细
 
 为每个 `FAIL`、`BLOCKED`、`SKIPPED`、首次失败后重试通过或疑似 flaky 的用例复制以下段落。若没有，写“无”。
 
@@ -183,7 +227,7 @@ description: "与 OpenTeams 功能回归测试操作手册逐用例对应的详�
 - 证据：
 - 对后续用例的影响：
 
-## 7. 缺陷清单
+## 8. 缺陷清单
 
 | 缺陷 ID | 严重度 | 标题 | 关联用例 | 状态 | 是否阻断发布 |
 | --- | --- | --- | --- | --- | --- |
@@ -209,7 +253,7 @@ description: "与 OpenTeams 功能回归测试操作手册逐用例对应的详�
 - 控制台/网络/服务端错误：
 - 证据：
 
-## 8. 功能衰退分析
+## 9. 功能衰退分析
 
 ### 与基线相比的新增问题
 
@@ -227,25 +271,27 @@ description: "与 OpenTeams 功能回归测试操作手册逐用例对应的详�
 | --- | --- | --- | --- | --- |
 |  |  |  |  |  |
 
-## 9. 证据索引
+## 10. 证据索引
 
 | 证据路径 | 类型 | 关联用例 | 内容说明 | 是否脱敏 |
 | --- | --- | --- | --- | --- |
 |  |  |  |  |  |
 
-## 10. 清理记录
+## 11. 清理记录
 
 | 测试对象 | 预期清理动作 | 实际状态 | 证据/备注 |
 | --- | --- | --- | --- |
 | 测试项目/会话 | 仅清理名称含 RUN_ID 的对象 |  |  |
 | 测试成员/模板 | 仅清理名称含 RUN_ID 的对象 |  |  |
 | 测试 Provider | 删除本轮创建项 |  |  |
+| CLI 成员/会话/变体 | 仅清理名称含 RUN_ID 的对象 |  |  |
+| CLI 测试 MCP/Skill | 恢复原配置，仅删除本轮新增项 |  |  |
 | GitHub 测试分支/PR | 按测试账号策略处理 |  |  |
 | worktree | 无 running/active/conflicted 遗留 |  |  |
 | REG_ROOT | 获得批准后再删除 |  |  |
 | 用户既有数据 | 未修改/未删除 |  |  |
 
-## 11. 最终结论
+## 12. 最终结论
 
 ### 判定
 

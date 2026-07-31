@@ -19,6 +19,7 @@ description: "供测试 Agent 执行 OpenTeams 全量功能回归、判定功能
 
 - 项目、工作区与会话
 - AI 成员、团队协议和团队模板
+- 全部生产 CLI Agent 的安装发现、认证、模型、首次运行、续聊、文件变更、停止和运行记录兼容性
 - 自由聊天、流式运行、队列、附件和运行产物
 - 工作流计划、调度、输入、审批、审查、重试、跳过、停止和恢复
 - 会话源码管理、隔离 worktree、合并和冲突处理
@@ -117,6 +118,7 @@ qa_test/<RUN_ID>/
 
 - 仓库依赖可安装，Rust、Node.js 和 pnpm 满足项目要求。
 - 至少配置一个仅用于测试的可运行 Agent/Provider，用于 `CHAT-*` 和 `WF-*`。
+- 执行完整 CLI 兼容认证时，测试实验室必须安装并认证 11 个生产 CLI Agent；缺少任一个时，对应 `CLI-*` 用例标记为 `BLOCKED`，不得标记为 `SKIPPED`。
 - 浏览器允许访问本地前后端。
 - Git 可用，但不得改写全局 Git 配置。
 - GitHub 用例需要测试专用 GitHub 账号和测试仓库；缺失时只有 `INT-001`、`INT-002` 可标记为 `SKIPPED`。
@@ -130,10 +132,12 @@ RUN_ID="REG-$(date +%Y%m%d-%H%M)-$(git rev-parse --short HEAD)"
 REG_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/openteams-regression.XXXXXX")"
 REG_REPO_A="${REG_ROOT}/${RUN_ID}-repo-a"
 REG_REPO_B="${REG_ROOT}/${RUN_ID}-repo-b"
+REG_CLI_REPO="${REG_ROOT}/${RUN_ID}-cli-repo"
 REG_EVIDENCE="qa_test/${RUN_ID}"
 
 mkdir -p "${REG_REPO_A}/src"
 mkdir -p "${REG_REPO_B}"
+mkdir -p "${REG_CLI_REPO}"
 mkdir -p "${REG_EVIDENCE}/logs"
 mkdir -p "${REG_EVIDENCE}/evidence"
 mkdir -p "${REG_EVIDENCE}/defects"
@@ -146,6 +150,11 @@ git -C "${REG_REPO_A}" add .
 git -C "${REG_REPO_A}" -c user.name="OpenTeams Regression" -c user.email="regression@example.invalid" commit -m "test: seed ${RUN_ID}"
 
 printf 'plain-%s\n' "${RUN_ID}" > "${REG_REPO_B}/README.md"
+git -C "${REG_CLI_REPO}" init -b main
+printf '# CLI compatibility %s\n' "${RUN_ID}" > "${REG_CLI_REPO}/README.md"
+git -C "${REG_CLI_REPO}" add README.md
+git -C "${REG_CLI_REPO}" -c user.name="OpenTeams Regression" -c user.email="regression@example.invalid" commit -m "test: seed CLI compatibility ${RUN_ID}"
+
 printf 'attachment-%s\n' "${RUN_ID}" > "${REG_ROOT}/attachment.txt"
 cp readmes/images/openteams-logo.png "${REG_ROOT}/attachment.png"
 ```
@@ -153,10 +162,12 @@ cp readmes/images/openteams-logo.png "${REG_ROOT}/attachment.png"
 记录并验证：
 
 ```bash
-printf 'RUN_ID=%s\nREG_ROOT=%s\nREG_REPO_A=%s\nREG_REPO_B=%s\n' \
-  "${RUN_ID}" "${REG_ROOT}" "${REG_REPO_A}" "${REG_REPO_B}"
+printf 'RUN_ID=%s\nREG_ROOT=%s\nREG_REPO_A=%s\nREG_REPO_B=%s\nREG_CLI_REPO=%s\n' \
+  "${RUN_ID}" "${REG_ROOT}" "${REG_REPO_A}" "${REG_REPO_B}" "${REG_CLI_REPO}"
 git -C "${REG_REPO_A}" status --short
 git -C "${REG_REPO_A}" log -1 --oneline
+git -C "${REG_CLI_REPO}" status --short
+git -C "${REG_CLI_REPO}" log -1 --oneline
 ```
 
 预期 `git status --short` 为空，最近提交信息包含本轮 `RUN_ID`。
@@ -167,6 +178,7 @@ git -C "${REG_REPO_A}" log -1 --oneline
 | --- | --- |
 | Git 项目 A | `<RUN_ID>-project-a`，工作区为 `REG_REPO_A` |
 | 普通目录项目 B | `<RUN_ID>-project-b`，工作区为 `REG_REPO_B` |
+| CLI 兼容项目 | `<RUN_ID>-cli-compat`，工作区为 `REG_CLI_REPO` |
 | 主工作区会话 | `<RUN_ID>-main-session` |
 | 隔离会话 | `<RUN_ID>-isolated-session` |
 | Lead 成员 | `<RUN_ID>-Lead` |
@@ -181,11 +193,12 @@ git -C "${REG_REPO_A}" log -1 --oneline
 1. `PRE-*`：环境、门禁、构建和启动。
 2. `NAV-*`、`PRJ-*`、`SES-*`：建立可用的测试项目和会话。
 3. `MEM-*`：建立测试成员、协议和模板。
-4. `CHAT-*`：产生消息、运行记录和文件变更。
-5. `WF-*`：产生工作流执行、审查和统计数据。
-6. `SCM-*`：验证源码操作和 worktree。
-7. `ISS-*`、`INT-*`、`STA-*`：验证事项、集成、设置和统计。
-8. 清理测试数据、汇总缺陷并生成最终报告。
+4. `CLI-*`：逐一认证全部生产 CLI Agent，并验证跨 Agent 作用域和适配器能力。
+5. `CHAT-*`：产生消息、运行记录和文件变更。
+6. `WF-*`：产生工作流执行、审查和统计数据。
+7. `SCM-*`：验证源码操作和 worktree。
+8. `ISS-*`、`INT-*`、`STA-*`：验证事项、集成、设置和统计。
+9. 清理测试数据、汇总缺陷并生成最终报告。
 
 若前置用例失败，依赖用例标记为 `BLOCKED`，不得伪造为 `FAIL` 或 `PASS`。
 
@@ -573,7 +586,331 @@ git -C "${REG_REPO_A}" log -1 --oneline
 - 实例化不会反向修改模板，也不会创建重复项目成员。
 - 两名成员均可被 `@` 提及并进入运行。
 
-## 11. 自由聊天
+## 11. 全部 CLI Agent 兼容性
+
+### 11.1 生产 CLI Agent 清单
+
+兼容性清单以生产 `BaseCodingAgent` 类型为真源。当前必须覆盖以下 11 个 runner；测试 Agent 不得仅抽测自己已安装的子集。
+
+| 用例 | 产品名称 | runner key | 主要启动方式 | 兼容性重点 |
+| --- | --- | --- | --- | --- |
+| CLI-101 | Claude Code | `CLAUDE_CODE` | OpenTeams 固定版本的 `@anthropic-ai/claude-code` | 首次运行、续聊、上下文用量、slash commands |
+| CLI-102 | Amp | `AMP` | OpenTeams 固定版本的 `@sourcegraph/amp` | mode 映射、流式 JSON、续聊 |
+| CLI-103 | Gemini CLI | `GEMINI` | `gemini` / ACP | ACP probe、认证方法、模型选项、权限 |
+| CLI-104 | OpenAI Codex | `CODEX` | OpenTeams 固定版本的 `@openai/codex` app-server | thread 续聊、reasoning、上下文用量 |
+| CLI-105 | OpenCode | `OPENCODE` | OpenTeams 管理的 OpenCode runtime | provider/model 发现、会话、slash commands |
+| CLI-106 | OpenTeams CLI | `OPEN_TEAMS_CLI` | 同目录、开发二进制、用户目录或 PATH 中的 bundled CLI | 二进制优先级、模型、会话 |
+| CLI-107 | Cursor Agent CLI | `CURSOR_AGENT` | `cursor-agent` | 安装/认证提示、stream-json、模型 |
+| CLI-108 | Qwen Code | `QWEN_CODE` | `qwen` / ACP | ACP probe、模型、权限、续聊 |
+| CLI-109 | GitHub Copilot CLI | `COPILOT` | OpenTeams 固定版本的 `@github/copilot` | 登录、流式运行、续聊 |
+| CLI-110 | Factory Droid | `DROID` | `droid exec` | autonomy level、权限、stream-json |
+| CLI-111 | Kimi Code | `KIMI_CODE` | `kimi acp` | ACP probe、provider/model、认证、续聊 |
+
+`QA_MOCK` 和 `ACP_QA` 仅在 `qa-mode` 中存在，不属于生产 CLI 兼容清单，由 PRE-003 自动化测试覆盖。Claude Code Router（CCR）不是独立 `BaseCodingAgent`，但作为 `CLAUDE_CODE` 的受支持适配器变体由 CLI-204 单独覆盖。
+
+### 11.2 标准逐 CLI 执行程序
+
+CLI-101 至 CLI-111 都必须完整执行以下步骤，不得用“其他 Agent 已通过”代替。每个 runner 使用独立成员 `<RUN_ID>-<runner-key>` 和独立会话 `<RUN_ID>-cli-<runner-key>`，工作区固定为 `REG_CLI_REPO`。
+
+1. **发现与诊断**：在 Agent runtime 选择目标 runner，执行 Refresh；记录 `installed`、`executable`、availability、version、resolved command、command source、config path、run mode、discovered models、model source、last error。对已安装且已认证的 CLI，产品必须识别为可运行。
+2. **配置持久化**：保持 `run_mode=auto` 或测试批准的 local 模式，选择一个已发现/实验室指定模型；若有 reasoning、mode、autonomy 或 ACP 选项，选择安全测试值。保存、刷新页面并重新打开核对。
+3. **首次运行**：创建目标成员和自由聊天会话，发送：`仅回复 RUNTIME=<runner-key>; RUN_ID=<RUN_ID>; NONCE=<runner-key>-FIRST，不修改文件。` 记录实际 runner、命令、模型、流式消息和终态。
+4. **续聊**：在同一成员发送：`不要读取磁盘，复述上一条消息中的 NONCE，并回复 FOLLOWUP-OK。` 核对外部会话/thread ID、上下文和新运行记录；若适配器内部重建进程，也必须保持产品层续聊语义。
+5. **文件变更**：发送：`仅在当前工作区创建 cli-<runner-key>-<RUN_ID>.txt，内容严格为 <runner-key>:<RUN_ID>，不要修改其他文件。` 核对文件、Diff、运行 files/activity/log 和 `git -C "${REG_CLI_REPO}" status --short`。
+6. **停止与恢复使用**：启动一个预计持续 20 秒以上的只读任务，在运行中 Stop；确认中断终态后发送一条最小只读消息，验证该 runner 仍可继续使用。
+7. **持久化与收尾**：刷新应用并重新打开会话，核对消息、runner、模型、运行记录、token/context 信息和文件证据。只 stage 本 runner 的文件并提交 `test: <runner-key> compatibility <RUN_ID>`，确保仓库重新干净。
+
+逐 CLI 通用验收标准：
+
+- OpenTeams 使用所选 runner，不得静默回退到默认 Agent、错误 runner 或进程 cwd。
+- 首次运行、续聊、文件写入和 Stop 均有明确终态；不得重复消息、重复运行、永久 spinner 或失联进程。
+- 续聊返回正确 NONCE；运行记录保留真实 runner、模型和外部 session/thread 标识（若 CLI 提供）。
+- 文件只出现在 `REG_CLI_REPO`，内容与 runner key 对应；其他项目和用户目录无变更。
+- 模型、运行模式和适配器配置在刷新/重启后保持；秘密值不得出现在 UI、日志或报告。
+- CLI 不提供 token/context 或模型枚举时，UI 必须显示明确的“不可用/配置来源”，不得伪造数据或沿用其他 runner 缓存。
+
+### CLI-001 生产 Runner 清单、安装与认证前检
+
+- 优先级：P0
+- 前置：PRE-004 通过；测试实验室声明已准备全部生产 CLI。
+
+步骤：
+
+1. 从生成的 `BaseCodingAgent` 类型和 Agent runtime 页面分别收集生产 runner key。
+2. 对照本节 11 项清单，记录每项安装方式、认证账号类型、CLI 版本和凭据责任人；报告中只记录账号别名，不记录秘密。
+3. 对 11 项逐一执行 Refresh 和 diagnostics，保存状态矩阵。
+4. 创建 `<RUN_ID>-cli-compat` 项目，工作区设为 `REG_CLI_REPO`。
+5. 对无法安装/认证/执行的项停止对应 runner 用例并标记 `BLOCKED`；判断是实验室缺口还是产品发现错误。
+
+验收标准：
+
+- 类型真源、Agent runtime 和报告矩阵的 11 个生产 runner 一一对应，无缺失、重复或错误 key。
+- QA-only runner 不出现在生产 UI。
+- 已安装/认证项显示 executable；已知未安装项显示明确 Not found/setup 信息，不导致全页失败。
+- CLI 兼容项目精确使用 `REG_CLI_REPO`。
+
+### CLI-101 Claude Code 兼容性
+
+- 优先级：P1
+- 前置：Claude Code 已安装/可由固定 npx 命令启动并完成认证；CCR 关闭。
+
+步骤：
+
+1. 以 `CLAUDE_CODE` 完整执行“标准逐 CLI 执行程序”步骤 1–7。
+2. 在 diagnostics 记录 Claude Code 版本、实际 command source、模型和 slash command 加载状态。
+3. 在首次运行与续聊后核对 context/token usage 和 Claude session 标识。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- 实际 runner 为 `CLAUDE_CODE` 且未误启用 CCR。
+- slash commands 加载失败时有局部错误而不是阻断聊天；CLI 提供的上下文用量可正确归属当前运行。
+
+### CLI-102 Amp 兼容性
+
+- 优先级：P1
+- 前置：Amp 已安装/可由固定 npx 命令启动并完成认证。
+
+步骤：
+
+1. 以 `AMP` 完整执行“标准逐 CLI 执行程序”步骤 1–7。
+2. 选择实验室支持的 `smart`、`deep`、`rush` 或 `free` mode，保存后核对实际 CLI 参数语义。
+3. 检查 stream-json 归一化后的增量消息和最终消息。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- Agent runtime 的 model/mode 不被错误当作普通模型 ID，保存和运行一致。
+- 流式片段不重复拼接，续聊不会把旧线程全部重复输出到新消息。
+
+### CLI-103 Gemini CLI 兼容性
+
+- 优先级：P1
+- 前置：Gemini CLI 已安装、认证，ACP probe 成功。
+
+步骤：
+
+1. 以 `GEMINI` 完整执行“标准逐 CLI 执行程序”步骤 1–7。
+2. 记录 ACP agent version、认证方法、模型 config option 和 permission option。
+3. 首次运行使用 `workspace_only + ask`，对一个仅写入目标文件的权限请求选择允许。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- ACP probe 和实际运行均为 Gemini，模型/认证选项来自当前 probe，不沿用 Qwen/Kimi。
+- workspace-only 阻止仓库外访问；ask 审批只作用于当前请求。
+
+### CLI-104 OpenAI Codex 兼容性
+
+- 优先级：P1
+- 前置：Codex 已安装/可由固定 npx 命令启动并完成认证。
+
+步骤：
+
+1. 以 `CODEX` 完整执行“标准逐 CLI 执行程序”步骤 1–7。
+2. 记录 app-server 连接、thread ID、模型、reasoning effort 和 command source。
+3. 检查首次运行与续聊的 thread 关联以及 token/context usage。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- 实际通过 Codex app-server 执行，续聊使用正确 thread，不创建无关会话或串用其他成员 thread。
+- reasoning 配置和用量属于当前 Codex run；认证/配置目录信息不泄漏秘密。
+
+### CLI-105 OpenCode 兼容性
+
+- 优先级：P1
+- 前置：OpenCode runtime 可用并已配置测试 provider。
+
+步骤：
+
+1. 以 `OPENCODE` 完整执行“标准逐 CLI 执行程序”步骤 1–7。
+2. 记录 OpenTeams 解析出的 runtime/version、provider、model source 和 slash commands。
+3. 切换一次已配置模型并执行最小只读消息，再恢复测试模型。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- 使用当前 OpenCode runtime，模型发现和执行 provider 一致。
+- runtime 切换/缓存不串到 OpenTeams CLI 或其他 OpenCode 工作区，slash command 错误可诊断。
+
+### CLI-106 OpenTeams CLI 兼容性
+
+- 优先级：P0
+- 前置：开发或发布产物包含可执行的 OpenTeams CLI。
+
+步骤：
+
+1. 以 `OPEN_TEAMS_CLI` 完整执行“标准逐 CLI 执行程序”步骤 1–7。
+2. 记录二进制解析来源：显式 override、服务端同目录、开发 `binaries`、用户 bundled 目录或 PATH。
+3. 验证模型列表、slash commands、首次运行和续聊均来自同一解析出的 CLI。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- bundled CLI 在支持的开发/发布方式中无需用户另装第三方 CLI 即可发现。
+- 二进制优先级稳定且日志显示真实来源；runner key 始终为 `OPEN_TEAMS_CLI`。
+
+### CLI-107 Cursor Agent CLI 兼容性
+
+- 优先级：P1
+- 前置：`cursor-agent` 已安装并通过登录或测试 API key 认证。
+
+步骤：
+
+1. 以 `CURSOR_AGENT` 完整执行“标准逐 CLI 执行程序”步骤 1–7。
+2. 记录 setup helper、resolved command、模型列表以及 `-p --output-format=stream-json` 运行结果。
+3. 在认证缺失的受控副本中观察一次 setup/auth 错误展示，随后恢复测试认证。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- 未安装/未认证时提供准确 setup 指引；已认证后 Refresh 可恢复 executable。
+- stream-json 正确归一化，认证错误不被误报为模型或工作区错误。
+
+### CLI-108 Qwen Code 兼容性
+
+- 优先级：P1
+- 前置：Qwen Code 已安装、认证，ACP probe 成功。
+
+步骤：
+
+1. 以 `QWEN_CODE` 完整执行“标准逐 CLI 执行程序”步骤 1–7。
+2. 记录 ACP agent version、认证方法、模型和权限选项。
+3. 使用 `workspace_only + ask` 执行目标文件写入并完成单次审批。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- ACP probe、模型选项、权限和 run records 均归属 `QWEN_CODE`。
+- Qwen 的配置和 native skill 路径不与 Gemini、Kimi 或 OpenCode 混用。
+
+### CLI-109 GitHub Copilot CLI 兼容性
+
+- 优先级：P1
+- 前置：GitHub Copilot CLI 已安装并用测试账号完成认证。
+
+步骤：
+
+1. 以 `COPILOT` 完整执行“标准逐 CLI 执行程序”步骤 1–7。
+2. 记录 CLI 版本、认证状态、模型发现结果和 stream 输出。
+3. 核对续聊、Stop 后恢复以及 GitHub 账号信息的脱敏展示。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- Copilot 不得借用项目 GitHub integration 的 OAuth 状态冒充 CLI 登录。
+- CLI 不提供的模型/context 能力显示为明确不可用，不复用其他 runner 数据。
+
+### CLI-110 Factory Droid 兼容性
+
+- 优先级：P1
+- 前置：Droid 已安装并用测试账号或测试 API key 认证。
+
+步骤：
+
+1. 以 `DROID` 完整执行“标准逐 CLI 执行程序”步骤 1–7。
+2. 将 autonomy level 设为允许工作区测试文件写入但不允许高风险系统改动的级别。
+3. 记录 `droid exec` stream-json、模型、审批和 Stop 行为。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- autonomy level 保存并映射到本次 Droid 运行；不得静默升级为 unsafe。
+- 安全级别不足时显示权限错误，不伪装为运行成功或修改仓库外文件。
+
+### CLI-111 Kimi Code 兼容性
+
+- 优先级：P1
+- 前置：Kimi Code 已安装、认证，ACP probe 和 provider discovery 成功。
+
+步骤：
+
+1. 以 `KIMI_CODE` 完整执行“标准逐 CLI 执行程序”步骤 1–7。
+2. 记录 ACP agent version、terminal auth method、provider/model 和权限选项。
+3. 使用 `workspace_only + ask` 执行目标文件写入并完成单次审批。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- `kimi acp`、provider list 和实际运行使用一致的 Kimi 配置。
+- Kimi 的认证、模型、权限和 session 信息不串到 Gemini/Qwen。
+
+### CLI-201 跨 Runner 会话、日志与工作区隔离
+
+- 优先级：P0
+- 前置：CLI-101 至 CLI-111 均已产生首次运行、续聊和文件提交。
+
+步骤：
+
+1. 汇总 11 个会话的 runner key、成员 ID、run ID、外部 session/thread ID、模型和 resolved workspace。
+2. 逐个重新打开会话，要求复述各自 NONCE；不得再次提供 NONCE。
+3. 对照 `REG_CLI_REPO` 的 11 个文件和提交，核对作者 runner 与内容。
+4. 搜索每个 runner 的日志和错误，检查是否出现其他 runner 的命令、模型、认证信息或 session ID。
+
+验收标准：
+
+- 11 个 runner 的运行归属、会话上下文和日志边界清晰，无静默 fallback 或跨成员 session 复用。
+- 每个 Agent 只复述自己的 NONCE；共享公开聊天历史之外的私有 runner 状态不得泄漏。
+- 工作区均为 `REG_CLI_REPO`，文件和提交与对应 runner 一一匹配。
+
+### CLI-202 ACP Runner 配置与审批兼容性
+
+- 优先级：P1
+- 前置：CLI-103、CLI-108、CLI-111 通过。
+
+步骤：
+
+1. 分别打开 Gemini、Qwen、Kimi diagnostics，保存各自 ACP probe、config options 和 auth methods。
+2. 对三者逐一测试 `workspace_only + ask`、一次拒绝、一次允许和一个额外工作目录配置。
+3. 将其中一个 runner 改为 `auto_reject`，确认只影响该 runner 后恢复。
+4. 刷新和重启，核对三者配置持久化与隔离。
+
+验收标准：
+
+- 三个 ACP runner 的 probe、模型、认证和权限选项各自独立。
+- ask/allow/reject 语义一致，配置改变只影响目标 runner。
+- 额外目录必须规范化并受访问边界约束；重启后设置不串位。
+
+### CLI-203 MCP 与 Native Skill 适配兼容性
+
+- 优先级：P1
+- 前置：实验室为每个 runner 准备一个无秘密、只返回 `<runner-key>:<RUN_ID>` 的测试 MCP 工具，以及一个同名只读测试 Skill。
+
+步骤：
+
+1. 对 11 个 runner 记录 diagnostics 中的 MCP/Skill 配置路径、native discovery roots 和 toggle 能力。
+2. 在测试成员 Skills 配置中选择对应 runner 的测试 Skill，刷新并核对选择。
+3. 在单独消息中要求 Agent 调用测试 MCP 工具并遵循测试 Skill 输出格式。
+4. 禁用可 toggle 的测试 Skill 后重试；对不可 toggle 的 runner 只验证明确的只读状态。
+5. 恢复测试配置并确认其他 runner 的 MCP/Skill 文件和选择未变化。
+
+验收标准：
+
+- 11 个 runner 均读取自己的配置 schema/path，不把 `mcp` 与 `mcpServers` 等不同结构互相覆盖。
+- MCP 返回值、Skill 指令和运行记录的 runner key 一致；无工具重复调用。
+- toggle 能力与 UI/后端一致，不支持 toggle 时给出明确状态而非假成功。
+- 测试配置不得覆盖用户已有 MCP、Skill 或秘密。
+
+### CLI-204 Claude Code Router 兼容性
+
+- 优先级：P2
+- 前置：测试专用 CCR provider/model 已配置；缺失时允许 `SKIPPED`，但 Claude Code CLI-101 仍必须执行。
+
+步骤：
+
+1. 为 `CLAUDE_CODE` 创建仅本轮使用的 CCR 变体，启用 `claude_code_router` 并选择测试 model mapping。
+2. 执行标准程序中的首次运行、续聊、文件写入和 Stop。
+3. 记录实际命令、CCR provider/model、Claude session 和文件证据。
+4. 切回非 CCR Claude 配置，再运行最小消息确认没有配置泄漏。
+
+验收标准：
+
+- CCR 以 `CLAUDE_CODE` 变体运行，不作为未知 runner 或独立生产 key 出现。
+- 启用时实际使用 CCR 命令/provider/model；关闭后恢复标准 Claude Code。
+- 两种变体的会话、模型、日志和认证错误可区分，秘密不进入报告。
+
+## 12. 自由聊天
 
 ### CHAT-001 单 Agent 提及、流式输出和最终态
 
@@ -702,7 +1039,7 @@ git -C "${REG_REPO_A}" log -1 --oneline
 - UI 文件列表、状态、Diff/内容与 Git 结果一致。
 - `.openteams/` 运行数据不得被当作用户源码变更展示。
 
-## 12. 工作流
+## 13. 工作流
 
 工作流基准提示词：
 
@@ -879,7 +1216,7 @@ git -C "${REG_REPO_A}" log -1 --oneline
 - 实际审查行为与设置一致，不影响其他步骤。
 - Inbox 打开后聚焦到正确的 input/review/approval，而不是只打开会话顶部。
 
-## 13. 源码管理与隔离 worktree
+## 14. 源码管理与隔离 worktree
 
 ### SCM-001 变更列表和作用域
 
@@ -1027,7 +1364,7 @@ git -C "${REG_REPO_A}" log -1 --oneline
 - 确认后仅目标 worktree 被删除，主仓库未获得其未合并文件。
 - 自动清理绝不删除未合并、active 或 conflicted 的其他 worktree。
 
-## 14. Issues
+## 15. Issues
 
 ### ISS-001 创建和编辑本地 Issue
 
@@ -1115,7 +1452,7 @@ git -C "${REG_REPO_A}" log -1 --oneline
 - 删除确认显示正确标题，取消无副作用。
 - 确认后 Issue 不再出现；其他 Issue 和关联会话不被误删。
 
-## 15. 可选集成与设置
+## 16. 可选集成与设置
 
 ### INT-001 GitHub 授权、仓库连接和 Issue 导入
 
@@ -1174,7 +1511,7 @@ git -C "${REG_REPO_A}" log -1 --oneline
 - 技能列表和详情可加载，作用域/安装状态一致。
 - 清理只删除本轮 Provider，其他配置不变。
 
-## 16. 统计、外观与持久化
+## 17. 统计、外观与持久化
 
 ### STA-001 Build Statistics 汇总
 
@@ -1230,21 +1567,22 @@ git -C "${REG_REPO_A}" log -1 --oneline
 - 快捷键冲突被阻止或明确提示，恢复默认有效。
 - 最终设置在刷新和重启后保持，且不影响运行数据。
 
-## 17. 清理
+## 18. 清理
 
 1. 停止所有本轮运行和工作流，确保没有 queued/running/merging 状态。
-2. 通过 UI 删除或归档名称含 `RUN_ID` 的测试 Issue、会话、成员、团队模板、Provider 和项目。
+2. 通过 UI 删除或归档名称含 `RUN_ID` 的测试 Issue、会话、成员、团队模板、Provider、CLI 变体和项目。
 3. 不得删除项目 A，直到所有 Git、worktree 和统计证据采集完成。
-4. 对 `REG_REPO_A`、`REG_REPO_B` 和 worktree 做最后只读检查，记录未清理项。
-5. 只有在路径已打印、路径非空、路径位于系统临时目录、且用户明确批准后，才可删除 `REG_ROOT`。
-6. 不得通过覆盖 `dev_assets` 或删除数据库的方式清理测试数据。
-7. 清理行为和遗留物必须写入报告。
+4. 对 `REG_REPO_A`、`REG_REPO_B`、`REG_CLI_REPO` 和 worktree 做最后只读检查，记录未清理项。
+5. 恢复 CLI-203 使用的测试 MCP/Skill 配置；只删除本轮新增项，不覆盖各 CLI 原有配置文件。
+6. 只有在路径已打印、路径非空、路径位于系统临时目录、且用户明确批准后，才可删除 `REG_ROOT`。
+7. 不得通过覆盖 `dev_assets` 或删除数据库的方式清理测试数据。
+8. 清理行为和遗留物必须写入报告。
 
-## 18. 报告要求
+## 19. 报告要求
 
 最终报告必须基于 `docs/qa/regression-test-report-template.md`，并满足：
 
-1. 包含本手册全部 56 个用例，且每个用例恰好一条最终结果。
+1. 包含本手册全部 72 个用例，且每个用例恰好一条最终结果。
 2. 每条记录包含优先级、开始/结束时间、实际结果、验收判断、证据路径和缺陷编号。
 3. 自动化门禁记录完整命令、退出码、总数和失败栈。
 4. 所有 `FAIL`、`BLOCKED`、`SKIPPED`、重试通过和疑似 flaky 用例都有详细解释。
@@ -1253,7 +1591,7 @@ git -C "${REG_REPO_A}" log -1 --oneline
 7. 明确给出 `PASS`、`CONDITIONAL PASS` 或 `FAIL`，不得只写“整体正常”。
 8. 报告结论必须列出残余风险、未覆盖项和清理状态。
 
-## 19. 手册维护触发条件
+## 20. 手册维护触发条件
 
 出现以下任一变更时，提交代码的人必须同步评估并更新本手册与报告模板：
 
@@ -1261,4 +1599,5 @@ git -C "${REG_REPO_A}" log -1 --oneline
 - 修改 workflow reducer、worktree 状态机、源码工作区解析或安全边界。
 - 修改项目/Issue/GitHub 的关联模型。
 - 修改 Agent 执行、队列、审批、附件、运行记录或统计口径。
+- 新增、删除或重命名生产 `BaseCodingAgent`，或修改任一 CLI 的启动命令、会话、ACP、MCP、Skill、模型和认证适配。
 - 新增测试命令、测试夹具或发布门禁。
