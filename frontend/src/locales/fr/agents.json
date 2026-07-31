@@ -112,6 +112,7 @@
   "agents.details.baseCommand": "Commande de base",
   "agents.details.checking": "Vérification...",
   "agents.details.cliVersion": "Version CLI",
+  "agents.details.commandHint": "Ordre de résolution : remplacement, CLI native, puis valeur par défaut.",
   "agents.details.commandSource": "Source de la commande",
   "agents.details.commandSourceDefault": "Par défaut",
   "agents.details.commandSourceNative": "Native",

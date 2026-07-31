@@ -112,6 +112,7 @@
   "agents.details.baseCommand": "Comando base",
   "agents.details.checking": "Comprobando...",
   "agents.details.cliVersion": "Versión de CLI",
+  "agents.details.commandHint": "Orden de resolución: sobrescritura, CLI nativa y valor predeterminado.",
   "agents.details.commandSource": "Origen del comando",
   "agents.details.commandSourceDefault": "Predeterminado",
   "agents.details.commandSourceNative": "Nativo",

@@ -112,6 +112,7 @@
   "agents.details.baseCommand": "Base command",
   "agents.details.checking": "Checking...",
   "agents.details.cliVersion": "CLI version",
+  "agents.details.commandHint": "Resolved in order: custom override, native CLI, then the built-in default.",
   "agents.details.commandSource": "Command source",
   "agents.details.commandSourceDefault": "Default",
   "agents.details.commandSourceNative": "Native",

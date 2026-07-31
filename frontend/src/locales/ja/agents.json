@@ -112,6 +112,7 @@
   "agents.details.baseCommand": "ベースコマンド",
   "agents.details.checking": "確認中...",
   "agents.details.cliVersion": "CLI バージョン",
+  "agents.details.commandHint": "解決順序: 上書き → ネイティブ → デフォルト",
   "agents.details.commandSource": "コマンドのソース",
   "agents.details.commandSourceDefault": "デフォルト",
   "agents.details.commandSourceNative": "ネイティブ",

@@ -112,6 +112,7 @@
   "agents.details.baseCommand": "기본 명령",
   "agents.details.checking": "확인 중...",
   "agents.details.cliVersion": "CLI 버전",
+  "agents.details.commandHint": "해결 순서: 재정의 → 네이티브 → 기본값",
   "agents.details.commandSource": "명령 소스",
   "agents.details.commandSourceDefault": "기본값",
   "agents.details.commandSourceNative": "네이티브",

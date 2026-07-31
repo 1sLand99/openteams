@@ -112,6 +112,7 @@
   "agents.details.baseCommand": "基础命令",
   "agents.details.checking": "检查中...",
   "agents.details.cliVersion": "CLI 版本",
+  "agents.details.commandHint": "按顺序解析：自定义覆盖 → 原生命令 → 默认配置。",
   "agents.details.commandSource": "命令来源",
   "agents.details.commandSourceDefault": "默认配置",
   "agents.details.commandSourceNative": "原生命令",

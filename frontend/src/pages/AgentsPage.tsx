@@ -1429,6 +1429,9 @@ function AgentConfigSidebar({
               value={baseCommand}
             />
           </div>
+          <p className="mt-2 text-[12px] leading-relaxed text-[var(--ink-tertiary)]">
+            {t("agents.details.commandHint")}
+          </p>
           {diagnosticsError && (
             <div className="mt-3 flex items-start gap-2 rounded-[8px] border border-amber-500/20 bg-amber-500/5 p-3 text-[14px] leading-relaxed text-amber-400">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
