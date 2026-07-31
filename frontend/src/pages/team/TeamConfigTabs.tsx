@@ -172,7 +172,7 @@ function SettingRow({
   wide?: boolean;
 }) {
   return (
-    <div className="grid gap-2 border-t border-[var(--hairline)] py-4 first:border-t-0 first:pt-1 md:grid-cols-[minmax(170px,220px)_minmax(0,1fr)] md:items-start md:gap-8">
+    <div className="grid gap-2 border-t border-[var(--hairline)] py-4 first:border-t-0 first:pt-1 md:grid-cols-[minmax(150px,190px)_minmax(0,1fr)] md:items-start md:gap-6">
       <div className="min-w-0 pt-0.5">
         <p className="text-[13px] font-medium leading-[1.4] text-[var(--ink)]">
           {title}
@@ -611,10 +611,11 @@ function ConfigTab({
     : null;
 
   return (
-    <div className="space-y-0">
+    <div className="space-y-0 xl:grid xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] xl:gap-12">
       <ConfigSection
         title={t("teamPage.config.title")}
         description={t("teamPage.config.desc")}
+        className="xl:pb-0"
       >
           <SettingRow
             title={t("teamPage.form.memberName")}

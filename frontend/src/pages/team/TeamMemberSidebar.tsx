@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useState, useMemo, useRef, useEffect, useLayoutEffect } from "react";
 import type { BackendChatAgent, BaseCodingAgent } from "@/types";
+import { AgentBrandAvatar } from "../agent-runtime/agentRuntimeBrand";
 import {
   compactRunnerLabel,
   cx,
@@ -26,27 +27,42 @@ type TranslateFn = (
 
 function MemberRoleAvatar({
   lead,
+  runner,
   t,
 }: {
   lead: boolean;
+  runner: BaseCodingAgent | null;
   t: TranslateFn;
 }) {
-  const Icon = lead ? Crown : Bot;
   const label = lead
     ? t("teamPage.sidebar.mainAgent")
     : t("teamPage.sidebar.workAgent");
   return (
     <span
       className={cx(
-        "flex h-8 w-8 shrink-0 items-center justify-center rounded-full border shadow-sm transition-all",
+        "relative flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] border transition-colors",
         lead
-          ? "border-[var(--primary)]/35 bg-[var(--primary-tint)] text-[var(--primary)]"
+          ? "border-[var(--primary)]/30 bg-[var(--primary-tint)] text-[var(--primary)]"
           : "border-[var(--hairline)] bg-[var(--surface-3)] text-[var(--ink-tertiary)]",
       )}
       title={label}
       aria-label={label}
     >
-      <Icon className="h-4 w-4" />
+      {runner ? (
+        <AgentBrandAvatar
+          runner={runner}
+          framed={false}
+          className="h-8 w-8 text-current"
+          iconClassName="h-4 w-4"
+        />
+      ) : (
+        <Bot aria-hidden="true" className="h-4 w-4" />
+      )}
+      {lead && (
+        <span className="absolute -bottom-1 -right-1 flex h-[14px] w-[14px] items-center justify-center rounded-full bg-[var(--primary)] text-white ring-2 ring-[var(--surface-2)]">
+          <Crown aria-hidden="true" className="h-[9px] w-[9px]" strokeWidth={2.75} />
+        </span>
+      )}
     </span>
   );
 }
@@ -110,6 +126,36 @@ type TeamAddableRuntime = {
   modelName: string | null;
   runnerType: BaseCodingAgent;
 };
+
+function AddOptionAvatar({
+  runner,
+  tone,
+}: {
+  runner: BaseCodingAgent | null;
+  tone: "neutral" | "primary";
+}) {
+  return (
+    <span
+      className={cx(
+        "flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border",
+        tone === "primary"
+          ? "border-[var(--primary)]/30 bg-[var(--primary-tint)] text-[var(--primary-hover)]"
+          : "border-[var(--hairline)] bg-[var(--surface-3)] text-[var(--ink-tertiary)]",
+      )}
+    >
+      {runner ? (
+        <AgentBrandAvatar
+          runner={runner}
+          framed={false}
+          className="h-7 w-7 text-current"
+          iconClassName="h-3.5 w-3.5"
+        />
+      ) : (
+        <Bot aria-hidden="true" className="h-4 w-4" />
+      )}
+    </span>
+  );
+}
 
 export function TeamAddMemberButton({
   legacyAgents = [],
@@ -229,9 +275,10 @@ export function TeamAddMemberButton({
                     }}
                     className="flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-[var(--surface-2)]"
                   >
-                    <div className="flex h-7 w-7 items-center justify-center rounded-full bg-[var(--surface-3)] text-[var(--ink-subtle)]">
-                      <Bot className="h-4 w-4" />
-                    </div>
+                    <AddOptionAvatar
+                      runner={normalizeRunnerType(agent.runner_type)}
+                      tone="neutral"
+                    />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-[13px] font-medium text-[var(--ink)]">
                         {agent.name}
@@ -258,9 +305,10 @@ export function TeamAddMemberButton({
                     }}
                     className="flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-[var(--surface-2)]"
                   >
-                    <div className="flex h-7 w-7 items-center justify-center rounded-full bg-[var(--primary-tint)] text-[var(--primary-hover)]">
-                      <Bot className="h-4 w-4" />
-                    </div>
+                    <AddOptionAvatar
+                      runner={option.runnerType}
+                      tone="primary"
+                    />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-[13px] font-medium text-[var(--ink)]">
                         {option.label}
@@ -355,7 +403,7 @@ export function TeamMemberSidebar({
                     : "hover:bg-[var(--surface-3)]/60",
                 )}
               >
-                <MemberRoleAvatar lead={lead} t={t} />
+                <MemberRoleAvatar lead={lead} runner={runner ?? null} t={t} />
                 
                 <div className="min-w-0">
                   <div className="flex min-w-0 items-center gap-1.5">
