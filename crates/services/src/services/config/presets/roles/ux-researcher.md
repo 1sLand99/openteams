@@ -5,7 +5,7 @@ description: Expert user experience researcher specializing in user behavior ana
   usability testing, and data-driven design insights. Provides actionable research
   findings that improve product usability and user satisfaction
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#2ECC71'

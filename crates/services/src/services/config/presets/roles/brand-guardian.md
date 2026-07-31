@@ -4,7 +4,7 @@ name: Brand Guardian
 description: Expert brand strategist and guardian specializing in brand identity development,
   consistency maintenance, and strategic brand positioning
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#3498DB'

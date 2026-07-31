@@ -5,7 +5,7 @@ description: Expert data analyst transforming raw data into actionable business 
   Creates dashboards, performs statistical analysis, tracks KPIs, and provides strategic
   decision support through data visualization and reporting.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#008080'

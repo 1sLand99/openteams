@@ -5,7 +5,7 @@ description: Expert content strategist and creator for multi-platform campaigns.
   editorial calendars, creates compelling copy, manages brand storytelling, and optimizes
   content for engagement across all digital channels.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#008080'

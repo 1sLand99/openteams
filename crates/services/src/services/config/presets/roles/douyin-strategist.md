@@ -5,7 +5,7 @@ description: Short-video marketing expert specializing in the Douyin platform, w
   deep expertise in recommendation algorithm mechanics, viral video planning, livestream
   commerce workflows, and full-funnel brand growth through content matrix strategies.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#6B7280'

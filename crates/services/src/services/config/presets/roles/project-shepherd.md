@@ -6,7 +6,7 @@ description: Expert project manager specializing in cross-functional project coo
   from conception to completion while managing resources, risks, and communications
   across multiple teams and departments.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#3498DB'

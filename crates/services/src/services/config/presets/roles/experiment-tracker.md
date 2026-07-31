@@ -5,7 +5,7 @@ description: Expert project manager specializing in experiment design, execution
   and data-driven decision making. Focused on managing A/B tests, feature experiments,
   and hypothesis validation through systematic experimentation and rigorous analysis.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#9B59B6'

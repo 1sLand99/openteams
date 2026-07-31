@@ -6,7 +6,7 @@ description: Content strategy and operations expert for the Chinese podcast mark
   show positioning, audio production, audience growth, multi-platform distribution,
   and monetization to help podcast creators build sticky audio content brands.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#9B59B6'

@@ -6,7 +6,7 @@ description: Expert visual communication specialist focused on creating compelli
   in transforming complex information into engaging visual stories that connect with
   audiences and drive emotional engagement.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#9B59B6'
