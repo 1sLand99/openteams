@@ -440,22 +440,22 @@ export const createLatestRequestGate = () => {
 };
 
 const hairlineSurfaceClassName =
-  "relative overflow-hidden border border-[var(--team-template-border)] bg-[linear-gradient(180deg,var(--team-template-surface-top),var(--team-template-surface))] shadow-[inset_0_1px_0_var(--team-template-top-highlight)] before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-[var(--team-template-top-glow)]";
+  "relative overflow-hidden border border-[var(--team-template-border)] bg-[var(--team-template-surface)]";
 
 const interactiveSurfaceClassName =
-  "transition-all duration-150 ease-out hover:border-[var(--team-template-border-strong)] hover:bg-[var(--team-template-surface-hover)] hover:shadow-[inset_0_1px_0_var(--team-template-top-highlight-strong)]";
+  "transition-colors duration-150 ease-out hover:border-[var(--team-template-border-strong)] hover:bg-[var(--team-template-surface-hover)]";
 
 const quietButtonClassName =
-  `inline-flex items-center justify-center rounded-[4px] ${hairlineSurfaceClassName} text-[var(--team-template-title)] ${interactiveSurfaceClassName}`;
+  `inline-flex items-center justify-center rounded-[6px] ${hairlineSurfaceClassName} text-[var(--team-template-title)] ${interactiveSurfaceClassName}`;
 
 const brandPrimaryButtonClassName =
-  "inline-flex items-center justify-center border border-[var(--primary)] bg-[var(--primary)] font-semibold text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_1px_2px_rgba(0,0,0,0.24)] transition-all duration-150 ease-out hover:-translate-y-px hover:border-[var(--primary-hover)] hover:bg-[var(--primary-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-focus)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--team-template-canvas)] disabled:cursor-not-allowed disabled:translate-y-0 disabled:opacity-60";
+  "inline-flex items-center justify-center border border-[var(--primary)] bg-[var(--primary)] font-semibold text-white transition-colors duration-150 ease-out hover:border-[var(--primary-hover)] hover:bg-[var(--primary-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-focus)]/40 disabled:cursor-not-allowed disabled:opacity-60";
 
 const activeSurfaceClassName =
-  "border border-[var(--team-template-border)] bg-[var(--team-template-active-surface)] shadow-[inset_0_1px_0_var(--team-template-top-highlight-strong)]";
+  "border border-[var(--team-template-border)] bg-[var(--team-template-active-surface)]";
 
 const dangerGhostButtonClassName =
-  "inline-flex items-center justify-center rounded-[4px] text-red-300/85 transition-colors duration-150 hover:bg-red-500/10 hover:text-red-200 disabled:opacity-50 disabled:hover:bg-transparent";
+  "inline-flex items-center justify-center rounded-[6px] text-red-400 transition-colors duration-150 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-50 disabled:hover:bg-transparent";
 
 const recommendedBadgeClassName =
   "inline-flex text-[var(--team-template-muted)] transition-colors duration-150 group-hover:text-[var(--team-template-accent)]";
@@ -489,25 +489,25 @@ function TeamTemplatesHeader({
   const systemBreadcrumbLabel = t("agents.breadcrumb.system");
 
   return (
-    <header className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--team-template-border)] bg-transparent px-6 shadow-[inset_0_-1px_0_rgba(255,255,255,0.02)]">
+    <header className="flex h-[49px] shrink-0 items-center justify-between border-b border-[var(--team-template-border)] px-[29px]">
       <nav
         aria-label={translateWithFallback(t, "teamTemplates.breadcrumb", "Breadcrumb")}
-        className="flex min-w-0 items-center gap-1.5"
+        className="flex min-w-0 items-center gap-[7px]"
       >
         <span
           role="img"
           aria-label={systemBreadcrumbLabel}
           title={systemBreadcrumbLabel}
-          className="flex h-5 w-5 shrink-0 items-center justify-center text-[var(--team-template-muted)]"
+          className="flex h-[19px] w-[19px] shrink-0 items-center justify-center text-[var(--primary)]"
         >
-          <Settings aria-hidden="true" className="h-[15px] w-[15px]" strokeWidth={1.5} />
+          <Settings aria-hidden="true" className="h-[17px] w-[17px]" />
         </span>
         <ChevronRight
           aria-hidden="true"
-          className="h-3.5 w-3.5 shrink-0 text-[var(--team-template-border-strong)]"
-          strokeWidth={1.5}
+          className="h-[15px] w-[15px] shrink-0 text-[#8f9298]"
+          strokeWidth={2.4}
         />
-        <h1 className="truncate text-[13px] font-medium leading-none text-[var(--team-template-title)]">
+        <h1 className="truncate text-[16px] font-semibold leading-[1.25] text-[var(--team-template-title)]">
           {t("page.team-templates")}
         </h1>
       </nav>
@@ -515,11 +515,11 @@ function TeamTemplatesHeader({
       <button
         type="button"
         onClick={onCreate}
-        className={`${quietButtonClassName} h-[28px] gap-1.5 px-3 text-[12px] font-medium hover:text-white`}
+        className="flex h-7 items-center gap-1.5 rounded-[6px] border border-[var(--team-template-border)] bg-[var(--team-template-surface)] px-2.5 text-[13px] font-medium text-[var(--team-template-muted)] transition-colors hover:border-[var(--team-template-border-strong)] hover:text-[var(--team-template-title)]"
       >
-        <Plus aria-hidden="true" className="h-3.5 w-3.5 -ml-0.5" strokeWidth={1.5} />
+        <Plus aria-hidden="true" className="h-3.5 w-3.5" />
         {translateWithFallback(t, "teamTemplates.new", "New template")}
-        <kbd className="ml-1 rounded border border-[var(--team-template-border)] px-1.5 py-px font-mono text-[10px] font-medium text-[var(--team-template-aux)]">
+        <kbd className="rounded border border-[var(--team-template-border)] px-1.5 py-px font-mono text-[11px] font-medium text-[var(--team-template-aux)]">
           N
         </kbd>
       </button>
@@ -547,8 +547,8 @@ function FormInput({
 
   if (inline) {
     return (
-      <label className="team-template-compact-field grid grid-cols-[72px_minmax(0,1fr)] items-start gap-2 border-b border-[var(--team-template-border)] py-1.5 last:border-b-0">
-        <span className="pt-1 font-mono text-[10px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-aux)]">
+      <label className="team-template-compact-field grid grid-cols-[72px_minmax(0,1fr)] items-start gap-2 py-1.5">
+        <span className="pt-1 font-mono text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-aux)]">
           {label}
         </span>
         <span className="min-w-0">
@@ -557,11 +557,11 @@ function FormInput({
             value={value}
             onChange={(event) => onChange(event.target.value)}
             className={[
-              "team-template-field h-7 w-full rounded-[3px] border-0 bg-transparent px-1 text-[13px] text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-white/[0.035] focus:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-60",
+              "team-template-field h-7 w-full rounded-[3px] border-0 bg-transparent px-1 text-[14px] text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-[var(--team-template-row-hover)] focus:bg-[var(--team-template-row-hover)] disabled:cursor-not-allowed disabled:opacity-60",
               error ? "bg-red-500/10 text-red-200" : "",
             ].join(" ")}
           />
-          {error && <p className="mt-1 text-[11px] text-red-400">{error}</p>}
+          {error && <p className="mt-1 text-[12px] text-red-400">{error}</p>}
         </span>
       </label>
     );
@@ -569,7 +569,7 @@ function FormInput({
 
   return (
     <label className="block">
-      <span className="font-mono text-[10px] font-semibold uppercase text-[var(--team-template-muted)]">
+      <span className="font-mono text-[11px] font-semibold uppercase text-[var(--team-template-muted)]">
         {label}
       </span>
       <input
@@ -577,14 +577,14 @@ function FormInput({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         className={[
-          "team-template-field mt-1.5 h-8 w-full border text-[13px] text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] disabled:cursor-not-allowed disabled:opacity-60",
+          "team-template-field mt-1.5 h-8 w-full border text-[14px] text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] disabled:cursor-not-allowed disabled:opacity-60",
           bare
             ? "rounded-none border-x-0 border-t-0 bg-transparent px-0 shadow-none focus:border-[var(--team-template-field-focus)]"
             : "rounded-[4px] bg-[var(--team-template-field-surface)] px-3 shadow-[inset_0_1px_0_var(--team-template-field-highlight)] focus:border-[var(--team-template-field-focus)] focus:shadow-[inset_0_0_0_1px_var(--team-template-field-focus)]",
           error ? "border-red-400/70" : "border-[var(--team-template-border)]",
         ].join(" ")}
       />
-      {error && <p className="mt-1 text-[11px] text-red-400">{error}</p>}
+      {error && <p className="mt-1 text-[12px] text-red-400">{error}</p>}
     </label>
   );
 }
@@ -620,8 +620,8 @@ function FormTextarea({
 
   if (inline) {
     return (
-      <label className="team-template-compact-field grid grid-cols-[72px_minmax(0,1fr)] items-start gap-2 border-b border-[var(--team-template-border)] py-1.5 last:border-b-0">
-        <span className="pt-1 font-mono text-[10px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-aux)]">
+      <label className="team-template-compact-field grid grid-cols-[72px_minmax(0,1fr)] items-start gap-2 py-1.5">
+        <span className="pt-1 font-mono text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-aux)]">
           {label}
         </span>
         <span className="min-w-0">
@@ -632,11 +632,11 @@ function FormTextarea({
             rows={rows}
             onChange={(event) => onChange(event.target.value)}
             className={[
-              "team-template-field min-h-7 w-full resize-none overflow-hidden rounded-[3px] border-0 bg-transparent px-1 py-1 text-[13px] leading-[1.45] text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-white/[0.035] focus:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-60",
+              "team-template-field min-h-7 w-full resize-none overflow-hidden rounded-[3px] border-0 bg-transparent px-1 py-1 text-[14px] leading-[1.45] text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-[var(--team-template-row-hover)] focus:bg-[var(--team-template-row-hover)] disabled:cursor-not-allowed disabled:opacity-60",
               error ? "bg-red-500/10 text-red-200" : "",
             ].join(" ")}
           />
-          {error && <p className="mt-1 text-[11px] text-red-400">{error}</p>}
+          {error && <p className="mt-1 text-[12px] text-red-400">{error}</p>}
         </span>
       </label>
     );
@@ -644,7 +644,7 @@ function FormTextarea({
 
   return (
     <label className="block">
-      <span className="font-mono text-[10px] font-semibold uppercase text-[var(--team-template-muted)]">
+      <span className="font-mono text-[11px] font-semibold uppercase text-[var(--team-template-muted)]">
         {label}
       </span>
       <textarea
@@ -653,14 +653,14 @@ function FormTextarea({
         rows={rows}
         onChange={(event) => onChange(event.target.value)}
         className={[
-          "team-template-field mt-1.5 w-full resize-y border text-[13px] leading-relaxed text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] disabled:cursor-not-allowed disabled:opacity-60",
+          "team-template-field mt-1.5 w-full resize-y border text-[14px] leading-relaxed text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] disabled:cursor-not-allowed disabled:opacity-60",
           bare
             ? "rounded-none border-x-0 border-t-0 bg-transparent px-0 py-1 shadow-none focus:border-[var(--team-template-field-focus)]"
             : "rounded-[4px] bg-[var(--team-template-field-surface)] px-3 py-2 shadow-[inset_0_1px_0_var(--team-template-field-highlight)] focus:border-[var(--team-template-field-focus)] focus:shadow-[inset_0_0_0_1px_var(--team-template-field-focus)]",
           error ? "border-red-400/70" : "border-[var(--team-template-border)]",
         ].join(" ")}
       />
-      {error && <p className="mt-1 text-[11px] text-red-400">{error}</p>}
+      {error && <p className="mt-1 text-[12px] text-red-400">{error}</p>}
     </label>
   );
 }
@@ -693,7 +693,7 @@ function AutoGrowingTextarea({
       rows={1}
       placeholder={placeholder}
       onChange={(event) => onChange(event.target.value)}
-      className="team-template-document-description -mx-1 mt-1.5 w-full resize-none overflow-hidden rounded-[4px] border-0 bg-transparent px-1 py-1 text-[14px] leading-relaxed text-[var(--team-template-muted)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-aux)] hover:bg-white/[0.035] focus:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-60"
+      className="team-template-document-description -mx-1 mt-1.5 w-full resize-none overflow-hidden rounded-[4px] border-0 bg-transparent px-1 py-1 text-[14px] leading-relaxed text-[var(--team-template-muted)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-aux)] hover:bg-[var(--team-template-row-hover)] focus:bg-[var(--team-template-row-hover)] disabled:cursor-not-allowed disabled:opacity-60"
     />
   );
 }
@@ -726,7 +726,7 @@ function WorkflowStepDescriptionTextarea({
       rows={1}
       placeholder={placeholder}
       onChange={(event) => onChange(event.target.value)}
-      className="team-template-workflow-step-description -mx-1 mt-0.5 min-h-6 w-full resize-none overflow-hidden rounded-[3px] border-0 bg-transparent px-1 py-0.5 text-[12px] leading-[1.45] text-[var(--team-template-member-description)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-aux)] hover:bg-white/[0.035] focus:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-60"
+      className="team-template-workflow-step-description -mx-1 mt-0.5 min-h-6 w-full resize-none overflow-hidden rounded-[3px] border-0 bg-transparent px-1 py-0.5 text-[13px] leading-[1.45] text-[var(--team-template-member-description)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-aux)] hover:bg-[var(--team-template-row-hover)] focus:bg-[var(--team-template-row-hover)] disabled:cursor-not-allowed disabled:opacity-60"
     />
   );
 }
@@ -774,8 +774,8 @@ function MarkdownEditableField({
         onChange={(event) => setDraft(event.target.value)}
         className={
           compact
-            ? "team-template-field w-full resize-y rounded-[3px] border border-transparent bg-transparent px-1 py-1 text-[13px] leading-[1.45] text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-white/[0.035] focus:border-[var(--team-template-field-focus)] focus:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-60"
-            : "team-template-field w-full resize-y rounded-[4px] border border-[var(--team-template-border)] bg-[var(--team-template-field-surface)] px-3 py-2 text-[13px] leading-relaxed text-[var(--team-template-title)] shadow-[inset_0_1px_0_var(--team-template-field-highlight)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] focus:border-[var(--team-template-field-focus)] focus:shadow-[inset_0_0_0_1px_var(--team-template-field-focus)] disabled:cursor-not-allowed disabled:opacity-60"
+            ? "team-template-field w-full resize-y rounded-[3px] border border-transparent bg-transparent px-1 py-1 text-[14px] leading-[1.45] text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-white/[0.035] focus:border-[var(--team-template-field-focus)] focus:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-60"
+            : "team-template-field w-full resize-y rounded-[4px] border border-[var(--team-template-border)] bg-[var(--team-template-field-surface)] px-3 py-2 text-[14px] leading-relaxed text-[var(--team-template-title)] shadow-[inset_0_1px_0_var(--team-template-field-highlight)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] focus:border-[var(--team-template-field-focus)] focus:shadow-[inset_0_0_0_1px_var(--team-template-field-focus)] disabled:cursor-not-allowed disabled:opacity-60"
         }
       />
     );
@@ -785,11 +785,11 @@ function MarkdownEditableField({
     <div
       className={[
         compact
-          ? "min-h-7 max-h-12 overflow-hidden rounded-[3px] border border-transparent bg-transparent px-1 py-1 text-[13px] leading-[1.45] text-[var(--team-template-title)]"
-          : "min-h-[72px] rounded-[4px] border border-[var(--team-template-border)] bg-[var(--team-template-field-surface)] p-3 text-[13px] leading-relaxed text-[var(--team-template-title)] shadow-[inset_0_1px_0_var(--team-template-field-highlight)]",
+          ? "min-h-7 max-h-12 overflow-hidden rounded-[3px] border border-transparent bg-transparent px-1 py-1 text-[14px] leading-[1.45] text-[var(--team-template-title)]"
+          : "min-h-[72px] rounded-[4px] border border-[var(--team-template-border)] bg-[var(--team-template-field-surface)] p-3 text-[14px] leading-relaxed text-[var(--team-template-title)] shadow-[inset_0_1px_0_var(--team-template-field-highlight)]",
         editable && !disabled
           ? compact
-            ? "cursor-text hover:bg-white/[0.035] hover:text-[var(--team-template-title)]"
+            ? "cursor-text hover:bg-[var(--team-template-row-hover)] hover:text-[var(--team-template-title)]"
             : "cursor-text hover:border-[var(--team-template-border-strong)]"
           : "",
       ].join(" ")}
@@ -798,7 +798,7 @@ function MarkdownEditableField({
       }}
     >
       {value.trim() ? (
-        <AgentMarkdown content={value} fontSize={13} />
+        <AgentMarkdown content={value} fontSize={14} />
       ) : (
         <span className="text-[var(--team-template-muted)]">{placeholder}</span>
       )}
@@ -1050,14 +1050,14 @@ function MemberInfoSection({
   title: string;
 }) {
   return (
-    <section className="team-template-compact-section border-t border-[var(--team-template-border)] pt-4 first:border-t-0 first:pt-0">
+    <section className="team-template-compact-section">
       <div className="mb-2 flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
-          <h3 className="truncate text-[12px] font-semibold leading-tight text-[var(--team-template-title)]">
+          <h3 className="truncate text-[13px] font-semibold leading-tight text-[var(--team-template-title)]">
             {title}
           </h3>
         </div>
-        <span className="font-mono text-[9px] font-medium tracking-[0.06em] text-[var(--team-template-aux)]">
+        <span className="font-mono text-[10px] font-medium tracking-[0.06em] text-[var(--team-template-aux)]">
           {meta}
         </span>
       </div>
@@ -1074,11 +1074,11 @@ function MemberInfoField({
   value: string;
 }) {
   return (
-    <div className="grid grid-cols-[88px_minmax(0,1fr)] gap-3 border-b border-[var(--team-template-border)] py-2 last:border-b-0">
-      <span className="font-mono text-[10px] font-medium uppercase text-[var(--team-template-aux)]">
+    <div className="grid grid-cols-[88px_minmax(0,1fr)] gap-3 py-1.5">
+      <span className="font-mono text-[11px] font-medium uppercase text-[var(--team-template-aux)]">
         {label}
       </span>
-      <span className="min-w-0 truncate font-mono text-[12px] text-[var(--team-template-title)]">
+      <span className="min-w-0 truncate font-mono text-[13px] text-[var(--team-template-title)]">
         {value}
       </span>
     </div>
@@ -1289,8 +1289,8 @@ function TemplateMemberInfoPage({
 
   if (editable && formMember) {
     return (
-      <aside className="team-template-member-detail flex min-h-0 flex-col p-1 text-[13px] lg:h-full lg:p-0">
-        <header className="flex min-w-0 items-start justify-between gap-3 border-b border-[var(--team-template-border)] pb-3">
+      <aside className="team-template-member-detail flex min-h-0 flex-col p-1 text-[14px] lg:h-full lg:p-0">
+        <header className="flex min-w-0 items-start justify-between gap-3">
           <div className="flex min-w-0 items-start gap-2.5">
             <span
               aria-hidden="true"
@@ -1298,24 +1298,24 @@ function TemplateMemberInfoPage({
             />
             <div className="min-w-0">
               <div className="flex min-w-0 items-center gap-2">
-                <h2 className="truncate text-[15px] font-semibold leading-tight text-[var(--team-template-title)]">
+                <h2 className="truncate text-[17px] font-semibold leading-tight text-[var(--team-template-title)]">
                   {formMember.name || roleKey}
                 </h2>
                 {isLead && (
-                  <span className="inline-flex items-center gap-1 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--team-template-muted)]">
+                  <span className="inline-flex items-center gap-1 font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--team-template-muted)]">
                     <span className="h-1 w-1 rounded-full bg-current opacity-70" />
                     LEAD
                   </span>
                 )}
               </div>
-              <p className="mt-1 font-mono text-[11px] text-[var(--team-template-aux)]">
+              <p className="mt-1 font-mono text-[12px] text-[var(--team-template-aux)]">
                 {roleKey}
               </p>
             </div>
           </div>
         </header>
 
-        <div className="team-template-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto pt-3">
+        <div className="team-template-scrollbar min-h-0 flex-1 space-y-6 overflow-y-auto pt-4">
           <MemberInfoSection meta="MEMBER" title={translateWithFallback(t, "teamTemplates.member.info", "Member information")}>
             <div>
               <FormInput
@@ -1339,8 +1339,8 @@ function TemplateMemberInfoPage({
 
           <MemberInfoSection meta="MODEL" title={translateWithFallback(t, "teamTemplates.member.modelConfig", "Model configuration")}>
             <div>
-              <div className="team-template-compact-field grid grid-cols-[72px_minmax(0,1fr)] items-start gap-2 border-b border-[var(--team-template-border)] py-1.5">
-                <span className="pt-1 font-mono text-[10px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-aux)]">
+              <div className="team-template-compact-field grid grid-cols-[72px_minmax(0,1fr)] items-start gap-2 py-1.5">
+                <span className="pt-1 font-mono text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-aux)]">
                   {translateWithFallback(t, "teamTemplates.member.runtime", "Runtime")}
                 </span>
                 <DropdownSelect
@@ -1350,7 +1350,7 @@ function TemplateMemberInfoPage({
                   searchPlaceholder={translateWithFallback(t, "teamTemplates.member.searchRuntimes", "Search runtimes...")}
                   emptyLabel={translateWithFallback(t, "teamTemplates.member.noRuntimes", "No runtimes available")}
                   disabled={disabled}
-                  className="w-full [&>button]:h-7 [&>button]:rounded-[3px] [&>button]:border-transparent [&>button]:bg-transparent [&>button]:px-1 [&>button]:py-0 [&>button]:text-[13px] [&>button]:shadow-none [&>button:hover]:bg-white/[0.035]"
+                  className="w-full [&>button]:h-7 [&>button]:rounded-[3px] [&>button]:border-transparent [&>button]:bg-transparent [&>button]:px-1 [&>button]:py-0 [&>button]:text-[14px] [&>button]:shadow-none [&>button:hover]:bg-[var(--team-template-row-hover)]"
                   maxPanelHeightClassName="max-h-[180px]"
                   onChange={(value) =>
                     onMemberChange?.({
@@ -1361,8 +1361,8 @@ function TemplateMemberInfoPage({
                   }
                 />
               </div>
-              <div className="team-template-compact-field grid grid-cols-[72px_minmax(0,1fr)] items-start gap-2 border-b border-[var(--team-template-border)] py-1.5 last:border-b-0">
-                <span className="pt-1 font-mono text-[10px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-aux)]">
+              <div className="team-template-compact-field grid grid-cols-[72px_minmax(0,1fr)] items-start gap-2 py-1.5">
+                <span className="pt-1 font-mono text-[11px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-aux)]">
                   {translateWithFallback(t, "teamTemplates.member.model", "Model")}
                 </span>
                 <DropdownSelect
@@ -1372,7 +1372,7 @@ function TemplateMemberInfoPage({
                   searchPlaceholder={translateWithFallback(t, "teamTemplates.member.searchModels", "Search models...")}
                   emptyLabel={translateWithFallback(t, "teamTemplates.member.noAvailableModels", "No models available")}
                   disabled={disabled || modelOptions.length === 0}
-                  className="w-full [&>button]:h-7 [&>button]:rounded-[3px] [&>button]:border-transparent [&>button]:bg-transparent [&>button]:px-1 [&>button]:py-0 [&>button]:text-[13px] [&>button]:shadow-none [&>button:hover]:bg-white/[0.035]"
+                  className="w-full [&>button]:h-7 [&>button]:rounded-[3px] [&>button]:border-transparent [&>button]:bg-transparent [&>button]:px-1 [&>button]:py-0 [&>button]:text-[14px] [&>button]:shadow-none [&>button:hover]:bg-[var(--team-template-row-hover)]"
                   maxPanelHeightClassName="max-h-[180px]"
                   onChange={(value) =>
                     onMemberChange?.({
@@ -1412,7 +1412,7 @@ function TemplateMemberInfoPage({
                   : runtimeSkillsError || translateWithFallback(t, "teamTemplates.member.noRuntimeSkills", "No skills available for this runtime")
               }
               disabled={disabled || runtimeSkillsLoading || skillOptions.length === 0}
-              className="w-full [&>button]:min-h-7 [&>button]:rounded-[3px] [&>button]:border-transparent [&>button]:bg-transparent [&>button]:px-1 [&>button]:py-1 [&>button]:text-[13px] [&>button]:shadow-none [&>button:hover]:bg-white/[0.035]"
+              className="w-full [&>button]:min-h-7 [&>button]:rounded-[3px] [&>button]:border-transparent [&>button]:bg-transparent [&>button]:px-1 [&>button]:py-1 [&>button]:text-[14px] [&>button]:shadow-none [&>button:hover]:bg-[var(--team-template-row-hover)]"
               maxPanelHeightClassName="max-h-[220px]"
               formatValueLabel={(selectedOptions) => {
                 if (selectedOptions.length === 0) return skillPlaceholder;
@@ -1429,7 +1429,7 @@ function TemplateMemberInfoPage({
             <label className="relative block">
               <span
                 aria-hidden="true"
-                className="pointer-events-none absolute left-3 top-2.5 select-none font-mono text-[10px] leading-relaxed text-[var(--team-template-index)]"
+                className="pointer-events-none absolute left-3 top-2.5 select-none font-mono text-[11px] leading-relaxed text-[var(--team-template-index)]"
               >
                 1<br />
                 2<br />
@@ -1452,14 +1452,14 @@ function TemplateMemberInfoPage({
                   onMemberChange?.({ toolsEnabledText: event.target.value })
                 }
                 className={[
-                  "team-template-field w-full resize-y rounded-[3px] border-x-0 border-t-0 bg-[var(--team-template-code-surface)] py-1.5 pl-10 pr-3 font-mono text-[12px] leading-relaxed text-[var(--team-template-code-text)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] focus:border-[var(--team-template-field-focus)] disabled:cursor-not-allowed disabled:opacity-60",
+                  "team-template-field w-full resize-y rounded-[3px] border-x-0 border-t-0 bg-[var(--team-template-code-surface)] py-1.5 pl-10 pr-3 font-mono text-[13px] leading-relaxed text-[var(--team-template-code-text)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] focus:border-[var(--team-template-field-focus)] disabled:cursor-not-allowed disabled:opacity-60",
                   fieldErrors[`member:${memberKey}:tools_enabled`]
                     ? "border-red-400/70"
                     : "border-[var(--team-template-code-border)]",
                 ].join(" ")}
               />
               {fieldErrors[`member:${memberKey}:tools_enabled`] && (
-                <p className="mt-1 text-[11px] text-red-400">
+                <p className="mt-1 text-[12px] text-red-400">
                   {fieldErrors[`member:${memberKey}:tools_enabled`]}
                 </p>
               )}
@@ -1474,7 +1474,7 @@ function TemplateMemberInfoPage({
     <aside
       className="team-template-member-detail flex min-h-0 flex-col p-1 lg:h-full lg:p-0"
     >
-      <header className="flex min-w-0 items-start justify-between gap-4 border-b border-[var(--team-template-border)] pb-4">
+      <header className="flex min-w-0 items-start justify-between gap-4">
         <div className="flex min-w-0 items-start gap-3">
           <span
             aria-hidden="true"
@@ -1482,23 +1482,23 @@ function TemplateMemberInfoPage({
           />
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
-              <h2 className="truncate text-[16px] font-semibold leading-tight text-[var(--team-template-title)]">
+              <h2 className="truncate text-[17px] font-semibold leading-tight text-[var(--team-template-title)]">
                 {member.name || roleKey}
               </h2>
               {isLead && (
-                <span className="rounded-[4px] border border-[var(--team-template-ghost-badge-border)] px-1.5 py-0.5 font-mono text-[9px] font-medium text-[var(--team-template-muted)]">
+                <span className="rounded-[4px] border border-[var(--team-template-ghost-badge-border)] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[var(--team-template-muted)]">
                   LEAD
                 </span>
               )}
             </div>
-            <p className="mt-1 font-mono text-[11px] text-[var(--team-template-aux)]">
+            <p className="mt-1 font-mono text-[12px] text-[var(--team-template-aux)]">
               {roleKey}
             </p>
           </div>
         </div>
       </header>
 
-      <div className="team-template-scrollbar min-h-0 flex-1 space-y-7 overflow-y-auto pt-4">
+      <div className="team-template-scrollbar min-h-0 flex-1 space-y-7 overflow-y-auto pt-6">
         <MemberInfoSection meta="MODEL" title={translateWithFallback(t, "teamTemplates.member.modelConfig", "Model configuration")}>
           <div>
             <MemberInfoField
@@ -1513,8 +1513,8 @@ function TemplateMemberInfoPage({
         </MemberInfoSection>
 
         <MemberInfoSection meta="ROLE" title={translateWithFallback(t, "teamTemplates.member.role", "Role instructions")}>
-          <div className="team-template-role-markdown mt-3 max-h-[220px] overflow-auto text-[12px] leading-[1.55] text-[var(--team-template-member-description)] ot-scroll-area-styled">
-            <AgentMarkdown content={systemPrompt} fontSize={12} />
+          <div className="team-template-role-markdown mt-3 max-h-[220px] overflow-auto text-[13px] leading-[1.55] text-[var(--team-template-member-description)] ot-scroll-area-styled">
+            <AgentMarkdown content={systemPrompt} fontSize={13} />
           </div>
         </MemberInfoSection>
 
@@ -1524,14 +1524,14 @@ function TemplateMemberInfoPage({
               {member.selected_skill_ids.map((skillId) => (
                 <span
                   key={skillId}
-                  className="rounded-[4px] border border-[var(--team-template-ghost-badge-border)] bg-[var(--team-template-tag-surface)] px-2 py-1 font-mono text-[10px] font-medium text-[var(--team-template-muted)]"
+                  className="rounded-[4px] border border-[var(--team-template-ghost-badge-border)] bg-[var(--team-template-tag-surface)] px-2 py-1 font-mono text-[11px] font-medium text-[var(--team-template-muted)]"
                 >
                   {skillId}
                 </span>
               ))}
             </div>
           ) : (
-            <p className="text-[12px] text-[var(--team-template-member-description)]">
+            <p className="text-[13px] text-[var(--team-template-member-description)]">
               {translateWithFallback(t, "teamTemplates.member.noSkillsSelected", "No skills selected.")}
             </p>
           )}
@@ -1539,11 +1539,11 @@ function TemplateMemberInfoPage({
 
         <MemberInfoSection meta="MCP" title={translateWithFallback(t, "teamTemplates.member.mcp", "MCP configuration")}>
           {mcpConfig ? (
-            <pre className="max-h-[220px] overflow-auto font-mono text-[11px] leading-relaxed text-[var(--team-template-code-text)] ot-scroll-area-styled">
+            <pre className="max-h-[220px] overflow-auto font-mono text-[12px] leading-relaxed text-[var(--team-template-code-text)] ot-scroll-area-styled">
               {mcpConfig}
             </pre>
           ) : (
-            <p className="text-[12px] text-[var(--team-template-member-description)]">
+            <p className="text-[13px] text-[var(--team-template-member-description)]">
               {translateWithFallback(t, "teamTemplates.member.noMcp", "No MCP configuration.")}
             </p>
           )}
@@ -1562,14 +1562,14 @@ function AgentAvatarGroup({ template }: { template: TeamPresetSummary }) {
       {initials.map((label, index) => (
         <span
           key={`${label}-${index}`}
-          className={`${index > 0 ? "-ml-1.5" : ""} flex h-5 w-5 items-center justify-center rounded-full bg-[var(--team-template-avatar-surface)] font-mono text-[9px] font-medium text-[var(--team-template-muted)] shadow-[inset_0_0_0_1px_var(--team-template-inner-stroke)]`}
+          className={`${index > 0 ? "-ml-1.5" : ""} flex h-5 w-5 items-center justify-center rounded-full bg-[var(--team-template-avatar-surface)] font-mono text-[10px] font-medium text-[var(--team-template-muted)] shadow-[inset_0_0_0_1px_var(--team-template-inner-stroke)]`}
           style={{ zIndex: initials.length - index }}
         >
           {label}
         </span>
       ))}
       {extraCount > 0 && (
-        <span className="-ml-1.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--team-template-tag-surface)] px-1.5 font-mono text-[9px] font-medium text-[var(--team-template-muted)] shadow-[inset_0_0_0_1px_var(--team-template-inner-stroke)]">
+        <span className="-ml-1.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--team-template-tag-surface)] px-1.5 font-mono text-[10px] font-medium text-[var(--team-template-muted)] shadow-[inset_0_0_0_1px_var(--team-template-inner-stroke)]">
           +{extraCount}
         </span>
       )}
@@ -1622,15 +1622,15 @@ function WorkflowPreview({
   return (
     <section
       className={[
-        "team-template-workflow-preview text-[13px]",
+        "team-template-workflow-preview text-[14px]",
         editable ? "pt-3" : "border-t border-[var(--team-template-border)] pt-4",
       ].join(" ")}
     >
       <div className="mb-3 flex min-h-7 items-center justify-between gap-3">
-        <h2 className="text-[12px] font-medium tracking-[0.02em] text-[var(--team-template-muted)]">
+        <h2 className="text-[13px] font-medium tracking-[0.02em] text-[var(--team-template-muted)]">
           {translateWithFallback(t, "teamTemplates.workflow.title", "Workflow")}
         </h2>
-        <span className="inline-flex items-center gap-1.5 font-mono text-[9px] font-medium text-[var(--team-template-aux)] tabular-nums">
+        <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-medium text-[var(--team-template-aux)] tabular-nums">
           <Workflow aria-hidden="true" className="h-3 w-3" strokeWidth={1.2} />
           PIPELINE / {stepCountLabel}
         </span>
@@ -1639,7 +1639,7 @@ function WorkflowPreview({
       {editable ? (
         <div className="team-template-deboxed-workflow relative space-y-1 border-l border-[var(--team-template-border)] pl-4">
           {editableSteps.length === 0 && (
-            <p className="rounded-[4px] border border-dashed border-[var(--team-template-border)] px-3 py-4 text-[12px] text-[var(--team-template-muted)]">
+            <p className="rounded-[4px] border border-dashed border-[var(--team-template-border)] px-3 py-4 text-[13px] text-[var(--team-template-muted)]">
               {translateWithFallback(t, "teamTemplates.workflow.empty", "No workflow steps defined.")}
             </p>
           )}
@@ -1652,7 +1652,7 @@ function WorkflowPreview({
                 aria-hidden="true"
                 className="absolute -left-[19px] top-2.5 h-1.5 w-1.5 rounded-full border border-[var(--team-template-pipeline-dot-muted)] bg-[var(--team-template-canvas)]"
               />
-              <span className="pt-1 font-mono text-[10px] font-semibold tabular-nums text-[var(--team-template-aux)]">
+              <span className="pt-1 font-mono text-[11px] font-semibold tabular-nums text-[var(--team-template-aux)]">
                 {String(index + 1).padStart(2, "0")}
               </span>
               <div className="min-w-0">
@@ -1663,7 +1663,7 @@ function WorkflowPreview({
                   onChange={(event) =>
                     updateStep(index, { title: event.target.value })
                   }
-                  className="team-template-workflow-step-title -mx-1 h-6 w-full rounded-[3px] border-0 bg-transparent px-1 text-[13px] font-semibold leading-none text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-white/[0.035] focus:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-60"
+                  className="team-template-workflow-step-title -mx-1 h-6 w-full rounded-[3px] border-0 bg-transparent px-1 text-[14px] font-semibold leading-none text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-[var(--team-template-row-hover)] focus:bg-[var(--team-template-row-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                 />
                 <WorkflowStepDescriptionTextarea
                   disabled={disabled}
@@ -1693,7 +1693,7 @@ function WorkflowPreview({
             onClick={() =>
               onStepsChange?.([...editableSteps, { title: "", description: "" }])
             }
-            className={`${quietButtonClassName} mt-2 h-7 gap-1.5 px-2.5 text-[11px] font-medium disabled:opacity-50`}
+            className={`${quietButtonClassName} mt-2 h-7 gap-1.5 px-2.5 text-[12px] font-medium disabled:opacity-50`}
           >
             <Plus aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.4} />
             {translateWithFallback(t, "teamTemplates.workflow.addStep", "Add step")}
@@ -1702,7 +1702,7 @@ function WorkflowPreview({
       ) : (
       <div>
         {steps.length === 0 ? (
-          <p className="rounded-md border border-dashed border-[var(--team-template-border)] px-3 py-4 text-[12px] text-[var(--team-template-muted)]">
+          <p className="rounded-md border border-dashed border-[var(--team-template-border)] px-3 py-4 text-[13px] text-[var(--team-template-muted)]">
             {translateWithFallback(t, "teamTemplates.workflow.empty", "No workflow steps defined.")}
           </p>
         ) : (
@@ -1745,10 +1745,10 @@ function WorkflowPreview({
                     textLit ? "team-template-workflow-copy-lit" : "",
                   ].join(" ")}
                 >
-                  <h3 className="truncate text-[12px] font-semibold leading-[1.2] text-[var(--team-template-title)]">
+                  <h3 className="truncate text-[13px] font-semibold leading-[1.2] text-[var(--team-template-title)]">
                     {step.title}
                   </h3>
-                  <p className="mt-0.5 text-[12px] leading-[1.35] text-[#808080]">
+                  <p className="mt-0.5 text-[13px] leading-[1.35] text-[var(--team-template-member-description)]">
                     {step.description}
                   </p>
                 </div>
@@ -1878,7 +1878,7 @@ function TemplateDetailView({
 
   if (!isEditing && detailLoading) {
     return (
-      <div className="mx-auto w-full max-w-[1280px] p-6 md:p-8 lg:p-10 animate-pulse">
+      <div className="w-full p-6 md:p-8 lg:p-10 animate-pulse">
         <div className="mb-8 h-6 w-32 rounded bg-[var(--team-template-surface-hover)]"></div>
         <div className="flex gap-6">
            <div className="h-16 w-16 rounded-lg bg-[var(--team-template-surface-hover)]"></div>
@@ -1904,13 +1904,13 @@ function TemplateDetailView({
         <div className="mt-6 flex justify-center gap-3">
           <button
             onClick={onBack}
-            className={`${quietButtonClassName} px-4 py-2 text-[13px] font-medium`}
+            className={`${quietButtonClassName} px-4 py-2 text-[14px] font-medium`}
           >
             {translateWithFallback(t, "teamTemplates.backToList", "Back to list")}
           </button>
           <button
             onClick={onRetryDetail}
-            className="rounded-md border border-white/10 bg-[#ededed] px-4 py-2 text-[13px] font-medium text-[#08090a] transition-all duration-150 hover:-translate-y-px hover:bg-white"
+            className={`${brandPrimaryButtonClassName} rounded-[6px] px-4 py-2 text-[14px] font-medium`}
           >
             {translateWithFallback(t, "teamTemplates.retry", "Retry")}
           </button>
@@ -1999,15 +1999,16 @@ function TemplateDetailView({
   return (
     <div
       className={[
-        "mx-auto grid h-auto min-h-full w-full max-w-[1280px] grid-cols-1 lg:h-full lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_minmax(420px,40vw)] 2xl:grid-cols-[minmax(0,1fr)_540px]",
-        isEditing ? "team-template-compact-editor text-[13px]" : "",
+        "grid h-auto min-h-full w-full grid-cols-1 lg:h-full lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_minmax(360px,30vw)] 2xl:grid-cols-[minmax(0,1fr)_480px]",
+        isEditing ? "team-template-compact-editor text-[14px]" : "",
       ].join(" ")}
     >
       <div className="team-template-scrollbar min-w-0 p-5 md:p-7 lg:min-h-0 lg:overflow-y-auto lg:p-8">
+      <div className="mx-auto w-full max-w-[920px]">
       <button
         type="button"
         onClick={isEditing ? (onCancel ?? onBack) : onBack}
-        className="mb-5 flex items-center gap-2 text-[12px] font-medium text-[var(--team-template-muted)] transition-colors duration-150 hover:text-[var(--team-template-title)]"
+        className="mb-5 flex items-center gap-2 text-[13px] font-medium text-[var(--team-template-muted)] transition-colors duration-150 hover:text-[var(--team-template-title)]"
       >
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={1.2} />{" "}
         {isEditing
@@ -2045,14 +2046,14 @@ function TemplateDetailView({
                       onFormChange?.({ ...form, name: event.target.value })
                     }
                     className={[
-                      "team-template-document-title -mx-1 w-full rounded-[4px] border-0 bg-transparent px-1 py-0.5 text-[26px] font-semibold leading-tight text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-white/[0.04] focus:bg-white/[0.05] disabled:cursor-not-allowed disabled:opacity-60",
+                      "team-template-document-title -mx-1 w-full rounded-[4px] border-0 bg-transparent px-1 py-0.5 text-[28px] font-semibold leading-tight text-[var(--team-template-title)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] hover:bg-[var(--team-template-row-hover)] focus:bg-[var(--team-template-row-hover)] disabled:cursor-not-allowed disabled:opacity-60",
                       fieldErrors["team:name"]
                         ? "bg-red-500/10 text-red-200"
                         : "",
                     ].join(" ")}
                   />
                   {fieldErrors["team:name"] && (
-                    <p className="mt-1 text-[11px] text-red-400">
+                    <p className="mt-1 text-[12px] text-red-400">
                       {fieldErrors["team:name"]}
                     </p>
                   )}
@@ -2068,12 +2069,12 @@ function TemplateDetailView({
               ) : (
                 <>
                   <div className="flex min-w-0 items-center gap-2">
-                    <h1 className="truncate text-[20px] font-semibold leading-tight text-[var(--team-template-title)]">
+                    <h1 className="truncate text-[22px] font-semibold leading-tight text-[var(--team-template-title)]">
                       {viewDetail.name}
                     </h1>
                     {viewDetail.is_builtin && <RecommendedBadge t={t} />}
                   </div>
-                  <p className="mt-3 max-w-2xl text-[13px] leading-relaxed text-[var(--team-template-muted)]">
+                  <p className="mt-3 max-w-2xl text-[14px] leading-relaxed text-[var(--team-template-muted)]">
                     {viewDetail.description || translateWithFallback(t, "teamTemplates.noDescription", "No description provided for this template.")}
                   </p>
                 </>
@@ -2091,13 +2092,13 @@ function TemplateDetailView({
             {isEditing && (
               <div className="flex flex-col items-end gap-2">
                 {formError && (
-                  <p className="max-w-[360px] text-right text-[12px] leading-snug text-red-400">
+                  <p className="max-w-[360px] text-right text-[13px] leading-snug text-red-400">
                     {formError}
                   </p>
                 )}
                 <div className="flex items-center gap-2">
                   {saveStatus && (
-                    <span className="font-mono text-[10px] font-medium text-[var(--team-template-aux)] opacity-80">
+                    <span className="font-mono text-[11px] font-medium text-[var(--team-template-aux)] opacity-80">
                       {saveStatus}
                     </span>
                   )}
@@ -2106,7 +2107,7 @@ function TemplateDetailView({
                       type="button"
                       disabled={controlsDisabled}
                       onClick={onSave ?? (() => undefined)}
-                      className={`${brandPrimaryButtonClassName} h-8 gap-1.5 rounded-[4px] px-3.5 text-[12px]`}
+                      className={`${brandPrimaryButtonClassName} h-8 gap-1.5 rounded-[4px] px-3.5 text-[13px]`}
                     >
                       <Save aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.5} />
                       {saving
@@ -2135,7 +2136,7 @@ function TemplateDetailView({
                               setMoreMenuOpen(false);
                               onDelete();
                             }}
-                            className="flex h-8 w-full items-center gap-2 rounded-[6px] px-2.5 text-left text-[12px] font-medium text-red-300/90 transition-colors duration-150 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-50"
+                            className="flex h-8 w-full items-center gap-2 rounded-[6px] px-2.5 text-left text-[13px] font-medium text-red-300/90 transition-colors duration-150 hover:bg-red-500/10 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             <Trash2 aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.4} />
                             {deleting
@@ -2155,7 +2156,7 @@ function TemplateDetailView({
                   type="button"
                   disabled={deleting}
                   onClick={onEdit}
-                  className="inline-flex h-8 items-center justify-center gap-1.5 bg-transparent px-2 text-[12px] font-medium text-[var(--team-template-muted)] transition-colors duration-150 hover:text-[var(--team-template-title)] disabled:opacity-50"
+                  className="inline-flex h-8 items-center justify-center gap-1.5 bg-transparent px-2 text-[13px] font-medium text-[var(--team-template-muted)] transition-colors duration-150 hover:text-[var(--team-template-title)] disabled:opacity-50"
                 >
                   <Pencil aria-hidden="true" className="h-3.5 w-3.5 text-[var(--team-template-muted)]" strokeWidth={1.2} />
                   {translateWithFallback(t, "teamTemplates.edit", "Edit")}
@@ -2164,7 +2165,7 @@ function TemplateDetailView({
                   type="button"
                   disabled={deleting}
                   onClick={onDelete}
-                  className={`${dangerGhostButtonClassName} h-8 gap-1.5 px-3 text-[12px] font-medium`}
+                  className={`${dangerGhostButtonClassName} h-8 gap-1.5 px-3 text-[13px] font-medium`}
                 >
                   <Trash2 aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.2} />
                   {deleting
@@ -2178,12 +2179,12 @@ function TemplateDetailView({
                 type="button"
                 onClick={onUseTemplate}
                 disabled={usingTemplate || deleting}
-                className={`${brandPrimaryButtonClassName} h-8 gap-2 rounded-[6px] px-3 text-[12px]`}
+                className={`${brandPrimaryButtonClassName} h-8 gap-2 rounded-[6px] px-3 text-[13px]`}
               >
                 {usingTemplate
                   ? translateWithFallback(t, "teamTemplates.applying", "Applying...")
                   : translateWithFallback(t, "teamTemplates.use", "Use template")}
-                <kbd className="rounded-[3px] border border-white/25 bg-white/10 px-1.5 py-px font-mono text-[9px] font-semibold leading-none text-white/75">
+                <kbd className="rounded-[3px] border border-white/25 bg-white/10 px-1.5 py-px font-mono text-[10px] font-semibold leading-none text-white/75">
                   ⌘ Enter
                 </kbd>
               </button>
@@ -2214,11 +2215,11 @@ function TemplateDetailView({
           }
         >
           <header className="mb-2 flex min-h-7 items-center justify-between gap-3">
-            <h2 className="text-[12px] font-medium tracking-[0.02em] text-[var(--team-template-muted)]">
+            <h2 className="text-[13px] font-medium tracking-[0.02em] text-[var(--team-template-muted)]">
               {translateWithFallback(t, "teamTemplates.members.title", "Members")}
             </h2>
             <div className="flex items-center gap-2">
-              <span className="font-mono text-[9px] font-medium text-[var(--team-template-aux)] tabular-nums">
+              <span className="font-mono text-[10px] font-medium text-[var(--team-template-aux)] tabular-nums">
                 MEMBERS / {String(viewDetail.members.length).padStart(2, "0")}
               </span>
               {isEditing && (
@@ -2226,7 +2227,7 @@ function TemplateDetailView({
                   type="button"
                   disabled={controlsDisabled}
                   onClick={addCustomMember}
-                  className={`${quietButtonClassName} h-7 gap-1.5 px-2.5 text-[11px] font-medium disabled:opacity-50`}
+                  className={`${quietButtonClassName} h-7 gap-1.5 px-2.5 text-[12px] font-medium disabled:opacity-50`}
                 >
                   <Plus aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={1.4} />
                   {translateWithFallback(t, "teamTemplates.members.add", "Add member")}
@@ -2237,7 +2238,7 @@ function TemplateDetailView({
 
           <div>
               {viewDetail.members.length === 0 && (
-                <p className="rounded-[4px] border border-dashed border-[var(--team-template-border)] px-3 py-4 text-[12px] text-[var(--team-template-muted)]">
+                <p className="rounded-[4px] border border-dashed border-[var(--team-template-border)] px-3 py-4 text-[13px] text-[var(--team-template-muted)]">
                   {translateWithFallback(t, "teamTemplates.members.empty", "No members added yet.")}
                 </p>
               )}
@@ -2251,7 +2252,7 @@ function TemplateDetailView({
                   translateWithFallback(t, "teamTemplates.member.noDescription", "No role description.");
 
                 const rowClassName = [
-                  "team-template-member-row group grid min-h-[38px] w-full grid-cols-1 gap-1 border-b border-[var(--team-template-border)] px-1.5 py-1.5 text-left text-[13px] transition-colors duration-150 last:border-b-0 md:grid-cols-[minmax(140px,0.72fr)_minmax(0,1fr)_auto] md:items-center md:gap-2",
+                  "team-template-member-row group grid min-h-[38px] w-full grid-cols-1 gap-1 border-b border-[var(--team-template-border)] px-1.5 py-1.5 text-left text-[14px] transition-colors duration-150 last:border-b-0 md:grid-cols-[minmax(140px,0.72fr)_minmax(0,1fr)_auto] md:items-center md:gap-2",
                   active
                     ? "bg-[var(--team-template-row-active)] shadow-[inset_2px_0_0_var(--team-template-border-strong)]"
                     : "hover:bg-[var(--team-template-row-hover)]",
@@ -2278,13 +2279,13 @@ function TemplateDetailView({
                         />
                       ) : null}
                       <span
-                        className={`min-w-0 truncate font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--team-template-code-text)] transition-colors duration-150 group-hover:text-[var(--team-template-title)] ${getMemberRoleToneClassName(member, index)}`}
+                        className={`min-w-0 truncate font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--team-template-code-text)] transition-colors duration-150 group-hover:text-[var(--team-template-title)] ${getMemberRoleToneClassName(member, index)}`}
                         title={roleKey}
                       >
                         {roleKey}
                       </span>
                       {isLead && (
-                        <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap font-mono text-[9px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-muted)]">
+                        <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap font-mono text-[10px] font-semibold uppercase tracking-[0.04em] text-[var(--team-template-muted)]">
                           <span className="h-1 w-1 rounded-full bg-current opacity-70" />
                           {translateWithFallback(t, "teamTemplates.members.lead", "Lead")}
                         </span>
@@ -2292,7 +2293,7 @@ function TemplateDetailView({
                     </span>
 
                     <span
-                      className="min-w-0 text-[12px] leading-[1.4] text-[var(--team-template-member-description)] md:truncate"
+                      className="min-w-0 text-[13px] leading-[1.4] text-[var(--team-template-member-description)] md:truncate"
                       title={description}
                     >
                       {description}
@@ -2301,7 +2302,7 @@ function TemplateDetailView({
                     <span className="inline-flex items-center gap-2 md:justify-self-end">
                       {member.selected_skill_ids.length > 0 && (
                         <span
-                          className="inline-flex items-center gap-1 rounded-[4px] border border-[var(--team-template-ghost-badge-border)] px-1.5 py-0.5 font-mono text-[9px] font-medium text-[var(--team-template-aux)] tabular-nums"
+                          className="inline-flex items-center gap-1 rounded-[4px] border border-[var(--team-template-ghost-badge-border)] px-1.5 py-0.5 font-mono text-[10px] font-medium text-[var(--team-template-aux)] tabular-nums"
                           title={member.selected_skill_ids.join(", ")}
                         >
                           <span className="h-1 w-1 rounded-full bg-current opacity-60" />
@@ -2362,10 +2363,10 @@ function TemplateDetailView({
       {(isEditing || viewDetail.team_protocol) && (
         <section className="mt-12 border-t border-[var(--team-template-border)] pt-6">
           <div className="mb-3 flex items-center justify-between gap-3">
-            <h2 className="text-[12px] font-medium tracking-[0.02em] text-[var(--team-template-muted)]">
+            <h2 className="text-[13px] font-medium tracking-[0.02em] text-[var(--team-template-muted)]">
               {translateWithFallback(t, "teamTemplates.protocol.title", "Collaboration protocol")}
             </h2>
-            <span className="font-mono text-[9px] font-medium text-[var(--team-template-aux)]">
+            <span className="font-mono text-[10px] font-medium text-[var(--team-template-aux)]">
               TEAM PROTOCOL
             </span>
           </div>
@@ -2383,14 +2384,15 @@ function TemplateDetailView({
                 }}
               />
             ) : (
-              <AgentMarkdown content={viewDetail.team_protocol} fontSize={13} />
+              <AgentMarkdown content={viewDetail.team_protocol} fontSize={14} />
             )}
           </div>
         </section>
       )}
       </div>
+      </div>
 
-      <aside className="min-h-0 border-t border-[var(--team-template-grid-line-strong)] p-4 lg:h-full lg:border-l lg:border-t-0 lg:p-5">
+      <aside className="min-h-0 border-t border-[var(--team-template-grid-line-strong)] bg-[var(--team-template-surface)] p-4 lg:h-full lg:border-l lg:border-t-0 lg:px-6 lg:pb-6 lg:pt-[68px]">
         {selectedMember && (
           <TemplateMemberInfoPage
             disabled={controlsDisabled}
@@ -2445,11 +2447,11 @@ function UnsavedEditorExitDialog({
           <div className="min-w-0 flex-1">
             <h2
               id="unsaved-template-title"
-              className="text-[15px] font-semibold text-[var(--team-template-title)]"
+              className="text-[16px] font-semibold text-[var(--team-template-title)]"
             >
               {translateWithFallback(t, "teamTemplates.unsaved.title", "Save changes before exiting?")}
             </h2>
-            <p className="mt-1 text-[13px] leading-relaxed text-[var(--team-template-muted)]">
+            <p className="mt-1 text-[14px] leading-relaxed text-[var(--team-template-muted)]">
               {translateWithFallback(t, "teamTemplates.unsaved.description", "This template has unsaved changes. Save them first, or discard them and exit editing.")}
             </p>
           </div>
@@ -2470,7 +2472,7 @@ function UnsavedEditorExitDialog({
             type="button"
             onClick={onDiscard}
             disabled={saving}
-            className={`${dangerGhostButtonClassName} h-8 px-3 text-[12px] font-medium disabled:cursor-not-allowed`}
+            className={`${dangerGhostButtonClassName} h-8 px-3 text-[13px] font-medium disabled:cursor-not-allowed`}
           >
             {translateWithFallback(t, "teamTemplates.unsaved.discard", "Discard changes")}
           </button>
@@ -2478,7 +2480,7 @@ function UnsavedEditorExitDialog({
             type="button"
             onClick={onCancel}
             disabled={saving}
-            className={`${quietButtonClassName} h-8 px-3 text-[12px] font-medium disabled:cursor-not-allowed disabled:opacity-60`}
+            className={`${quietButtonClassName} h-8 px-3 text-[13px] font-medium disabled:cursor-not-allowed disabled:opacity-60`}
           >
             {translateWithFallback(t, "teamTemplates.unsaved.continue", "Continue editing")}
           </button>
@@ -2486,7 +2488,7 @@ function UnsavedEditorExitDialog({
             type="button"
             onClick={onSave}
             disabled={saving}
-            className="inline-flex h-8 items-center justify-center rounded-[6px] border border-white/20 bg-[#f4f4f5] px-3 text-[12px] font-semibold text-[#08090a] shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-1px_0_rgba(0,0,0,0.08),0_1px_0_rgba(0,0,0,0.35),0_2px_0_rgba(0,0,0,0.16)] transition-all duration-150 ease-out hover:-translate-y-px hover:bg-white disabled:cursor-not-allowed disabled:translate-y-0 disabled:opacity-70"
+            className={`${brandPrimaryButtonClassName} h-8 rounded-[6px] px-3 text-[13px] disabled:opacity-70`}
           >
             {saving
               ? translateWithFallback(t, "teamTemplates.saving", "Saving...")
@@ -2532,14 +2534,14 @@ function UseTeamTemplateDialog({
           <div className="min-w-0 flex-1">
             <h2
               id="use-team-template-title"
-              className="text-[15px] font-semibold text-[var(--team-template-title)]"
+              className="text-[16px] font-semibold text-[var(--team-template-title)]"
             >
               {translateWithFallback(t, "teamTemplates.useDialog.title", "Use this template?")}
             </h2>
-            <p className="mt-1 text-[13px] leading-relaxed text-[var(--team-template-muted)]">
+            <p className="mt-1 text-[14px] leading-relaxed text-[var(--team-template-muted)]">
               {translateWithFallback(t, "teamTemplates.useDialog.description", "This replaces the current team members and syncs the team protocol.")}
             </p>
-            <p className="mt-3 truncate rounded-[7px] border border-[var(--team-template-border)] px-3 py-2 text-[12px] font-medium text-[var(--team-template-title)]">
+            <p className="mt-3 truncate rounded-[7px] border border-[var(--team-template-border)] px-3 py-2 text-[13px] font-medium text-[var(--team-template-title)]">
               {detail.name}
             </p>
           </div>
@@ -2560,7 +2562,7 @@ function UseTeamTemplateDialog({
             type="button"
             onClick={onCancel}
             disabled={applying}
-            className={`${quietButtonClassName} h-8 px-3 text-[12px] font-medium disabled:cursor-not-allowed disabled:opacity-60`}
+            className={`${quietButtonClassName} h-8 px-3 text-[13px] font-medium disabled:cursor-not-allowed disabled:opacity-60`}
           >
             {translateWithFallback(t, "teamTemplates.cancel", "Cancel")}
           </button>
@@ -2568,7 +2570,7 @@ function UseTeamTemplateDialog({
             type="button"
             onClick={onConfirm}
             disabled={applying}
-            className="inline-flex h-8 items-center justify-center rounded-[6px] border border-white/20 bg-[#f4f4f5] px-3 text-[12px] font-semibold text-[#08090a] shadow-[inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-1px_0_rgba(0,0,0,0.08),0_1px_0_rgba(0,0,0,0.35),0_2px_0_rgba(0,0,0,0.16)] transition-all duration-150 ease-out hover:-translate-y-px hover:bg-white disabled:cursor-not-allowed disabled:translate-y-0 disabled:opacity-70"
+            className={`${brandPrimaryButtonClassName} h-8 rounded-[6px] px-3 text-[13px] disabled:opacity-70`}
           >
             {applying
               ? translateWithFallback(t, "teamTemplates.replacing", "Replacing...")
@@ -2594,7 +2596,7 @@ function TemplateCard({
   return (
     <div
       onClick={onClick}
-      className={`team-template-card group relative flex min-h-[124px] cursor-pointer flex-col rounded-lg p-3 ${hairlineSurfaceClassName} ${interactiveSurfaceClassName}`}
+      className={`team-template-card group relative flex min-h-[124px] cursor-pointer flex-col rounded-[8px] p-3 ${hairlineSurfaceClassName} ${interactiveSurfaceClassName}`}
     >
       {template.is_builtin && (
         <div className="absolute right-3 top-3">
@@ -2607,12 +2609,12 @@ function TemplateCard({
           <CategoryIcon className="h-4 w-4" strokeWidth={1.5} />
         </div>
         <div className="min-w-0 flex-1">
-          <h3 className="min-w-0 whitespace-normal break-words text-[13px] font-semibold leading-snug text-[var(--team-template-title)]">
+          <h3 className="min-w-0 whitespace-normal break-words text-[14px] font-semibold leading-snug text-[var(--team-template-title)]">
             {template.name}
           </h3>
           {template.description && (
             <p
-              className="mt-1 line-clamp-2 text-[11px] leading-snug text-[#888888]"
+              className="mt-1 line-clamp-2 text-[12px] leading-snug text-[var(--team-template-muted)]"
               title={template.description}
             >
               {template.description}
@@ -2624,11 +2626,11 @@ function TemplateCard({
       <div className="mt-auto flex items-center justify-between gap-3 pt-0.5">
         <div className="flex min-w-0 items-center gap-2">
           <AgentAvatarGroup template={template} />
-          <span className="min-w-0 font-mono text-[11px] font-medium text-[var(--team-template-aux)] tabular-nums">
+          <span className="min-w-0 font-mono text-[12px] font-medium text-[var(--team-template-aux)] tabular-nums">
             {translateWithFallback(t, "teamTemplates.memberCount", "{count} members", { count: template.member_count })}
           </span>
         </div>
-        <span className="shrink-0 font-mono text-[10px] font-medium text-[var(--team-template-aux)] tabular-nums">
+        <span className="shrink-0 font-mono text-[11px] font-medium text-[var(--team-template-aux)] tabular-nums">
           {getTemplateVersionLabel(template)}
         </span>
       </div>
@@ -3203,7 +3205,7 @@ export function TeamTemplatesPage() {
 
         {!loading && loadError && (
           <div className="flex h-full w-full flex-col items-center justify-center p-8 text-center">
-            <h2 className="text-[15px] font-medium text-[var(--team-template-title)]">
+            <h2 className="text-[16px] font-medium text-[var(--team-template-title)]">
               {translateWithFallback(t, "teamTemplates.loadTitle", "Could not load templates")}
             </h2>
             <p className="mt-2 text-[14px] text-[var(--team-template-muted)]">
@@ -3212,7 +3214,7 @@ export function TeamTemplatesPage() {
             <button
               type="button"
               onClick={() => void loadTemplates()}
-              className={`${quietButtonClassName} mt-6 h-9 px-4 text-[13px] font-medium`}
+              className={`${quietButtonClassName} mt-6 h-9 px-4 text-[14px] font-medium`}
             >
               {translateWithFallback(t, "teamTemplates.retry", "Retry")}
             </button>
@@ -3288,7 +3290,7 @@ export function TeamTemplatesPage() {
           <div className="w-full px-4 py-6 sm:px-5 md:px-6 md:py-8 lg:px-8 lg:py-10">
             {currentActiveTemplate && (
               <section className="mb-8">
-                <div className={`group relative flex cursor-pointer items-center gap-3 overflow-hidden rounded-lg px-3 py-2.5 ${activeSurfaceClassName} transition-all duration-200 ease-out hover:-translate-y-px hover:bg-[var(--team-template-surface-hover)]`} onClick={() => openTemplateDetail(currentActiveTemplate.id)}>
+                <div className={`group relative flex cursor-pointer items-center gap-3 overflow-hidden rounded-[8px] px-3 py-2.5 ${activeSurfaceClassName} transition-colors duration-150 ease-out hover:bg-[var(--team-template-surface-hover)]`} onClick={() => openTemplateDetail(currentActiveTemplate.id)}>
                   <span
                     aria-hidden="true"
                     className="pointer-events-none absolute inset-y-0 left-0 w-px bg-[var(--team-template-accent)]"
@@ -3299,16 +3301,16 @@ export function TeamTemplatesPage() {
                     </div>
                     <div className="flex min-w-0 flex-1 flex-col">
                       <div className="flex items-center">
-                        <span className="font-mono text-[11px] font-medium text-[var(--team-template-aux)]">
+                        <span className="font-mono text-[12px] font-medium text-[var(--team-template-aux)]">
                           {translateWithFallback(t, "teamTemplates.currentActive", "Current active template")}
                         </span>
                       </div>
-                      <h3 className="whitespace-normal break-words text-[13px] font-semibold leading-snug text-[var(--team-template-title)]">
+                      <h3 className="whitespace-normal break-words text-[14px] font-semibold leading-snug text-[var(--team-template-title)]">
                         {currentActiveTemplate.name}
                       </h3>
                       {currentActiveTemplate.description && (
                         <p
-                          className="mt-0.5 line-clamp-1 text-[12px] leading-snug text-[#888888]"
+                          className="mt-0.5 line-clamp-1 text-[13px] leading-snug text-[var(--team-template-muted)]"
                           title={currentActiveTemplate.description}
                         >
                           {currentActiveTemplate.description}
@@ -3317,7 +3319,7 @@ export function TeamTemplatesPage() {
                     </div>
                   </div>
                   <div className="hidden min-w-[150px] flex-col md:flex">
-                    <div className="flex items-center justify-between gap-2 font-mono text-[10px] text-[var(--team-template-aux)]">
+                    <div className="flex items-center justify-between gap-2 font-mono text-[11px] text-[var(--team-template-aux)]">
                       <span>{getTemplateVersionLabel(currentActiveTemplate)}</span>
                       <span>{translateWithFallback(t, "teamTemplates.updatedRecently", "Updated recently")}</span>
                     </div>
@@ -3325,9 +3327,9 @@ export function TeamTemplatesPage() {
                   <div className="hidden lg:flex">
                     <AgentAvatarGroup template={currentActiveTemplate} />
                   </div>
-                  <button className={`${quietButtonClassName} h-7 gap-1.5 px-2.5 text-[12px] font-medium`}>
+                  <button className={`${quietButtonClassName} h-7 gap-1.5 px-2.5 text-[13px] font-medium`}>
                     {translateWithFallback(t, "teamTemplates.configure", "Configure")}
-                    <kbd className="rounded border border-[var(--team-template-border)] px-1.5 py-px font-mono text-[10px] font-medium text-[var(--team-template-aux)]">
+                    <kbd className="rounded border border-[var(--team-template-border)] px-1.5 py-px font-mono text-[11px] font-medium text-[var(--team-template-aux)]">
                       C
                     </kbd>
                   </button>
@@ -3335,15 +3337,15 @@ export function TeamTemplatesPage() {
               </section>
             )}
 
-            <section className="mb-12">
-              <h2 className="mb-5 text-xs font-medium text-[var(--team-template-muted)]">
-                标准模板 (<span className="font-mono text-[13px] tabular-nums text-[var(--team-template-title)]">{standardTemplates.length}</span>)
+            <section className="mb-10">
+              <h2 className="mb-4 text-[12px] font-semibold uppercase tracking-[0.12em] text-[var(--team-template-aux)]">
+                {translateWithFallback(t, "teamTemplates.tiers.standard", "Standard templates")} (<span className="font-mono tabular-nums text-[var(--team-template-title)]">{standardTemplates.length}</span>)
               </h2>
               {standardTemplates.length === 0 ? (
                 <button
                   type="button"
                   onClick={startCreate}
-                  className={`flex w-full flex-col items-center justify-center rounded-lg border border-dashed border-[var(--team-template-border)] bg-[var(--team-template-surface)] py-12 shadow-[inset_0_1px_0_var(--team-template-top-highlight)] transition-all duration-150 ease-out hover:-translate-y-px hover:border-[var(--team-template-border-strong)] hover:bg-[var(--team-template-surface-hover)]`}
+                  className={`flex w-full flex-col items-center justify-center rounded-[8px] border border-dashed border-[var(--team-template-border)] bg-[var(--team-template-surface)] py-12 transition-colors duration-150 ease-out hover:border-[var(--team-template-border-strong)] hover:bg-[var(--team-template-surface-hover)]`}
                 >
                   <div className={`flex h-12 w-12 items-center justify-center rounded-lg text-[var(--team-template-muted)] ${hairlineSurfaceClassName}`}>
                     <Plus className="h-6 w-6" strokeWidth={1.5} />
@@ -3356,7 +3358,7 @@ export function TeamTemplatesPage() {
                   </p>
                 </button>
               ) : (
-                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
                   {standardTemplates.map((template) => (
                     <TemplateCard
                       key={template.id}
@@ -3370,15 +3372,15 @@ export function TeamTemplatesPage() {
             </section>
 
             <section>
-              <h2 className="mb-5 text-xs font-medium text-[var(--team-template-muted)]">
-                高级模板 (<span className="font-mono text-[13px] tabular-nums text-[var(--team-template-title)]">{advancedTemplates.length}</span>)
+              <h2 className="mb-4 text-[12px] font-semibold uppercase tracking-[0.12em] text-[var(--team-template-aux)]">
+                {translateWithFallback(t, "teamTemplates.tiers.advanced", "Advanced templates")} (<span className="font-mono tabular-nums text-[var(--team-template-title)]">{advancedTemplates.length}</span>)
               </h2>
               {advancedTemplates.length === 0 ? (
-                <p className="text-[12px] text-[var(--team-template-muted)]">
-                  No advanced templates available.
+                <p className="text-[13px] text-[var(--team-template-muted)]">
+                  {translateWithFallback(t, "teamTemplates.tiers.emptyAdvanced", "No advanced templates available.")}
                 </p>
               ) : (
-                <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
                   {advancedTemplates.map((template) => (
                     <TemplateCard
                       key={template.id}
