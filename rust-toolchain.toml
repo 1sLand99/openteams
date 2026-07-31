@@ -6,7 +6,6 @@ components = [
     "rust-analyzer",
     "rust-src",
     "rust-std",
-    "cargo",
-    "toolchain"
+    "cargo"
 ]
 profile = "default"
