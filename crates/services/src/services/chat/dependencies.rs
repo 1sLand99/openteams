@@ -2,7 +2,6 @@
 pub const DEFAULT_TOKEN_THRESHOLD: u32 = 50000;
 /// Default percentage of messages to compress (25%)
 pub const DEFAULT_COMPRESSION_PERCENTAGE: u8 = 25;
-const SUMMARY_EXECUTION_TIMEOUT: Duration = Duration::from_secs(120);
 const SUMMARY_DRAIN_TIMEOUT: Duration = Duration::from_millis(350);
 const SUMMARY_REAP_TIMEOUT: Duration = Duration::from_secs(3);
 const SUMMARY_KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);

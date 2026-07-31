@@ -20,7 +20,7 @@ use tokio::{
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
-use workspace_utils::approvals::ApprovalStatus;
+use workspace_utils::{approvals::ApprovalStatus, msg_store::SESSION_INACTIVITY_TIMEOUT};
 
 use super::{slash_commands, types::OpenTeamsCliExecutorEvent};
 use crate::{
@@ -232,13 +232,6 @@ fn local_client_builder() -> reqwest::ClientBuilder {
         .connect_timeout(LOCAL_CONNECT_TIMEOUT)
 }
 
-/// If the local executor server stops emitting any session activity while a request is still
-/// pending, fail the run so the session agent state does not stay stuck on `running` forever.
-///
-/// Do not also apply this duration as a reqwest request timeout. Session requests stay open for
-/// the entire agent turn and may legitimately run longer than this while SSE activity keeps
-/// resetting the watchdog in `run_request_with_control_timeout`.
-const REQUEST_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// `session.status: idle` may be immediately preceded or followed by a
 /// provider error. Keep consuming the control channel briefly so an idle
 /// notification cannot mask a terminal error that is already in flight.
@@ -445,7 +438,7 @@ where
         &mut request_fut,
         control_rx,
         cancel,
-        REQUEST_ACTIVITY_TIMEOUT,
+        SESSION_INACTIVITY_TIMEOUT,
     )
     .await
 }
@@ -1965,11 +1958,10 @@ mod tests {
     use tokio::sync::{Mutex, mpsc};
 
     use super::{
-        ConfigProvidersResponse, ControlEvent, ProviderInfo, REQUEST_ACTIVITY_TIMEOUT,
-        build_default_headers, create_session, event_matches_session, extract_retry_status,
-        is_retryable_openteams_cli_db_init_error, local_client_builder,
-        resolve_model_spec_from_config, resolve_session_id, run_request_with_control,
-        run_request_with_control_timeout, session_status_is_idle,
+        ConfigProvidersResponse, ControlEvent, ProviderInfo, build_default_headers, create_session,
+        event_matches_session, extract_retry_status, is_retryable_openteams_cli_db_init_error,
+        local_client_builder, resolve_model_spec_from_config, resolve_session_id,
+        run_request_with_control, run_request_with_control_timeout, session_status_is_idle,
     };
     use crate::executors::{
         ExecutorError,
@@ -1977,8 +1969,11 @@ mod tests {
     };
 
     #[test]
-    fn request_activity_timeout_is_thirty_minutes() {
-        assert_eq!(REQUEST_ACTIVITY_TIMEOUT, Duration::from_secs(30 * 60));
+    fn request_activity_timeout_is_forty_minutes() {
+        assert_eq!(
+            workspace_utils::msg_store::SESSION_INACTIVITY_TIMEOUT,
+            Duration::from_secs(40 * 60)
+        );
     }
 
     #[test]

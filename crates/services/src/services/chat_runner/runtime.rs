@@ -3302,6 +3302,24 @@ impl ChatRunner {
 
                 completion = RunCompletionStatus::Stopped;
             }
+            LifecycleEvent::SessionInactivityTimeout => {
+                if let Some(token) = executor_cancel.as_ref() {
+                    token.cancel();
+                }
+
+                let reason = format!(
+                    "Executor timed out after {}s without session activity",
+                    SESSION_INACTIVITY_TIMEOUT.as_secs()
+                );
+                *terminal_failure_reason.lock().await = Some(reason.clone());
+                msg_store.push(LogMsg::Stderr(reason));
+                if let Err(err) =
+                    process::terminate_process_group(&mut child, graceful_timeout).await
+                {
+                    msg_store.push(LogMsg::Stderr(format!("process cleanup error: {err}")));
+                }
+                completion = RunCompletionStatus::Failed;
+            }
         }
 
         completion.store(&completion_status);
@@ -3353,6 +3371,28 @@ impl ChatRunner {
         msg_store: &MsgStore,
         session_agent_id: Uuid,
     ) -> LifecycleEvent {
+        Self::wait_for_lifecycle_event_with_inactivity_timeout(
+            child,
+            stop,
+            exit_signal,
+            msg_store,
+            session_agent_id,
+            SESSION_INACTIVITY_TIMEOUT,
+        )
+        .await
+    }
+
+    pub(super) async fn wait_for_lifecycle_event_with_inactivity_timeout(
+        child: &mut command_group::AsyncGroupChild,
+        stop: &CancellationToken,
+        exit_signal: &mut Option<ExecutorExitSignal>,
+        msg_store: &MsgStore,
+        session_agent_id: Uuid,
+        inactivity_timeout: std::time::Duration,
+    ) -> LifecycleEvent {
+        let inactivity = msg_store.wait_for_inactivity(inactivity_timeout);
+        tokio::pin!(inactivity);
+
         loop {
             tokio::select! {
                 status = child.wait() => {
@@ -3360,6 +3400,9 @@ impl ChatRunner {
                 }
                 _ = stop.cancelled() => {
                     return LifecycleEvent::StopRequested;
+                }
+                _ = &mut inactivity => {
+                    return LifecycleEvent::SessionInactivityTimeout;
                 }
                 signal_result = async {
                     let signal = exit_signal.as_mut().expect("exit signal checked");

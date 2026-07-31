@@ -752,6 +752,7 @@ async fn run_workflow_agent_prompt_inner(
             &mut spawned.child,
             &mut exit_signal,
             spawned.cancel.clone(),
+            &msg_store,
         )
         .await;
         // Some executors let their child process exit just before the task
@@ -808,7 +809,7 @@ async fn run_workflow_agent_prompt_inner(
                     interrupted = true;
                     terminate_child(&mut spawned).await;
                 } else {
-                    match wait_for_process_exit(&mut spawned, &agent.name).await {
+                    match wait_for_process_exit(&mut spawned, &agent.name, &msg_store).await {
                     Ok(exit_status) => status = Some(exit_status),
                     Err(error) => {
                         terminate_child(&mut spawned).await;
@@ -884,8 +885,7 @@ async fn run_workflow_agent_prompt_inner(
                 finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
                 finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
                 let history = msg_store.get_history();
-                let message =
-                    workflow_executor_failure_message(&agent.name, "workflow 执行超时", &history);
+                let message = workflow_executor_inactivity_message(&agent.name, &history);
                 let latest_assistant =
                     extract_latest_assistant_from_history(&history).unwrap_or_default();
                 finish_workflow_runtime_run_record(
@@ -935,7 +935,7 @@ async fn run_workflow_agent_prompt_inner(
             }
         }
     } else {
-        match wait_for_process_exit(&mut spawned, &agent.name).await {
+        match wait_for_process_exit(&mut spawned, &agent.name, &msg_store).await {
             Ok(exit_status) => status = Some(exit_status),
             Err(error) => {
                 terminate_child(&mut spawned).await;
@@ -974,9 +974,11 @@ async fn run_workflow_agent_prompt_inner(
         terminate_child(&mut spawned).await;
         let history = msg_store.get_history();
         let latest_assistant = extract_latest_assistant_from_history(&history).unwrap_or_default();
-        let message = format!(
-            "workflow step 被中断：{}",
-            agent.name
+        let message = workflow_runtime_error_message(
+            WorkflowRuntimeErrorCode::StepInterrupted,
+            Some(&agent.name),
+            None,
+            None,
         );
         finish_workflow_runtime_run_record(
             db,
@@ -1022,8 +1024,11 @@ async fn run_workflow_agent_prompt_inner(
         && !exit_status.success()
     {
         let history = msg_store.get_history();
-        let message =
-            workflow_executor_failure_message(&agent.name, "workflow 执行失败", &history);
+        let message = workflow_executor_failure_message(
+            &agent.name,
+            WorkflowRuntimeErrorCode::ExecutionFailed,
+            &history,
+        );
         let latest_assistant = extract_latest_assistant_from_history(&history).unwrap_or_default();
         finish_workflow_runtime_run_record(
             db,
@@ -1095,7 +1100,7 @@ async fn run_workflow_agent_prompt_inner(
     let Some(latest_assistant) = extract_latest_assistant_from_history(&history) else {
         let message = workflow_executor_failure_message(
             &agent.name,
-            "workflow agent 没有返回 assistant 输出",
+            WorkflowRuntimeErrorCode::MissingAssistantOutput,
             &history,
         );
         finish_workflow_runtime_run_record(
@@ -1316,13 +1321,67 @@ fn sanitize_debug_prompt_filename_component(value: &str) -> String {
     }
 }
 
-fn workflow_executor_failure_message(agent_name: &str, reason: &str, history: &[LogMsg]) -> String {
-    let base = format!("{reason}：{agent_name}");
-    let Some(excerpt) = workflow_executor_log_excerpt(history) else {
-        return base;
-    };
+const WORKFLOW_RUNTIME_ERROR_PREFIX: &str = "openteams.workflow_runtime_error:";
+const WORKFLOW_RUNTIME_ERROR_DETAIL_PREFIX: &str =
+    "openteams.workflow_runtime_error_detail:";
 
-    format!("{base}\n\nExecutor error:\n{excerpt}")
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkflowRuntimeErrorCode {
+    SessionInactivityTimeout,
+    StepInterrupted,
+    ExecutionFailed,
+    MissingAssistantOutput,
+    ChildStdoutMissing,
+    ChildStderrMissing,
+}
+
+#[derive(Serialize)]
+struct WorkflowRuntimeErrorPayload<'a> {
+    code: WorkflowRuntimeErrorCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inactivity_minutes: Option<u64>,
+}
+
+fn workflow_runtime_error_message(
+    code: WorkflowRuntimeErrorCode,
+    agent_name: Option<&str>,
+    inactivity_minutes: Option<u64>,
+    detail: Option<&str>,
+) -> String {
+    let payload = WorkflowRuntimeErrorPayload {
+        code,
+        agent_name,
+        inactivity_minutes,
+    };
+    let payload = serde_json::to_string(&payload)
+        .expect("workflow runtime error payload should always serialize");
+    let message = format!("{WORKFLOW_RUNTIME_ERROR_PREFIX}{payload}");
+    match detail.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(detail) => format!("{message}\n\n{WORKFLOW_RUNTIME_ERROR_DETAIL_PREFIX}{detail}"),
+        None => message,
+    }
+}
+
+fn workflow_executor_failure_message(
+    agent_name: &str,
+    code: WorkflowRuntimeErrorCode,
+    history: &[LogMsg],
+) -> String {
+    let excerpt = workflow_executor_log_excerpt(history);
+    workflow_runtime_error_message(code, Some(agent_name), None, excerpt.as_deref())
+}
+
+fn workflow_executor_inactivity_message(agent_name: &str, history: &[LogMsg]) -> String {
+    let excerpt = workflow_executor_log_excerpt(history);
+    workflow_runtime_error_message(
+        WorkflowRuntimeErrorCode::SessionInactivityTimeout,
+        Some(agent_name),
+        Some(SESSION_INACTIVITY_TIMEOUT.as_secs() / 60),
+        excerpt.as_deref(),
+    )
 }
 
 fn workflow_executor_signal_failure_message(
@@ -1331,10 +1390,19 @@ fn workflow_executor_signal_failure_message(
     history: &[LogMsg],
 ) -> String {
     if let Some(reason) = signal_error.map(str::trim).filter(|reason| !reason.is_empty()) {
-        return format!("{reason}：{agent_name}");
+        return workflow_runtime_error_message(
+            WorkflowRuntimeErrorCode::ExecutionFailed,
+            Some(agent_name),
+            None,
+            Some(reason),
+        );
     }
 
-    workflow_executor_failure_message(agent_name, "workflow 执行失败", history)
+    workflow_executor_failure_message(
+        agent_name,
+        WorkflowRuntimeErrorCode::ExecutionFailed,
+        history,
+    )
 }
 
 fn workflow_executor_log_excerpt(history: &[LogMsg]) -> Option<String> {
@@ -1615,10 +1683,20 @@ fn spawn_log_forwarders(
     msg_store: Arc<MsgStore>,
 ) -> Result<(), WorkflowRuntimeError> {
     let stdout = child.inner().stdout.take().ok_or_else(|| {
-        WorkflowRuntimeError::Validation("workflow child 缺少 stdout".to_string())
+        WorkflowRuntimeError::Validation(workflow_runtime_error_message(
+            WorkflowRuntimeErrorCode::ChildStdoutMissing,
+            None,
+            None,
+            None,
+        ))
     })?;
     let stderr = child.inner().stderr.take().ok_or_else(|| {
-        WorkflowRuntimeError::Validation("workflow child 缺少 stderr".to_string())
+        WorkflowRuntimeError::Validation(workflow_runtime_error_message(
+            WorkflowRuntimeErrorCode::ChildStderrMissing,
+            None,
+            None,
+            None,
+        ))
     })?;
 
     let stdout_store = msg_store.clone();
@@ -1675,40 +1753,66 @@ enum ExecutorWaitEvent {
     CancelRequested,
 }
 
+#[derive(Debug)]
+struct SessionInactivityTimeout;
+
 async fn wait_for_executor_exit_or_cancel(
     child: &mut command_group::AsyncGroupChild,
     exit_signal: &mut ExecutorExitSignal,
     cancel: Option<CancellationToken>,
-) -> Result<ExecutorWaitEvent, tokio::time::error::Elapsed> {
-    time::timeout(WORKFLOW_EXECUTION_TIMEOUT, async move {
-        if let Some(cancel) = cancel {
-            tokio::select! {
-                result = &mut *exit_signal => ExecutorWaitEvent::Exit(result),
-                result = child.wait() => ExecutorWaitEvent::ProcessExited(result),
-                _ = cancel.cancelled() => ExecutorWaitEvent::CancelRequested,
-            }
-        } else {
-            tokio::select! {
-                result = &mut *exit_signal => ExecutorWaitEvent::Exit(result),
-                result = child.wait() => ExecutorWaitEvent::ProcessExited(result),
+    msg_store: &MsgStore,
+) -> Result<ExecutorWaitEvent, SessionInactivityTimeout> {
+    wait_for_executor_exit_or_cancel_with_inactivity_timeout(
+        child,
+        exit_signal,
+        cancel,
+        msg_store,
+        SESSION_INACTIVITY_TIMEOUT,
+    )
+    .await
+}
+
+async fn wait_for_executor_exit_or_cancel_with_inactivity_timeout(
+    child: &mut command_group::AsyncGroupChild,
+    exit_signal: &mut ExecutorExitSignal,
+    cancel: Option<CancellationToken>,
+    msg_store: &MsgStore,
+    inactivity_timeout: Duration,
+) -> Result<ExecutorWaitEvent, SessionInactivityTimeout> {
+    if let Some(cancel) = cancel {
+        tokio::select! {
+            result = &mut *exit_signal => Ok(ExecutorWaitEvent::Exit(result)),
+            result = child.wait() => Ok(ExecutorWaitEvent::ProcessExited(result)),
+            _ = cancel.cancelled() => Ok(ExecutorWaitEvent::CancelRequested),
+            _ = msg_store.wait_for_inactivity(inactivity_timeout) => {
+                Err(SessionInactivityTimeout)
             }
         }
-    })
-    .await
+    } else {
+        tokio::select! {
+            result = &mut *exit_signal => Ok(ExecutorWaitEvent::Exit(result)),
+            result = child.wait() => Ok(ExecutorWaitEvent::ProcessExited(result)),
+            _ = msg_store.wait_for_inactivity(inactivity_timeout) => {
+                Err(SessionInactivityTimeout)
+            }
+        }
+    }
 }
 
 async fn wait_for_process_exit(
     spawned: &mut SpawnedChild,
     agent_name: &str,
+    msg_store: &MsgStore,
 ) -> Result<std::process::ExitStatus, WorkflowRuntimeError> {
-    match time::timeout(WORKFLOW_EXECUTION_TIMEOUT, spawned.child.wait()).await {
-        Ok(Ok(status)) => Ok(status),
-        Ok(Err(err)) => Err(WorkflowRuntimeError::Io(err)),
-        Err(_) => {
+    tokio::select! {
+        result = spawned.child.wait() => result.map_err(WorkflowRuntimeError::Io),
+        _ = msg_store.wait_for_inactivity(SESSION_INACTIVITY_TIMEOUT) => {
             terminate_child(spawned).await;
-            Err(WorkflowRuntimeError::Validation(format!(
-                "workflow agent '{}' 执行超时",
-                agent_name
+            Err(WorkflowRuntimeError::Validation(workflow_runtime_error_message(
+                WorkflowRuntimeErrorCode::SessionInactivityTimeout,
+                Some(agent_name),
+                Some(SESSION_INACTIVITY_TIMEOUT.as_secs() / 60),
+                None,
             )))
         }
     }

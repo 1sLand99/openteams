@@ -53,7 +53,12 @@ use sqlx::SqlitePool;
 use tokio::{fs, time};
 use tokio_util::io::ReaderStream;
 use ts_rs::TS;
-use utils::{log_msg::LogMsg, msg_store::MsgStore, process, utf8::Utf8LossyDecoder};
+use utils::{
+    log_msg::LogMsg,
+    msg_store::{MsgStore, SESSION_INACTIVITY_TIMEOUT},
+    process,
+    utf8::Utf8LossyDecoder,
+};
 use uuid::Uuid;
 
 use super::{

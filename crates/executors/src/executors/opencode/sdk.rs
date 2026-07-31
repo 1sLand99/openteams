@@ -20,7 +20,7 @@ use tokio::{
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
-use workspace_utils::approvals::ApprovalStatus;
+use workspace_utils::{approvals::ApprovalStatus, msg_store::SESSION_INACTIVITY_TIMEOUT};
 
 use super::{slash_commands, types::OpencodeExecutorEvent};
 use crate::{
@@ -231,10 +231,6 @@ fn local_client_builder() -> reqwest::ClientBuilder {
         .connect_timeout(LOCAL_CONNECT_TIMEOUT)
 }
 
-/// If the local executor server stops emitting any session activity while a request is still
-/// pending, fail the run so the session agent state does not stay stuck on `running` forever.
-const REQUEST_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(3600);
-
 pub async fn run_session(
     config: RunConfig,
     log_writer: LogWriter,
@@ -432,7 +428,7 @@ where
         &mut request_fut,
         control_rx,
         cancel,
-        REQUEST_ACTIVITY_TIMEOUT,
+        SESSION_INACTIVITY_TIMEOUT,
     )
     .await
 }
@@ -712,7 +708,6 @@ async fn prompt(
         .post(format!("{base_url}/session/{session_id}/message"))
         .query(&[("directory", directory)])
         .json(&req)
-        .timeout(REQUEST_ACTIVITY_TIMEOUT)
         .send()
         .await
         .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
@@ -815,7 +810,6 @@ pub async fn session_command(
         .post(format!("{base_url}/session/{session_id}/command"))
         .query(&[("directory", directory)])
         .json(&req)
-        .timeout(REQUEST_ACTIVITY_TIMEOUT)
         .send()
         .await
         .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;
@@ -887,7 +881,6 @@ pub async fn session_summarize(
         .post(format!("{base_url}/session/{session_id}/summarize"))
         .query(&[("directory", directory)])
         .json(&req)
-        .timeout(REQUEST_ACTIVITY_TIMEOUT)
         .send()
         .await
         .map_err(|err| ExecutorError::Io(io::Error::other(err)))?;

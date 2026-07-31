@@ -14,6 +14,7 @@ import {
 } from "@/components/approvals/executorApprovalPresentation";
 import { useAppScale } from "@/context/AppScaleContext";
 import { executorApprovalsApi } from "@/lib/api";
+import { localizeWorkflowRuntimeError } from "@/components/workflow/workflowRuntimeError";
 import type { Session } from "@/types";
 import type {
   ChatExecutorApprovalRequest,
@@ -546,6 +547,9 @@ export function InboxNotificationsPopover({
                       ? sessionTitleById.get(item.session_id)
                       : null;
                     const itemPending = actionItemId === item.id;
+                    const localizedBody = item.body
+                      ? localizeWorkflowRuntimeError(item.body, translate)
+                      : null;
                     return (
                       <div
                         key={item.id}
@@ -575,9 +579,9 @@ export function InboxNotificationsPopover({
                         <div className="mt-1 truncate text-[12px] font-semibold text-[var(--ink)]">
                           {item.title}
                         </div>
-                        {item.body && (
+                        {localizedBody && (
                           <div className="mt-0.5 line-clamp-1 text-[11px] leading-[1.5] text-[var(--ink-muted)]">
-                            {item.body}
+                            {localizedBody}
                           </div>
                         )}
                         {(item.kind === "executor_approval" ||

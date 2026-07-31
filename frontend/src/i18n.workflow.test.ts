@@ -20,6 +20,7 @@ const sourceFiles = [
   "./components/workflow/WorkflowReviewSettingsDialog.tsx",
   "./components/workflow/WorkflowWindow.tsx",
   "./components/workflow/workflowGeneratedText.ts",
+  "./components/workflow/workflowRuntimeError.ts",
   "./components/workflow/workflowStepPresentation.ts",
 ] as const;
 

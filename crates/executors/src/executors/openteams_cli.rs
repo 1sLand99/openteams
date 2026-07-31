@@ -819,12 +819,12 @@ mod tests {
     fn openteams_cli_failure_message_preserves_specific_io_cause() {
         let error = ExecutorError::Io(io::Error::new(
             io::ErrorKind::TimedOut,
-            "OpenTeamsCli request timed out after 1800s without session activity",
+            "OpenTeamsCli request timed out after 2400s without session activity",
         ));
 
         assert_eq!(
             executor_failure_message(&error),
-            "OpenTeamsCli request timed out after 1800s without session activity"
+            "OpenTeamsCli request timed out after 2400s without session activity"
         );
     }
 

@@ -23,12 +23,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
-use utils::approvals::{ApprovalRequest, ApprovalStatus};
+use utils::{
+    approvals::{ApprovalRequest, ApprovalStatus},
+    msg_store::SESSION_INACTIVITY_TIMEOUT,
+};
 use uuid::Uuid;
 
 use crate::services::inbox::InboxService;
 
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const APPROVAL_TIMEOUT: Duration = SESSION_INACTIVITY_TIMEOUT;
 const MAX_DISPLAY_INPUT_BYTES: usize = 16 * 1024;
 
 static WAITERS: LazyLock<DashMap<Uuid, oneshot::Sender<String>>> = LazyLock::new(DashMap::new);
@@ -713,8 +716,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn approval_timeout_is_thirty_minutes() {
-        assert_eq!(APPROVAL_TIMEOUT, Duration::from_secs(30 * 60));
+    fn approval_timeout_is_forty_minutes() {
+        assert_eq!(APPROVAL_TIMEOUT, Duration::from_secs(40 * 60));
     }
 
     #[test]

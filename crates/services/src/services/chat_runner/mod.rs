@@ -52,7 +52,7 @@ use ts_rs::TS;
 use utils::{
     assets::{asset_dir, config_path},
     log_msg::LogMsg,
-    msg_store::MsgStore,
+    msg_store::{MsgStore, SESSION_INACTIVITY_TIMEOUT},
     process,
     utf8::Utf8LossyDecoder,
 };
