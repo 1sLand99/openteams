@@ -1019,6 +1019,111 @@ check(
   "does not render duplicate project sessions from shell data",
   !html.includes("undefined"),
 );
+const pendingApprovalSessionHtml = renderToStaticMarkup(
+  <ProjectSidebar
+    shellOptions={mockShellOptions}
+    sessions={[
+      {
+        ...mockWorkspaceBootstrap.sessions[0],
+        hasPendingApproval: true,
+      },
+    ]}
+    activeSessionId="another-session"
+    activePage="workspace"
+    weeklyCost={mockWorkspaceBootstrap.defaults.weeklyCost}
+    onNavigate={() => undefined}
+    onSessionSelect={() => undefined}
+    onPrimaryAction={() => undefined}
+    onProjectAction={() => undefined}
+  />,
+);
+const approvalOrderedHtml = renderToStaticMarkup(
+  <ProjectSidebar
+    shellOptions={mockShellOptions}
+    sessions={mockWorkspaceBootstrap.sessions.map((session) => ({
+      ...session,
+      hasPendingApproval: session.id === "sess-8",
+    }))}
+    activeSessionId={mockWorkspaceBootstrap.defaults.activeSessionId}
+    activePage="workspace"
+    weeklyCost={mockWorkspaceBootstrap.defaults.weeklyCost}
+    onNavigate={() => undefined}
+    onSessionSelect={() => undefined}
+    onPrimaryAction={() => undefined}
+    onProjectAction={() => undefined}
+  />,
+);
+const approvalPriorityOrderIds = prioritizeSessions(
+  mockWorkspaceBootstrap.sessions.map((session) => ({
+    ...session,
+    hasPendingApproval: session.id === "sess-8",
+  })),
+).map((session) => session.id);
+check(
+  "renders pending approval sessions with non-running highlighted CircleDot icon",
+  !pendingApprovalSessionHtml.includes("animate-spin") &&
+    pendingApprovalSessionHtml.includes("text-[var(--primary)]") &&
+    pendingApprovalSessionHtml.includes("waiting for approval"),
+  pendingApprovalSessionHtml,
+);
+check(
+  "uses CircleDot (not Box) for pending approval sessions in source",
+  componentSource.includes("hasPendingApproval") &&
+    componentSource.includes("hasPendingApproval\n                      ? CircleDot"),
+  componentSource,
+);
+check(
+  "includes hasPendingApproval in sidebar priority function",
+  componentSource.includes(
+    "Boolean(session.hasPendingApproval)",
+  ),
+  componentSource,
+);
+check(
+  "moves pending approval sessions to the top of the collapsed session group",
+  approvalOrderedHtml.indexOf("Billing copy polish") >= 0 &&
+    approvalOrderedHtml.indexOf("Billing copy polish") <
+      approvalOrderedHtml.indexOf("Fix login flicker") &&
+    !approvalOrderedHtml.includes("Refactor auth guard"),
+  approvalOrderedHtml,
+);
+check(
+  "prioritizes pending approval sessions in sort order",
+  approvalPriorityOrderIds[0] === "sess-8",
+  approvalPriorityOrderIds,
+);
+const runningAndApprovalSessionHtml = renderToStaticMarkup(
+  <ProjectSidebar
+    shellOptions={mockShellOptions}
+    sessions={[
+      {
+        ...mockWorkspaceBootstrap.sessions[0],
+        hasRunningAgent: true,
+        hasPendingApproval: true,
+      },
+    ]}
+    activeSessionId="another-session"
+    activePage="workspace"
+    weeklyCost={mockWorkspaceBootstrap.defaults.weeklyCost}
+    onNavigate={() => undefined}
+    onSessionSelect={() => undefined}
+    onPrimaryAction={() => undefined}
+    onProjectAction={() => undefined}
+  />,
+);
+check(
+  "shows CircleDot (not spinner) when running and pending approval coexist",
+  !runningAndApprovalSessionHtml.includes("animate-spin") &&
+    runningAndApprovalSessionHtml.includes("text-[var(--primary)]") &&
+    runningAndApprovalSessionHtml.includes("waiting for approval") &&
+    !runningAndApprovalSessionHtml.includes("agent running"),
+  runningAndApprovalSessionHtml,
+);
+check(
+  "pending approval icon takes priority over running in source decision tree",
+  componentSource.includes("hasPendingApproval\n                      ? CircleDot\n                      : isRunning"),
+  componentSource,
+);
 
 if (failures > 0) {
   // eslint-disable-next-line no-console

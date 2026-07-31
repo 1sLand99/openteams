@@ -504,7 +504,7 @@ check('workflow edit fields use compact text-flow editing', source.includes('tea
 check('edit detail uses compact Linear density and hover-revealed actions', source.includes('team-template-compact-editor') && source.includes('team-template-compact-field') && source.includes('variant="inline"') && source.includes('group-hover:pointer-events-auto') && source.includes('compact'));
 check('edit detail removes the large title-to-content spacer but keeps title breathing room', source.includes('editable ? "pt-3"') && source.includes('isEditing ? "pt-3"') && source.includes('isEditing ? "gap-8" : "gap-12"') && !source.includes('mt-8 gap-8') && !source.includes('isEditing ? "pb-8"'));
 check('workflow and member headings align on the same row height', source.includes('mb-3 flex min-h-7 items-center justify-between gap-3') && source.includes('mb-2 flex min-h-7 items-center justify-between gap-3'));
-check('editable MCP JSON uses code editor visual treatment', source.includes('pl-10 pr-3 font-mono') && styleSource.includes('--team-template-code-surface: #070708'));
+check('editable MCP JSON uses code editor visual treatment', source.includes('pl-10 pr-3 font-mono') && styleSource.includes('--team-template-code-surface: #0f1011'));
 check('new/edit detail uses sharp field focus tokens', source.includes('focus:border-[var(--team-template-field-focus)]') && styleSource.includes('--team-template-field-surface'));
 check('delete actions expose deleting state', source.includes('Deleting...') && source.includes('deleting={deleting}') && source.includes('setEditorMode(null);'));
 check('reuses TemplateDetailView for create and edit mode', !source.includes('<TemplateEditor') && source.includes('editorMode={editorMode}'));

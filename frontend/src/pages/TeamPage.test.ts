@@ -209,7 +209,7 @@ check(
 check(
   "ACP member permissions appear immediately without waiting for diagnostics",
   configTabsSource.includes(
-    'props.runnerType === "GEMINI" || props.runnerType === "QWEN_CODE"',
+    'props.runnerType === "GEMINI" ||\n    props.runnerType === "QWEN_CODE" ||\n    props.runnerType === "KIMI_CODE"',
   ) &&
     !configTabsSource.includes(
       "const supportsAcpPermissions = props.acpProbeAvailable",

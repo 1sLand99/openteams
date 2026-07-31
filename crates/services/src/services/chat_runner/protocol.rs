@@ -75,6 +75,18 @@ impl ChatRunner {
         }
     }
 
+    fn localized_protocol_retry_message(language_code: &str) -> &'static str {
+        match language_code {
+            "zh-Hans" => "响应格式无效，正在自动重试。",
+            "zh-Hant" => "回應格式無效，正在自動重試。",
+            "ja" => "応答形式が無効なため、自動的に再試行しています。",
+            "ko" => "응답 형식이 올바르지 않아 자동으로 다시 시도하고 있습니다.",
+            "fr" => "Le format de réponse est invalide. Nouvelle tentative automatique.",
+            "es" => "El formato de respuesta no es válido. Reintentando automáticamente.",
+            _ => "The response format was invalid. Retrying automatically.",
+        }
+    }
+
     pub(super) fn emit_protocol_notice(
         &self,
         notice: ProtocolNoticeArgs<'_>,
@@ -178,6 +190,7 @@ impl ChatRunner {
         token_usage: Option<&TokenUsageInfo>,
         run_model: Option<&str>,
         empty_output_fallback: Option<AgentEmptyOutputFallback>,
+        protocol_retry_meta: Option<&serde_json::Value>,
     ) -> Result<(), ChatRunnerError> {
         let output_is_empty = raw_output.trim().is_empty();
         let empty_output_fallback =
@@ -207,6 +220,9 @@ impl ChatRunner {
                 "output_is_empty": output_is_empty
             }
         });
+        if let Some(protocol_retry_meta) = protocol_retry_meta {
+            meta["protocol_retry"] = protocol_retry_meta.clone();
+        }
         // Include error info in meta if provided
         if let Some((error_content, error_type)) = error_info {
             let summary: String = error_content.chars().take(200).collect();
@@ -298,6 +314,77 @@ impl ChatRunner {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn persist_protocol_retry_attempt_message(
+        &self,
+        session_id: Uuid,
+        session_agent_id: Uuid,
+        agent_id: Uuid,
+        run_id: Uuid,
+        agent_name: &str,
+        source_message_id: Uuid,
+        client_message_id: Option<&str>,
+        chain_depth: u32,
+        prompt_language: ResolvedPromptLanguage,
+        protocol_retry_attempt: u32,
+        previous_protocol_retry_meta: Option<&serde_json::Value>,
+        code: &ChatProtocolNoticeCode,
+        detail: Option<&str>,
+        token_usage: Option<&TokenUsageInfo>,
+        run_model: Option<&str>,
+    ) -> Result<(), ChatRunnerError> {
+        let mut meta = Self::build_protocol_send_message_meta(
+            prompt_language.code,
+            run_id,
+            session_agent_id,
+            source_message_id,
+            client_message_id,
+            chain_depth,
+            "you",
+            0,
+            None,
+            None,
+            token_usage,
+            run_model,
+        );
+        meta["protocol"] = serde_json::json!({
+            "type": "message",
+            "mode": "protocol_retry",
+            "retry_scheduled": true,
+        });
+
+        let mut retry_meta = previous_protocol_retry_meta
+            .cloned()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        retry_meta["attempt"] = serde_json::json!(protocol_retry_attempt);
+        retry_meta["current_run_id"] = serde_json::json!(run_id);
+        retry_meta["next_attempt"] = serde_json::json!(protocol_retry_attempt + 1);
+        retry_meta["error_code"] =
+            serde_json::to_value(code).unwrap_or(serde_json::Value::Null);
+        retry_meta["retry_scheduled"] = serde_json::json!(true);
+        if let Some(detail) = detail {
+            retry_meta["error_detail"] = serde_json::json!(detail);
+        }
+        meta["protocol_retry"] = retry_meta;
+
+        let message = chat::create_message(
+            &self.db.pool,
+            session_id,
+            ChatSenderType::Agent,
+            Some(agent_id),
+            Self::localized_protocol_retry_message(prompt_language.code).to_string(),
+            Some(meta),
+        )
+        .await?;
+
+        InboxService::new()
+            .notify_chat_agent_message(&self.db.pool, &message, Some(agent_name))
+            .await;
+        self.emit_message_new(session_id, message);
+        Ok(())
+    }
+
     /// Persist an error message when the agent fails without producing valid output.
     /// Creates an agent message with error details visible to the user.
     #[allow(clippy::too_many_arguments)]
@@ -313,6 +400,7 @@ impl ChatRunner {
         error_content: &str,
         error_type: Option<&NormalizedEntryError>,
         run_model: Option<&str>,
+        protocol_retry_meta: Option<&serde_json::Value>,
     ) -> Result<(), ChatRunnerError> {
         let summary: String = error_content.chars().take(200).collect();
         let mut error_meta = serde_json::json!({
@@ -323,7 +411,7 @@ impl ChatRunner {
             error_meta["error_type"] = serde_json::to_value(et).unwrap_or(serde_json::Value::Null);
         }
 
-        let meta = serde_json::json!({
+        let mut meta = serde_json::json!({
             "run_id": run_id,
             "session_agent_id": session_agent_id,
             "agent_id": agent_id,
@@ -332,6 +420,9 @@ impl ChatRunner {
             "client_message_id": client_message_id,
             "error": error_meta,
         });
+        if let Some(protocol_retry_meta) = protocol_retry_meta {
+            meta["protocol_retry"] = protocol_retry_meta.clone();
+        }
 
         tracing::info!(
             session_id = %session_id,
@@ -383,6 +474,7 @@ impl ChatRunner {
         error_type: Option<&NormalizedEntryError>,
         token_usage: Option<&TokenUsageInfo>,
         run_model: Option<&str>,
+        protocol_retry_meta: Option<&serde_json::Value>,
     ) -> Result<(), ChatRunnerError> {
         let mut meta = Self::build_protocol_send_message_meta(
             prompt_language.code,
@@ -403,6 +495,9 @@ impl ChatRunner {
             "mode": "display_fallback",
             "source": "no_send"
         });
+        if let Some(protocol_retry_meta) = protocol_retry_meta {
+            meta["protocol_retry"] = protocol_retry_meta.clone();
+        }
 
         if let Some(error_content) = error_content
             && !error_content.trim().is_empty()
@@ -653,6 +748,7 @@ impl ChatRunner {
         token_usage: Option<&TokenUsageInfo>,
         run_model: Option<&str>,
         protocol_retry_attempt: u32,
+        protocol_retry_meta: Option<&serde_json::Value>,
     ) -> Result<ProtocolProcessResult, ChatRunnerError> {
         let output_is_empty = latest_assistant.trim().is_empty();
         let has_error = error_content.is_some_and(|e| !e.is_empty());
@@ -708,6 +804,7 @@ impl ChatRunner {
                         token_usage,
                         run_model,
                         Some(empty_output_fallback),
+                        protocol_retry_meta,
                     )
                     .await?;
                     return Ok(ProtocolProcessResult::Success(1));
@@ -771,6 +868,7 @@ impl ChatRunner {
                         token_usage,
                         run_model,
                         Some(empty_output_fallback),
+                        protocol_retry_meta,
                     )
                     .await?;
                     return Ok(ProtocolProcessResult::Success(1));
@@ -909,6 +1007,9 @@ impl ChatRunner {
                 token_usage,
                 run_model,
             );
+            if let Some(protocol_retry_meta) = protocol_retry_meta {
+                meta["protocol_retry"] = protocol_retry_meta.clone();
+            }
 
             // Sync error info from the run to the message meta so frontend can display it
             if let Some(ref ec) = error_content
@@ -977,6 +1078,7 @@ impl ChatRunner {
                 error_type,
                 token_usage,
                 run_model,
+                protocol_retry_meta,
             )
             .await?;
             send_count = 1;

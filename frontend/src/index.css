@@ -983,39 +983,39 @@ body[data-mode="light"] .global-search-dialog {
 }
 
 .team-template-page {
-  --team-template-canvas: #070708;
-  --team-template-border: rgba(255, 255, 255, 0.08);
-  --team-template-border-strong: rgba(255, 255, 255, 0.16);
+  --team-template-canvas: #141516;
+  --team-template-border: #23252a;
+  --team-template-border-strong: #34343a;
   --team-template-grid-line: var(--team-template-border);
   --team-template-grid-line-strong: var(--team-template-border-strong);
-  --team-template-surface: #09090a;
-  --team-template-surface-top: #0b0b0c;
-  --team-template-surface-hover: rgba(255, 255, 255, 0.035);
-  --team-template-card-surface: #111214;
-  --team-template-card-surface-top: #15161a;
-  --team-template-card-surface-hover: #191b20;
-  --team-template-active-surface: rgba(255, 255, 255, 0.025);
-  --team-template-inner-stroke: rgba(255, 255, 255, 0.06);
-  --team-template-inner-stroke-strong: rgba(255, 255, 255, 0.12);
-  --team-template-tag-surface: rgba(255, 255, 255, 0.03);
-  --team-template-avatar-surface: rgba(255, 255, 255, 0.035);
-  --team-template-pipeline-track: rgba(255, 255, 255, 0.07);
-  --team-template-pipeline-node-border: rgba(255, 255, 255, 0.1);
-  --team-template-pipeline-dot: #d8d9dc;
-  --team-template-pipeline-dot-muted: rgba(255, 255, 255, 0.28);
-  --team-template-pipeline-dot-glow: rgba(216, 217, 220, 0.34);
-  --team-template-code-surface: #070708;
-  --team-template-code-border: rgba(255, 255, 255, 0.1);
-  --team-template-code-text: #a7aaaf;
+  --team-template-surface: #0f1011;
+  --team-template-surface-top: #0f1011;
+  --team-template-surface-hover: #18191a;
+  --team-template-card-surface: #0f1011;
+  --team-template-card-surface-top: #0f1011;
+  --team-template-card-surface-hover: #18191a;
+  --team-template-active-surface: #18191a;
+  --team-template-inner-stroke: #23252a;
+  --team-template-inner-stroke-strong: #34343a;
+  --team-template-tag-surface: #18191a;
+  --team-template-avatar-surface: #18191a;
+  --team-template-pipeline-track: #34343a;
+  --team-template-pipeline-node-border: #34343a;
+  --team-template-pipeline-dot: #8a8f98;
+  --team-template-pipeline-dot-muted: #62666d;
+  --team-template-pipeline-dot-glow: rgba(94, 106, 210, 0.4);
+  --team-template-code-surface: #0f1011;
+  --team-template-code-border: #34343a;
+  --team-template-code-text: #8a8f98;
   --team-template-index: rgba(138, 141, 145, 0.45);
   --team-template-disabled: rgba(138, 141, 145, 0.36);
-  --team-template-ghost-badge-border: rgba(255, 255, 255, 0.07);
-  --team-template-row-hover: rgba(255, 255, 255, 0.025);
-  --team-template-row-active: rgba(255, 255, 255, 0.035);
-  --team-template-field-surface: #080809;
-  --team-template-field-highlight: rgba(255, 255, 255, 0.035);
-  --team-template-field-focus: rgba(255, 255, 255, 0.78);
-  --team-template-step-surface: rgba(255, 255, 255, 0.016);
+  --team-template-ghost-badge-border: #23252a;
+  --team-template-row-hover: #18191a;
+  --team-template-row-active: #18191a;
+  --team-template-field-surface: #0f1011;
+  --team-template-field-highlight: transparent;
+  --team-template-field-focus: #5e6ad2;
+  --team-template-step-surface: transparent;
   --team-template-member-description: #8a8f98;
   --team-template-primary-button-top: rgba(244, 245, 246, 0.96);
   --team-template-primary-button-bottom: rgba(214, 218, 226, 0.92);
@@ -1028,60 +1028,55 @@ body[data-mode="light"] .global-search-dialog {
   --team-template-primary-button-kbd-border: rgba(8, 9, 10, 0.14);
   --team-template-primary-button-kbd-text: rgba(8, 9, 10, 0.62);
   --team-template-hover: var(--team-template-surface-hover);
-  --team-template-top-highlight: rgba(255, 255, 255, 0.055);
-  --team-template-top-highlight-strong: rgba(255, 255, 255, 0.095);
-  --team-template-top-glow: linear-gradient(
-    90deg,
-    transparent 0%,
-    rgba(255, 255, 255, 0.08) 50%,
-    transparent 100%
-  );
-  --team-template-title: #ffffff;
+  --team-template-top-highlight: transparent;
+  --team-template-top-highlight-strong: transparent;
+  --team-template-top-glow: none;
+  --team-template-title: #f7f8f8;
   --team-template-muted: #8a8f98;
-  --team-template-aux: #6f747c;
+  --team-template-aux: #62666d;
   --team-template-icon-strong: #8a8f98;
-  --team-template-accent: var(--primary-hover);
-  --team-template-accent-glow: color-mix(in srgb, var(--primary-hover) 34%, transparent);
+  --team-template-accent: var(--primary);
+  --team-template-accent-glow: color-mix(in srgb, var(--primary) 34%, transparent);
   --team-template-description: var(--team-template-muted);
-  --team-template-icon: #8a8f98;
+  --team-template-icon: #62666d;
   --team-template-tag-text: var(--team-template-muted);
   background: transparent;
 }
 
 body[data-mode="light"] .team-template-page {
-  --team-template-canvas: #fbfbfc;
-  --team-template-border: rgba(15, 23, 42, 0.08);
-  --team-template-border-strong: rgba(15, 23, 42, 0.12);
+  --team-template-canvas: #f5f6f8;
+  --team-template-border: #e3e5ea;
+  --team-template-border-strong: #d0d4dc;
   --team-template-grid-line: var(--team-template-border);
   --team-template-grid-line-strong: var(--team-template-border-strong);
   --team-template-surface: #ffffff;
   --team-template-surface-top: #ffffff;
-  --team-template-surface-hover: #f7f8fa;
+  --team-template-surface-hover: #eef0f3;
   --team-template-card-surface: #ffffff;
   --team-template-card-surface-top: #ffffff;
-  --team-template-card-surface-hover: #f7f8fa;
-  --team-template-active-surface: #f5f6f8;
-  --team-template-inner-stroke: rgba(15, 23, 42, 0.08);
-  --team-template-inner-stroke-strong: rgba(15, 23, 42, 0.12);
-  --team-template-tag-surface: rgba(88, 101, 242, 0.08);
-  --team-template-avatar-surface: rgba(15, 23, 42, 0.045);
-  --team-template-pipeline-track: rgba(15, 23, 42, 0.07);
-  --team-template-pipeline-node-border: rgba(15, 23, 42, 0.14);
-  --team-template-pipeline-dot: #4b5563;
-  --team-template-pipeline-dot-muted: rgba(15, 23, 42, 0.28);
-  --team-template-pipeline-dot-glow: rgba(15, 23, 42, 0.12);
-  --team-template-code-surface: rgba(15, 23, 42, 0.045);
-  --team-template-code-border: rgba(15, 23, 42, 0.085);
-  --team-template-code-text: #374151;
+  --team-template-card-surface-hover: #eef0f3;
+  --team-template-active-surface: #eef0f3;
+  --team-template-inner-stroke: #e3e5ea;
+  --team-template-inner-stroke-strong: #d0d4dc;
+  --team-template-tag-surface: #eef0f3;
+  --team-template-avatar-surface: #eef0f3;
+  --team-template-pipeline-track: #d0d4dc;
+  --team-template-pipeline-node-border: #d0d4dc;
+  --team-template-pipeline-dot: #62666d;
+  --team-template-pipeline-dot-muted: #b6bcc7;
+  --team-template-pipeline-dot-glow: rgba(94, 106, 210, 0.25);
+  --team-template-code-surface: #f5f6f8;
+  --team-template-code-border: #e3e5ea;
+  --team-template-code-text: #62666d;
   --team-template-index: rgba(98, 102, 109, 0.48);
   --team-template-disabled: rgba(98, 102, 109, 0.42);
-  --team-template-ghost-badge-border: rgba(15, 23, 42, 0.1);
-  --team-template-row-hover: rgba(15, 23, 42, 0.03);
-  --team-template-row-active: rgba(15, 23, 42, 0.045);
-  --team-template-field-surface: #fbfbfc;
-  --team-template-field-highlight: rgba(255, 255, 255, 0.65);
-  --team-template-field-focus: rgba(15, 23, 42, 0.72);
-  --team-template-step-surface: rgba(15, 23, 42, 0.018);
+  --team-template-ghost-badge-border: #e3e5ea;
+  --team-template-row-hover: #eef0f3;
+  --team-template-row-active: #eef0f3;
+  --team-template-field-surface: #ffffff;
+  --team-template-field-highlight: transparent;
+  --team-template-field-focus: #5e6ad2;
+  --team-template-step-surface: transparent;
   --team-template-member-description: #62666d;
   --team-template-primary-button-top: #171b24;
   --team-template-primary-button-bottom: #0d1118;
@@ -1094,22 +1089,17 @@ body[data-mode="light"] .team-template-page {
   --team-template-primary-button-kbd-border: rgba(255, 255, 255, 0.16);
   --team-template-primary-button-kbd-text: rgba(255, 255, 255, 0.72);
   --team-template-hover: var(--team-template-surface-hover);
-  --team-template-top-highlight: rgba(255, 255, 255, 0.85);
-  --team-template-top-highlight-strong: rgba(255, 255, 255, 0.95);
-  --team-template-top-glow: linear-gradient(
-    90deg,
-    transparent 0%,
-    rgba(255, 255, 255, 0.76) 50%,
-    transparent 100%
-  );
-  --team-template-title: #111827;
+  --team-template-top-highlight: transparent;
+  --team-template-top-highlight-strong: transparent;
+  --team-template-top-glow: none;
+  --team-template-title: #0a0a0c;
   --team-template-muted: #62666d;
-  --team-template-aux: rgba(15, 23, 42, 0.46);
-  --team-template-icon-strong: rgba(15, 23, 42, 0.58);
-  --team-template-accent: var(--primary-hover);
-  --team-template-accent-glow: color-mix(in srgb, var(--primary-hover) 28%, transparent);
+  --team-template-aux: #8a8f98;
+  --team-template-icon-strong: #62666d;
+  --team-template-accent: var(--primary);
+  --team-template-accent-glow: color-mix(in srgb, var(--primary) 28%, transparent);
   --team-template-description: var(--team-template-muted);
-  --team-template-icon: rgba(98, 102, 109, 0.78);
+  --team-template-icon: #8a8f98;
   --team-template-tag-text: var(--team-template-muted);
   background: transparent;
 }

@@ -144,25 +144,18 @@ function ConfigSection({
   title: string;
 }) {
   return (
-    <section className={cx("flex flex-col pb-8", className)}>
-      <div className="mb-3 px-1">
-        <h3 className="text-[17px] font-semibold leading-[1.2] text-[var(--ink)]">
+    <section className={cx("flex flex-col pb-10", className)}>
+      <div className="mb-3 px-0.5">
+        <h3 className="text-[14px] font-semibold leading-[1.3] text-[var(--ink)]">
           {title}
         </h3>
         {description && (
-          <p className="mt-1 max-w-[680px] text-[13px] leading-[1.5] text-[var(--ink-subtle)]">
+          <p className="mt-1 max-w-[640px] text-[12.5px] leading-[1.55] text-[var(--ink-subtle)]">
             {description}
           </p>
         )}
       </div>
-      <div
-        className={cx(
-          "flex-1 space-y-6 rounded-[12px] bg-[var(--surface-3)] p-5",
-          bodyClassName,
-        )}
-      >
-        {children}
-      </div>
+      <div className={cx("flex-1", bodyClassName)}>{children}</div>
     </section>
   );
 }
@@ -171,15 +164,17 @@ function SettingRow({
   children,
   description,
   title,
+  wide = false,
 }: {
   children: ReactNode;
   description?: string;
   title: string;
+  wide?: boolean;
 }) {
   return (
-    <div className="grid gap-3 md:grid-cols-[minmax(180px,260px)_minmax(0,1fr)] md:items-start md:gap-8">
-      <div className="min-w-0">
-        <p className="text-[13px] font-semibold leading-[1.35] text-[var(--ink)]">
+    <div className="grid gap-2 border-t border-[var(--hairline)] py-4 first:border-t-0 first:pt-1 md:grid-cols-[minmax(150px,190px)_minmax(0,1fr)] md:items-start md:gap-6">
+      <div className="min-w-0 pt-0.5">
+        <p className="text-[13px] font-medium leading-[1.4] text-[var(--ink)]">
           {title}
         </p>
         {description && (
@@ -188,7 +183,9 @@ function SettingRow({
           </p>
         )}
       </div>
-      <div className="min-w-0">{children}</div>
+      <div className={cx("min-w-0", !wide && "md:max-w-[400px]")}>
+        {children}
+      </div>
     </div>
   );
 }
@@ -218,7 +215,7 @@ function MarkdownEditableField({
         spellCheck={false}
         placeholder={placeholder}
         className={cx(
-          "block w-full resize-y overflow-y-auto rounded-[12px] border border-[var(--hairline)] bg-[var(--surface-2)] px-5 py-5 font-mono text-[14px] leading-relaxed text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-muted)] focus:border-[var(--hairline-strong)] focus:ring-2 focus:ring-[var(--primary-focus)]/35",
+          "block w-full resize-y overflow-y-auto rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-4 py-4 font-mono text-[14px] leading-relaxed text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-muted)] focus:border-[var(--hairline-strong)] focus:ring-2 focus:ring-[var(--primary-focus)]/35",
           minHeightClassName,
         )}
       />
@@ -239,7 +236,7 @@ function MarkdownEditableField({
         }
       }}
       className={cx(
-        "w-full overflow-y-auto rounded-[12px] border border-[var(--hairline)] bg-[var(--surface-2)] px-5 py-5 text-[14px] leading-relaxed transition-colors",
+        "w-full overflow-y-auto rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-4 py-4 text-[14px] leading-relaxed transition-colors",
         minHeightClassName,
         disabled
           ? "cursor-not-allowed opacity-70"
@@ -284,7 +281,7 @@ function SkillSettingBlock({
 }
 
 const inputClassName =
-  "h-10 w-full rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-3)] px-3 font-mono text-[13px] text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-tertiary)] focus:ring-2 focus:ring-[var(--primary-focus)]/50";
+  "h-9 w-full rounded-[6px] border border-[var(--hairline)] bg-[var(--surface-1)] px-3 font-mono text-[13px] text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-tertiary)] focus:border-[var(--hairline-strong)] focus:ring-2 focus:ring-[var(--primary-focus)]/35";
 
 function SkillsSection({
   allowedSkillIds,
@@ -332,7 +329,7 @@ function SkillsSection({
     <>
       <SkillSettingBlock title={t("teamPage.skills.addTitle")}>
         {selectedSkills.length === 0 ? (
-          <p className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-3)] p-3 text-[14px] text-[var(--ink-subtle)]">
+          <p className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] p-3 text-[14px] text-[var(--ink-subtle)]">
             {t("teamPage.skills.noneAdded")}
           </p>
         ) : (
@@ -342,7 +339,7 @@ function SkillsSection({
                 key={id}
                 type="button"
                 onClick={() => removeSkill(id)}
-                className="inline-flex h-8 max-w-full items-center gap-2 rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-3)] px-2.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:border-[var(--hairline-strong)] hover:text-[var(--ink)]"
+                className="inline-flex h-8 max-w-full items-center gap-2 rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-2.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:border-[var(--hairline-strong)] hover:text-[var(--ink)]"
               >
                 <span className="truncate">{skill?.name ?? id}</span>
                 <X className="h-3.5 w-3.5 shrink-0 text-[var(--ink-tertiary)]" />
@@ -354,7 +351,7 @@ function SkillsSection({
 
       <SkillSettingBlock title={t("teamPage.skills.installedTitle")}>
         {skillsLoading ? (
-          <p className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-3)] p-3 text-[14px] text-[var(--ink-subtle)]">
+          <p className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] p-3 text-[14px] text-[var(--ink-subtle)]">
             {t("teamPage.skills.loading")}
           </p>
         ) : skillsError ? (
@@ -362,7 +359,7 @@ function SkillsSection({
             {skillsError}
           </p>
         ) : skills.length === 0 ? (
-          <p className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-3)] p-3 text-[14px] text-[var(--ink-subtle)]">
+          <p className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] p-3 text-[14px] text-[var(--ink-subtle)]">
             {t("teamPage.skills.noneInstalled")}
           </p>
         ) : (
@@ -390,10 +387,10 @@ function SkillsSection({
                         }
                       }}
                       className={cx(
-                        "flex min-h-[64px] min-w-0 cursor-pointer overflow-hidden rounded-[8px] border bg-[var(--surface-3)] p-2.5 text-left transition-colors",
+                        "flex min-h-[64px] min-w-0 cursor-pointer overflow-hidden rounded-[8px] border bg-[var(--surface-1)] p-2.5 text-left transition-colors",
                         selected
                           ? "border-[var(--primary)]/35 bg-[var(--primary-tint)]"
-                          : "border-[var(--hairline)] hover:border-[var(--hairline-strong)] hover:bg-[var(--surface-4)]",
+                          : "border-[var(--hairline)] hover:border-[var(--hairline-strong)] hover:bg-[var(--surface-3)]",
                       )}
                     >
                       <div className="flex min-w-0 flex-1 items-start gap-2">
@@ -487,7 +484,7 @@ function SkillMarkdownPanel({
   const triggerKeywords = skill.trigger_keywords ?? [];
 
   return (
-    <div className="min-w-0 rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-3)] p-4">
+    <div className="min-w-0 rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] p-4">
       <div className="flex min-w-0 items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-[13px] font-medium text-[var(--ink)]">
@@ -614,20 +611,12 @@ function ConfigTab({
     : null;
 
   return (
-    <div className="space-y-0">
-      <div
-        className="grid items-stretch gap-6 pb-4"
-        style={{
-          gridTemplateColumns:
-            "repeat(auto-fit, minmax(min(100%, 520px), 1fr))",
-        }}
+    <div className="space-y-0 xl:grid xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] xl:gap-12">
+      <ConfigSection
+        title={t("teamPage.config.title")}
+        description={t("teamPage.config.desc")}
+        className="xl:pb-0"
       >
-        <ConfigSection
-          title={t("teamPage.config.title")}
-          description={t("teamPage.config.desc")}
-          className="!pb-0"
-          bodyClassName="space-y-4 p-4"
-        >
           <SettingRow
             title={t("teamPage.form.memberName")}
             description={t("teamPage.form.memberNameDesc")}
@@ -649,7 +638,7 @@ function ConfigTab({
               value={runnerType}
               options={runtimeOptions}
               searchPlaceholder={t("teamPage.search.runtimes")}
-              className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
+              className="[&>button]:h-9 [&>button]:bg-[var(--surface-1)] [&>button]:font-mono [&>button]:text-[13px]"
               triggerIcon={
                 <AgentBrandAvatar
                   runner={runnerType}
@@ -679,7 +668,7 @@ function ConfigTab({
                   description: choice.description ?? undefined,
                 }))}
                 searchPlaceholder={t("teamPage.search.models")}
-                className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
+                className="[&>button]:h-9 [&>button]:bg-[var(--surface-1)] [&>button]:font-mono [&>button]:text-[13px]"
                 onChange={(value) =>
                   onAcpConfigValueChange(acpModelOption, {
                     type: "value_id",
@@ -692,7 +681,7 @@ function ConfigTab({
                 value={selectedModelValue}
                 options={modelOptions}
                 searchPlaceholder={t("teamPage.search.models")}
-                className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
+                className="[&>button]:h-9 [&>button]:bg-[var(--surface-1)] [&>button]:font-mono [&>button]:text-[13px]"
                 onChange={(value) =>
                   setModelName(value === defaultOptionId ? "" : value)
                 }
@@ -717,7 +706,7 @@ function ConfigTab({
                   description: choice.description ?? undefined,
                 }))}
                 showSearch={false}
-                className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
+                className="[&>button]:h-9 [&>button]:bg-[var(--surface-1)] [&>button]:font-mono [&>button]:text-[13px]"
                 onChange={(value) =>
                   onAcpConfigValueChange(acpThoughtLevelOption, {
                     type: "value_id",
@@ -736,7 +725,7 @@ function ConfigTab({
                 ]}
                 disabled
                 showSearch={false}
-                className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
+                className="[&>button]:h-9 [&>button]:bg-[var(--surface-1)] [&>button]:font-mono [&>button]:text-[13px]"
                 onChange={() => undefined}
               />
             ) : (
@@ -744,7 +733,7 @@ function ConfigTab({
                 value={selectedReasoningValue}
                 options={reasoningOptions}
                 showSearch={false}
-                className="[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]"
+                className="[&>button]:h-9 [&>button]:bg-[var(--surface-1)] [&>button]:font-mono [&>button]:text-[13px]"
                 onChange={(value) => {
                   const nextValue =
                     value === defaultOptionId ? "" : value;
@@ -780,36 +769,34 @@ function ConfigTab({
               aria-label={t("teamPage.aria.toggleMainAgent")}
               aria-pressed={isLeader}
               className={cx(
-                "relative h-6 w-11 rounded-full border transition-colors",
+                "relative h-[22px] w-10 rounded-full border transition-colors",
                 isLeader
                   ? "border-[var(--primary)] bg-[var(--primary)]"
-                  : "border-[var(--hairline-strong)] bg-[var(--surface-3)]",
+                  : "border-[var(--hairline-strong)] bg-[var(--surface-1)]",
               )}
             >
               <span
                 className={cx(
-                  "absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white transition-transform",
-                  isLeader ? "translate-x-5" : "translate-x-0",
+                  "absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
+                  isLeader ? "translate-x-[18px]" : "translate-x-0",
                 )}
               />
             </button>
           </SettingRow>
         </ConfigSection>
 
-        <ConfigSection
-          title={t("teamPage.systemPrompt.title")}
-          description={t("teamPage.systemPrompt.desc")}
-          className="!pb-0"
-          bodyClassName="!p-0 flex flex-col"
-        >
-          <MarkdownEditableField
-            value={roleDefinition}
-            onChange={setRoleDefinition}
-            placeholder={t("teamPage.systemPrompt.placeholder")}
-            minHeightClassName="min-h-[360px] flex-1"
-          />
-        </ConfigSection>
-      </div>
+      <ConfigSection
+        title={t("teamPage.systemPrompt.title")}
+        description={t("teamPage.systemPrompt.desc")}
+        bodyClassName="!p-0 flex flex-col"
+      >
+        <MarkdownEditableField
+          value={roleDefinition}
+          onChange={setRoleDefinition}
+          placeholder={t("teamPage.systemPrompt.placeholder")}
+          minHeightClassName="min-h-[360px] flex-1"
+        />
+      </ConfigSection>
     </div>
   );
 }
@@ -848,14 +835,13 @@ function PermissionsTab({
     "full_access" | "auto_allow" | null
   >(null);
   const dropdownClassName =
-    "[&>button]:h-10 [&>button]:bg-[var(--surface-3)] [&>button]:font-mono [&>button]:text-[13px]";
+    "[&>button]:h-9 [&>button]:bg-[var(--surface-1)] [&>button]:font-mono [&>button]:text-[13px]";
 
   return (
     <>
       <ConfigSection
         title="权限与审批"
         description="成员设置会覆盖 Agents 页面中的全局默认值。"
-        bodyClassName="space-y-4 p-4"
       >
       <SettingRow
         title="文件权限"
@@ -1018,6 +1004,7 @@ function SkillsTab({
       <ConfigSection
         title={t("teamPage.skills.title")}
         description={t("teamPage.skills.desc")}
+        bodyClassName="space-y-6"
       >
         <SkillsSection
           allowedSkillIds={allowedSkillIds}
@@ -1101,6 +1088,7 @@ function McpConfigTab({
           <>
             <SettingRow
               title={t("teamPage.mcp.serverConfig")}
+              wide
               description={
                 mcpLoading
                   ? t("teamPage.mcp.loadingCurrent")
@@ -1125,7 +1113,7 @@ function McpConfigTab({
     }
   }
 }'
-                className="block w-full resize-y rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-3)] px-4 py-3 font-mono text-[13px] leading-relaxed text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-tertiary)] focus:ring-2 focus:ring-[var(--primary-focus)]/50 disabled:opacity-70"
+                className="block w-full resize-y rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-4 py-3 font-mono text-[13px] leading-relaxed text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-tertiary)] focus:ring-2 focus:ring-[var(--primary-focus)]/50 disabled:opacity-70"
               />
               {mcpConfigPath && !mcpLoading && (
                 <p className="mt-2 truncate font-mono text-[12px] text-[var(--ink-tertiary)]">
@@ -1139,6 +1127,7 @@ function McpConfigTab({
               Object.keys(servers).length > 0 && (
                 <SettingRow
                   title={t("teamPage.mcp.builtinTitle")}
+                  wide
                   description={t("teamPage.mcp.builtinDesc")}
                 >
                   <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
@@ -1158,7 +1147,7 @@ function McpConfigTab({
                             "group flex min-w-0 items-start gap-3 rounded-[8px] border p-3 text-left transition-colors",
                             selected
                               ? "border-[var(--primary)]/45 bg-[var(--primary-tint)]"
-                              : "border-[var(--hairline)] bg-[var(--surface-3)] hover:border-[var(--hairline-strong)] hover:bg-[var(--surface-4)]",
+                              : "border-[var(--hairline)] bg-[var(--surface-1)] hover:border-[var(--hairline-strong)] hover:bg-[var(--surface-3)]",
                           )}
                         >
                           <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-[8px] bg-[var(--surface-1)]">
@@ -1253,7 +1242,9 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
   const [activeTab, setActiveTab] = useState<MemberConfigTab>("config");
   const { selectedMember, t } = props;
   const supportsAcpPermissions =
-    props.runnerType === "GEMINI" || props.runnerType === "QWEN_CODE";
+    props.runnerType === "GEMINI" ||
+    props.runnerType === "QWEN_CODE" ||
+    props.runnerType === "KIMI_CODE";
   const effectiveActiveTab = selectedMember
     ? activeTab === "permissions" && !supportsAcpPermissions
       ? "config"
@@ -1324,7 +1315,7 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--surface-2)]">
-      <div className="sticky top-0 z-20 flex shrink-0 items-end justify-between gap-4 border-b border-[var(--hairline)] bg-[var(--surface-2)] px-5">
+      <div className="sticky top-0 z-20 flex shrink-0 items-end justify-between gap-4 border-b border-[var(--hairline)] bg-[var(--surface-2)] px-6">
         <div className="flex min-w-0 items-center gap-1">
           {tabItems.map((item) => {
             const Icon = item.icon;
@@ -1335,7 +1326,7 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
                 type="button"
                 onClick={() => setActiveTab(item.id)}
                 className={cx(
-                  "relative inline-flex h-11 items-center gap-1.5 px-3 text-[13px] font-medium transition-colors focus-visible:outline-none",
+                  "relative inline-flex h-10 items-center gap-1.5 px-3 text-[13px] font-medium transition-colors focus-visible:outline-none",
                   active
                     ? "text-[var(--ink)]"
                     : "text-[var(--ink-subtle)] hover:text-[var(--ink)]",
@@ -1345,7 +1336,7 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
                 {item.label}
                 <span
                   className={cx(
-                    "absolute inset-x-2 -bottom-px h-[2px] rounded-full transition-colors",
+                    "absolute inset-x-3 -bottom-px h-[2px] rounded-full transition-colors",
                     active ? "bg-[var(--primary)]" : "bg-transparent",
                   )}
                 />
@@ -1353,7 +1344,7 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
             );
           })}
         </div>
-        <div className="hidden min-w-0 items-center gap-2 pb-3 text-[13px] text-[var(--ink-subtle)] sm:flex">
+        <div className="hidden min-w-0 items-center gap-2 pb-2.5 text-[13px] text-[var(--ink-subtle)] sm:flex">
           {statusNotice && (
             <span
               className={cx(
@@ -1376,7 +1367,7 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5 ot-scroll-area-styled">
+      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6 ot-scroll-area-styled">
         {effectiveActiveTab === "config" ? (
           <ConfigTab {...props} />
         ) : effectiveActiveTab === "permissions" ? (

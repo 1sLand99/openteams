@@ -285,6 +285,12 @@ fn with_thinking_or_variant(
             next.thinking_effort = Some(effort.to_string());
             Some(CodingAgent::QwenCode(next))
         }
+        CodingAgent::KimiCode(base) => {
+            let effort = thinking_effort?;
+            let mut next = base.clone();
+            next.thinking_effort = Some(effort.to_string());
+            Some(CodingAgent::KimiCode(next))
+        }
         _ => None,
     }
 }
@@ -322,7 +328,11 @@ mod tests {
         let base = CodingAgent::KimiCode(crate::executors::kimi::KimiCode {
             append_prompt: AppendPrompt::default(),
             model: None,
+            thinking_effort: None,
+            acp: None,
             cmd: Default::default(),
+            acp_mcp_policy: Default::default(),
+            approvals: None,
         });
 
         assert!(supports_model(&base));
@@ -332,6 +342,26 @@ mod tests {
         };
 
         assert_eq!(config.model.as_deref(), Some("kimi-k2.5"));
+    }
+
+    #[test]
+    fn member_execution_override_sets_kimi_thinking_effort() {
+        let base = CodingAgent::KimiCode(crate::executors::kimi::KimiCode {
+            append_prompt: AppendPrompt::default(),
+            model: None,
+            thinking_effort: None,
+            acp: None,
+            cmd: Default::default(),
+            acp_mcp_policy: Default::default(),
+            approvals: None,
+        });
+
+        let CodingAgent::KimiCode(config) =
+            with_member_execution_overrides(&base, None, Some("max"), None)
+        else {
+            panic!("expected KimiCode config");
+        };
+        assert_eq!(config.thinking_effort.as_deref(), Some("max"));
     }
 
     fn agent_from_json(value: serde_json::Value) -> CodingAgent {

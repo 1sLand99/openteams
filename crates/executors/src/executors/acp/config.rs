@@ -43,22 +43,27 @@ pub struct AcpConfigOverride {
 
 impl AcpConfigOverride {
     pub(crate) fn controls_session_mode(&self) -> bool {
-        fn is_mode_key(value: &str) -> bool {
-            matches!(
-                value
-                    .chars()
-                    .filter(|character| character.is_alphanumeric())
-                    .flat_map(char::to_lowercase)
-                    .collect::<String>()
-                    .as_str(),
-                "mode" | "sessionmode" | "agentmode" | "workmode" | "workingmode"
-            )
-        }
-
-        self.category_snapshot.as_deref().is_some_and(is_mode_key)
-            || is_mode_key(&self.option_id)
-            || self.label_snapshot.as_deref().is_some_and(is_mode_key)
+        self.category_snapshot
+            .as_deref()
+            .is_some_and(is_session_mode_key)
+            || is_session_mode_key(&self.option_id)
+            || self
+                .label_snapshot
+                .as_deref()
+                .is_some_and(is_session_mode_key)
     }
+}
+
+pub(crate) fn is_session_mode_key(value: &str) -> bool {
+    matches!(
+        value
+            .chars()
+            .filter(|character| character.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+            .as_str(),
+        "mode" | "sessionmode" | "agentmode" | "workmode" | "workingmode"
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -296,6 +301,8 @@ pub struct AcpSessionPreferences {
     pub model: Option<String>,
     pub thought_level: Option<String>,
     pub native_thought_level_fallback: bool,
+    /// Trusted adapter-only mode enforced before any user-configurable option.
+    pub required_session_mode: Option<AcpConfigSelection>,
     pub options: Vec<AcpConfigSelection>,
 }
 

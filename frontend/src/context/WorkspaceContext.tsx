@@ -51,6 +51,10 @@ import {
   hasRunningWorkflowActivity,
   isWorkflowSidebarRunning,
 } from '@/lib/workflowSidebarState';
+import {
+  EXECUTOR_APPROVAL_CHANGED_EVENT,
+  type ExecutorApprovalChangedDetail,
+} from '@/lib/executorApprovalEvents';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
 import { useWorkspaceChatRuntime } from './workspace/useWorkspaceChatRuntime';
 import type { WorkspaceContextProps } from './workspace/workspaceContextContract';
@@ -106,6 +110,12 @@ import {
 export type { ChatStreamEvent } from './workspace/workspaceChatStreamTypes';
 export * from './workspace/workspaceContextUtils';
 
+const isExecutorApprovalInboxItem = (item: InboxItem): boolean =>
+  item.kind === 'executor_approval' ||
+  item.source_type === 'executor_approval';
+
+const PENDING_APPROVAL_INBOX_LIMIT = 100;
+
 export const WorkspaceContext = createContext<WorkspaceContextProps | undefined>(
   undefined,
 );
@@ -159,6 +169,12 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
     setInboxSummaryAsync,
     inboxItemsAsync,
     setInboxItemsAsync,
+    pendingApprovalSessionIds,
+    setPendingApprovalSessionIds,
+    pendingApprovalSessionIdsRef,
+    waitingApprovalSessionIds,
+    setWaitingApprovalSessionIds,
+    waitingApprovalSessionIdsRef,
     workflowCardAsync,
     setWorkflowCardAsync,
     workspaceChangesAsync,
@@ -385,13 +401,9 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
       )
         ? currentActiveSessionId
         : (backend[0]?.id ?? '');
-      const skipAgentSessionIds = nextActiveSessionId
-        ? new Set([nextActiveSessionId])
-        : undefined;
       const runningIndicators = await loadSessionRunningIndicators(
         backend.map((session) => session.id),
         ignoredSessionAgentIds,
-        { skipAgentSessionIds },
       );
       if (selectedProjectIdRef.current !== projectId) return;
 
@@ -413,6 +425,12 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
 
       const activeBackendSessions = backend;
       syncActiveSessionSelection(activeBackendSessions);
+      const nextWaitingApprovalSessionIds = new Set<string>();
+      for (const [sid, ind] of runningIndicators) {
+        if (ind.hasPendingApproval) nextWaitingApprovalSessionIds.add(sid);
+      }
+      waitingApprovalSessionIdsRef.current = nextWaitingApprovalSessionIds;
+      setWaitingApprovalSessionIds(nextWaitingApprovalSessionIds);
       const mapped = mapSessions(backend, nextActiveSessionId).map(
         (session) => {
           const indicators = runningIndicators.get(session.id);
@@ -444,6 +462,9 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
               session.id,
               hasRunningAgent,
             ),
+            hasPendingApproval:
+              pendingApprovalSessionIdsRef.current.has(session.id) ||
+              nextWaitingApprovalSessionIds.has(session.id),
           };
         },
       );
@@ -491,6 +512,10 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
       inboxInitialUnreadItemIdsRef.current = new Set();
       setInboxSummaryAsync(succeed(EMPTY_INBOX_SUMMARY));
       setInboxItemsAsync(succeed([]));
+      pendingApprovalSessionIdsRef.current = new Set();
+      setPendingApprovalSessionIds(new Set());
+      waitingApprovalSessionIdsRef.current = new Set();
+      setWaitingApprovalSessionIds(new Set());
       return;
     }
     const settingsSignature = inboxNotificationSettingsSignature(
@@ -510,16 +535,24 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
     setInboxSummaryAsync(beginLoad);
     setInboxItemsAsync(beginLoad);
     try {
-      const [summary, itemsResponse] = await Promise.all([
-        inboxApi.getSummary({ project_id: projectId, session_id: null }),
-        inboxApi.listItems({
-          project_id: projectId,
-          session_id: null,
-          unread: true,
-          archived: false,
-          limit: INBOX_LIST_LIMIT,
-        }),
-      ]);
+      const [summary, itemsResponse, approvalItemsResponse] =
+        await Promise.all([
+          inboxApi.getSummary({ project_id: projectId, session_id: null }),
+          inboxApi.listItems({
+            project_id: projectId,
+            session_id: null,
+            unread: true,
+            archived: false,
+            limit: INBOX_LIST_LIMIT,
+          }),
+          inboxApi.listItems({
+            project_id: projectId,
+            session_id: null,
+            unread: false,
+            archived: false,
+            limit: PENDING_APPROVAL_INBOX_LIMIT,
+          }),
+        ]);
       if (
         inboxRequestIdRef.current !== requestId ||
         selectedProjectIdRef.current !== projectId
@@ -552,6 +585,26 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
       inboxSoundPrimedRef.current = true;
       setInboxSummaryAsync(succeed(visibleSummary));
       setInboxItemsAsync(succeed(visibleItems));
+      const nextPendingApprovalSessionIds = new Set(
+        approvalItemsResponse.items
+          .filter(
+            (item) =>
+              isExecutorApprovalInboxItem(item) && item.session_id,
+          )
+          .map((item) => item.session_id as string),
+      );
+      const prevPendingApprovalSessionIds =
+        pendingApprovalSessionIdsRef.current;
+      if (
+        nextPendingApprovalSessionIds.size !==
+          prevPendingApprovalSessionIds.size ||
+        [...nextPendingApprovalSessionIds].some(
+          (id) => !prevPendingApprovalSessionIds.has(id),
+        )
+      ) {
+        pendingApprovalSessionIdsRef.current = nextPendingApprovalSessionIds;
+        setPendingApprovalSessionIds(nextPendingApprovalSessionIds);
+      }
     } catch (err) {
       if (inboxRequestIdRef.current !== requestId) return;
       setInboxSummaryAsync((prev) => fail(prev, err));
@@ -688,6 +741,31 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
     },
     [],
   );
+
+  useEffect(() => {
+    if (sessionsAsync.source !== 'api') return;
+    const current = sessionsAsync.data;
+    const hasApproval = (id: string) =>
+      pendingApprovalSessionIds.has(id) ||
+      waitingApprovalSessionIds.has(id);
+    const needsPatch = current.some(
+      (session) => session.hasPendingApproval !== hasApproval(session.id),
+    );
+    if (!needsPatch) return;
+    setSessionsAsync(
+      succeed(
+        current.map((session) => ({
+          ...session,
+          hasPendingApproval: hasApproval(session.id),
+        })),
+      ),
+    );
+  }, [
+    pendingApprovalSessionIds,
+    waitingApprovalSessionIds,
+    sessionsAsync,
+    setSessionsAsync,
+  ]);
 
   const refreshSessionLists = useCallback(async (): Promise<void> => {
     await Promise.all([refreshSessions(), refreshArchivedSessions()]);
@@ -1260,6 +1338,24 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
             sessionId,
             hasRunningSessionAgent(sessionAgents, ignoredSessionAgentIds),
           );
+          const hasWaitingApproval = sessionAgents.some(
+            (sa) =>
+              !ignoredSessionAgentIds.has(sa.id) &&
+              sa.state === 'waitingapproval',
+          );
+          const prev = waitingApprovalSessionIdsRef.current;
+          const wasWaiting = prev.has(sessionId);
+          if (hasWaitingApproval && !wasWaiting) {
+            const next = new Set(prev);
+            next.add(sessionId);
+            waitingApprovalSessionIdsRef.current = next;
+            setWaitingApprovalSessionIds(next);
+          } else if (!hasWaitingApproval && wasWaiting) {
+            const next = new Set(prev);
+            next.delete(sessionId);
+            waitingApprovalSessionIdsRef.current = next;
+            setWaitingApprovalSessionIds(next);
+          }
         }
         if (workflowStatus) {
           setSessionWorkflowStatusIndicators(sessionId, workflowStatus);
@@ -1278,6 +1374,7 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
       loadSessionWorkflowStatus,
       setSessionRunningIndicator,
       setSessionWorkflowStatusIndicators,
+      setWaitingApprovalSessionIds,
     ],
   );
 
@@ -1287,13 +1384,15 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
     const runningSidebarSessionIds = sessionsAsync.data
       .filter(
         (session) =>
-          session.id !== activeSessionId &&
+          (session.id !== activeSessionId ||
+            Boolean(session.hasPendingApproval)) &&
           Boolean(
             session.hasRunningAgent ||
               hasRunningWorkflowActivity(session) ||
               session.hasPendingWorkflowInput ||
               session.hasPendingWorkflowReview ||
-              session.hasWorkflowError,
+              session.hasWorkflowError ||
+              session.hasPendingApproval,
           ),
       )
       .map((session) => session.id);
@@ -1317,6 +1416,33 @@ export const WorkspaceProvider: React.FC<{ children: React.ReactNode }> = ({
     scheduleInboxRefresh,
     sessionsAsync.data,
     sessionsAsync.source,
+  ]);
+
+  useEffect(() => {
+    const onChanged = (event: Event) => {
+      const detail = (event as CustomEvent<ExecutorApprovalChangedDetail>)
+        .detail;
+      if (!detail?.sessionId) return;
+      if (detail.type === 'executor_approval_requested') {
+        const prev = pendingApprovalSessionIdsRef.current;
+        if (!prev.has(detail.sessionId)) {
+          const next = new Set(prev);
+          next.add(detail.sessionId);
+          pendingApprovalSessionIdsRef.current = next;
+          setPendingApprovalSessionIds(next);
+        }
+      } else {
+        scheduleInboxRefresh();
+        void refreshSessionRunningIndicators(detail.sessionId);
+      }
+    };
+    window.addEventListener(EXECUTOR_APPROVAL_CHANGED_EVENT, onChanged);
+    return () =>
+      window.removeEventListener(EXECUTOR_APPROVAL_CHANGED_EVENT, onChanged);
+  }, [
+    scheduleInboxRefresh,
+    setPendingApprovalSessionIds,
+    refreshSessionRunningIndicators,
   ]);
 
   const resetWorkspaceChanges = useCallback(() => {

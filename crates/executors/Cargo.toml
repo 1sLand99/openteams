@@ -64,6 +64,9 @@ openssl = { version = "0.10", features = ["vendored"] }
 default = []
 qa-mode = []
 
+[dev-dependencies]
+tempfile = "3.21"
+
 [[bin]]
 name = "acp-qa-agent"
 path = "src/bin/acp_qa_agent.rs"

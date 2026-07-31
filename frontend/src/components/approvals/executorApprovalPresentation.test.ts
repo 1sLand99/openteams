@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  approvalCommand,
   approvalOptionLabel,
   groupApprovalRequests,
   partitionApprovalOptions,
@@ -54,6 +55,29 @@ assert.equal(partitionedOptions.allowAlways?.option_id, 'always');
 assert.deepEqual(
   partitionedOptions.otherOptions.map((option) => option.option_id),
   ['deny'],
+);
+
+const commandRequest = {
+  display_input: {
+    tool_call: {
+      rawInput: {
+        command: 'pnpm run frontend:check',
+      },
+    },
+  },
+} as unknown as ChatExecutorApprovalRequest;
+assert.equal(approvalCommand(commandRequest), 'pnpm run frontend:check');
+assert.equal(
+  approvalCommand({
+    display_input: { command: 'cargo test' },
+  } as unknown as ChatExecutorApprovalRequest),
+  'cargo test',
+);
+assert.equal(
+  approvalCommand({
+    display_input: { tool_call: { rawInput: {} } },
+  } as unknown as ChatExecutorApprovalRequest),
+  null,
 );
 
 const requests = [

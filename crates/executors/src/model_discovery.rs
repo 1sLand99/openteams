@@ -144,6 +144,91 @@ pub fn model_slugs_from_models_json(value: &Value) -> Vec<String> {
     models.into_iter().collect()
 }
 
+/// Run a CLI command that returns a top-level `models` object and collect only
+/// its keys. This intentionally does not recurse through provider credentials
+/// or other configuration values.
+pub async fn discover_model_map_from_cli_command(
+    current_dir: &Path,
+    env: &ExecutionEnv,
+    cmd: &CmdOverrides,
+    builder: CommandBuilder,
+) -> Result<Option<Vec<String>>, ExecutorError> {
+    let command_parts = builder.build_initial()?;
+    let (program, args) = match command_parts.into_resolved().await {
+        Ok(parts) => parts,
+        Err(ExecutorError::ExecutableNotFound { .. }) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+
+    let mut command = Command::new(program);
+    command
+        .kill_on_drop(true)
+        .current_dir(current_dir)
+        .env("NPM_CONFIG_LOGLEVEL", "error")
+        .env("NODE_NO_WARNINGS", "1")
+        .env("NO_COLOR", "1")
+        .args(args);
+    env.clone().with_profile(cmd).apply_to_command(&mut command);
+
+    let output = match timeout(CLI_DISCOVERY_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(err)) => return Err(ExecutorError::Io(err)),
+        Err(_) => {
+            return Err(ExecutorError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "model discovery command timed out",
+            )));
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim().chars().take(512).collect::<String>();
+        return Err(ExecutorError::Io(std::io::Error::other(
+            if detail.is_empty() {
+                format!("model discovery command exited with {}", output.status)
+            } else {
+                format!(
+                    "model discovery command exited with {}: {detail}",
+                    output.status
+                )
+            },
+        )));
+    }
+    let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|error| {
+        ExecutorError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("model discovery command returned invalid JSON: {error}"),
+        ))
+    })?;
+    let models = model_ids_from_model_map_json(&value);
+    if models.is_empty() {
+        return Err(ExecutorError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "model discovery command returned no model aliases",
+        )));
+    }
+    Ok(Some(models))
+}
+
+pub fn model_ids_from_model_map_json(value: &Value) -> Vec<String> {
+    let Some(models) = value.get("models").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    models
+        .keys()
+        .filter_map(|model| {
+            let model = model.trim();
+            (!model.is_empty()
+                && model.len() <= 160
+                && !model.contains(char::is_whitespace)
+                && !model.contains("://"))
+            .then(|| model.to_string())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+}
+
 fn collect_model_slugs(value: &Value, models: &mut BTreeSet<String>) {
     match value {
         Value::Array(items) => {
@@ -959,5 +1044,33 @@ mod tests {
         let models = model_slugs_from_models_json(&value);
 
         assert_eq!(models, vec!["gpt-5.3-codex", "gpt-5.4"]);
+    }
+
+    #[test]
+    fn extracts_only_top_level_model_map_keys() {
+        let value = json!({
+            "providers": {
+                "custom": {
+                    "api_key": "secret/that-must-not-be-a-model"
+                }
+            },
+            "models": {
+                "kimi-code/k3": {
+                    "model": "vendor-internal-model"
+                },
+                "kimi-code/kimi-for-coding": {},
+                "private-alias": {}
+            }
+        });
+        let models = model_ids_from_model_map_json(&value);
+
+        assert_eq!(
+            models,
+            vec![
+                "kimi-code/k3".to_string(),
+                "kimi-code/kimi-for-coding".to_string(),
+                "private-alias".to_string()
+            ]
+        );
     }
 }

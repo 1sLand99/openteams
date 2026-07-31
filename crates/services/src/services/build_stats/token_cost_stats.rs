@@ -1026,15 +1026,11 @@ fn runtime_usage_support(runner_type: Option<&str>) -> RuntimeUsageSupport {
         return RuntimeUsageSupport::NativeUsage;
     }
 
-    if runner.contains("gemini") || runner.contains("qwen") {
+    if runner.contains("gemini") || runner.contains("qwen") || runner.contains("kimi") {
         return RuntimeUsageSupport::GenericTokenUsageOnly;
     }
 
-    if runner.contains("cursor")
-        || runner.contains("copilot")
-        || runner.contains("droid")
-        || runner.contains("kimi")
-    {
+    if runner.contains("cursor") || runner.contains("copilot") || runner.contains("droid") {
         return RuntimeUsageSupport::UnsupportedNoUsage;
     }
 
@@ -1741,6 +1737,70 @@ mod tests {
     }
 
     #[test]
+    fn converts_kimi_acp_session_usage_to_per_turn_deltas() {
+        let records = real_usage_records_from_rows(
+            vec![
+                row(
+                    "m1",
+                    "run-1",
+                    "kimi_code",
+                    Some("kimi-code/k3"),
+                    serde_json::json!({
+                        "agent_session_id": "kimi-thread-1",
+                        "token_usage": {
+                            "runtime_agent": "kimi",
+                            "runtime_model_id": "kimi-code/k3",
+                            "runtime_thread_id": "kimi-thread-1",
+                            "usage_scope": "thread_total_snapshot",
+                            "input_tokens": 100,
+                            "output_tokens": 40,
+                            "cache_read_tokens": 10,
+                            "snapshot_input_tokens": 100,
+                            "snapshot_output_tokens": 40,
+                            "snapshot_cache_read_tokens": 10,
+                            "is_estimated": false
+                        }
+                    }),
+                ),
+                row(
+                    "m2",
+                    "run-2",
+                    "kimi_code",
+                    Some("kimi-code/k3"),
+                    serde_json::json!({
+                        "agent_session_id": "kimi-thread-1",
+                        "token_usage": {
+                            "runtime_agent": "kimi",
+                            "runtime_model_id": "kimi-code/k3",
+                            "runtime_thread_id": "kimi-thread-1",
+                            "usage_scope": "thread_total_snapshot",
+                            "input_tokens": 175,
+                            "output_tokens": 70,
+                            "cache_read_tokens": 25,
+                            "snapshot_input_tokens": 175,
+                            "snapshot_output_tokens": 70,
+                            "snapshot_cache_read_tokens": 25,
+                            "is_estimated": false
+                        }
+                    }),
+                ),
+            ],
+            None,
+            None,
+        );
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].model_id, "kimi-code/k3");
+        assert_eq!(records[0].input_tokens, 100);
+        assert_eq!(records[0].output_tokens, 40);
+        assert_eq!(records[0].cache_read_tokens, 10);
+        assert_eq!(records[1].model_id, "kimi-code/k3");
+        assert_eq!(records[1].input_tokens, 75);
+        assert_eq!(records[1].output_tokens, 30);
+        assert_eq!(records[1].cache_read_tokens, 15);
+    }
+
+    #[test]
     fn model_usage_prefers_custom_prices_and_charges_cache() {
         let records = vec![TokenUsageRecord {
             date: "2026-06-01".to_string(),
@@ -2134,7 +2194,7 @@ mod tests {
         );
         assert_eq!(
             runtime_usage_support(Some("kimi_code")),
-            RuntimeUsageSupport::UnsupportedNoUsage
+            RuntimeUsageSupport::GenericTokenUsageOnly
         );
     }
 }

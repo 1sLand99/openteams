@@ -218,8 +218,7 @@ cd openteams
 pnpm i
 npm run dev
 # build
-pnpm --filter frontend build
-pnpm desktop:build
+pnpm run desktop:build
 ```
 
 ### Build `openteams-cli` locally

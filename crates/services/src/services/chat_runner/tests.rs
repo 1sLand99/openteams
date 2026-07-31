@@ -2554,6 +2554,7 @@ async fn process_agent_protocol_output_requests_retry_for_first_json_shape_failu
             None,
             None,
             0,
+            None,
         )
         .await
         .expect("process protocol output");
@@ -2602,6 +2603,7 @@ async fn process_agent_protocol_output_uses_raw_output_after_retry_exhaustion() 
             None,
             None,
             MAX_PROTOCOL_PARSE_RETRIES,
+            None,
         )
         .await
         .expect("process protocol output");
@@ -2616,6 +2618,68 @@ async fn process_agent_protocol_output_uses_raw_output_after_retry_exhaustion() 
     assert_eq!(messages[0].content, "still not json");
     assert_eq!(messages[0].meta["protocol"]["mode"], json!("raw_fallback"));
     assert_eq!(messages[0].meta["run_id"], json!(run_id));
+}
+
+#[tokio::test]
+async fn persist_protocol_retry_attempt_message_keeps_run_activity_anchor() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let run_id = Uuid::new_v4();
+    let previous_run_id = Uuid::new_v4();
+    let previous_retry_meta = json!({
+        "attempt": 1,
+        "previous_run_id": previous_run_id,
+    });
+
+    runner
+        .persist_protocol_retry_attempt_message(
+            session_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            run_id,
+            "coder",
+            Uuid::new_v4(),
+            Some("client-message"),
+            0,
+            ResolvedPromptLanguage {
+                setting: "simplified_chinese",
+                code: "zh-Hans",
+                instruction: "You MUST respond in Simplified Chinese.",
+            },
+            1,
+            Some(&previous_retry_meta),
+            &ChatProtocolNoticeCode::InvalidJson,
+            Some("expected an array"),
+            None,
+            Some("kimi"),
+        )
+        .await
+        .expect("persist retry attempt");
+
+    let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
+        .await
+        .expect("list messages");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "响应格式无效，正在自动重试。");
+    assert_eq!(messages[0].meta["run_id"], json!(run_id));
+    assert_eq!(
+        messages[0].meta["protocol"]["mode"],
+        json!("protocol_retry")
+    );
+    assert_eq!(
+        messages[0].meta["protocol_retry"]["previous_run_id"],
+        json!(previous_run_id)
+    );
+    assert_eq!(
+        messages[0].meta["protocol_retry"]["current_run_id"],
+        json!(run_id)
+    );
+    assert_eq!(
+        messages[0].meta["protocol_retry"]["next_attempt"],
+        json!(2)
+    );
 }
 
 #[tokio::test]
@@ -2648,6 +2712,7 @@ async fn process_agent_protocol_output_uses_conclusion_when_no_send() {
             None,
             None,
             0,
+            None,
         )
         .await
         .expect("process protocol output");
@@ -2673,6 +2738,12 @@ async fn process_agent_protocol_output_persists_run_model_on_send_message() {
     let session_id = Uuid::new_v4();
     insert_test_chat_session(&db, session_id).await;
 
+    let previous_run_id = Uuid::new_v4();
+    let protocol_retry_meta = json!({
+        "attempt": 1,
+        "previous_run_id": previous_run_id,
+        "error_code": "invalid_json",
+    });
     let result = runner
         .process_agent_protocol_output(
             session_id,
@@ -2696,6 +2767,7 @@ async fn process_agent_protocol_output_persists_run_model_on_send_message() {
             None,
             Some("gpt-5.5"),
             0,
+            Some(&protocol_retry_meta),
         )
         .await
         .expect("process protocol output");
@@ -2707,6 +2779,10 @@ async fn process_agent_protocol_output_persists_run_model_on_send_message() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].sender_type, ChatSenderType::Agent);
     assert_eq!(messages[0].meta["model"], json!("gpt-5.5"));
+    assert_eq!(
+        messages[0].meta["protocol_retry"]["previous_run_id"],
+        json!(previous_run_id)
+    );
 }
 
 #[tokio::test]
@@ -2739,6 +2815,7 @@ async fn process_agent_protocol_output_uses_record_when_no_send_or_conclusion() 
             None,
             None,
             0,
+            None,
         )
         .await
         .expect("process protocol output");
@@ -2783,6 +2860,7 @@ async fn process_agent_protocol_output_persists_error_when_output_empty() {
             None,
             None,
             0,
+            None,
         )
         .await
         .expect("process protocol output");
@@ -2827,6 +2905,7 @@ async fn process_agent_protocol_output_persists_failure_hint_when_output_empty()
             None,
             None,
             0,
+            None,
         )
         .await
         .expect("process protocol output");
@@ -2872,6 +2951,7 @@ async fn process_agent_protocol_output_persists_completed_hint_when_successful_o
             None,
             None,
             0,
+            None,
         )
         .await
         .expect("process protocol output");
@@ -2924,6 +3004,7 @@ async fn process_agent_protocol_output_persists_permission_rejected_hint_when_ou
             None,
             None,
             0,
+            None,
         )
         .await
         .expect("process protocol output");
@@ -2976,6 +3057,7 @@ async fn process_agent_protocol_output_keeps_model_output_after_permission_rejec
             None,
             None,
             0,
+            None,
         )
         .await
         .expect("process protocol output");
@@ -3023,6 +3105,7 @@ async fn process_agent_protocol_output_persists_stopped_hint_when_stopped_empty(
             None,
             None,
             0,
+            None,
         )
         .await
         .expect("process protocol output");

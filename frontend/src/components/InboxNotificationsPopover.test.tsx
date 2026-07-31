@@ -297,6 +297,14 @@ check(
   approvalActionsSource,
 );
 
+check(
+  "shows the approval command and truncates long values",
+  approvalActionsSource.includes("const command = approvalCommand(request)") &&
+    approvalActionsSource.includes("title={command}") &&
+    approvalActionsSource.includes('className="w-full truncate'),
+  approvalActionsSource,
+);
+
 if (failures > 0) {
   // eslint-disable-next-line no-console
   console.error(`\n${failures} InboxNotificationsPopover assertion(s) failed.`);

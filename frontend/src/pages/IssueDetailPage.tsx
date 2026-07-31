@@ -11,7 +11,6 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  Save,
   Send,
   Tag,
   Trash2,
@@ -583,11 +582,6 @@ export function IssueDetailPage({
       label: session.title?.trim() || session.id,
     }));
   const trimmedTitleDraft = titleDraft.trim();
-  const titleSaveDisabled =
-    action === 'rename-issue' ||
-    action === 'delete-issue' ||
-    !trimmedTitleDraft ||
-    trimmedTitleDraft === issueTitle;
 
   useEffect(() => {
     if (!titleEditing) {
@@ -697,6 +691,7 @@ export function IssueDetailPage({
   };
 
   const handleSaveTitleDraft = async () => {
+    if (action === 'rename-issue' || action === 'delete-issue') return;
     const saved = await handleRenameIssue(trimmedTitleDraft);
     if (saved) {
       setTitleEditing(false);
@@ -1515,22 +1510,25 @@ export function IssueDetailPage({
           <section className="min-w-0 pl-2 pr-1 pt-6">
             {titleEditing ? (
               <form
-                className="flex min-w-0 items-center gap-2"
+                className="w-full min-w-0"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  if (!titleSaveDisabled) void handleSaveTitleDraft();
+                  void handleSaveTitleDraft();
                 }}
               >
                 <input
                   ref={titleInputRef}
                   tabIndex={-1}
                   value={titleDraft}
-                  className="h-10 min-w-0 flex-1 rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-2.5 text-[23px] font-bold leading-tight text-[var(--ink)] outline-none transition placeholder:text-[var(--ink-tertiary)] focus:border-[var(--hairline-strong)]"
+                  className="h-10 w-full min-w-0 rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-2.5 text-[23px] font-bold leading-tight text-[var(--ink)] outline-none transition placeholder:text-[var(--ink-tertiary)] focus:border-[var(--hairline-strong)]"
                   placeholder={tr(
                     'issue.detail.actions.namePlaceholder',
                     'Issue name',
                   )}
                   onChange={(event) => setTitleDraft(event.target.value)}
+                  onBlur={() => {
+                    void handleSaveTitleDraft();
+                  }}
                   onKeyDown={(event) => {
                     if (preventTabFocusChange(event)) return;
                     if (event.key === 'Escape') {
@@ -1540,22 +1538,28 @@ export function IssueDetailPage({
                     }
                   }}
                 />
-                <button
-                  type="submit"
-                  disabled={titleSaveDisabled}
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] border border-[var(--hairline)] text-[var(--ink-tertiary)] transition hover:bg-[var(--surface-3)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-45"
-                  aria-label={tr(
-                    'issue.detail.actions.saveName',
-                    'Save name',
-                  )}
-                >
-                  <Save aria-hidden="true" className="h-[18px] w-[18px]" />
-                </button>
               </form>
             ) : (
-              <h2 className="text-[23px] font-bold leading-tight text-[var(--ink)]">
-                {issueTitle}
-              </h2>
+              <div className="flex min-w-0 items-start gap-2">
+                <h2 className="min-w-0 break-words text-[23px] font-bold leading-tight text-[var(--ink)]">
+                  {issueTitle}
+                </h2>
+                <button
+                  type="button"
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px] text-[var(--ink-tertiary)] transition hover:bg-[var(--surface-3)] hover:text-[var(--ink)]"
+                  aria-label={tr(
+                    'issue.detail.actions.rename',
+                    'Rename',
+                  )}
+                  onClick={() => setTitleEditing(true)}
+                >
+                  <Pencil
+                    aria-hidden="true"
+                    className="h-[15px] w-[15px]"
+                    strokeWidth={2.2}
+                  />
+                </button>
+              </div>
             )}
             <div className="mt-2 flex items-center gap-2 text-[12px] font-medium text-[var(--ink-subtle)]">
               <IssueAvatar
@@ -2203,12 +2207,12 @@ function IssueDetailHeader({
             <div className="absolute left-full top-full z-50 ml-2 mt-2 -translate-x-[30px]">
               <div
                 role="menu"
-                className="w-[226px] rounded-[8px] border border-[#34363a] bg-[#1b1b1c] p-2 text-[15px] shadow-[0_24px_70px_rgba(0,0,0,0.46),inset_0_1px_0_rgba(255,255,255,0.04)]"
+                className="w-[226px] rounded-[8px] border border-[var(--hairline-strong)] bg-[var(--surface-1)] p-2 text-[15px] text-[var(--ink)] shadow-[0_24px_70px_rgba(0,0,0,0.28)]"
               >
                 <button
                   type="button"
                   role="menuitem"
-                  className="flex h-12 w-full items-center gap-3 rounded-[8px] px-3 text-left font-semibold text-[#e9eaec] transition hover:bg-[#27282c]"
+                  className="flex h-12 w-full items-center gap-3 rounded-[8px] px-3 text-left font-semibold text-[var(--ink)] transition hover:bg-[var(--surface-3)]"
                   onClick={() => {
                     onStartRename();
                     setMenuOpen(false);
@@ -2216,7 +2220,7 @@ function IssueDetailHeader({
                 >
                   <Pencil
                     aria-hidden="true"
-                    className="h-[18px] w-[18px] shrink-0 text-[#a6a8ad]"
+                    className="h-[18px] w-[18px] shrink-0 text-[var(--ink-subtle)]"
                     strokeWidth={2.4}
                   />
                   <span className="min-w-0 flex-1 truncate">
@@ -2228,7 +2232,7 @@ function IssueDetailHeader({
                   type="button"
                   role="menuitem"
                   disabled={renaming || deleting}
-                  className="mt-1 flex h-12 w-full items-center gap-3 rounded-[8px] px-3 text-left font-semibold text-[#f1f2f3] transition hover:bg-[#27282c] disabled:cursor-not-allowed disabled:opacity-55"
+                  className="mt-1 flex h-12 w-full items-center gap-3 rounded-[8px] px-3 text-left font-semibold text-[var(--ink)] transition hover:bg-[var(--surface-3)] disabled:cursor-not-allowed disabled:opacity-55"
                   onClick={() => {
                     setMenuOpen(false);
                     setDeleteDialogOpen(true);
@@ -2236,7 +2240,7 @@ function IssueDetailHeader({
                 >
                   <Trash2
                     aria-hidden="true"
-                    className="h-[19px] w-[19px] shrink-0 text-[#f1f2f3]"
+                    className="h-[19px] w-[19px] shrink-0 text-[var(--ink)]"
                     strokeWidth={2.4}
                   />
                   <span className="min-w-0 flex-1 truncate">

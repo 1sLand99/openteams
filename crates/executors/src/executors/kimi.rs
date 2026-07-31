@@ -1,303 +1,272 @@
-use std::{collections::HashMap, path::Path, process::Stdio, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
-use chrono::Utc;
-use command_group::AsyncCommandGroup;
-use futures::StreamExt;
+use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tokio::{io::AsyncWriteExt, process::Command};
 use ts_rs::TS;
 use workspace_utils::{msg_store::MsgStore, shell::resolve_executable_path_blocking};
 
+use super::acp::{
+    AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
+    AcpCapabilityProbe, AcpClientServicePolicy, AcpConfigChoice, AcpConfigOptionKind,
+    AcpConfigOptionSnapshot, AcpConfigSource, AcpExecutionOptions,
+    mcp::{AcpMcpPolicy, resolve_effective_mcp_config},
+};
 use crate::{
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides},
+    approvals::ExecutorApprovalService,
+    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
     },
-    logs::{
-        ActionType, NormalizedEntry, NormalizedEntryType, ToolResult, ToolStatus,
-        stderr_processor::normalize_stderr_logs,
-        utils::{EntryIndexProvider, patch::ConversationPatch},
-    },
-    model_discovery::{
-        ProviderKind, cli_model_commands, discover_from_sources, runner_config_paths,
-    },
-    stdout_dup,
+    mcp_config::{McpConfig, read_canonical_mcp_config},
+    model_discovery::{discover_model_map_from_cli_command, read_config_value},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
+#[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[derivative(Debug, PartialEq)]
 pub struct KimiCode {
     #[serde(default)]
     pub append_prompt: AppendPrompt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Kimi model alias configured in Kimi Code CLI")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Per-run Kimi thinking effort: low, high, or max")]
+    pub thinking_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp: Option<AcpExecutionOptions>,
     #[serde(flatten)]
     pub cmd: CmdOverrides,
-}
-
-#[derive(Clone)]
-struct ToolEntryState {
-    index: usize,
-    tool_name: String,
-    arguments: Option<Value>,
+    #[serde(skip)]
+    #[ts(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    pub acp_mcp_policy: AcpMcpPolicy,
+    #[serde(skip)]
+    #[ts(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    pub approvals: Option<Arc<dyn ExecutorApprovalService>>,
 }
 
 impl KimiCode {
-    const SESSION_PREFIX: &'static str = "[kimi-session] ";
-    const SESSION_SENTINEL: &'static str = "KIMI_CONTINUE";
+    const BASE_COMMAND: &'static str = "kimi";
+    const TERMINAL_AUTH_METHOD: &'static str = "login";
 
     pub fn base_command() -> &'static str {
-        "kimi"
+        Self::BASE_COMMAND
     }
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        let mut builder = CommandBuilder::new(Self::base_command()).params([
-            "--print",
-            "--output-format",
-            "stream-json",
-        ]);
-
-        if let Some(model) = &self.model {
-            let model = Self::normalize_model_name(model);
-            builder = builder.extend_params(["--model".to_string(), model]);
-        }
-
-        apply_overrides(builder, &self.cmd)
+        apply_overrides(
+            CommandBuilder::new(Self::BASE_COMMAND).extend_params(["acp"]),
+            &self.cmd,
+        )
     }
 
-    fn normalize_model_name(model: &str) -> String {
-        match model.trim() {
-            "kimi-k2.5" => "moonshot-cn/kimi-k2.5".to_string(),
-            "kimi-k2.6" => "moonshot-cn/kimi-k2.6".to_string(),
-            other => other.to_string(),
-        }
+    fn provider_list_command(&self) -> Result<CommandBuilder, CommandBuildError> {
+        apply_overrides(
+            CommandBuilder::new(Self::BASE_COMMAND).extend_params(["provider", "list", "--json"]),
+            &self.cmd,
+        )
     }
 
-    fn extract_assistant_text(message: &Value) -> String {
-        let Some(content) = message.get("content") else {
-            return String::new();
-        };
-
-        match content {
-            Value::String(text) => text.clone(),
-            Value::Array(parts) => parts
-                .iter()
-                .filter_map(|part| {
-                    if let Some(text) = part.as_str() {
-                        return Some(text.to_string());
-                    }
-
-                    part.get("text")
-                        .and_then(|v| v.as_str())
-                        .map(|v| v.to_string())
-                        .or_else(|| {
-                            part.get("content")
-                                .and_then(|v| v.as_str())
-                                .map(|v| v.to_string())
-                        })
-                })
-                .collect::<String>(),
-            _ => String::new(),
-        }
-    }
-
-    fn extract_assistant_thinking(message: &Value) -> String {
-        let Some(content) = message.get("content") else {
-            return String::new();
-        };
-
-        match content {
-            Value::Array(parts) => parts
-                .iter()
-                .filter_map(|part| {
-                    let part_type = part.get("type").and_then(|v| v.as_str());
-                    if !matches!(part_type, Some("think" | "thinking")) {
-                        return None;
-                    }
-
-                    part.get("think")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| part.get("thinking").and_then(|v| v.as_str()))
-                        .or_else(|| part.get("text").and_then(|v| v.as_str()))
-                        .map(|v| v.to_string())
-                })
-                .collect::<String>(),
-            _ => String::new(),
-        }
-    }
-
-    fn extract_event_type_and_message(payload: &Value) -> (&str, &Value) {
-        let event_type = payload
-            .get("type")
-            .and_then(|v| v.as_str())
-            .or_else(|| payload.get("role").and_then(|v| v.as_str()))
-            .unwrap_or_default();
-
-        let message = payload.get("message").unwrap_or(payload);
-        (event_type, message)
-    }
-
-    fn extract_tool_calls(message: &Value) -> Vec<(String, String, Option<Value>)> {
-        let mut calls = Vec::new();
-        let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) else {
-            return calls;
-        };
-
-        for call in tool_calls {
-            let Some(id) = call.get("id").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let Some(function) = call.get("function") else {
-                continue;
-            };
-            let Some(tool_name) = function.get("name").and_then(|v| v.as_str()) else {
-                continue;
-            };
-
-            let arguments = function
-                .get("arguments")
-                .and_then(Self::parse_tool_arguments);
-
-            calls.push((id.to_string(), tool_name.to_string(), arguments));
-        }
-
-        calls
-    }
-
-    fn parse_tool_arguments(value: &Value) -> Option<Value> {
-        match value {
-            Value::Null => None,
-            Value::String(raw) => {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    serde_json::from_str::<Value>(trimmed)
-                        .ok()
-                        .or_else(|| Some(Value::String(raw.clone())))
-                }
+    fn validate_auth_selection(&self) -> Result<(), ExecutorError> {
+        match self.acp.as_ref().and_then(|options| options.auth.as_ref()) {
+            Some(AcpAuthSelection::MethodId { method_id }) => {
+                Err(unsupported_terminal_auth(method_id))
             }
-            other => Some(other.clone()),
+            Some(AcpAuthSelection::Auto) | None => Ok(()),
         }
     }
 
-    fn extract_tool_result(message: &Value) -> (Option<String>, String) {
-        let tool_call_id = message
-            .get("tool_call_id")
-            .and_then(|v| v.as_str())
-            .map(|v| v.to_string());
-
-        let content = match message.get("content") {
-            Some(Value::String(text)) => text.clone(),
-            Some(Value::Array(parts)) => parts
-                .iter()
-                .filter_map(|part| {
-                    part.get("text")
-                        .and_then(|v| v.as_str())
-                        .map(|v| v.to_string())
-                        .or_else(|| {
-                            part.get("content")
-                                .and_then(|v| v.as_str())
-                                .map(|v| v.to_string())
-                        })
-                })
-                .collect::<String>(),
-            Some(other) => other.to_string(),
-            None => String::new(),
+    async fn acp_harness(&self, env: &ExecutionEnv) -> Result<AcpAgentHarness, ExecutorError> {
+        let options = self.acp.clone().unwrap_or_default();
+        let approval_policy = match options.approval_mode.unwrap_or_default() {
+            AcpApprovalMode::Ask => AcpApprovalPolicy::Ask,
+            AcpApprovalMode::AutoAllow => AcpApprovalPolicy::AutoAllow,
+            AcpApprovalMode::AutoReject => AcpApprovalPolicy::AutoReject,
         };
+        let additional_directories = options
+            .validated_directories()
+            .await
+            .map_err(ExecutorError::Io)?;
+        let full_access = options.access_mode.unwrap_or_default() == AcpAccessMode::FullAccess;
+        let mut harness = AcpAgentHarness::new()
+            .with_approval_policy(approval_policy)
+            .with_required_session_mode("mode", "default")
+            .with_additional_directories(additional_directories)
+            .with_client_services(AcpClientServicePolicy {
+                read_text_file: true,
+                write_text_file: true,
+                terminal: true,
+                full_access,
+                ..AcpClientServicePolicy::default()
+            });
+        self.validate_auth_selection()?;
 
-        (tool_call_id, content)
+        let config_overrides = options.config_overrides.as_deref().unwrap_or_default();
+        let has_model_override = config_overrides.iter().any(|selection| {
+            selection.category_snapshot.as_deref() == Some("model")
+                || selection.option_id.eq_ignore_ascii_case("model")
+        });
+        let has_thought_override = config_overrides.iter().any(|selection| {
+            selection.category_snapshot.as_deref() == Some("thought_level")
+                || matches!(
+                    normalized_config_key(&selection.option_id).as_str(),
+                    "thinking" | "thoughtlevel"
+                )
+        });
+        if let Some(model) = self
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|_| !has_model_override)
+        {
+            harness = harness.with_model(model);
+        }
+        if let Some(effort) = self
+            .thinking_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|_| !has_thought_override)
+        {
+            harness = harness.with_native_thought_level_fallback(effort);
+        }
+        for selection in config_overrides {
+            harness = harness.with_config_override(selection);
+        }
+
+        let canonical = match kimi_mcp_config_path(Some(env)) {
+            Some(path) => read_canonical_mcp_config(&path, &McpConfig::canonical_acp()).await?,
+            None => serde_json::json!({ "mcpServers": {} }),
+        };
+        let effective = resolve_effective_mcp_config(&canonical, &self.acp_mcp_policy)?;
+        tracing::debug!(
+            server_count = effective.servers.len(),
+            config_hash = %effective.config_hash,
+            "resolved effective Kimi ACP MCP configuration"
+        );
+        Ok(harness.with_mcp_servers(effective.servers))
     }
 
-    fn merge_assistant_text(current: &str, incoming: &str) -> String {
-        if current.is_empty() {
-            return incoming.to_string();
-        }
-        if incoming.starts_with(current) {
-            return incoming.to_string();
-        }
-        if current.ends_with(incoming) {
-            return current.to_string();
-        }
-
-        let mut next = String::with_capacity(current.len() + incoming.len());
-        next.push_str(current);
-        next.push_str(incoming);
-        next
-    }
-}
-
-async fn spawn_kimi(
-    command_parts: CommandParts,
-    prompt: &str,
-    current_dir: &Path,
-    env: &ExecutionEnv,
-    cmd_overrides: &CmdOverrides,
-) -> Result<SpawnedChild, ExecutorError> {
-    let (program_path, args) = command_parts.into_resolved().await?;
-
-    let mut command = Command::new(program_path);
-    command
-        .kill_on_drop(true)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .current_dir(current_dir)
-        .env("NO_COLOR", "1")
-        .args(args);
-
-    env.clone()
-        .with_profile(cmd_overrides)
-        .apply_to_command(&mut command);
-
-    // Kimi CLI is Python-based and may decode stdin using the local Windows
-    // code page. Force UTF-8 to avoid surrogate decoding errors for CJK input.
-    command
-        .env("PYTHONUTF8", "1")
-        .env("PYTHONIOENCODING", "utf-8");
-
-    let mut child = command.group_spawn()?;
-
-    if let Some(mut stdin) = child.inner().stdin.take() {
-        stdin.write_all(prompt.as_bytes()).await?;
-        stdin.shutdown().await?;
+    async fn configured_default_model(
+        &self,
+        env: &ExecutionEnv,
+    ) -> Result<Option<String>, ExecutorError> {
+        let Some(path) = kimi_code_home(Some(env)).map(|home| home.join("config.toml")) else {
+            return Ok(None);
+        };
+        let Some(config) = read_config_value(&path).await? else {
+            return Ok(None);
+        };
+        Ok(config
+            .get("default_model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned))
     }
 
-    let (_, appender) = stdout_dup::tee_stdout_with_appender(&mut child)?;
-    appender.append_line(format!(
-        "{}{}",
-        KimiCode::SESSION_PREFIX,
-        KimiCode::SESSION_SENTINEL
-    ));
-
-    Ok(child.into())
+    fn discovered_model_option(
+        &self,
+        models: Vec<String>,
+        default_model: Option<&str>,
+    ) -> AcpConfigOptionSnapshot {
+        let current_value = self
+            .model
+            .as_deref()
+            .or(default_model)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|selected| models.iter().any(|model| model == selected))
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| models[0].clone());
+        AcpConfigOptionSnapshot {
+            id: "model".to_string(),
+            name: "Model".to_string(),
+            description: Some("Models reported by Kimi Code CLI".to_string()),
+            category: Some("model".to_string()),
+            kind: AcpConfigOptionKind::Select {
+                current_value,
+                options: models
+                    .into_iter()
+                    .map(|model| AcpConfigChoice {
+                        name: model.clone(),
+                        value: model,
+                        description: None,
+                    })
+                    .collect(),
+            },
+        }
+    }
 }
 
 #[async_trait]
 impl StandardCodingAgentExecutor for KimiCode {
+    fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
+        self.approvals = Some(approvals);
+    }
+
     async fn list_models(
         &self,
         current_dir: &Path,
         env: &ExecutionEnv,
     ) -> Result<Option<Vec<String>>, ExecutorError> {
-        let config_paths = runner_config_paths([
-            self.default_mcp_config_path(),
-            dirs::home_dir().map(|home| home.join(".kimi").join("config.json")),
-            dirs::home_dir().map(|home| home.join(".kimi").join("settings.json")),
-        ]);
-        discover_from_sources(
+        let mut models = discover_model_map_from_cli_command(
             current_dir,
             env,
             &self.cmd,
-            self.model.as_deref(),
-            config_paths,
-            cli_model_commands(Self::base_command(), &self.cmd),
-            &[ProviderKind::OpenAiCompatible],
+            self.provider_list_command()?,
         )
-        .await
+        .await?
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        if let Some(model) = self
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        {
+            models.insert(model.to_string());
+        }
+        Ok((!models.is_empty()).then(|| models.into_iter().collect()))
+    }
+
+    async fn probe_acp(
+        &self,
+        current_dir: &Path,
+        env: &ExecutionEnv,
+        auth_method_id: Option<&str>,
+    ) -> Result<Option<AcpCapabilityProbe>, ExecutorError> {
+        if let Some(method_id) = auth_method_id {
+            return Err(unsupported_terminal_auth(method_id));
+        }
+        let mut probe = super::acp::runtime::probe_acp_command_without_session(
+            self.build_command_builder()?.build_initial()?,
+            current_dir,
+            env,
+            &self.cmd,
+            None,
+        )
+        .await?;
+        if let Some(models) = self.list_models(current_dir, env).await?
+            && !models.is_empty()
+        {
+            let default_model = self.configured_default_model(env).await?;
+            probe.config_source = AcpConfigSource::Stable;
+            probe
+                .config_options
+                .push(self.discovered_model_option(models, default_model.as_deref()));
+        }
+        Ok(Some(probe))
     }
 
     async fn spawn(
@@ -306,9 +275,19 @@ impl StandardCodingAgentExecutor for KimiCode {
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let command = self.build_command_builder()?.build_initial()?;
+        let harness = self.acp_harness(env).await?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
-        spawn_kimi(command, &combined_prompt, current_dir, env, &self.cmd).await
+        let command = self.build_command_builder()?.build_initial()?;
+        harness
+            .spawn_with_command(
+                current_dir,
+                combined_prompt,
+                command,
+                env,
+                &self.cmd,
+                self.approvals.clone(),
+            )
+            .await
     }
 
     async fn spawn_follow_up(
@@ -319,396 +298,213 @@ impl StandardCodingAgentExecutor for KimiCode {
         _reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let additional_args = if session_id == Self::SESSION_SENTINEL {
-            vec!["--continue".to_string()]
-        } else {
-            vec!["--session".to_string(), session_id.to_string()]
-        };
-
-        let command = self
-            .build_command_builder()?
-            .build_follow_up(&additional_args)?;
+        let harness = self.acp_harness(env).await?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
-        spawn_kimi(command, &combined_prompt, current_dir, env, &self.cmd).await
+        let command = self.build_command_builder()?.build_follow_up(&[])?;
+        harness
+            .spawn_follow_up_with_command(
+                current_dir,
+                combined_prompt,
+                session_id,
+                command,
+                env,
+                &self.cmd,
+                self.approvals.clone(),
+            )
+            .await
     }
 
-    fn normalize_logs(&self, msg_store: Arc<MsgStore>, _worktree_path: &Path) {
-        let entry_index_provider = EntryIndexProvider::start_from(&msg_store);
-        normalize_stderr_logs(msg_store.clone(), entry_index_provider.clone());
-
-        tokio::spawn(async move {
-            // Use stdout_lines_stream_until_close to ensure we process all stdout,
-            // including error messages that may arrive just before Finished signal.
-            let mut stdout_lines = msg_store.stdout_lines_stream_until_close();
-            let mut model_reported = false;
-            let mut current_assistant_index: Option<usize> = None;
-            let mut current_assistant_text = String::new();
-            let mut current_thinking_index: Option<usize> = None;
-            let mut current_thinking_text = String::new();
-            let mut tool_entries: HashMap<String, ToolEntryState> = HashMap::new();
-
-            while let Some(Ok(line)) = stdout_lines.next().await {
-                if let Some(session_id) = line.strip_prefix(KimiCode::SESSION_PREFIX) {
-                    msg_store.push_session_id(session_id.trim().to_string());
-                    continue;
-                }
-
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-
-                let payload: Value = match serde_json::from_str(trimmed) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        let entry = NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::SystemMessage,
-                            content: strip_ansi_escapes::strip_str(trimmed),
-                            metadata: None,
-                        };
-                        let index = entry_index_provider.next();
-                        msg_store.push_patch(ConversationPatch::add_normalized_entry(index, entry));
-                        continue;
-                    }
-                };
-
-                let (event_type, message) = KimiCode::extract_event_type_and_message(&payload);
-
-                match event_type {
-                    "assistant" => {
-                        if !model_reported
-                            && let Some(model) = message.get("model").and_then(|v| v.as_str())
-                        {
-                            model_reported = true;
-                            let entry = NormalizedEntry {
-                                timestamp: None,
-                                entry_type: NormalizedEntryType::SystemMessage,
-                                content: format!("model: {model}"),
-                                metadata: None,
-                            };
-                            let index = entry_index_provider.next();
-                            msg_store
-                                .push_patch(ConversationPatch::add_normalized_entry(index, entry));
-                        }
-
-                        for (tool_call_id, tool_name, arguments) in
-                            KimiCode::extract_tool_calls(message)
-                        {
-                            if tool_entries.contains_key(&tool_call_id) {
-                                continue;
-                            }
-
-                            let action_type = ActionType::Tool {
-                                tool_name: tool_name.clone(),
-                                arguments: arguments.clone(),
-                                result: None,
-                            };
-                            let entry = NormalizedEntry {
-                                timestamp: None,
-                                entry_type: NormalizedEntryType::ToolUse {
-                                    tool_name: tool_name.clone(),
-                                    action_type,
-                                    status: ToolStatus::Created,
-                                },
-                                content: tool_name.clone(),
-                                metadata: None,
-                            };
-
-                            let index = entry_index_provider.next();
-                            msg_store
-                                .push_patch(ConversationPatch::add_normalized_entry(index, entry));
-                            tool_entries.insert(
-                                tool_call_id,
-                                ToolEntryState {
-                                    index,
-                                    tool_name,
-                                    arguments,
-                                },
-                            );
-                        }
-
-                        let thinking = KimiCode::extract_assistant_thinking(message);
-                        if !thinking.is_empty() {
-                            let merged =
-                                KimiCode::merge_assistant_text(&current_thinking_text, &thinking);
-                            current_thinking_text = merged.clone();
-
-                            let entry = NormalizedEntry {
-                                timestamp: None,
-                                entry_type: NormalizedEntryType::Thinking,
-                                content: merged,
-                                metadata: None,
-                            };
-
-                            if let Some(index) = current_thinking_index {
-                                msg_store.push_patch(ConversationPatch::replace(index, entry));
-                            } else {
-                                let index = entry_index_provider.next();
-                                current_thinking_index = Some(index);
-                                msg_store.push_patch(ConversationPatch::add_normalized_entry(
-                                    index, entry,
-                                ));
-                            }
-                        }
-
-                        let text = KimiCode::extract_assistant_text(message);
-                        if text.is_empty() {
-                            continue;
-                        }
-
-                        current_thinking_index = None;
-                        current_thinking_text.clear();
-
-                        let merged = KimiCode::merge_assistant_text(&current_assistant_text, &text);
-                        current_assistant_text = merged.clone();
-
-                        let entry = NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::AssistantMessage,
-                            content: merged,
-                            metadata: None,
-                        };
-
-                        if let Some(index) = current_assistant_index {
-                            msg_store.push_patch(ConversationPatch::replace(index, entry));
-                        } else {
-                            let index = entry_index_provider.next();
-                            current_assistant_index = Some(index);
-                            msg_store
-                                .push_patch(ConversationPatch::add_normalized_entry(index, entry));
-                        }
-                    }
-                    "tool" => {
-                        current_assistant_index = None;
-                        current_assistant_text.clear();
-                        current_thinking_index = None;
-                        current_thinking_text.clear();
-
-                        let (tool_call_id, result_text) = KimiCode::extract_tool_result(message);
-                        let Some(tool_call_id) = tool_call_id else {
-                            continue;
-                        };
-                        let Some(state) = tool_entries.get(&tool_call_id).cloned() else {
-                            continue;
-                        };
-
-                        let action_type = ActionType::Tool {
-                            tool_name: state.tool_name.clone(),
-                            arguments: state.arguments.clone(),
-                            result: if result_text.trim().is_empty() {
-                                None
-                            } else {
-                                Some(ToolResult::markdown(result_text.clone()))
-                            },
-                        };
-
-                        let entry = NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::ToolUse {
-                                tool_name: state.tool_name,
-                                action_type,
-                                status: ToolStatus::Success,
-                            },
-                            content: if result_text.trim().is_empty() {
-                                "Tool completed".to_string()
-                            } else {
-                                result_text
-                            },
-                            metadata: None,
-                        };
-                        msg_store.push_patch(ConversationPatch::replace(state.index, entry));
-                    }
-                    _ => {
-                        current_assistant_index = None;
-                        current_assistant_text.clear();
-                        current_thinking_index = None;
-                        current_thinking_text.clear();
-                        let entry = NormalizedEntry {
-                            timestamp: None,
-                            entry_type: NormalizedEntryType::SystemMessage,
-                            content: payload.to_string(),
-                            metadata: None,
-                        };
-                        let index = entry_index_provider.next();
-                        msg_store.push_patch(ConversationPatch::add_normalized_entry(index, entry));
-                    }
-                }
-            }
-        });
+    fn normalize_logs(&self, msg_store: Arc<MsgStore>, worktree_path: &Path) {
+        super::acp::normalize_logs(msg_store, worktree_path);
     }
 
-    fn default_mcp_config_path(&self) -> Option<std::path::PathBuf> {
-        dirs::home_dir().map(|home| home.join(".kimi").join("mcp.json"))
+    fn default_mcp_config_path(&self) -> Option<PathBuf> {
+        kimi_mcp_config_path(None)
     }
 
-    fn native_skill_discovery_roots(&self) -> Vec<std::path::PathBuf> {
-        dirs::home_dir()
+    fn native_skill_discovery_roots(&self) -> Vec<PathBuf> {
+        let mut roots = dirs::home_dir()
             .map(|home| vec![home.join(".agents").join("skills")])
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if let Some(home) = kimi_code_home(None) {
+            roots.push(home.join("skills"));
+        }
+        roots
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
-        if resolve_executable_path_blocking(Self::base_command()).is_none() {
-            return AvailabilityInfo::NotFound;
+        let command = self
+            .cmd
+            .base_command_override
+            .as_deref()
+            .and_then(shlex::split)
+            .and_then(|parts| parts.into_iter().next())
+            .unwrap_or_else(|| Self::BASE_COMMAND.to_string());
+        if resolve_executable_path_blocking(&command).is_some() {
+            AvailabilityInfo::InstallationFound
+        } else {
+            AvailabilityInfo::NotFound
         }
-
-        if std::env::var("MOONSHOT_API_KEY")
-            .ok()
-            .is_some_and(|v| !v.trim().is_empty())
-        {
-            return AvailabilityInfo::LoginDetected {
-                last_auth_timestamp: Utc::now().timestamp(),
-            };
-        }
-
-        AvailabilityInfo::InstallationFound
     }
+}
+
+fn normalized_config_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn unsupported_terminal_auth(method_id: &str) -> ExecutorError {
+    let message = if method_id == KimiCode::TERMINAL_AUTH_METHOD {
+        "Kimi ACP login is terminal-based; run `kimi login` and keep ACP auth set to auto"
+            .to_string()
+    } else {
+        format!(
+            "Kimi ACP authentication method `{method_id}` is not supported; run `kimi login` and keep ACP auth set to auto"
+        )
+    };
+    ExecutorError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        message,
+    ))
+}
+
+fn kimi_code_home(env: Option<&ExecutionEnv>) -> Option<PathBuf> {
+    let configured = env
+        .and_then(|env| env.get("KIMI_CODE_HOME").cloned())
+        .or_else(|| std::env::var("KIMI_CODE_HOME").ok());
+    configured
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".kimi-code")))
+}
+
+fn kimi_mcp_config_path(env: Option<&ExecutionEnv>) -> Option<PathBuf> {
+    kimi_code_home(env).map(|home| home.join("mcp.json"))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use tempfile::TempDir;
 
-    use serde_json::json;
-    use workspace_utils::{log_msg::LogMsg, msg_store::MsgStore};
+    use super::*;
+    use crate::env::RepoContext;
 
-    use super::KimiCode;
-    use crate::{
-        executors::{AppendPrompt, StandardCodingAgentExecutor},
-        logs::{NormalizedEntryType, utils::patch::extract_normalized_entry_from_patch},
-    };
-
-    #[test]
-    fn extract_event_type_and_message_supports_wrapped_payload() {
-        let payload = json!({
-            "type": "assistant",
-            "message": {
-                "content": "hello"
-            }
-        });
-
-        let (event_type, message) = KimiCode::extract_event_type_and_message(&payload);
-        assert_eq!(event_type, "assistant");
-        assert_eq!(
-            message.get("content").and_then(|v| v.as_str()),
-            Some("hello")
-        );
-    }
-
-    #[test]
-    fn extract_event_type_and_message_supports_role_payload() {
-        let payload = json!({
-            "role": "assistant",
-            "content": "hello"
-        });
-
-        let (event_type, message) = KimiCode::extract_event_type_and_message(&payload);
-        assert_eq!(event_type, "assistant");
-        assert_eq!(
-            message.get("content").and_then(|v| v.as_str()),
-            Some("hello")
-        );
-    }
-
-    #[test]
-    fn extract_assistant_text_reads_kimi_stream_json_parts() {
-        let message = json!({
-            "role": "assistant",
-            "content": [
-                {"type": "think", "think": "internal"},
-                {"type": "text", "text": "你好，"},
-                {"type": "text", "text": "我是 Kimi。"}
-            ]
-        });
-
-        let text = KimiCode::extract_assistant_text(&message);
-        assert_eq!(text, "你好，我是 Kimi。");
-    }
-
-    #[test]
-    fn extract_assistant_thinking_reads_kimi_think_parts() {
-        let message = json!({
-            "role": "assistant",
-            "content": [
-                {"type": "think", "think": "first"},
-                {"type": "thinking", "thinking": " second"},
-                {"type": "text", "text": "visible"}
-            ]
-        });
-
-        let thinking = KimiCode::extract_assistant_thinking(&message);
-        assert_eq!(thinking, "first second");
-    }
-
-    #[test]
-    fn build_command_includes_configured_model() {
-        let executor = KimiCode {
+    fn kimi() -> KimiCode {
+        KimiCode {
             append_prompt: AppendPrompt::default(),
-            model: Some("kimi-k2.5".to_string()),
-            cmd: Default::default(),
-        };
+            model: Some("kimi-code/k3".to_string()),
+            thinking_effort: Some("high".to_string()),
+            acp: None,
+            cmd: CmdOverrides::default(),
+            acp_mcp_policy: AcpMcpPolicy::default(),
+            approvals: None,
+        }
+    }
 
-        let command = executor
+    #[test]
+    fn command_builder_uses_kimi_acp_subcommand() {
+        let (_program, args) = kimi()
             .build_command_builder()
-            .expect("command builder")
+            .unwrap()
             .build_initial()
-            .expect("command parts");
-        let (_program, args) = command.into_parts_for_test();
+            .unwrap()
+            .into_parts_for_test();
+        assert!(args.iter().any(|arg| arg == "acp"));
+        assert!(!args.iter().any(|arg| arg == "--print"));
+        assert!(!args.iter().any(|arg| arg == "--output-format"));
+        assert!(!args.iter().any(|arg| arg == "--model"));
+    }
 
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--model", "moonshot-cn/kimi-k2.5"])
+    #[test]
+    fn model_discovery_uses_provider_list_json() {
+        let (_program, args) = kimi()
+            .provider_list_command()
+            .unwrap()
+            .build_initial()
+            .unwrap()
+            .into_parts_for_test();
+        assert_eq!(args, vec!["provider", "list", "--json"]);
+    }
+
+    #[test]
+    fn discovered_models_become_stable_acp_model_option() {
+        let option = kimi().discovered_model_option(
+            vec![
+                "kimi-code/kimi-for-coding".to_string(),
+                "kimi-code/k3".to_string(),
+            ],
+            Some("kimi-code/k3"),
         );
+        assert_eq!(option.category.as_deref(), Some("model"));
+        let AcpConfigOptionKind::Select {
+            current_value,
+            options,
+        } = option.kind
+        else {
+            panic!("expected select option");
+        };
+        assert_eq!(current_value, "kimi-code/k3");
+        assert_eq!(options.len(), 2);
+    }
+
+    #[test]
+    fn explicit_terminal_auth_is_rejected_with_login_guidance() {
+        let mut executor = kimi();
+        executor.acp = Some(AcpExecutionOptions {
+            auth: Some(AcpAuthSelection::MethodId {
+                method_id: "login".to_string(),
+            }),
+            ..Default::default()
+        });
+        let error = executor.validate_auth_selection().unwrap_err().to_string();
+        assert!(error.contains("kimi login"));
+        assert!(error.contains("auth set to auto"));
     }
 
     #[tokio::test]
-    async fn normalize_logs_supports_role_stream_json_payload() {
-        let executor = KimiCode {
-            append_prompt: AppendPrompt::default(),
-            model: None,
-            cmd: Default::default(),
-        };
-        let msg_store = Arc::new(MsgStore::new());
-        let current_dir = std::path::PathBuf::from("/tmp/test-worktree");
-
-        msg_store.push_stdout(format!(
-            "{}\n",
-            r#"{"role":"assistant","content":[{"type":"think","think":"internal"},{"type":"text","text":"我是 Kimi。"}]}"#
-        ));
-        msg_store.push_finished();
-
-        executor.normalize_logs(msg_store.clone(), &current_dir);
-        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-
-        let mut saw_assistant = false;
-        for item in msg_store.get_history() {
-            if let LogMsg::JsonPatch(patch) = item
-                && let Some((_, entry)) = extract_normalized_entry_from_patch(&patch)
-                && matches!(entry.entry_type, NormalizedEntryType::AssistantMessage)
-                && entry.content.contains("我是 Kimi。")
-            {
-                saw_assistant = true;
-                break;
-            }
-        }
-
-        let mut saw_thinking = false;
-        for item in msg_store.get_history() {
-            if let LogMsg::JsonPatch(patch) = item
-                && let Some((_, entry)) = extract_normalized_entry_from_patch(&patch)
-                && matches!(entry.entry_type, NormalizedEntryType::Thinking)
-                && entry.content.contains("internal")
-            {
-                saw_thinking = true;
-                break;
-            }
-        }
-
-        assert!(
-            saw_assistant,
-            "expected assistant message patch from role payload"
+    async fn every_approval_policy_enforces_default_agent_mode() {
+        let temp = TempDir::new().expect("create Kimi test home");
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(temp.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
         );
-        assert!(saw_thinking, "expected thinking patch from role payload");
+        env.insert("KIMI_CODE_HOME", temp.path().to_string_lossy().into_owned());
+
+        for approval_mode in [
+            AcpApprovalMode::Ask,
+            AcpApprovalMode::AutoAllow,
+            AcpApprovalMode::AutoReject,
+        ] {
+            let mut executor = kimi();
+            executor.acp = Some(AcpExecutionOptions {
+                approval_mode: Some(approval_mode),
+                config_overrides: Some(vec![super::super::acp::AcpConfigOverride {
+                    option_id: "mode".to_string(),
+                    value: super::super::acp::AcpConfigValue::ValueId {
+                        value: "yolo".to_string(),
+                    },
+                    label_snapshot: Some("Mode".to_string()),
+                    category_snapshot: Some("mode".to_string()),
+                }]),
+                ..Default::default()
+            });
+
+            let harness = executor
+                .acp_harness(&env)
+                .await
+                .expect("build Kimi harness");
+            let (option_id, value) = harness.required_session_mode().expect("required Kimi mode");
+            assert_eq!(option_id, "mode");
+            assert_eq!(
+                value,
+                &agent_client_protocol::schema::v1::SessionConfigOptionValue::value_id("default")
+            );
+        }
     }
 }

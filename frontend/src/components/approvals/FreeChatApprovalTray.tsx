@@ -11,6 +11,7 @@ import { useExecutorApprovals } from '@/hooks/useExecutorApprovals';
 import { useAppTranslation } from '@/hooks/useAppTranslation';
 import { cn } from '@/lib/utils';
 import {
+  approvalCommand,
   approvalOptionLabel,
   groupApprovalRequests,
   partitionApprovalOptions,
@@ -44,6 +45,7 @@ const ApprovalRequestRow: React.FC<{
   const { allowOnce, allowAlways, otherOptions } = partitionApprovalOptions(
     request.options,
   );
+  const command = approvalCommand(request);
 
   useEffect(() => {
     if (!allowMenuOpen) return;
@@ -121,17 +123,27 @@ const ApprovalRequestRow: React.FC<{
 
   return (
     <article className="px-3.5 py-2.5">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <div className="flex min-w-0 flex-[1_1_15rem] items-baseline gap-2">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2">
+        <div className="flex min-w-0 items-baseline gap-2 overflow-hidden">
           <span className="shrink-0 text-xs text-[var(--ink-subtle)]">
             {translate('approvals.requestAction', 'requests to run')}
           </span>
-          <code
-            title={request.tool_name}
-            className="min-w-0 truncate font-mono text-[12px] font-medium text-[var(--ink)]"
-          >
-            {request.tool_name}
-          </code>
+          <div className="flex min-w-0 flex-1 items-baseline gap-2">
+            <code
+              title={request.tool_name}
+              className="shrink-0 font-mono text-[12px] font-medium text-[var(--ink)]"
+            >
+              {request.tool_name}
+            </code>
+            {command && (
+              <code
+                title={command}
+                className="min-w-0 truncate font-mono text-[12px] text-[var(--ink-muted)]"
+              >
+                {command}
+              </code>
+            )}
+          </div>
           <time
             dateTime={new Date(request.created_at).toISOString()}
             className="ml-auto shrink-0 font-mono text-[10px] text-[var(--ink-tertiary)]"
@@ -143,7 +155,7 @@ const ApprovalRequestRow: React.FC<{
           </time>
         </div>
 
-        <div className="ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
           {otherOptions.map(renderGhostOption)}
           {allowOnce ? (
             <div ref={allowMenuRef} className="relative ml-1 inline-flex">

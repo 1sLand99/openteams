@@ -32,7 +32,8 @@ use tokio_util::{compat::TokioAsyncReadCompatExt, sync::CancellationToken};
 use super::{
     AcpApprovalPolicy, AcpAuthMethodInfo, AcpCapabilityProbe, AcpClient, AcpConfigChoice,
     AcpConfigOptionKind, AcpConfigOptionSnapshot, AcpConfigSource, AcpEvent, AcpRunConfig,
-    AcpSessionPreferences, mcp::validate_mcp_servers, output::AcpOutput,
+    AcpSessionPreferences, config::is_session_mode_key, mcp::validate_mcp_servers,
+    output::AcpOutput,
 };
 use crate::{
     approvals::ExecutorApprovalService,
@@ -117,6 +118,22 @@ impl AcpAgentHarness {
         self
     }
 
+    /// Enforce an adapter-owned safe mode before applying user preferences.
+    ///
+    /// This setting is intentionally separate from ordinary config overrides,
+    /// which are never allowed to control an Agent's permission mode.
+    pub fn with_required_session_mode(
+        mut self,
+        option_id: impl Into<String>,
+        value_id: impl Into<String>,
+    ) -> Self {
+        self.config.session.required_session_mode = Some(super::AcpConfigSelection {
+            option_id: option_id.into(),
+            value: SessionConfigOptionValue::value_id(value_id.into()),
+        });
+        self
+    }
+
     pub fn with_config_override(mut self, selection: &super::AcpConfigOverride) -> Self {
         if selection.controls_session_mode() {
             return self;
@@ -141,6 +158,15 @@ impl AcpAgentHarness {
     pub fn with_client_services(mut self, services: super::AcpClientServicePolicy) -> Self {
         self.config.client_services = services;
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn required_session_mode(&self) -> Option<(&str, &SessionConfigOptionValue)> {
+        self.config
+            .session
+            .required_session_mode
+            .as_ref()
+            .map(|selection| (selection.option_id.as_str(), &selection.value))
     }
 
     pub fn with_full_access(mut self, full_access: bool) -> Self {
@@ -452,6 +478,48 @@ pub async fn probe_acp_command(
     cmd_overrides: &CmdOverrides,
     auth_method_id: Option<String>,
 ) -> Result<AcpCapabilityProbe, ExecutorError> {
+    probe_acp_command_inner(
+        command_parts,
+        current_dir,
+        env,
+        cmd_overrides,
+        auth_method_id,
+        true,
+    )
+    .await
+}
+
+/// Probe ACP initialization without creating a session.
+///
+/// Some Agents cannot close or delete a probe session. Callers can use this
+/// variant and populate model/config metadata from an Agent-specific local
+/// source to avoid leaving empty sessions behind.
+pub async fn probe_acp_command_without_session(
+    command_parts: CommandParts,
+    current_dir: &Path,
+    env: &ExecutionEnv,
+    cmd_overrides: &CmdOverrides,
+    auth_method_id: Option<String>,
+) -> Result<AcpCapabilityProbe, ExecutorError> {
+    probe_acp_command_inner(
+        command_parts,
+        current_dir,
+        env,
+        cmd_overrides,
+        auth_method_id,
+        false,
+    )
+    .await
+}
+
+async fn probe_acp_command_inner(
+    command_parts: CommandParts,
+    current_dir: &Path,
+    env: &ExecutionEnv,
+    cmd_overrides: &CmdOverrides,
+    auth_method_id: Option<String>,
+    create_probe_session: bool,
+) -> Result<AcpCapabilityProbe, ExecutorError> {
     let (program_path, args) = command_parts.into_resolved().await?;
     let mut command = Command::new(program_path);
     command
@@ -537,39 +605,44 @@ pub async fn probe_acp_command(
                             .block_task()
                             .await?;
                     }
-                    let session_state = send_session_start_request(
-                        &connection,
-                        "session/new",
-                        NewSessionRequest::new(probe_cwd)
-                            .additional_directories(Vec::new())
-                            .mcp_servers(Vec::new()),
-                        None,
-                    )
-                    .await?;
-                    let (config_source, config_options) = match &session_state {
-                        state if !state.config_options.is_empty() => (
-                            AcpConfigSource::Stable,
-                            snapshot_config_options(&state.config_options),
-                        ),
-                        state if state.legacy_models.is_some() => (
-                            AcpConfigSource::LegacyModel,
-                            vec![legacy_model_config_snapshot(
-                                state.legacy_models.as_ref().expect("checked legacy models"),
-                            )],
-                        ),
-                        _ => (AcpConfigSource::None, Vec::new()),
+                    let (config_source, config_options) = if create_probe_session {
+                        let session_state = send_session_start_request(
+                            &connection,
+                            "session/new",
+                            NewSessionRequest::new(probe_cwd)
+                                .additional_directories(Vec::new())
+                                .mcp_servers(Vec::new()),
+                            None,
+                        )
+                        .await?;
+                        let config = match &session_state {
+                            state if !state.config_options.is_empty() => (
+                                AcpConfigSource::Stable,
+                                snapshot_config_options(&state.config_options),
+                            ),
+                            state if state.legacy_models.is_some() => (
+                                AcpConfigSource::LegacyModel,
+                                vec![legacy_model_config_snapshot(
+                                    state.legacy_models.as_ref().expect("checked legacy models"),
+                                )],
+                            ),
+                            _ => (AcpConfigSource::None, Vec::new()),
+                        };
+                        if supports_close {
+                            let _ = connection
+                                .send_request(CloseSessionRequest::new(session_state.session_id))
+                                .block_task()
+                                .await;
+                        } else if supports_delete {
+                            let _ = connection
+                                .send_request(DeleteSessionRequest::new(session_state.session_id))
+                                .block_task()
+                                .await;
+                        }
+                        config
+                    } else {
+                        (AcpConfigSource::None, Vec::new())
                     };
-                    if supports_close {
-                        let _ = connection
-                            .send_request(CloseSessionRequest::new(session_state.session_id))
-                            .block_task()
-                            .await;
-                    } else if supports_delete {
-                        let _ = connection
-                            .send_request(DeleteSessionRequest::new(session_state.session_id))
-                            .block_task()
-                            .await;
-                    }
                     let probe = AcpCapabilityProbe {
                         protocol_version: initialize.protocol_version.to_string(),
                         agent_name: initialize.agent_info.as_ref().map(|info| info.name.clone()),
@@ -969,6 +1042,9 @@ async fn run_connection(
             .await
             .map_err(|_| agent_client_protocol::Error::internal_error())?;
     }
+    if let Some(error) = client.take_terminal_api_error().await {
+        return Err(agent_client_protocol::Error::internal_error().data(error.message));
+    }
     output
         .send(AcpEvent::Done(
             serde_json::to_string(&response.stop_reason).unwrap_or_default(),
@@ -985,6 +1061,39 @@ async fn apply_session_preferences(
     options: &mut Vec<SessionConfigOption>,
     legacy_models: Option<&LegacySessionModelState>,
 ) -> agent_client_protocol::Result<Option<String>> {
+    if let Some(required_mode) = &preferences.required_session_mode {
+        let option = options
+            .iter()
+            .find(|option| option.id.0.as_ref() == required_mode.option_id)
+            .cloned()
+            .ok_or_else(|| {
+                invalid_config(format!(
+                    "required ACP session mode `{}` was not advertised",
+                    required_mode.option_id
+                ))
+            })?;
+        if !protocol_option_controls_session_mode(&option) {
+            return Err(invalid_config(format!(
+                "required ACP session mode `{}` does not identify a mode option",
+                required_mode.option_id
+            )));
+        }
+        if !config_value_supported(&option, &required_mode.value) {
+            return Err(invalid_config(format!(
+                "required ACP session mode value for `{}` was not advertised",
+                required_mode.option_id
+            )));
+        }
+        set_config_option_and_verify(
+            connection,
+            session_id,
+            &option,
+            required_mode.value.clone(),
+            options,
+        )
+        .await?;
+    }
+
     if options.is_empty() {
         return apply_legacy_session_preferences(
             connection,
@@ -1049,6 +1158,12 @@ async fn apply_session_preferences(
                     selection.option_id
                 ))
             })?;
+        if protocol_option_controls_session_mode(&option) {
+            return Err(invalid_config(format!(
+                "ACP config option `{}` controls the reserved session mode",
+                selection.option_id
+            )));
+        }
         if !config_value_supported(&option, &selection.value) {
             return Err(invalid_config(format!(
                 "ACP config value for `{}` was not advertised",
@@ -1208,6 +1323,18 @@ fn semantic_config_key(value: &str) -> String {
         .filter(|character| character.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+fn protocol_option_controls_session_mode(option: &SessionConfigOption) -> bool {
+    let category_is_mode = option.category.as_ref().is_some_and(|category| {
+        serde_json::to_value(category)
+            .ok()
+            .and_then(|value| value.as_str().map(is_session_mode_key))
+            .unwrap_or(false)
+    });
+    category_is_mode
+        || is_session_mode_key(option.id.0.as_ref())
+        || is_session_mode_key(&option.name)
 }
 
 async fn set_config_option_and_verify(
@@ -1389,6 +1516,22 @@ mod tests {
             &option,
             &SessionConfigOptionValue::value_id("false")
         ));
+    }
+
+    #[test]
+    fn protocol_mode_category_is_reserved_even_with_an_unrelated_id() {
+        let option = SessionConfigOption::select(
+            "execution-profile",
+            "Profile",
+            "default",
+            vec![
+                SessionConfigSelectOption::new("default", "Default"),
+                SessionConfigSelectOption::new("yolo", "YOLO"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Other("mode".into()));
+
+        assert!(protocol_option_controls_session_mode(&option));
     }
 
     #[test]

@@ -35,6 +35,7 @@ struct QaSession {
     cwd: PathBuf,
     mcp_names: Vec<String>,
     model: String,
+    mode: String,
 }
 
 fn model_config_option(current_model: &str) -> SessionConfigOption {
@@ -49,6 +50,35 @@ fn model_config_option(current_model: &str) -> SessionConfigOption {
         ],
     )
     .category(SessionConfigOptionCategory::Model)
+}
+
+fn mode_config_option(current_mode: &str) -> SessionConfigOption {
+    SessionConfigOption::select(
+        "mode",
+        "Mode",
+        current_mode.to_string(),
+        vec![
+            SessionConfigSelectOption::new("default", "Default"),
+            SessionConfigSelectOption::new("auto", "Auto"),
+            SessionConfigSelectOption::new("yolo", "YOLO"),
+        ],
+    )
+    .category(SessionConfigOptionCategory::Other("mode".into()))
+}
+
+fn session_config_options(
+    session: &QaSession,
+    advertise_model: bool,
+    advertise_mode: bool,
+) -> Vec<SessionConfigOption> {
+    let mut options = Vec::new();
+    if advertise_model {
+        options.push(model_config_option(&session.model));
+    }
+    if advertise_mode {
+        options.push(mode_config_option(&session.mode));
+    }
+    options
 }
 
 fn mcp_names(servers: &[McpServer]) -> Vec<String> {
@@ -73,6 +103,8 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
     let disable_follow_up = std::env::var_os("ACP_QA_DISABLE_FOLLOW_UP").is_some();
     let require_auth = std::env::var_os("ACP_QA_REQUIRE_AUTH").is_some();
     let advertise_config = std::env::var_os("ACP_QA_CONFIG_OPTIONS").is_some();
+    let advertise_mode = std::env::var_os("ACP_QA_MODE_OPTIONS").is_some();
+    let refuse_mode_set = std::env::var_os("ACP_QA_REFUSE_MODE_SET").is_some();
     let authenticated = Arc::new(AtomicBool::new(false));
     let sessions = Arc::new(Mutex::new(HashMap::<String, QaSession>::new()));
 
@@ -136,19 +168,23 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                         .respond_with_error(agent_client_protocol::Error::auth_required());
                 }
                 let session_id = format!("qa-{}", uuid::Uuid::new_v4());
-                sessions_for_new.lock().await.insert(
-                    session_id.clone(),
-                    QaSession {
-                        cwd: request.cwd,
-                        mcp_names: mcp_names(&request.mcp_servers),
-                        model: "gemini-3.1-pro-preview".to_string(),
-                    },
-                );
+                let session = QaSession {
+                    cwd: request.cwd,
+                    mcp_names: mcp_names(&request.mcp_servers),
+                    model: "gemini-3.1-pro-preview".to_string(),
+                    mode: "yolo".to_string(),
+                };
+                let config_options =
+                    session_config_options(&session, advertise_config, advertise_mode);
+                sessions_for_new
+                    .lock()
+                    .await
+                    .insert(session_id.clone(), session);
                 let response = NewSessionResponse::new(session_id);
-                responder.respond(if advertise_config {
-                    response.config_options(vec![model_config_option("gemini-3.1-pro-preview")])
-                } else {
+                responder.respond(if config_options.is_empty() {
                     response
+                } else {
+                    response.config_options(config_options)
                 })
             },
             agent_client_protocol::on_receive_request!(),
@@ -159,15 +195,24 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     return responder
                         .respond_with_error(agent_client_protocol::Error::auth_required());
                 }
-                sessions_for_resume.lock().await.insert(
-                    session_key(&request.session_id),
-                    QaSession {
-                        cwd: request.cwd,
-                        mcp_names: mcp_names(&request.mcp_servers),
-                        model: "gemini-3.1-pro-preview".to_string(),
-                    },
-                );
-                responder.respond(ResumeSessionResponse::new())
+                let session = QaSession {
+                    cwd: request.cwd,
+                    mcp_names: mcp_names(&request.mcp_servers),
+                    model: "gemini-3.1-pro-preview".to_string(),
+                    mode: "yolo".to_string(),
+                };
+                let config_options =
+                    session_config_options(&session, advertise_config, advertise_mode);
+                sessions_for_resume
+                    .lock()
+                    .await
+                    .insert(session_key(&request.session_id), session);
+                let response = ResumeSessionResponse::new();
+                responder.respond(if config_options.is_empty() {
+                    response
+                } else {
+                    response.config_options(config_options)
+                })
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -177,48 +222,63 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     return responder
                         .respond_with_error(agent_client_protocol::Error::auth_required());
                 }
-                sessions_for_load.lock().await.insert(
-                    session_key(&request.session_id),
-                    QaSession {
-                        cwd: request.cwd,
-                        mcp_names: mcp_names(&request.mcp_servers),
-                        model: "gemini-3.1-pro-preview".to_string(),
-                    },
-                );
-                responder.respond(LoadSessionResponse::new())
+                let session = QaSession {
+                    cwd: request.cwd,
+                    mcp_names: mcp_names(&request.mcp_servers),
+                    model: "gemini-3.1-pro-preview".to_string(),
+                    mode: "yolo".to_string(),
+                };
+                let config_options =
+                    session_config_options(&session, advertise_config, advertise_mode);
+                sessions_for_load
+                    .lock()
+                    .await
+                    .insert(session_key(&request.session_id), session);
+                let response = LoadSessionResponse::new();
+                responder.respond(if config_options.is_empty() {
+                    response
+                } else {
+                    response.config_options(config_options)
+                })
             },
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
             async move |request: SetSessionConfigOptionRequest, responder, _connection| {
-                if request.config_id.0.as_ref() != "session-model" {
-                    return responder
-                        .respond_with_error(agent_client_protocol::Error::invalid_params());
-                }
                 let SessionConfigOptionValue::ValueId { value } = request.value else {
                     return responder
                         .respond_with_error(agent_client_protocol::Error::invalid_params());
                 };
                 let selected = value.0.to_string();
-                if ![
-                    "gpt-5.6-luna(openai)",
-                    "gemini-2.5-flash",
-                    "gemini-3.1-pro-preview",
-                ]
-                .contains(&selected.as_str())
-                {
-                    return responder
-                        .respond_with_error(agent_client_protocol::Error::invalid_params());
-                }
                 let mut sessions = sessions_for_config.lock().await;
                 let Some(session) = sessions.get_mut(&session_key(&request.session_id)) else {
                     return responder
                         .respond_with_error(agent_client_protocol::Error::invalid_params());
                 };
-                session.model.clone_from(&selected);
-                responder.respond(SetSessionConfigOptionResponse::new(vec![
-                    model_config_option(&selected),
-                ]))
+                match request.config_id.0.as_ref() {
+                    "session-model"
+                        if [
+                            "gpt-5.6-luna(openai)",
+                            "gemini-2.5-flash",
+                            "gemini-3.1-pro-preview",
+                        ]
+                        .contains(&selected.as_str()) =>
+                    {
+                        session.model.clone_from(&selected);
+                    }
+                    "mode" if ["default", "auto", "yolo"].contains(&selected.as_str()) => {
+                        if !refuse_mode_set {
+                            session.mode.clone_from(&selected);
+                        }
+                    }
+                    _ => {
+                        return responder
+                            .respond_with_error(agent_client_protocol::Error::invalid_params());
+                    }
+                }
+                responder.respond(SetSessionConfigOptionResponse::new(
+                    session_config_options(session, advertise_config, advertise_mode),
+                ))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -301,8 +361,14 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                         request.session_id.clone(),
                         SessionUpdate::UsageUpdate(UsageUpdate::new(37, 128)),
                     ))?;
-                    let (mcp, model) = session
-                        .map(|session| (session.mcp_names.join(","), session.model))
+                    let (mcp, model, mode) = session
+                        .map(|session| {
+                            (
+                                session.mcp_names.join(","),
+                                session.model,
+                                session.mode,
+                            )
+                        })
                         .unwrap_or_default();
                     let content = if text.contains("[OPENTEAMS_SOURCE=openteams]") {
                         serde_json::json!([{
@@ -316,7 +382,7 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                         .to_string()
                     } else {
                         format!(
-                            "QA ACP response: {text}; approval={approval}; mcp={mcp}; model={model}"
+                            "QA ACP response: {text}; approval={approval}; mcp={mcp}; model={model}; mode={mode}"
                         )
                     };
                     connection.send_notification(SessionNotification::new(

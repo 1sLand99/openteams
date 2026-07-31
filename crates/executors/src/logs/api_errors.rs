@@ -339,6 +339,8 @@ fn detect_api_error_from_string(
         || lowered.contains("credit exhausted")
         || lowered.contains("insufficient credit")
         || lowered.contains("insufficient_quota")
+        || lowered.contains("reached your usage limit")
+        || (lowered.contains("usage limit") && lowered.contains("billing cycle"))
         || (lowered.contains("billing") && lowered.contains("limit"))
         || lowered.contains("余额不足")
         || (lowered.contains("额度") && (lowered.contains("用尽") || lowered.contains("不足")))
@@ -513,6 +515,16 @@ mod tests {
         assert!(matches!(
             err.error_type,
             NormalizedEntryError::AuthenticationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn test_detect_billing_cycle_usage_limit_in_nested_tool_output() {
+        let msg = r#"{"subagents":[{"status":"failed","error":"[provider.api_error] 403 You've reached your usage limit for this billing cycle"}]}"#;
+        let result = detect_api_error(msg).expect("usage limit should be detected");
+        assert!(matches!(
+            result.error_type,
+            NormalizedEntryError::QuotaExceeded { .. }
         ));
     }
 }

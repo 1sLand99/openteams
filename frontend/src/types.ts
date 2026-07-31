@@ -66,6 +66,7 @@ export interface Session {
   hasPendingWorkflowReview?: boolean;
   pendingWorkflowReviewId?: string | null;
   hasWorkflowError?: boolean;
+  hasPendingApproval?: boolean;
   pinnedAt?: string | null;
   // Mirrors `BackendChatSession.worktree_mode`. Undefined keeps legacy
   // sessions on the main workspace without touching their behavior.
