@@ -104,54 +104,6 @@ impl Copilot {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{Copilot, copilot_auth_value_has_credentials};
-    use crate::{command::CmdOverrides, executors::AppendPrompt};
-
-    #[test]
-    fn command_builder_uses_native_copilot_command() {
-        let copilot = Copilot {
-            append_prompt: AppendPrompt::default(),
-            model: None,
-            allow_all_tools: None,
-            allow_tool: None,
-            deny_tool: None,
-            add_dir: None,
-            disable_mcp_server: None,
-            cmd: CmdOverrides::default(),
-        };
-        let (program, args) = copilot
-            .build_command_builder("copilot-logs")
-            .expect("build Copilot command")
-            .build_initial()
-            .expect("build initial Copilot command")
-            .into_parts_for_test();
-
-        assert_eq!(program, "copilot");
-        assert_eq!(
-            args,
-            [
-                "--no-color",
-                "--log-level",
-                "debug",
-                "--log-dir",
-                "copilot-logs"
-            ]
-        );
-    }
-
-    #[test]
-    fn copilot_auth_requires_a_logged_in_user_or_token() {
-        assert!(!copilot_auth_value_has_credentials(
-            &serde_json::json!({"loggedInUsers": [], "githubToken": " "})
-        ));
-        assert!(copilot_auth_value_has_credentials(
-            &serde_json::json!({"loggedInUsers": [{"login": "octocat"}]})
-        ));
-    }
-}
-
 fn copilot_auth_value_has_credentials(value: &serde_json::Value) -> bool {
     value.get("loggedInUsers").is_some_and(|users| match users {
         serde_json::Value::Array(users) => !users.is_empty(),
@@ -428,5 +380,53 @@ impl Copilot {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Copilot, copilot_auth_value_has_credentials};
+    use crate::{command::CmdOverrides, executors::AppendPrompt};
+
+    #[test]
+    fn command_builder_uses_native_copilot_command() {
+        let copilot = Copilot {
+            append_prompt: AppendPrompt::default(),
+            model: None,
+            allow_all_tools: None,
+            allow_tool: None,
+            deny_tool: None,
+            add_dir: None,
+            disable_mcp_server: None,
+            cmd: CmdOverrides::default(),
+        };
+        let (program, args) = copilot
+            .build_command_builder("copilot-logs")
+            .expect("build Copilot command")
+            .build_initial()
+            .expect("build initial Copilot command")
+            .into_parts_for_test();
+
+        assert_eq!(program, "copilot");
+        assert_eq!(
+            args,
+            [
+                "--no-color",
+                "--log-level",
+                "debug",
+                "--log-dir",
+                "copilot-logs"
+            ]
+        );
+    }
+
+    #[test]
+    fn copilot_auth_requires_a_logged_in_user_or_token() {
+        assert!(!copilot_auth_value_has_credentials(
+            &serde_json::json!({"loggedInUsers": [], "githubToken": " "})
+        ));
+        assert!(copilot_auth_value_has_credentials(
+            &serde_json::json!({"loggedInUsers": [{"login": "octocat"}]})
+        ));
     }
 }
