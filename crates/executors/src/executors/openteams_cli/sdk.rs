@@ -24,7 +24,10 @@ use workspace_utils::{approvals::ApprovalStatus, msg_store::SESSION_INACTIVITY_T
 
 use super::{slash_commands, types::OpenTeamsCliExecutorEvent};
 use crate::{
-    approvals::{ExecutorApprovalError, ExecutorApprovalService},
+    approvals::{
+        ExecutorApprovalError, ExecutorApprovalOption, ExecutorApprovalRequest,
+        ExecutorApprovalService,
+    },
     env::RepoContext,
     executors::{
         ExecutorError,
@@ -1795,7 +1798,7 @@ async fn process_event_stream(
                 let auto_approve = ctx.auto_approve;
                 let cancel = ctx.cancel.clone();
                 tokio::spawn(async move {
-                    let status = match request_permission_approval(
+                    let reply = match request_permission_approval(
                         auto_approve,
                         approvals,
                         &permission,
@@ -1805,7 +1808,7 @@ async fn process_event_stream(
                     )
                     .await
                     {
-                        Ok(status) => status,
+                        Ok(reply) => reply,
                         Err(ExecutorApprovalError::Cancelled) => {
                             tracing::debug!(
                                 "OpenTeamsCli approval cancelled for tool_call_id={}",
@@ -1822,6 +1825,16 @@ async fn process_event_stream(
                         }
                     };
 
+                    let (status, message) = match reply {
+                        OpenTeamsCliPermissionReply::Once | OpenTeamsCliPermissionReply::Always => {
+                            (ApprovalStatus::Approved, None)
+                        }
+                        OpenTeamsCliPermissionReply::Reject => {
+                            let message = "User denied this tool use request".to_string();
+                            (ApprovalStatus::Denied { reason: None }, Some(message))
+                        }
+                    };
+
                     let _ = log_writer
                         .log_event(&OpenTeamsCliExecutorEvent::ApprovalResponse {
                             tool_call_id: tool_call_id.clone(),
@@ -1829,42 +1842,12 @@ async fn process_event_stream(
                         })
                         .await;
 
-                    let (reply, message) = match status {
-                        ApprovalStatus::Approved => ("once", None),
-                        ApprovalStatus::Denied { reason } => {
-                            let msg = reason
-                                .unwrap_or_else(|| "User denied this tool use request".to_string())
-                                .trim()
-                                .to_string();
-                            let msg = if msg.is_empty() {
-                                "User denied this tool use request".to_string()
-                            } else {
-                                msg
-                            };
-                            ("reject", Some(msg))
-                        }
-                        ApprovalStatus::TimedOut => (
-                            "reject",
-                            Some(
-                                "Approval request timed out; proceed without using this tool call."
-                                    .to_string(),
-                            ),
-                        ),
-                        ApprovalStatus::Pending => (
-                            "reject",
-                            Some(
-                                "Approval request could not be completed; proceed without using this tool call."
-                                    .to_string(),
-                            ),
-                        ),
-                    };
-
                     // If we reject without a message, OpenTeamsCli treats it as a hard stop.
                     // Provide a message so the agent can continue with guidance.
-                    let payload = if reply == "reject" {
-                        serde_json::json!({ "reply": reply, "message": message.unwrap_or_else(|| "User denied this tool use request".to_string()) })
+                    let payload = if reply == OpenTeamsCliPermissionReply::Reject {
+                        serde_json::json!({ "reply": reply.as_str(), "message": message.unwrap_or_else(|| "User denied this tool use request".to_string()) })
                     } else {
-                        serde_json::json!({ "reply": reply })
+                        serde_json::json!({ "reply": reply.as_str() })
                     };
 
                     let _ = client
@@ -1919,6 +1902,34 @@ fn session_status_is_idle(event: &Value) -> bool {
         == Some("idle")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenTeamsCliPermissionReply {
+    Once,
+    Always,
+    Reject,
+}
+
+impl OpenTeamsCliPermissionReply {
+    fn from_option_id(option_id: &str) -> Result<Self, ExecutorApprovalError> {
+        match option_id {
+            "once" => Ok(Self::Once),
+            "always" => Ok(Self::Always),
+            "reject" => Ok(Self::Reject),
+            _ => Err(ExecutorApprovalError::RequestFailed(format!(
+                "OpenTeams CLI approval service selected unknown option `{option_id}`"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Once => "once",
+            Self::Always => "always",
+            Self::Reject => "reject",
+        }
+    }
+}
+
 async fn request_permission_approval(
     auto_approve: bool,
     approvals: Option<Arc<dyn ExecutorApprovalService>>,
@@ -1926,23 +1937,49 @@ async fn request_permission_approval(
     tool_input: Value,
     tool_call_id: &str,
     cancel: CancellationToken,
-) -> Result<ApprovalStatus, ExecutorApprovalError> {
+) -> Result<OpenTeamsCliPermissionReply, ExecutorApprovalError> {
     if auto_approve {
-        return Ok(ApprovalStatus::Approved);
+        return Ok(OpenTeamsCliPermissionReply::Once);
     }
 
     let Some(approvals) = approvals else {
-        return Ok(ApprovalStatus::Approved);
+        return Ok(OpenTeamsCliPermissionReply::Once);
     };
 
+    // Preserve the native OpenTeams CLI option IDs so `always` is not collapsed
+    // into the same binary approved status as `once`.
     match approvals
-        .request_tool_approval(tool_name, tool_input, tool_call_id, cancel)
+        .request_acp_tool_approval(
+            ExecutorApprovalRequest {
+                tool_name: tool_name.to_string(),
+                tool_input,
+                tool_call_id: tool_call_id.to_string(),
+                options: vec![
+                    ExecutorApprovalOption {
+                        option_id: "once".to_string(),
+                        kind: "allow_once".to_string(),
+                        label: "Allow once".to_string(),
+                    },
+                    ExecutorApprovalOption {
+                        option_id: "always".to_string(),
+                        kind: "allow_always".to_string(),
+                        label: "Always allow".to_string(),
+                    },
+                    ExecutorApprovalOption {
+                        option_id: "reject".to_string(),
+                        kind: "reject_once".to_string(),
+                        label: "Reject".to_string(),
+                    },
+                ],
+            },
+            cancel,
+        )
         .await
     {
-        Ok(status) => Ok(status),
+        Ok(option_id) => OpenTeamsCliPermissionReply::from_option_id(&option_id),
         Err(
             ExecutorApprovalError::ServiceUnavailable | ExecutorApprovalError::SessionNotRegistered,
-        ) => Ok(ApprovalStatus::Approved),
+        ) => Ok(OpenTeamsCliPermissionReply::Once),
         Err(err) => Err(err),
     }
 }
@@ -1956,17 +1993,91 @@ mod tests {
     use reqwest::header::AUTHORIZATION;
     use serde_json::json;
     use tokio::sync::{Mutex, mpsc};
+    use tokio_util::sync::CancellationToken;
 
     use super::{
-        ConfigProvidersResponse, ControlEvent, ProviderInfo, build_default_headers, create_session,
-        event_matches_session, extract_retry_status, is_retryable_openteams_cli_db_init_error,
-        local_client_builder, resolve_model_spec_from_config, resolve_session_id,
+        ConfigProvidersResponse, ControlEvent, OpenTeamsCliPermissionReply, ProviderInfo,
+        build_default_headers, create_session, event_matches_session, extract_retry_status,
+        is_retryable_openteams_cli_db_init_error, local_client_builder,
+        request_permission_approval, resolve_model_spec_from_config, resolve_session_id,
         run_request_with_control, run_request_with_control_timeout, session_status_is_idle,
     };
-    use crate::executors::{
-        ExecutorError,
-        openteams_cli::{DIRECTORY_HEADER, SERVER_USERNAME},
+    use crate::{
+        approvals::{ExecutorApprovalError, ExecutorApprovalRequest, ExecutorApprovalService},
+        executors::{
+            ExecutorError,
+            openteams_cli::{DIRECTORY_HEADER, SERVER_USERNAME},
+        },
     };
+
+    struct CapturingApprovalService {
+        selected_option_id: &'static str,
+        request: Mutex<Option<ExecutorApprovalRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutorApprovalService for CapturingApprovalService {
+        async fn request_tool_approval(
+            &self,
+            _tool_name: &str,
+            _tool_input: serde_json::Value,
+            _tool_call_id: &str,
+            _cancel: CancellationToken,
+        ) -> Result<workspace_utils::approvals::ApprovalStatus, ExecutorApprovalError> {
+            unreachable!("OpenTeams CLI preserves the native permission options")
+        }
+
+        async fn request_acp_tool_approval(
+            &self,
+            request: ExecutorApprovalRequest,
+            _cancel: CancellationToken,
+        ) -> Result<String, ExecutorApprovalError> {
+            *self.request.lock().await = Some(request);
+            Ok(self.selected_option_id.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn openteams_cli_permission_approval_preserves_always_option() {
+        let approvals = Arc::new(CapturingApprovalService {
+            selected_option_id: "always",
+            request: Mutex::new(None),
+        });
+
+        let reply = request_permission_approval(
+            false,
+            Some(approvals.clone()),
+            "bash",
+            json!({ "patterns": ["cargo test"] }),
+            "tool-call",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("resolve OpenTeams CLI permission");
+
+        assert_eq!(reply, OpenTeamsCliPermissionReply::Always);
+        assert_eq!(reply.as_str(), "always");
+        let request = approvals
+            .request
+            .lock()
+            .await
+            .take()
+            .expect("captured approval request");
+        assert_eq!(request.tool_name, "bash");
+        assert_eq!(request.tool_call_id, "tool-call");
+        assert_eq!(
+            request
+                .options
+                .iter()
+                .map(|option| (option.option_id.as_str(), option.kind.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("once", "allow_once"),
+                ("always", "allow_always"),
+                ("reject", "reject_once"),
+            ]
+        );
+    }
 
     #[test]
     fn request_activity_timeout_is_forty_minutes() {
