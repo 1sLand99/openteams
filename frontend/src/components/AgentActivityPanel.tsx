@@ -24,6 +24,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ScrollArea";
+import { AgentMarkdown } from "@/components/AgentMarkdown";
 import {
   formatAgentActivityLines,
   isThinkingHeaderContent,
@@ -171,43 +172,33 @@ function isToolRunning(line: AgentActivityDisplayRow): boolean {
 const panelGroupKeyForLine = (line: AgentActivityDisplayRow): string =>
   line.agentName.trim() || "Agent";
 
-const renderSimpleBoldMarkdown = (content: string): React.ReactNode => {
-  const parts: React.ReactNode[] = [];
-  let cursor = 0;
-  let partIndex = 0;
+/**
+ * Lightweight inline markdown for activity body lines: `**bold**` and
+ * `` `inline code` `` only. Activity lines are single-line by construction,
+ * so block-level markdown (lists, headings, code fences) does not apply.
+ * Unbalanced markers render as literal text.
+ */
+const INLINE_MARKDOWN_PATTERN = /(\*\*[^*]+\*\*|`[^`]+`)/g;
 
-  while (cursor < content.length) {
-    const start = content.indexOf("**", cursor);
-    if (start < 0) {
-      parts.push(content.slice(cursor));
-      break;
-    }
-
-    const end = content.indexOf("**", start + 2);
-    if (end < 0) {
-      parts.push(content.slice(cursor));
-      break;
-    }
-
-    if (start > cursor) {
-      parts.push(content.slice(cursor, start));
-    }
-
-    const boldText = content.slice(start + 2, end);
-    parts.push(
-      boldText ? (
-        <strong key={`bold-${partIndex}`} className="font-semibold">
-          {boldText}
+const renderSimpleInlineMarkdown = (content: string): React.ReactNode => {
+  const parts = content.split(INLINE_MARKDOWN_PATTERN);
+  return parts.map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      return (
+        <strong key={`bold-${index}`} className="font-semibold">
+          {part.slice(2, -2)}
         </strong>
-      ) : (
-        "**"
-      ),
-    );
-    partIndex += 1;
-    cursor = end + 2;
-  }
-
-  return parts.length > 0 ? parts : content;
+      );
+    }
+    if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+      return (
+        <code key={`code-${index}`} className="wf-log-inline-code">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return part;
+  });
 };
 
 // ---------------------------------------------------------------------------
@@ -405,11 +396,23 @@ const ContentLineItem: React.FC<{
           isThinkingHeader ? "wf-log-thinking-text" : "wf-log-task-content-text"
         }
       >
-        {renderSimpleBoldMarkdown(line.content)}
+        {renderSimpleInlineMarkdown(line.content)}
       </span>
     </div>
   );
 };
+
+/** Consecutive prose lines rendered as one markdown block. */
+const MarkdownBlockItem: React.FC<{
+  rows: AgentActivityDisplayRow[];
+}> = ({ rows }) => (
+  <div className="wf-log-task-row wf-log-task-row--content wf-log-markdown-block">
+    <span className="wf-log-task-status" />
+    <div className="wf-log-markdown-block-body">
+      <AgentMarkdown content={rows.map((row) => row.content).join("\n")} />
+    </div>
+  </div>
+);
 
 const ErrorLineItem: React.FC<{
   line: AgentActivityDisplayRow;
@@ -548,6 +551,17 @@ export const AgentActivityPanel: React.FC<AgentActivityPanelProps> = ({
     return `${count} failed`;
   };
 
+  const isThinkingHeaderLine = (line: AgentActivityDisplayRow): boolean =>
+    line.line_type === "thinking" && isThinkingHeaderContent(line.content);
+
+  // Prose lines (non-header thinking/body text) merge into blocks rendered
+  // with the shared markdown renderer; headers, errors, and tool rows break
+  // a block.
+  const isProseLine = (line: AgentActivityDisplayRow): boolean =>
+    !isToolCallLine(line) &&
+    line.line_type !== "error" &&
+    !isThinkingHeaderLine(line);
+
   const renderLine = (line: AgentActivityDisplayRow) =>
     isToolCallLine(line) ? (
       <ToolLineItem
@@ -574,6 +588,19 @@ export const AgentActivityPanel: React.FC<AgentActivityPanelProps> = ({
     while (index < rows.length) {
       const line = rows[index];
       if (!isToolCallLine(line)) {
+        if (isProseLine(line)) {
+          let end = index;
+          while (end < rows.length && isProseLine(rows[end])) end += 1;
+          const block = rows.slice(index, end);
+          nodes.push(
+            <MarkdownBlockItem
+              key={`md-${block[0]?.row_id ?? index}`}
+              rows={block}
+            />,
+          );
+          index = end;
+          continue;
+        }
         nodes.push(renderLine(line));
         index += 1;
         continue;

@@ -721,8 +721,16 @@ check(
   "activity panel uses compact Codex-like line rows",
   activityPanelSource.includes("labels.cleaned") &&
     activityPanelSource.includes("formatAgentActivityLines") &&
-    activityPanelSource.includes("renderSimpleBoldMarkdown") &&
-    activityPanelSource.includes("<strong key={`bold-${partIndex}`}") &&
+    activityPanelSource.includes("renderSimpleInlineMarkdown") &&
+    activityPanelSource.includes("INLINE_MARKDOWN_PATTERN") &&
+    activityPanelSource.includes("MarkdownBlockItem") &&
+    activityPanelSource.includes("isProseLine") &&
+    activityPanelSource.includes("<AgentMarkdown") &&
+    activityPanelSource.includes("wf-log-markdown-block-body") &&
+    activityPanelCssSource.includes(".wf-log-markdown-block-body") &&
+    activityPanelSource.includes("wf-log-inline-code") &&
+    activityPanelCssSource.includes(".wf-log-inline-code") &&
+    activityPanelSource.includes("<strong key={`bold-${index}`}") &&
     messageContentSource.includes("translate={t}") &&
     activityPanelSource.includes("wf-log-task-row") &&
     activityPanelSource.includes("wf-log-task-content-text") &&
