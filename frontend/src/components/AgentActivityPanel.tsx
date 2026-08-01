@@ -7,7 +7,9 @@ import React, {
 } from "react";
 import {
   Activity,
+  Ban,
   Bot,
+  Check,
   ChevronRight,
   ClipboardList,
   FilePenLine,
@@ -17,13 +19,17 @@ import {
   Loader2,
   Search,
   Terminal,
+  TimerOff,
   Wrench,
+  XCircle,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ScrollArea";
 import {
   formatAgentActivityLines,
+  isThinkingHeaderContent,
   type AgentActivityDisplayRow,
   type AgentActivityToolKind,
+  type AgentActivityToolStatus,
   type AgentActivityTranslator,
 } from "@/lib/agentActivityFormatter";
 import type { ActivityLoadState, ChatRunActivityLine } from "@/types";
@@ -47,6 +53,81 @@ interface AgentActivityPanelProps {
 
 const AGENT_ACTIVITY_AUTO_SCROLL_IDLE_MS = 30000;
 const AGENT_ACTIVITY_BOTTOM_THRESHOLD_PX = 8;
+
+/**
+ * Runs of at least this many consecutive tool calls collapse into a single
+ * summary row; single calls stay inline.
+ */
+const COLLAPSED_TOOL_GROUP_MIN = 2;
+
+/** Display order for tool kinds inside a collapsed-group summary. */
+const GROUP_KIND_ORDER: AgentActivityToolKind[] = [
+  "file_edit",
+  "file_read",
+  "command",
+  "search",
+  "web_fetch",
+  "mcp_tool",
+  "tool",
+  "task",
+  "plan",
+  "activity",
+];
+
+const DEFAULT_GROUP_KIND_LABELS: Record<
+  AgentActivityToolKind,
+  { one: (count: number) => string; many: (count: number) => string }
+> = {
+  file_edit: {
+    one: () => "Edited a file",
+    many: (count) => `Edited ${count} files`,
+  },
+  file_read: {
+    one: () => "Read a file",
+    many: (count) => `Read ${count} files`,
+  },
+  command: {
+    one: () => "Ran a command",
+    many: (count) => `Ran ${count} commands`,
+  },
+  search: {
+    one: () => "Searched",
+    many: (count) => `Searched ${count} times`,
+  },
+  web_fetch: {
+    one: () => "Fetched a page",
+    many: (count) => `Fetched ${count} pages`,
+  },
+  mcp_tool: {
+    one: () => "Called an MCP tool",
+    many: (count) => `Made ${count} MCP calls`,
+  },
+  tool: {
+    one: () => "Called a tool",
+    many: (count) => `Made ${count} tool calls`,
+  },
+  task: {
+    one: () => "Started a subtask",
+    many: (count) => `Started ${count} subtasks`,
+  },
+  plan: {
+    one: () => "Updated the plan",
+    many: (count) => `Updated the plan ${count} times`,
+  },
+  activity: {
+    one: () => "Performed an action",
+    many: (count) => `Performed ${count} actions`,
+  },
+};
+
+/** Details longer than this are truncated on screen and expandable on click. */
+const TOOL_DETAIL_EXPAND_THRESHOLD = 72;
+
+/**
+ * Durations below this are almost always artifacts of batched started/
+ * completed lines rather than real elapsed time, so they stay hidden.
+ */
+const MIN_VISIBLE_DURATION_MS = 1000;
 
 const toolIconByKind: Record<
   AgentActivityToolKind,
@@ -220,45 +301,110 @@ const useAutoFollowScroll = (scrollSignal: string) => {
 // LineItem — Linear-style minimal row
 // ---------------------------------------------------------------------------
 
+const statusIconByStatus: Partial<
+  Record<AgentActivityToolStatus, React.ComponentType<{ className?: string }>>
+> = {
+  completed: Check,
+  failed: XCircle,
+  denied: Ban,
+  timed_out: TimerOff,
+  running: Loader2,
+  waiting_approval: Loader2,
+};
+
+const formatDurationMs = (ms: number): string => {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${Math.round(seconds % 60)}s`;
+};
+
 const ToolLineItem: React.FC<{
   line: AgentActivityDisplayRow;
 }> = ({ line }) => {
   const ToolIcon = line.toolKind ? toolIconByKind[line.toolKind] : Wrench;
+  const status = line.toolStatus;
+  const StatusIcon = status ? statusIconByStatus[status] : undefined;
+  const hasLongDetail =
+    (line.detail?.length ?? 0) > TOOL_DETAIL_EXPAND_THRESHOLD;
+  const expandable = Boolean(line.resultDetail) || hasLongDetail;
+  // Successful rows rely on the status icon alone; only failures and other
+  // noteworthy statuses keep the text label.
+  const showLabel = Boolean(line.title) && status !== "completed";
+  const rowClass = `wf-log-task-row${status ? ` wf-log-task-row--${status}` : ""}`;
 
   const row = (
-    <div className="wf-log-task-row">
+    <div className={rowClass}>
       <span className="wf-log-task-status">
-        {line.resultDetail && <ChevronRight className="wf-log-task-chevron" />}
+        {StatusIcon ? (
+          <StatusIcon
+            className={`wf-log-task-status-icon wf-log-task-status-icon--${status}`}
+          />
+        ) : null}
       </span>
       <span className="wf-log-task-tool-icon">
         <ToolIcon className="w-3 h-3" />
       </span>
-      {line.title && <span className="wf-log-task-label">{line.title}</span>}
+      {showLabel && <span className="wf-log-task-label">{line.title}</span>}
       {line.detail && (
         <span className="wf-log-task-target" title={line.detail}>
           {line.detail}
         </span>
       )}
+      {typeof line.durationMs === "number" &&
+        line.durationMs >= MIN_VISIBLE_DURATION_MS && (
+          <span className="wf-log-task-duration">
+            {formatDurationMs(line.durationMs)}
+          </span>
+        )}
+      {expandable && (
+        <ChevronRight className="wf-log-task-chevron wf-log-task-chevron--end" />
+      )}
     </div>
   );
 
-  if (!line.resultDetail) return row;
+  if (!expandable) return row;
 
   return (
     <details className="wf-log-task-disclosure">
       <summary>{row}</summary>
-      <pre className="wf-log-task-result">{line.resultDetail}</pre>
+      {hasLongDetail && line.detail && (
+        <pre className="wf-log-task-result">{line.detail}</pre>
+      )}
+      {line.resultDetail && (
+        <pre className="wf-log-task-result">{line.resultDetail}</pre>
+      )}
     </details>
   );
 };
 
+/**
+ * Only fully-bold one-line summaries (Codex-style `**Planning …**`) are
+ * promoted to section headers. Agents like Claude stream prose thinking
+ * split across many lines; treating each line as a header would fragment
+ * the log, so those stay regular body text.
+ */
 const ContentLineItem: React.FC<{
   line: AgentActivityDisplayRow;
 }> = ({ line }) => {
+  // Header thinking lines act as section titles: everything below them until
+  // the next header reads as one step of the agent's work.
+  const isThinkingHeader =
+    line.line_type === "thinking" && isThinkingHeaderContent(line.content);
   return (
-    <div className="wf-log-task-row wf-log-task-row--content">
+    <div
+      className={`wf-log-task-row wf-log-task-row--content${
+        isThinkingHeader ? " wf-log-task-row--thinking" : ""
+      }`}
+    >
       <span className="wf-log-task-status" />
-      <span className="wf-log-task-content-text">
+      <span
+        className={
+          isThinkingHeader ? "wf-log-thinking-text" : "wf-log-task-content-text"
+        }
+      >
         {renderSimpleBoldMarkdown(line.content)}
       </span>
     </div>
@@ -366,27 +512,113 @@ export const AgentActivityPanel: React.FC<AgentActivityPanelProps> = ({
   const showEmpty =
     !showLoading && !showPruned && !showError && visibleRows.length === 0;
 
+  const summarizeToolGroup = (rows: AgentActivityDisplayRow[]) => {
+    const counts = new Map<AgentActivityToolKind, number>();
+    let failures = 0;
+    for (const row of rows) {
+      const kind = row.toolKind ?? "activity";
+      counts.set(kind, (counts.get(kind) ?? 0) + 1);
+      if (
+        row.toolStatus === "failed" ||
+        row.toolStatus === "denied" ||
+        row.toolStatus === "timed_out"
+      ) {
+        failures += 1;
+      }
+    }
+    return { counts, failures };
+  };
+
+  const groupKindLabel = (
+    kind: AgentActivityToolKind,
+    count: number,
+  ): string => {
+    const key = `agentActivity.group.${kind}.${count === 1 ? "one" : "many"}`;
+    const translated = translate?.(key, { count });
+    if (translated && translated !== key) return translated;
+    return DEFAULT_GROUP_KIND_LABELS[kind][count === 1 ? "one" : "many"](
+      count,
+    );
+  };
+
+  const groupFailuresLabel = (count: number): string => {
+    const key = "agentActivity.group.failures";
+    const translated = translate?.(key, { count });
+    if (translated && translated !== key) return translated;
+    return `${count} failed`;
+  };
+
+  const renderLine = (line: AgentActivityDisplayRow) =>
+    isToolCallLine(line) ? (
+      <ToolLineItem
+        key={line.row_id}
+        line={line}
+      />
+    ) : line.line_type === "error" ? (
+      <ErrorLineItem
+        key={line.row_id}
+        line={line}
+      />
+    ) : (
+      <ContentLineItem
+        key={line.row_id}
+        line={line}
+      />
+    );
+
+  // Consecutive tool calls collapse into a single Codex-style summary row
+  // ("Edited 2 files · Ran 3 commands"); content rows break a run.
+  const renderRowsWithCollapse = (rows: AgentActivityDisplayRow[]) => {
+    const nodes: React.ReactNode[] = [];
+    let index = 0;
+    while (index < rows.length) {
+      const line = rows[index];
+      if (!isToolCallLine(line)) {
+        nodes.push(renderLine(line));
+        index += 1;
+        continue;
+      }
+
+      let end = index;
+      while (end < rows.length && isToolCallLine(rows[end])) end += 1;
+      const group = rows.slice(index, end);
+      if (group.length < COLLAPSED_TOOL_GROUP_MIN) {
+        group.forEach((entry) => nodes.push(renderLine(entry)));
+      } else {
+        const { counts, failures } = summarizeToolGroup(group);
+        const summaryLabel = GROUP_KIND_ORDER.filter((kind) =>
+          counts.has(kind),
+        )
+          .map((kind) => groupKindLabel(kind, counts.get(kind) ?? 0))
+          .join(" · ");
+        nodes.push(
+          <details
+            key={`collapsed-${group[0]?.row_id ?? index}`}
+            className="wf-log-collapsed-group"
+          >
+            <summary className="wf-log-collapsed-summary">
+              <span className="wf-log-task-status">
+                <ChevronRight className="wf-log-task-chevron" />
+              </span>
+              <span className="wf-log-collapsed-label">{summaryLabel}</span>
+              {failures > 0 && (
+                <span className="wf-log-collapsed-failures">
+                  {groupFailuresLabel(failures)}
+                </span>
+              )}
+            </summary>
+            {group.map(renderLine)}
+          </details>,
+        );
+      }
+      index = end;
+    }
+    return nodes;
+  };
+
   if (showEmpty && variant === "inline") return null;
 
   if (variant === "panel") {
-    const renderLine = (line: AgentActivityDisplayRow) =>
-      isToolCallLine(line) ? (
-        <ToolLineItem
-          key={line.row_id}
-          line={line}
-        />
-      ) : line.line_type === "error" ? (
-        <ErrorLineItem
-          key={line.row_id}
-          line={line}
-        />
-      ) : (
-        <ContentLineItem
-          key={line.row_id}
-          line={line}
-        />
-      );
-
     if (showLoading) {
       return (
         <div className="wf-log-panel wf-log-panel--empty">
@@ -441,7 +673,7 @@ export const AgentActivityPanel: React.FC<AgentActivityPanelProps> = ({
               <span className="wf-log-group-agent">{group.agentName}</span>
             </div>
             <div className="wf-log-group-tasks">
-              {group.rows.map(renderLine)}
+              {renderRowsWithCollapse(group.rows)}
             </div>
           </div>
         ))}
@@ -472,24 +704,7 @@ export const AgentActivityPanel: React.FC<AgentActivityPanelProps> = ({
           {...scrollHandlers}
         >
           <div className="wf-log-group-tasks">
-            {visibleRows.map((line) =>
-              isToolCallLine(line) ? (
-                <ToolLineItem
-                  key={line.row_id}
-                  line={line}
-                />
-              ) : line.line_type === "error" ? (
-                <ErrorLineItem
-                  key={line.row_id}
-                  line={line}
-                />
-              ) : (
-                <ContentLineItem
-                  key={line.row_id}
-                  line={line}
-                />
-              ),
-            )}
+            {renderRowsWithCollapse(visibleRows)}
           </div>
         </ScrollArea>
       )}
