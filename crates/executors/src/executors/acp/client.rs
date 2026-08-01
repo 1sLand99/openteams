@@ -6,13 +6,14 @@ use std::{
 };
 
 use agent_client_protocol::schema::v1::{
-    CreateTerminalRequest, CreateTerminalResponse, Error, KillTerminalRequest,
+    ContentBlock, CreateTerminalRequest, CreateTerminalResponse, Error, KillTerminalRequest,
     KillTerminalResponse, PermissionOptionKind, PromptResponse, ReadTextFileRequest,
     ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionNotification, SessionUpdate, TerminalExitStatus, TerminalId,
-    TerminalOutputRequest, TerminalOutputResponse, ToolCallStatus, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
+    TerminalOutputRequest, TerminalOutputResponse, ToolCallContent, ToolCallStatus, ToolCallUpdate,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
 };
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use tokio::{
@@ -51,6 +52,7 @@ pub struct AcpClient {
     services: AcpClientServicePolicy,
     terminal_env: HashMap<String, String>,
     terminals: Arc<Mutex<HashMap<String, TerminalRecord>>>,
+    tool_calls: Arc<Mutex<HashMap<String, ToolCallUpdate>>>,
     token_usage: Arc<Mutex<AcpTokenUsageAccumulator>>,
     terminal_api_error: Arc<Mutex<Option<DetectedApiError>>>,
 }
@@ -80,6 +82,7 @@ impl AcpClient {
                 .filter(|(name, _)| !is_sensitive_env_name(name))
                 .collect(),
             terminals: Arc::new(Mutex::new(HashMap::new())),
+            tool_calls: Arc::new(Mutex::new(HashMap::new())),
             token_usage: Arc::new(Mutex::new(AcpTokenUsageAccumulator::default())),
             terminal_api_error: Arc::new(Mutex::new(None)),
         }
@@ -109,6 +112,7 @@ impl AcpClient {
                 *terminal_api_error = Some(error);
             }
         }
+        self.observe_tool_call(&notification.update).await;
         self.send_event(events::event_from_notification(notification))
             .await;
         Ok(())
@@ -131,12 +135,15 @@ impl AcpClient {
         &self,
         response: &PromptResponse,
     ) -> Option<TokenUsageInfo> {
-        self.token_usage.lock().await.finish_turn(response)
+        let usage = self.token_usage.lock().await.finish_turn(response);
+        self.tool_calls.lock().await.clear();
+        usage
     }
 
     pub async fn begin_token_usage_turn(&self) {
         self.token_usage.lock().await.begin_turn();
         *self.terminal_api_error.lock().await = None;
+        self.tool_calls.lock().await.clear();
     }
 
     pub async fn take_terminal_api_error(&self) -> Option<DetectedApiError> {
@@ -145,8 +152,9 @@ impl AcpClient {
 
     pub async fn request_permission(
         &self,
-        request: RequestPermissionRequest,
+        mut request: RequestPermissionRequest,
     ) -> Result<RequestPermissionResponse, Error> {
+        request.tool_call = self.enrich_tool_call(request.tool_call).await;
         self.send_event(AcpEvent::RequestPermission(request.clone()))
             .await;
 
@@ -245,6 +253,63 @@ impl AcpClient {
         .await;
 
         Ok(outcome)
+    }
+
+    async fn observe_tool_call(&self, update: &SessionUpdate) {
+        let mut tool_calls = self.tool_calls.lock().await;
+        match update {
+            SessionUpdate::ToolCall(tool_call) => {
+                let tool_call_id = tool_call.tool_call_id.0.to_string();
+                if is_terminal_tool_call_status(tool_call.status) {
+                    tool_calls.remove(&tool_call_id);
+                } else {
+                    tool_calls.insert(tool_call_id, tool_call.clone().into());
+                }
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                let tool_call_id = update.tool_call_id.0.to_string();
+                if update
+                    .fields
+                    .status
+                    .is_some_and(is_terminal_tool_call_status)
+                {
+                    tool_calls.remove(&tool_call_id);
+                    return;
+                }
+
+                match tool_calls.get_mut(&tool_call_id) {
+                    Some(cached) => merge_tool_call_update(cached, update),
+                    None => {
+                        tool_calls.insert(tool_call_id, update.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn enrich_tool_call(&self, update: ToolCallUpdate) -> ToolCallUpdate {
+        let tool_call_id = update.tool_call_id.0.as_ref();
+        let cached = self.tool_calls.lock().await.get(tool_call_id).cloned();
+        if let Some(mut cached) = cached {
+            let recovered_raw_input =
+                if cached.fields.raw_input.is_none() && update.fields.raw_input.is_none() {
+                    cached
+                        .fields
+                        .content
+                        .as_deref()
+                        .and_then(raw_input_from_json_content)
+                } else {
+                    None
+                };
+            merge_tool_call_update(&mut cached, &update);
+            if cached.fields.raw_input.is_none() {
+                cached.fields.raw_input = recovered_raw_input;
+            }
+            cached
+        } else {
+            update
+        }
     }
 
     pub async fn read_text_file(
@@ -550,6 +615,51 @@ impl AcpClient {
     }
 }
 
+fn merge_tool_call_update(cached: &mut ToolCallUpdate, update: &ToolCallUpdate) {
+    if let Some(kind) = update.fields.kind {
+        cached.fields.kind = Some(kind);
+    }
+    if let Some(status) = update.fields.status {
+        cached.fields.status = Some(status);
+    }
+    if let Some(title) = &update.fields.title {
+        cached.fields.title = Some(title.clone());
+    }
+    if let Some(content) = &update.fields.content {
+        cached.fields.content = Some(content.clone());
+    }
+    if let Some(locations) = &update.fields.locations {
+        cached.fields.locations = Some(locations.clone());
+    }
+    if let Some(raw_input) = &update.fields.raw_input {
+        cached.fields.raw_input = Some(raw_input.clone());
+    }
+    if let Some(raw_output) = &update.fields.raw_output {
+        cached.fields.raw_output = Some(raw_output.clone());
+    }
+    if let Some(meta) = &update.meta {
+        cached.meta = Some(meta.clone());
+    }
+}
+
+fn is_terminal_tool_call_status(status: ToolCallStatus) -> bool {
+    matches!(status, ToolCallStatus::Completed | ToolCallStatus::Failed)
+}
+
+fn raw_input_from_json_content(content: &[ToolCallContent]) -> Option<serde_json::Value> {
+    content.iter().rev().find_map(|content| {
+        let ToolCallContent::Content(content) = content else {
+            return None;
+        };
+        let ContentBlock::Text(text) = &content.content else {
+            return None;
+        };
+        let value = serde_json::from_str::<serde_json::Value>(&text.text).ok()?;
+        let command = value.as_object()?.get("command")?.as_str()?.trim();
+        (!command.is_empty()).then_some(value)
+    })
+}
+
 fn detect_tool_result_api_error(update: &SessionUpdate) -> Option<DetectedApiError> {
     let (raw_output, failed_content) = match update {
         SessionUpdate::ToolCall(tool_call) => (
@@ -749,7 +859,7 @@ fn select_lines(content: &str, line: Option<u32>, limit: Option<u32>) -> String 
 mod tests {
     use agent_client_protocol::schema::v1::{
         CreateTerminalRequest, PermissionOption, SessionId, SessionUpdate, TerminalOutputRequest,
-        ToolCallId, ToolCallUpdate, ToolCallUpdateFields, WaitForTerminalExitRequest,
+        ToolCall, ToolCallId, ToolCallUpdate, ToolCallUpdateFields, WaitForTerminalExitRequest,
     };
 
     use super::*;
@@ -767,6 +877,142 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    #[derive(Default)]
+    struct CapturingApprovalService {
+        request: Mutex<Option<ExecutorApprovalRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutorApprovalService for CapturingApprovalService {
+        async fn request_tool_approval(
+            &self,
+            _tool_name: &str,
+            _tool_input: serde_json::Value,
+            _tool_call_id: &str,
+            _cancel: CancellationToken,
+        ) -> Result<ApprovalStatus, ExecutorApprovalError> {
+            unreachable!("ACP requests use request_acp_tool_approval")
+        }
+
+        async fn request_acp_tool_approval(
+            &self,
+            request: ExecutorApprovalRequest,
+            _cancel: CancellationToken,
+        ) -> Result<String, ExecutorApprovalError> {
+            *self.request.lock().await = Some(request);
+            Ok("allow-once".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn kimi_permission_update_recovers_cached_command() {
+        let (output, output_task) = AcpOutput::start(tokio::io::sink());
+        let approvals = Arc::new(CapturingApprovalService::default());
+        let client = AcpClient::new(
+            output.clone(),
+            Some(approvals.clone()),
+            AcpApprovalPolicy::Ask,
+            CancellationToken::new(),
+            PathBuf::from("/workspace"),
+            Vec::new(),
+            AcpClientServicePolicy::default(),
+            HashMap::new(),
+        );
+        let command = format!("echo {}", "x".repeat(254));
+        assert_eq!(command.len(), 259);
+
+        client
+            .handle_notification(SessionNotification::new(
+                SessionId::new("session"),
+                SessionUpdate::ToolCall(ToolCall::new(ToolCallId::new("kimi-tool"), "Shell")),
+            ))
+            .await
+            .expect("cache initial tool call");
+        let snapshots = [
+            r#"{"command":"echo "#.to_string(),
+            format!(r#"{{"command":"{}"#, &command[..128]),
+            serde_json::to_string(&serde_json::json!({ "command": command.clone() }))
+                .expect("serialize complete arguments"),
+        ];
+        for snapshot in snapshots {
+            client
+                .handle_notification(SessionNotification::new(
+                    SessionId::new("session"),
+                    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        ToolCallId::new("kimi-tool"),
+                        ToolCallUpdateFields::new().content(vec![snapshot.into()]),
+                    )),
+                ))
+                .await
+                .expect("cache argument snapshot");
+        }
+
+        let permission = RequestPermissionRequest::new(
+            SessionId::new("session"),
+            ToolCallUpdate::new(
+                ToolCallId::new("kimi-tool"),
+                ToolCallUpdateFields::new()
+                    .title("Run command")
+                    .content(vec!["Run command: echo xxxxxxxxx…".into()]),
+            ),
+            vec![PermissionOption::new(
+                "allow-once",
+                "Allow once",
+                PermissionOptionKind::AllowOnce,
+            )],
+        );
+        client
+            .request_permission(permission)
+            .await
+            .expect("request permission");
+
+        let captured = approvals
+            .request
+            .lock()
+            .await
+            .clone()
+            .expect("approval request");
+        assert_eq!(captured.tool_name, "Run command");
+        assert_eq!(
+            captured
+                .tool_input
+                .pointer("/tool_call/rawInput/command")
+                .and_then(serde_json::Value::as_str),
+            Some(command.as_str())
+        );
+
+        client
+            .handle_notification(SessionNotification::new(
+                SessionId::new("session"),
+                SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    ToolCallId::new("kimi-tool"),
+                    ToolCallUpdateFields::new().status(ToolCallStatus::Completed),
+                )),
+            ))
+            .await
+            .expect("observe terminal update");
+        assert!(client.tool_calls.lock().await.is_empty());
+
+        drop(client);
+        drop(output);
+        output_task
+            .await
+            .expect("output task")
+            .expect("output flush");
+    }
+
+    #[test]
+    fn natural_language_preview_is_not_promoted_to_raw_input() {
+        for preview in [
+            "Run command: cargo test…",
+            r#""cargo test""#,
+            r#"{"command":""}"#,
+        ] {
+            let content = vec![preview.into()];
+            assert!(raw_input_from_json_content(&content).is_none());
+        }
     }
 
     #[test]

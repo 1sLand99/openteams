@@ -46,6 +46,7 @@ const ApprovalRequestRow: React.FC<{
     request.options,
   );
   const command = approvalCommand(request);
+  const displayedAction = command ?? request.tool_name;
 
   useEffect(() => {
     if (!allowMenuOpen) return;
@@ -128,25 +129,15 @@ const ApprovalRequestRow: React.FC<{
           <span className="shrink-0 text-xs text-[var(--ink-subtle)]">
             {translate('approvals.requestAction', 'requests to run')}
           </span>
-          <div className="flex min-w-0 flex-1 items-baseline gap-2">
-            <code
-              title={request.tool_name}
-              className="shrink-0 font-mono text-[12px] font-medium text-[var(--ink)]"
-            >
-              {request.tool_name}
-            </code>
-            {command && (
-              <code
-                title={command}
-                className="min-w-0 truncate font-mono text-[12px] text-[var(--ink-muted)]"
-              >
-                {command}
-              </code>
-            )}
-          </div>
+          <code
+            title={displayedAction}
+            className="min-w-0 flex-1 truncate whitespace-nowrap font-mono text-[12px] font-medium text-[var(--ink)]"
+          >
+            {displayedAction}
+          </code>
           <time
             dateTime={new Date(request.created_at).toISOString()}
-            className="ml-auto shrink-0 font-mono text-[10px] text-[var(--ink-tertiary)]"
+            className="shrink-0 font-mono text-[10px] text-[var(--ink-tertiary)]"
           >
             {new Intl.DateTimeFormat(locale, {
               hour: '2-digit',
