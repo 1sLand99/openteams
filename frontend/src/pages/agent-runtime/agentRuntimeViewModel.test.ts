@@ -9,6 +9,7 @@ import {
   filterRuntimeRunners,
   getRuntimeDisplayState,
   parseEnvText,
+  parseRuntimeErrorDetails,
 } from "./agentRuntimeViewModel";
 
 let failures = 0;
@@ -159,6 +160,30 @@ check(
     "env_json",
     "executor_options",
   ]),
+);
+
+check(
+  "parses staged runtime error lines",
+  same(
+    parseRuntimeErrorDetails(
+      "[model_discovery] provider unavailable\n[version_check] executable not found",
+    ),
+    [
+      { stage: "model_discovery", message: "provider unavailable" },
+      { stage: "version_check", message: "executable not found" },
+    ],
+  ),
+);
+check(
+  "keeps unstaged runtime error lines verbatim",
+  same(parseRuntimeErrorDetails("spawn claude failed"), [
+    { stage: null, message: "spawn claude failed" },
+  ]),
+);
+check(
+  "empty runtime error yields no detail rows",
+  same(parseRuntimeErrorDetails(null), []) &&
+    same(parseRuntimeErrorDetails("  \n "), []),
 );
 
 if (failures > 0) {

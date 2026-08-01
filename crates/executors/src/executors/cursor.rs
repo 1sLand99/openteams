@@ -12,14 +12,16 @@ use workspace_utils::{
     diff::{create_unified_diff, normalize_unified_diff},
     msg_store::MsgStore,
     path::make_path_relative,
-    shell::resolve_executable_path_blocking,
 };
 
 use crate::{
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
+    command::{
+        CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides, command_is_available,
+    },
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        utils::{json_has_nonempty_string, read_json_file},
     },
     logs::{
         ActionType, FileChange, NormalizedEntry, NormalizedEntryError, NormalizedEntryType,
@@ -72,6 +74,24 @@ impl CursorAgent {
     }
 }
 
+fn cursor_auth_value_has_credentials(value: &serde_json::Value) -> bool {
+    json_has_nonempty_string(
+        value,
+        &[
+            "/accessToken",
+            "/refreshToken",
+            "/token",
+            "/apiKey",
+            "/auth/accessToken",
+            "/auth/refreshToken",
+            "/auth/token",
+            "/authInfo/authId",
+            "/authInfo/userId",
+            "/authInfo/email",
+        ],
+    )
+}
+
 #[async_trait]
 impl StandardCodingAgentExecutor for CursorAgent {
     fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
@@ -83,7 +103,8 @@ impl StandardCodingAgentExecutor for CursorAgent {
                 home.join(".cursor").join("cli-config.json"),
             ]
             .iter()
-            .any(|path| path.is_file())
+            .filter_map(|path| read_json_file(path))
+            .any(|value| cursor_auth_value_has_credentials(&value))
         });
         self.authentication_detected(&env, &["CURSOR_API_KEY"], cli_login)
     }
@@ -543,17 +564,7 @@ impl StandardCodingAgentExecutor for CursorAgent {
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
-        let binary_found = resolve_executable_path_blocking(Self::base_command()).is_some();
-        if !binary_found {
-            return AvailabilityInfo::NotFound;
-        }
-
-        let config_files_found = self
-            .default_mcp_config_path()
-            .map(|p| p.exists())
-            .unwrap_or(false);
-
-        if config_files_found {
+        if command_is_available(Self::base_command(), &self.cmd) {
             AvailabilityInfo::InstallationFound
         } else {
             AvailabilityInfo::NotFound
@@ -1269,6 +1280,16 @@ mod tests {
     use workspace_utils::msg_store::MsgStore;
 
     use super::*;
+
+    #[test]
+    fn cursor_auth_requires_nonempty_credentials() {
+        assert!(!cursor_auth_value_has_credentials(
+            &serde_json::json!({"authInfo": {}, "token": " "})
+        ));
+        assert!(cursor_auth_value_has_credentials(
+            &serde_json::json!({"authInfo": {"authId": "account"}})
+        ));
+    }
 
     #[tokio::test]
     async fn test_cursor_streaming_patch_generation() {

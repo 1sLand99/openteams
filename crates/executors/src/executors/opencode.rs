@@ -22,7 +22,9 @@ use workspace_utils::msg_store::MsgStore;
 
 use crate::{
     approvals::ExecutorApprovalService,
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
+    command::{
+        CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides, command_is_available,
+    },
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorExitResult, SpawnedChild,
@@ -100,6 +102,7 @@ const OPENCODE_RUNTIME_LAST_USED_MARKER: &str = ".last_used";
 impl Opencode {
     pub const PACKAGE_VERSION: &'static str = "1.17.18";
     const BASE_COMMAND: &'static str = "npx -y opencode-ai@1.17.18";
+    const INSTALL_COMMAND: &'static str = "opencode";
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         let builder = CommandBuilder::new(Self::BASE_COMMAND)
@@ -792,16 +795,35 @@ fn workspace_runtime_key(current_dir: &Path) -> String {
 }
 
 fn mirror_user_opencode_auth(isolated_opencode_data_dir: &Path) -> io::Result<()> {
+    let source_auth = user_opencode_auth_path().filter(|path| path.is_file());
+    mirror_opencode_auth(source_auth.as_deref(), isolated_opencode_data_dir)
+}
+
+fn mirror_opencode_auth(
+    source_auth: Option<&Path>,
+    isolated_opencode_data_dir: &Path,
+) -> io::Result<()> {
     let target_auth = isolated_opencode_data_dir.join("auth.json");
-    let Some(source_auth) = user_opencode_auth_path().filter(|path| path.is_file()) else {
+    let Some(source_auth) = source_auth else {
         return remove_file_if_present(&target_auth);
     };
     if source_auth == target_auth {
         return Ok(());
     }
 
+    // OpenCode may leave a zero-byte auth store behind when no credentials
+    // are configured. Do not mirror it into the isolated runtime: the CLI
+    // treats an absent store as unauthenticated, but reports an empty file as
+    // malformed JSON and model discovery then incorrectly fails.
+    if std::fs::read(source_auth)?
+        .iter()
+        .all(|byte| byte.is_ascii_whitespace())
+    {
+        return remove_file_if_present(&target_auth);
+    }
+
     remove_file_if_present(&target_auth)?;
-    symlink_or_copy_file(&source_auth, &target_auth)
+    symlink_or_copy_file(source_auth, &target_auth)
 }
 
 fn user_opencode_auth_path() -> Option<PathBuf> {
@@ -906,13 +928,22 @@ fn user_opencode_auth_provider_ids() -> HashSet<String> {
         }
     };
 
-    match serde_json::from_str::<Value>(&content) {
-        Ok(value) => opencode_auth_provider_ids(&value),
+    match parse_opencode_auth_store(&content) {
+        Ok(Some(value)) => opencode_auth_provider_ids(&value),
+        Ok(None) => HashSet::new(),
         Err(err) => {
             tracing::warn!(path = %path.display(), "Failed to parse OpenCode auth store: {err}");
             HashSet::new()
         }
     }
+}
+
+fn parse_opencode_auth_store(content: &str) -> serde_json::Result<Option<Value>> {
+    let content = content.trim();
+    if content.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str(content).map(Some)
 }
 
 fn user_opencode_config_provider_ids(current_dir: &Path) -> HashSet<String> {
@@ -1382,54 +1413,7 @@ impl StandardCodingAgentExecutor for Opencode {
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
-        let mcp_config_found = self
-            .default_mcp_config_path()
-            .map(|p| p.exists())
-            .unwrap_or(false);
-
-        // Check multiple installation indicator paths:
-        // 1. XDG config dir: $XDG_CONFIG_HOME/opencode
-        // 2. XDG data dir: $XDG_DATA_HOME/opencode
-        // 3. XDG state dir: $XDG_STATE_HOME/opencode
-        // 4. OpenCode CLI home: ~/.opencode
-        #[cfg(not(windows))]
-        let installation_indicator_found = {
-            let base_dirs = xdg::BaseDirectories::with_prefix("opencode");
-
-            let config_dir_exists = base_dirs
-                .get_config_home()
-                .map(|config| config.exists())
-                .unwrap_or(false);
-
-            let data_dir_exists = base_dirs
-                .get_data_home()
-                .map(|data| data.exists())
-                .unwrap_or(false);
-
-            let state_dir_exists = base_dirs
-                .get_state_home()
-                .map(|state| state.exists())
-                .unwrap_or(false);
-
-            config_dir_exists || data_dir_exists || state_dir_exists
-        };
-
-        #[cfg(windows)]
-        let installation_indicator_found = std::env::var("XDG_CONFIG_HOME")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .and_then(|p| p.join("opencode").exists().then_some(()))
-            .or_else(|| {
-                dirs::home_dir()
-                    .and_then(|p| p.join(".config").join("opencode").exists().then_some(()))
-            })
-            .is_some();
-
-        let home_opencode_exists = dirs::home_dir()
-            .map(|home| home.join(".opencode").exists())
-            .unwrap_or(false);
-
-        if mcp_config_found || installation_indicator_found || home_opencode_exists {
+        if command_is_available(Self::INSTALL_COMMAND, &self.cmd) {
             AvailabilityInfo::InstallationFound
         } else {
             AvailabilityInfo::NotFound
@@ -1512,10 +1496,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        OPENCODE_RUNTIME_LAST_USED_MARKER, OpencodeRuntimeLease, opencode_auth_path,
-        opencode_auth_provider_ids, opencode_config_paths, opencode_config_provider_ids,
-        opencode_runtime_usage, parse_models_command_output, prune_opencode_runtime_dirs,
-        touch_opencode_runtime,
+        OPENCODE_RUNTIME_LAST_USED_MARKER, OpencodeRuntimeLease, mirror_opencode_auth,
+        opencode_auth_path, opencode_auth_provider_ids, opencode_config_paths,
+        opencode_config_provider_ids, opencode_runtime_usage, parse_models_command_output,
+        parse_opencode_auth_store, prune_opencode_runtime_dirs, touch_opencode_runtime,
     };
 
     fn create_runtime(
@@ -1850,6 +1834,29 @@ CPA/gpt-5.3-codex
                 "zai-coding-plan".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn empty_opencode_auth_store_is_treated_as_absent() {
+        assert_eq!(parse_opencode_auth_store("").unwrap(), None);
+        assert_eq!(parse_opencode_auth_store(" \n\t").unwrap(), None);
+        assert!(parse_opencode_auth_store("{").is_err());
+    }
+
+    #[test]
+    fn empty_opencode_auth_store_is_not_mirrored() {
+        let temp = TempDir::new().expect("create temp directory");
+        let source_auth = temp.path().join("auth.json");
+        let isolated_data_dir = temp.path().join("isolated");
+        let target_auth = isolated_data_dir.join("auth.json");
+        fs::create_dir_all(&isolated_data_dir).expect("create isolated data directory");
+        fs::write(&source_auth, "\n").expect("write empty auth store");
+        fs::write(&target_auth, "stale").expect("write stale mirrored auth store");
+
+        mirror_opencode_auth(Some(&source_auth), &isolated_data_dir)
+            .expect("ignore empty auth store");
+
+        assert!(!target_auth.exists());
     }
 
     #[test]

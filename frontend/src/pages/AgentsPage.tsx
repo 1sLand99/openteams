@@ -40,6 +40,7 @@ import {
   getRunnerLabel,
   getRuntimeDisplayState,
   parseEnvText,
+  parseRuntimeErrorDetails,
   type AgentRuntimeFilter,
   type RuntimeDisplayState,
 } from "./agent-runtime/agentRuntimeViewModel";
@@ -251,6 +252,9 @@ const getRuntimeErrorMessage = (
   if (runner.installed && !runner.executable) return t("agents.status.error");
   return "";
 };
+
+const getErrorStageLabel = (stage: string, t: TranslateFn): string =>
+  translateWithFallback(t, `agents.error.stage.${stage}`, stage);
 
 const translateConfigFieldText = (
   t: TranslateFn,
@@ -1105,6 +1109,7 @@ function AgentConfigSidebar({
   const currentDiagnostics =
     diagnostics?.runner_type === runner.runner_type ? diagnostics : null;
   const envSummary = runner.env_summary;
+  const runtimeErrorDetails = parseRuntimeErrorDetails(runner.last_error);
   const configPath =
     currentDiagnostics?.config_path ??
     (diagnosticsLoading
@@ -1414,6 +1419,32 @@ function AgentConfigSidebar({
           "min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5 ot-scroll-area-styled",
         )}
       >
+        {runtimeErrorDetails.length > 0 && (
+          <section
+            role="alert"
+            className="rounded-[8px] border border-red-500/30 bg-red-500/5 p-4"
+          >
+            <h3 className="mb-3 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-red-400">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              {t("agents.error.title")}
+            </h3>
+            <div className="space-y-2">
+              {runtimeErrorDetails.map((detail, index) => (
+                <div key={index} className="flex items-start gap-2">
+                  {detail.stage && (
+                    <span className="mt-px shrink-0 rounded-[4px] border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 font-mono text-[10px] leading-[1.4] text-red-300">
+                      {getErrorStageLabel(detail.stage, t)}
+                    </span>
+                  )}
+                  <p className="min-w-0 break-words font-mono text-[12px] leading-[1.55] text-red-300/90">
+                    {detail.message}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         <AgentInstallGuide
           runner={runner}
           rechecking={rechecking}

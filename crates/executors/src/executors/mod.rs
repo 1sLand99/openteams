@@ -397,16 +397,7 @@ pub trait StandardCodingAgentExecutor {
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
-        let config_files_found = self
-            .default_mcp_config_path()
-            .map(|path| path.exists())
-            .unwrap_or(false);
-
-        if config_files_found {
-            AvailabilityInfo::InstallationFound
-        } else {
-            AvailabilityInfo::NotFound
-        }
+        AvailabilityInfo::NotFound
     }
 }
 
@@ -505,6 +496,18 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+
+    #[test]
+    fn login_state_remains_available_for_legacy_executors() {
+        assert!(
+            AvailabilityInfo::LoginDetected {
+                last_auth_timestamp: 1,
+            }
+            .is_available()
+        );
+        assert!(AvailabilityInfo::InstallationFound.is_available());
+        assert!(!AvailabilityInfo::NotFound.is_available());
+    }
 
     #[test]
     fn test_cursor_agent_deserialization() {

@@ -22,7 +22,9 @@ use uuid::Uuid;
 use workspace_utils::{msg_store::MsgStore, path::get_agent_chatgroup_temp_dir};
 
 use crate::{
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
+    command::{
+        CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides, command_is_available,
+    },
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
@@ -59,7 +61,7 @@ pub struct Copilot {
 }
 
 impl Copilot {
-    const BASE_COMMAND: &'static str = "npx -y @github/copilot@1.0.59";
+    const BASE_COMMAND: &'static str = "copilot";
 
     fn build_command_builder(&self, log_dir: &str) -> Result<CommandBuilder, CommandBuildError> {
         let mut builder = CommandBuilder::new(Self::BASE_COMMAND).params([
@@ -102,18 +104,68 @@ impl Copilot {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{Copilot, copilot_auth_value_has_credentials};
+    use crate::{command::CmdOverrides, executors::AppendPrompt};
+
+    #[test]
+    fn command_builder_uses_native_copilot_command() {
+        let copilot = Copilot {
+            append_prompt: AppendPrompt::default(),
+            model: None,
+            allow_all_tools: None,
+            allow_tool: None,
+            deny_tool: None,
+            add_dir: None,
+            disable_mcp_server: None,
+            cmd: CmdOverrides::default(),
+        };
+        let (program, args) = copilot
+            .build_command_builder("copilot-logs")
+            .expect("build Copilot command")
+            .build_initial()
+            .expect("build initial Copilot command")
+            .into_parts_for_test();
+
+        assert_eq!(program, "copilot");
+        assert_eq!(
+            args,
+            [
+                "--no-color",
+                "--log-level",
+                "debug",
+                "--log-dir",
+                "copilot-logs"
+            ]
+        );
+    }
+
+    #[test]
+    fn copilot_auth_requires_a_logged_in_user_or_token() {
+        assert!(!copilot_auth_value_has_credentials(
+            &serde_json::json!({"loggedInUsers": [], "githubToken": " "})
+        ));
+        assert!(copilot_auth_value_has_credentials(
+            &serde_json::json!({"loggedInUsers": [{"login": "octocat"}]})
+        ));
+    }
+}
+
+fn copilot_auth_value_has_credentials(value: &serde_json::Value) -> bool {
+    value.get("loggedInUsers").is_some_and(|users| match users {
+        serde_json::Value::Array(users) => !users.is_empty(),
+        serde_json::Value::Object(users) => !users.is_empty(),
+        _ => false,
+    }) || json_has_nonempty_string(value, &["/token", "/oauthToken", "/githubToken"])
+}
+
 #[async_trait]
 impl StandardCodingAgentExecutor for Copilot {
     fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
         let env = env.clone().with_profile(&self.cmd);
         let cli_login = copilot_config_path().is_some_and(|path| {
-            read_json_file(&path).is_some_and(|value| {
-                value.get("loggedInUsers").is_some_and(|users| match users {
-                    serde_json::Value::Array(users) => !users.is_empty(),
-                    serde_json::Value::Object(users) => !users.is_empty(),
-                    _ => false,
-                }) || json_has_nonempty_string(&value, &["/token", "/oauthToken", "/githubToken"])
-            })
+            read_json_file(&path).is_some_and(|value| copilot_auth_value_has_credentials(&value))
         });
         self.authentication_detected(
             &env,
@@ -278,16 +330,7 @@ impl StandardCodingAgentExecutor for Copilot {
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
-        let mcp_config_found = self
-            .default_mcp_config_path()
-            .map(|p| p.exists())
-            .unwrap_or(false);
-
-        let installation_indicator_found = dirs::home_dir()
-            .map(|home| home.join(".copilot").join("config.json").exists())
-            .unwrap_or(false);
-
-        if mcp_config_found || installation_indicator_found {
+        if command_is_available(Self::BASE_COMMAND, &self.cmd) {
             AvailabilityInfo::InstallationFound
         } else {
             AvailabilityInfo::NotFound

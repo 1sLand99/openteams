@@ -11,7 +11,7 @@ use serde_json::Value;
 use tokio::{process::Command, time::timeout};
 
 use crate::{
-    command::{CmdOverrides, CommandBuilder, apply_overrides},
+    command::{CmdOverrides, CommandBuilder, apply_overrides, redacted_command},
     env::ExecutionEnv,
     executors::ExecutorError,
 };
@@ -154,11 +154,19 @@ pub async fn discover_model_map_from_cli_command(
     builder: CommandBuilder,
 ) -> Result<Option<Vec<String>>, ExecutorError> {
     let command_parts = builder.build_initial()?;
+    let unresolved_command = command_parts.redacted_display();
     let (program, args) = match command_parts.into_resolved().await {
         Ok(parts) => parts,
         Err(ExecutorError::ExecutableNotFound { .. }) => return Ok(None),
-        Err(err) => return Err(err),
+        Err(err) => {
+            return Err(command_diagnostic_error(
+                &unresolved_command,
+                "resolve model discovery executable",
+                err,
+            ));
+        }
     };
+    let command_display = redacted_command(&program.display().to_string(), &args);
 
     let mut command = Command::new(program);
     command
@@ -172,40 +180,52 @@ pub async fn discover_model_map_from_cli_command(
 
     let output = match timeout(CLI_DISCOVERY_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,
-        Ok(Err(err)) => return Err(ExecutorError::Io(err)),
+        Ok(Err(err)) => {
+            return Err(command_diagnostic_error(
+                &command_display,
+                "execute model discovery command",
+                err,
+            ));
+        }
         Err(_) => {
-            return Err(ExecutorError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "model discovery command timed out",
-            )));
+            return Err(command_diagnostic_error(
+                &command_display,
+                "execute model discovery command",
+                "timed out after 8 seconds",
+            ));
         }
     };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stderr.trim().chars().take(512).collect::<String>();
-        return Err(ExecutorError::Io(std::io::Error::other(
-            if detail.is_empty() {
-                format!("model discovery command exited with {}", output.status)
-            } else {
-                format!(
-                    "model discovery command exited with {}: {detail}",
-                    output.status
-                )
-            },
-        )));
+        let result = if detail.is_empty() {
+            format!(
+                "process exited with {} and produced no error output",
+                output.status
+            )
+        } else {
+            format!("process exited with {}; stderr: {detail}", output.status)
+        };
+        return Err(command_diagnostic_error(
+            &command_display,
+            "execute model discovery command",
+            result,
+        ));
     }
     let value = serde_json::from_slice::<Value>(&output.stdout).map_err(|error| {
-        ExecutorError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("model discovery command returned invalid JSON: {error}"),
-        ))
+        command_diagnostic_error(
+            &command_display,
+            "parse model discovery output as JSON",
+            error,
+        )
     })?;
     let models = model_ids_from_model_map_json(&value);
     if models.is_empty() {
-        return Err(ExecutorError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "model discovery command returned no model aliases",
-        )));
+        return Err(command_diagnostic_error(
+            &command_display,
+            "validate model discovery output",
+            "command returned no model aliases",
+        ));
     }
     Ok(Some(models))
 }
@@ -253,7 +273,9 @@ pub async fn read_config_value(path: &Path) -> Result<Option<Value>, ExecutorErr
     let content = match tokio::fs::read_to_string(path).await {
         Ok(content) => content,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(ExecutorError::Io(err)),
+        Err(err) => {
+            return Err(config_diagnostic_error(path, "read configuration", err));
+        }
     };
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -265,21 +287,49 @@ pub async fn read_config_value(path: &Path) -> Result<Option<Value>, ExecutorErr
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
     {
-        let value: toml::Value = toml::from_str(trimmed)?;
-        return Ok(Some(serde_json::to_value(value)?));
+        let value: toml::Value = toml::from_str(trimmed)
+            .map_err(|error| config_diagnostic_error(path, "parse TOML configuration", error))?;
+        return Ok(Some(serde_json::to_value(value).map_err(|error| {
+            config_diagnostic_error(path, "convert TOML configuration", error)
+        })?));
     }
 
     if path
         .extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonc"))
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("jsonc"))
         && let Ok(Some(value)) =
             jsonc_parser::parse_to_serde_value(trimmed, &ParseOptions::default())
     {
         return Ok(Some(value));
     }
 
-    Ok(Some(serde_json::from_str(trimmed)?))
+    Ok(Some(serde_json::from_str(trimmed).map_err(|error| {
+        config_diagnostic_error(path, "parse JSON/JSONC configuration", error)
+    })?))
+}
+
+fn command_diagnostic_error(
+    command: &str,
+    operation: &str,
+    result: impl std::fmt::Display,
+) -> ExecutorError {
+    ExecutorError::Io(std::io::Error::other(format!(
+        "command=`{command}`; operation={operation}; result={}",
+        result.to_string().trim()
+    )))
+}
+
+fn config_diagnostic_error(
+    path: &Path,
+    operation: &str,
+    result: impl std::fmt::Display,
+) -> ExecutorError {
+    ExecutorError::Io(std::io::Error::other(format!(
+        "source=`{}`; operation={operation}; result={}",
+        path.display(),
+        result.to_string().trim()
+    )))
 }
 
 async fn discover_from_cli_command(
@@ -290,11 +340,19 @@ async fn discover_from_cli_command(
     collector: &mut ModelCollector,
 ) -> Result<(), ExecutorError> {
     let command_parts = builder.build_initial()?;
+    let unresolved_command = command_parts.redacted_display();
     let (program, args) = match command_parts.into_resolved().await {
         Ok(parts) => parts,
         Err(ExecutorError::ExecutableNotFound { .. }) => return Ok(()),
-        Err(err) => return Err(err),
+        Err(err) => {
+            return Err(command_diagnostic_error(
+                &unresolved_command,
+                "resolve model discovery executable",
+                err,
+            ));
+        }
     };
+    let command_display = redacted_command(&program.display().to_string(), &args);
 
     let mut command = Command::new(program);
     command
@@ -308,7 +366,13 @@ async fn discover_from_cli_command(
 
     let output = match timeout(CLI_DISCOVERY_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => output,
-        Ok(Err(err)) => return Err(ExecutorError::Io(err)),
+        Ok(Err(err)) => {
+            return Err(command_diagnostic_error(
+                &command_display,
+                "execute model discovery command",
+                err,
+            ));
+        }
         Err(_) => return Ok(()),
     };
 
@@ -912,8 +976,50 @@ fn has_value(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tempfile::TempDir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn reads_json_extension_config_with_jsonc_syntax() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let config_path = temp_dir.path().join("config.json");
+        tokio::fs::write(
+            &config_path,
+            r#"// User-level Copilot configuration
+            {
+                "model": "gpt-5.3-codex",
+            }
+            "#,
+        )
+        .await
+        .expect("write JSONC config");
+
+        let value = read_config_value(&config_path)
+            .await
+            .expect("parse JSONC stored with a .json extension")
+            .expect("config value");
+
+        assert_eq!(value["model"], "gpt-5.3-codex");
+    }
+
+    #[tokio::test]
+    async fn config_parse_error_identifies_source_operation_and_result() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let config_path = temp_dir.path().join("config.json");
+        tokio::fs::write(&config_path, "{not valid json")
+            .await
+            .expect("write invalid config");
+
+        let error = read_config_value(&config_path)
+            .await
+            .expect_err("invalid configuration should fail")
+            .to_string();
+
+        assert!(error.contains(&format!("source=`{}`", config_path.display())));
+        assert!(error.contains("operation=parse JSON/JSONC configuration"));
+        assert!(error.contains("result="));
+    }
 
     #[test]
     fn extracts_configured_models_from_nested_config_shapes() {

@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use ts_rs::TS;
-use workspace_utils::shell::resolve_executable_path;
+use workspace_utils::shell::{resolve_executable_path, resolve_executable_path_blocking};
 
 use crate::executors::ExecutorError;
 
@@ -42,6 +42,72 @@ impl CommandParts {
             .await
             .ok_or(ExecutorError::ExecutableNotFound { program })?;
         Ok((executable, args))
+    }
+
+    /// Render the exact process invocation for diagnostics while masking
+    /// credential-bearing flags. This never includes environment values.
+    pub fn redacted_display(&self) -> String {
+        redacted_command(&self.program, &self.args)
+    }
+}
+
+/// Render a process invocation for user-facing diagnostics. Arguments are
+/// quoted when needed and common credential flags are masked.
+pub fn redacted_command(program: &str, args: &[String]) -> String {
+    let mut parts = vec![quote_diagnostic_arg(program)];
+    let mut redact_next = false;
+    for arg in args {
+        let rendered = if redact_next {
+            redact_next = false;
+            "<redacted>".to_string()
+        } else if let Some((name, _)) = arg.split_once('=') {
+            if is_sensitive_flag(name) {
+                format!("{name}=<redacted>")
+            } else {
+                quote_diagnostic_arg(arg)
+            }
+        } else {
+            if is_sensitive_flag(arg) {
+                redact_next = true;
+            }
+            quote_diagnostic_arg(arg)
+        };
+        parts.push(rendered);
+    }
+    parts.join(" ")
+}
+
+fn is_sensitive_flag(value: &str) -> bool {
+    let name = value
+        .trim_start_matches(['-', '/'])
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    [
+        "token",
+        "api-key",
+        "apikey",
+        "password",
+        "secret",
+        "authorization",
+        "credential",
+    ]
+    .iter()
+    .any(|sensitive| name.contains(sensitive))
+}
+
+fn quote_diagnostic_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '_' | '-' | '.' | '/' | ':' | '@' | '%' | '+' | '=' | ','
+                )
+        })
+    {
+        value.to_string()
+    } else {
+        serde_json::to_string(value).unwrap_or_else(|_| "<unprintable>".to_string())
     }
 }
 
@@ -213,5 +279,79 @@ pub fn apply_overrides(
         builder.extend_shell_params(extra.clone())
     } else {
         Ok(builder)
+    }
+}
+
+/// Return whether the executable used by an effective base command can be
+/// resolved on this machine. Parsing follows the same platform-specific rules
+/// as command execution, and a configured base-command override takes
+/// precedence over the built-in command.
+pub fn command_is_available(base_command: &str, overrides: &CmdOverrides) -> bool {
+    let effective_command = overrides
+        .base_command_override
+        .as_deref()
+        .unwrap_or(base_command);
+    split_command_line(effective_command)
+        .ok()
+        .and_then(|parts| parts.into_iter().next())
+        .and_then(|program| resolve_executable_path_blocking(&program))
+        .is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CmdOverrides, command_is_available, redacted_command};
+
+    fn quoted_current_executable() -> String {
+        format!(
+            "\"{}\"",
+            std::env::current_exe()
+                .expect("resolve current test executable")
+                .display()
+        )
+    }
+
+    #[test]
+    fn command_availability_resolves_effective_executable() {
+        assert!(command_is_available(
+            &quoted_current_executable(),
+            &CmdOverrides::default()
+        ));
+        assert!(!command_is_available(
+            "openteams-command-that-does-not-exist",
+            &CmdOverrides::default()
+        ));
+    }
+
+    #[test]
+    fn command_availability_respects_base_command_override() {
+        let overrides = CmdOverrides {
+            base_command_override: Some(quoted_current_executable()),
+            ..CmdOverrides::default()
+        };
+        assert!(command_is_available(
+            "openteams-command-that-does-not-exist",
+            &overrides
+        ));
+    }
+
+    #[test]
+    fn diagnostic_command_quotes_arguments_and_redacts_credentials() {
+        let rendered = redacted_command(
+            "/path with spaces/copilot",
+            &[
+                "models".to_string(),
+                "--api-key".to_string(),
+                "top-secret".to_string(),
+                "--token=another-secret".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            rendered,
+            "\"/path with spaces/copilot\" models --api-key <redacted> --token=<redacted>"
+        );
+        assert!(!rendered.contains("top-secret"));
+        assert!(!rendered.contains("another-secret"));
     }
 }

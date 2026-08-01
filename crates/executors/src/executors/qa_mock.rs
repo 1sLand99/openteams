@@ -19,7 +19,7 @@ use workspace_utils::msg_store::MsgStore;
 use crate::{
     env::ExecutionEnv,
     executors::{
-        ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
         claude::{
             ClaudeContentItem, ClaudeJson, ClaudeMessage, ClaudeMessageContent, ClaudeToolData,
         },
@@ -33,6 +33,10 @@ pub struct QaMockExecutor;
 
 #[async_trait]
 impl StandardCodingAgentExecutor for QaMockExecutor {
+    fn get_availability_info(&self) -> AvailabilityInfo {
+        AvailabilityInfo::InstallationFound
+    }
+
     async fn spawn(
         &self,
         current_dir: &Path,

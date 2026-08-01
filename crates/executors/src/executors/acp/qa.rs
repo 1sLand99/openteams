@@ -13,9 +13,9 @@ use super::{
 };
 use crate::{
     approvals::ExecutorApprovalService,
-    command::{CmdOverrides, CommandBuilder},
+    command::{CmdOverrides, CommandBuilder, command_is_available},
     env::ExecutionEnv,
-    executors::{ExecutorError, SpawnedChild, StandardCodingAgentExecutor},
+    executors::{AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor},
     mcp_config::{McpConfig, read_canonical_mcp_config},
 };
 
@@ -101,6 +101,14 @@ impl AcpQaExecutor {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for AcpQaExecutor {
+    fn get_availability_info(&self) -> AvailabilityInfo {
+        if command_is_available(&self.command, &self.cmd) {
+            AvailabilityInfo::InstallationFound
+        } else {
+            AvailabilityInfo::NotFound
+        }
+    }
+
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals = Some(approvals);
     }

@@ -9,11 +9,14 @@ use ts_rs::TS;
 use workspace_utils::msg_store::MsgStore;
 
 use crate::{
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
+    command::{
+        CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides, command_is_available,
+    },
     env::ExecutionEnv,
     executors::{
-        AppendPrompt, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
         claude::{ClaudeLogProcessor, HistoryStrategy},
+        utils::{json_has_nonempty_string, read_json_file},
     },
     logs::{stderr_processor::normalize_stderr_logs, utils::EntryIndexProvider},
     model_discovery::{
@@ -42,7 +45,7 @@ pub struct Amp {
 }
 
 impl Amp {
-    const BASE_COMMAND: &'static str = "npx -y @sourcegraph/amp@0.0.1780464815-g688406";
+    const BASE_COMMAND: &'static str = "amp";
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         let mut builder =
@@ -57,13 +60,40 @@ impl Amp {
     }
 }
 
+fn amp_auth_value_has_credentials(value: &serde_json::Value) -> bool {
+    json_has_nonempty_string(
+        value,
+        &[
+            "/apiKey",
+            "/api_key",
+            "/token",
+            "/accessToken",
+            "/refreshToken",
+            "/auth/token",
+            "/auth/accessToken",
+            "/auth/refreshToken",
+        ],
+    )
+}
+
+fn amp_settings_path() -> Option<std::path::PathBuf> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from);
+    #[cfg(windows)]
+    let config_home = config_home.or_else(dirs::config_dir);
+    #[cfg(not(windows))]
+    let config_home = config_home.or_else(|| dirs::home_dir().map(|home| home.join(".config")));
+    config_home.map(|home| home.join("amp").join("settings.json"))
+}
+
 #[async_trait]
 impl StandardCodingAgentExecutor for Amp {
     fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
         let env = env.clone().with_profile(&self.cmd);
-        let cli_login = dirs::home_dir()
-            .map(|home| home.join(".config").join("amp").join("settings.json"))
-            .is_some_and(|path| path.is_file());
+        let cli_login = amp_settings_path()
+            .and_then(|path| read_json_file(&path))
+            .is_some_and(|value| amp_auth_value_has_credentials(&value));
         self.authentication_detected(&env, &["AMP_API_KEY"], cli_login)
     }
 
@@ -212,14 +242,57 @@ impl StandardCodingAgentExecutor for Amp {
         normalize_stderr_logs(msg_store, entry_index_provider);
     }
 
+    fn get_availability_info(&self) -> AvailabilityInfo {
+        if command_is_available(Self::BASE_COMMAND, &self.cmd) {
+            AvailabilityInfo::InstallationFound
+        } else {
+            AvailabilityInfo::NotFound
+        }
+    }
+
     // MCP configuration methods
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf> {
-        dirs::home_dir().map(|home| home.join(".config").join("amp").join("settings.json"))
+        amp_settings_path()
     }
 
     fn native_skill_discovery_roots(&self) -> Vec<std::path::PathBuf> {
         dirs::home_dir()
             .map(|home| vec![home.join(".agents").join("skills")])
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Amp, amp_auth_value_has_credentials};
+    use crate::{command::CmdOverrides, executors::AppendPrompt};
+
+    #[test]
+    fn command_builder_uses_native_amp_command() {
+        let amp = Amp {
+            append_prompt: AppendPrompt::default(),
+            model: None,
+            dangerously_allow_all: None,
+            cmd: CmdOverrides::default(),
+        };
+        let (program, args) = amp
+            .build_command_builder()
+            .expect("build Amp command")
+            .build_initial()
+            .expect("build initial Amp command")
+            .into_parts_for_test();
+
+        assert_eq!(program, "amp");
+        assert_eq!(args, ["--execute", "--stream-json"]);
+    }
+
+    #[test]
+    fn amp_auth_requires_nonempty_credentials() {
+        assert!(!amp_auth_value_has_credentials(
+            &serde_json::json!({"theme": "dark", "token": " "})
+        ));
+        assert!(amp_auth_value_has_credentials(
+            &serde_json::json!({"auth": {"accessToken": "token"}})
+        ));
     }
 }

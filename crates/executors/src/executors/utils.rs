@@ -12,7 +12,19 @@ use crate::executors::BaseCodingAgent;
 
 pub fn read_json_file(path: &Path) -> Option<serde_json::Value> {
     let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
+    parse_json_or_jsonc(&content)
+}
+
+fn parse_json_or_jsonc(content: &str) -> Option<serde_json::Value> {
+    let content = content.trim();
+    if content.is_empty() {
+        return None;
+    }
+    serde_json::from_str(content).ok().or_else(|| {
+        jsonc_parser::parse_to_serde_value(content, &jsonc_parser::ParseOptions::default())
+            .ok()
+            .flatten()
+    })
 }
 
 pub fn json_has_nonempty_string(value: &serde_json::Value, pointers: &[&str]) -> bool {
@@ -39,6 +51,30 @@ pub fn dotenv_has_nonempty_value(path: &Path, keys: &[&str]) -> bool {
         };
         keys.contains(&key.trim()) && !value.trim().trim_matches(['\'', '"']).is_empty()
     })
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::parse_json_or_jsonc;
+
+    #[test]
+    fn json_reader_accepts_jsonc_auth_stores() {
+        let value = parse_json_or_jsonc(
+            r#"{
+                // Managed by the CLI.
+                "loggedInUsers": [{ "login": "octocat" }],
+            }"#,
+        )
+        .expect("parse JSONC auth store");
+
+        assert_eq!(value["loggedInUsers"][0]["login"], "octocat");
+    }
+
+    #[test]
+    fn json_reader_rejects_empty_or_malformed_auth_stores() {
+        assert!(parse_json_or_jsonc(" \n\t").is_none());
+        assert!(parse_json_or_jsonc("{").is_none());
+    }
 }
 
 /// Parsed slash command with name and arguments.

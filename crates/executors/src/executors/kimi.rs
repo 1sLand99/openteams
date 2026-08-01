@@ -9,7 +9,7 @@ use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
-use workspace_utils::{msg_store::MsgStore, shell::resolve_executable_path_blocking};
+use workspace_utils::msg_store::MsgStore;
 
 use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
@@ -19,7 +19,9 @@ use super::acp::{
 };
 use crate::{
     approvals::ExecutorApprovalService,
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
+    command::{
+        CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides, command_is_available,
+    },
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
@@ -358,14 +360,7 @@ impl StandardCodingAgentExecutor for KimiCode {
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
-        let command = self
-            .cmd
-            .base_command_override
-            .as_deref()
-            .and_then(shlex::split)
-            .and_then(|parts| parts.into_iter().next())
-            .unwrap_or_else(|| Self::BASE_COMMAND.to_string());
-        if resolve_executable_path_blocking(&command).is_some() {
+        if command_is_available(Self::BASE_COMMAND, &self.cmd) {
             AvailabilityInfo::InstallationFound
         } else {
             AvailabilityInfo::NotFound

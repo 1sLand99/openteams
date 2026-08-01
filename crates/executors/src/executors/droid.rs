@@ -10,9 +10,12 @@ use ts_rs::TS;
 use workspace_utils::msg_store::MsgStore;
 
 use crate::{
-    command::{CommandBuildError, CommandBuilder, CommandParts},
+    command::{CommandBuildError, CommandBuilder, CommandParts, command_is_available},
     env::ExecutionEnv,
-    executors::{AppendPrompt, ExecutorError, SpawnedChild, StandardCodingAgentExecutor},
+    executors::{
+        AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        utils::{json_has_nonempty_string, read_json_file},
+    },
     logs::utils::EntryIndexProvider,
     model_discovery::{
         ProviderKind, cli_model_commands, discover_from_sources, runner_config_paths,
@@ -108,6 +111,22 @@ impl Droid {
     }
 }
 
+fn droid_auth_value_has_credentials(value: &serde_json::Value) -> bool {
+    json_has_nonempty_string(
+        value,
+        &[
+            "/apiKey",
+            "/api_key",
+            "/token",
+            "/accessToken",
+            "/refreshToken",
+            "/auth/token",
+            "/auth/accessToken",
+            "/auth/refreshToken",
+        ],
+    )
+}
+
 async fn spawn_droid(
     command_parts: CommandParts,
     prompt: &String,
@@ -153,7 +172,8 @@ impl StandardCodingAgentExecutor for Droid {
                 factory_home.join("config.json"),
             ]
             .iter()
-            .any(|path| path.is_file())
+            .filter_map(|path| read_json_file(path))
+            .any(|value| droid_auth_value_has_credentials(&value))
         });
         self.authentication_detected(&env, &["FACTORY_API_KEY"], cli_login)
     }
@@ -221,6 +241,14 @@ impl StandardCodingAgentExecutor for Droid {
         );
     }
 
+    fn get_availability_info(&self) -> AvailabilityInfo {
+        if command_is_available("droid", &self.cmd) {
+            AvailabilityInfo::InstallationFound
+        } else {
+            AvailabilityInfo::NotFound
+        }
+    }
+
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf> {
         dirs::home_dir().map(|home| home.join(".factory").join("mcp.json"))
     }
@@ -229,5 +257,20 @@ impl StandardCodingAgentExecutor for Droid {
         dirs::home_dir()
             .map(|home| vec![home.join(".factory").join("skills")])
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::droid_auth_value_has_credentials;
+
+    #[test]
+    fn droid_auth_requires_nonempty_credentials() {
+        assert!(!droid_auth_value_has_credentials(
+            &serde_json::json!({"settings": {}, "apiKey": " "})
+        ));
+        assert!(droid_auth_value_has_credentials(
+            &serde_json::json!({"auth": {"refreshToken": "token"}})
+        ));
     }
 }
