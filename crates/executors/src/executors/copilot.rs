@@ -26,6 +26,7 @@ use crate::{
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        utils::{json_has_nonempty_string, read_json_file},
     },
     logs::{
         NormalizedEntry, NormalizedEntryType, plain_text_processor::PlainTextLogProcessor,
@@ -103,6 +104,29 @@ impl Copilot {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for Copilot {
+    fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
+        let env = env.clone().with_profile(&self.cmd);
+        let cli_login = copilot_config_path().is_some_and(|path| {
+            read_json_file(&path).is_some_and(|value| {
+                value.get("loggedInUsers").is_some_and(|users| match users {
+                    serde_json::Value::Array(users) => !users.is_empty(),
+                    serde_json::Value::Object(users) => !users.is_empty(),
+                    _ => false,
+                }) || json_has_nonempty_string(&value, &["/token", "/oauthToken", "/githubToken"])
+            })
+        });
+        self.authentication_detected(
+            &env,
+            &[
+                "COPILOT_GITHUB_TOKEN",
+                "COPILOT_PROVIDER_API_KEY",
+                "GH_TOKEN",
+                "GITHUB_TOKEN",
+            ],
+            cli_login,
+        )
+    }
+
     async fn list_models(
         &self,
         current_dir: &Path,
@@ -269,6 +293,14 @@ impl StandardCodingAgentExecutor for Copilot {
             AvailabilityInfo::NotFound
         }
     }
+}
+
+fn copilot_config_path() -> Option<PathBuf> {
+    std::env::var_os("COPILOT_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".copilot")))
+        .map(|home| home.join("config.json"))
 }
 
 impl Copilot {

@@ -96,6 +96,14 @@ pub enum AgentRuntimeModelSource {
     None,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum AgentRuntimeAuthState {
+    Authenticated,
+    Unauthenticated,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AgentRuntimeStatus {
@@ -103,6 +111,10 @@ pub struct AgentRuntimeStatus {
     pub installed: bool,
     pub executable: bool,
     pub availability: AvailabilityInfo,
+    pub auth_state: AgentRuntimeAuthState,
+    /// Whether a Node.js runtime was detected on this machine. Drives the
+    /// "install Node.js" guidance for Node-based runners.
+    pub node_available: bool,
     pub discovered_models: Vec<String>,
     pub model_source: AgentRuntimeModelSource,
     pub version: Option<String>,
@@ -150,6 +162,8 @@ pub struct AgentRuntimeDiagnostics {
     pub installed: bool,
     pub executable: bool,
     pub availability: AvailabilityInfo,
+    pub auth_state: AgentRuntimeAuthState,
+    pub node_available: bool,
     pub config_path: String,
     pub install_indicator_path: Option<String>,
     pub resolved_command: Option<String>,
@@ -484,7 +498,8 @@ pub async fn runtime_diagnostics(
     let cli_config_path = base
         .default_mcp_config_path()
         .map(|path| path.display().to_string());
-    let status = build_status(runner, config, base, &store);
+    let node_available = detect_node_available();
+    let status = build_status(runner, config, base, &store, node_available);
     let mut runtime_executor = base.clone();
     let mut env = ExecutionEnv::new(Default::default(), false, String::new());
     apply_config_to_executor_and_env(runner, &mut runtime_executor, &mut env, &store)?;
@@ -527,7 +542,7 @@ pub async fn runtime_diagnostics(
     } else {
         read_store(&path)?
     };
-    let latest_status = build_status(runner, config, base, &latest_store);
+    let latest_status = build_status(runner, config, base, &latest_store, node_available);
     let version = detected_version.or(latest_status.version.clone());
 
     Ok(AgentRuntimeDiagnostics {
@@ -535,6 +550,8 @@ pub async fn runtime_diagnostics(
         installed: latest_status.installed,
         executable: latest_status.executable,
         availability: latest_status.availability,
+        auth_state: latest_status.auth_state,
+        node_available: latest_status.node_available,
         config_path: cli_config_path
             .clone()
             .unwrap_or_else(|| path.display().to_string()),
@@ -889,6 +906,7 @@ fn build_statuses(
     profiles: &ExecutorConfigs,
     store: &AgentRuntimeStore,
 ) -> Vec<AgentRuntimeStatus> {
+    let node_available = detect_node_available();
     let mut runners = profiles
         .executors
         .iter()
@@ -896,7 +914,7 @@ fn build_statuses(
             let base = config
                 .get_default()
                 .or_else(|| config.configurations.values().next())?;
-            Some(build_status(*runner, config, base, store))
+            Some(build_status(*runner, config, base, store, node_available))
         })
         .collect::<Vec<_>>();
     runners.sort_by_key(|status| status.runner_type.to_string());
@@ -934,6 +952,7 @@ fn build_status(
     executor_config: &ExecutorConfig,
     base: &CodingAgent,
     store: &AgentRuntimeStore,
+    node_available: bool,
 ) -> AgentRuntimeStatus {
     let config = store
         .configs
@@ -954,12 +973,21 @@ fn build_status(
     let availability = configured_base.get_availability_info();
     let installed = availability.is_available();
     let executable = installed && config.run_mode != AgentRunMode::Disabled;
+    let mut auth_env = ExecutionEnv::new(Default::default(), false, String::new());
+    auth_env.merge(&config.env_json);
+    let auth_state = if configured_base.is_authenticated(&auth_env) {
+        AgentRuntimeAuthState::Authenticated
+    } else {
+        AgentRuntimeAuthState::Unauthenticated
+    };
 
     AgentRuntimeStatus {
         runner_type: runner,
         installed,
         executable,
         availability,
+        auth_state,
+        node_available,
         discovered_models: models_for_runner(runner, executor_config, store),
         model_source: model_source_for_runner(runner, executor_config, store),
         version: discovery.and_then(|entry| entry.version.clone()),
@@ -969,6 +997,13 @@ fn build_status(
         env_summary: summarize_env(&config.env_json),
         executor_options: config.executor_options,
     }
+}
+
+/// Whether a `node` executable resolves on this machine. Resolution
+/// refreshes the login-shell PATH, so Node installed from a regular
+/// terminal is found without restarting the app.
+fn detect_node_available() -> bool {
+    utils::shell::resolve_executable_path_blocking("node").is_some()
 }
 
 fn reasoning_capability_for_runner(
@@ -1356,6 +1391,7 @@ mod tests {
             AgentRuntimeModelSource::ProfileFallback
         );
         assert_eq!(statuses[0].env_summary[0].value, "secret");
+        assert_eq!(statuses[0].auth_state, AgentRuntimeAuthState::Authenticated);
     }
 
     #[test]
@@ -1536,6 +1572,8 @@ mod tests {
             installed: true,
             executable: true,
             availability: AvailabilityInfo::InstallationFound,
+            auth_state: AgentRuntimeAuthState::Authenticated,
+            node_available: true,
             discovered_models: vec!["gpt-5.2-codex".to_string()],
             model_source: AgentRuntimeModelSource::Runner,
             version: None,

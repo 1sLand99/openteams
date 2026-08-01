@@ -505,6 +505,10 @@ async fn wait_for_server_url(
 
 #[async_trait]
 impl StandardCodingAgentExecutor for OpenTeamsCli {
+    fn is_authenticated(&self, _env: &ExecutionEnv) -> bool {
+        true
+    }
+
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals = Some(approvals);
     }

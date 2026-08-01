@@ -1,6 +1,6 @@
 use std::{
     num::NonZeroUsize,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
@@ -9,6 +9,37 @@ use lru::LruCache;
 
 use super::SlashCommandDescription;
 use crate::executors::BaseCodingAgent;
+
+pub fn read_json_file(path: &Path) -> Option<serde_json::Value> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+pub fn json_has_nonempty_string(value: &serde_json::Value, pointers: &[&str]) -> bool {
+    pointers.iter().any(|pointer| {
+        value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    })
+}
+
+pub fn dotenv_has_nonempty_value(path: &Path, keys: &[&str]) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    content.lines().any(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return false;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        keys.contains(&key.trim()) && !value.trim().trim_matches(['\'', '"']).is_empty()
+    })
+}
 
 /// Parsed slash command with name and arguments.
 

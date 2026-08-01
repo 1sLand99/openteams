@@ -217,6 +217,8 @@ const runtime: AgentRuntimeStatus = {
   installed: true,
   executable: true,
   availability: { type: 'INSTALLATION_FOUND' },
+  auth_state: 'authenticated',
+  node_available: true,
   discovered_models: ['gpt-5.2-codex'],
   model_source: 'runner',
   version: 'test',

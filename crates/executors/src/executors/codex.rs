@@ -69,6 +69,7 @@ use crate::{
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorExitResult, SlashCommandDescription,
         SpawnedChild, StandardCodingAgentExecutor,
+        utils::{json_has_nonempty_string, read_json_file},
     },
     logs::utils::patch,
     model_discovery::{
@@ -188,6 +189,38 @@ pub struct Codex {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for Codex {
+    fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
+        let env = env.clone().with_profile(&self.cmd);
+        let Some(home) = codex_home() else {
+            return self.authentication_detected(&env, &["OPENAI_API_KEY"], false);
+        };
+        let auth = read_json_file(&home.join("auth.json"));
+        let oauth_login = auth.as_ref().is_some_and(|value| {
+            json_has_nonempty_string(
+                value,
+                &[
+                    "/tokens/access_token",
+                    "/tokens/refresh_token",
+                    "/access_token",
+                    "/refresh_token",
+                ],
+            )
+        });
+        let auth_file_key = auth
+            .as_ref()
+            .is_some_and(|value| json_has_nonempty_string(value, &["/OPENAI_API_KEY", "/api_key"]));
+        let provider_configured = self
+            .model_provider
+            .as_deref()
+            .is_some_and(|provider| !provider.trim().is_empty())
+            || codex_config_has_provider(&home.join("config.toml"), &env);
+        self.authentication_detected(
+            &env,
+            &["OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"],
+            oauth_login || auth_file_key || provider_configured,
+        )
+    }
+
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals = Some(approvals);
     }
@@ -687,14 +720,63 @@ impl Codex {
     }
 }
 
+fn codex_config_has_provider(path: &Path, env: &ExecutionEnv) -> bool {
+    let Some(value) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| toml::from_str::<toml::Value>(&content).ok())
+    else {
+        return false;
+    };
+    let providers = value.get("model_providers").and_then(toml::Value::as_table);
+    let configured_provider = value
+        .get("model_provider")
+        .and_then(toml::Value::as_str)
+        .is_some_and(|provider| !provider.trim().is_empty());
+    let provider_entry = providers.is_some_and(|providers| !providers.is_empty());
+    let referenced_key = providers
+        .into_iter()
+        .flat_map(|providers| providers.values())
+        .any(|provider| {
+            provider
+                .get("env_key")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|key| {
+                    env.get(key).is_some_and(|value| !value.trim().is_empty())
+                        || std::env::var_os(key).is_some_and(|value| !value.is_empty())
+                })
+        });
+    configured_provider || provider_entry || referenced_key
+}
+
 #[cfg(test)]
 mod tests {
-    use super::CODEX_MODEL_FALLBACKS;
+    use tempfile::TempDir;
+
+    use super::{CODEX_MODEL_FALLBACKS, codex_config_has_provider};
+    use crate::env::ExecutionEnv;
 
     #[test]
     fn codex_model_fallbacks_include_latest_gpt_5_6_models() {
         assert!(CODEX_MODEL_FALLBACKS.contains(&"gpt-5.6-sol"));
         assert!(CODEX_MODEL_FALLBACKS.contains(&"gpt-5.6-terra"));
         assert!(CODEX_MODEL_FALLBACKS.contains(&"gpt-5.6-luna"));
+    }
+
+    #[test]
+    fn configured_model_provider_counts_as_authentication() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+                model_provider = "custom"
+                [model_providers.custom]
+                base_url = "http://localhost:11434/v1"
+            "#,
+        )
+        .unwrap();
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        assert!(codex_config_has_provider(&path, &env));
     }
 }

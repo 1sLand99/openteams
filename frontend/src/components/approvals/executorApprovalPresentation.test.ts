@@ -151,7 +151,7 @@ assert.ok(
 assert.ok(
   approvalTraySource.includes('const trigger = allowMenuRef.current;') &&
     approvalTraySource.includes('left: Math.max(8, rect.left)') &&
-    approvalTraySource.includes('minWidth: rect.width') &&
+    approvalTraySource.includes('minWidth: rect.width + 8') &&
     approvalTraySource.includes('minWidth: allowMenuPosition.minWidth') &&
     approvalTraySource.includes('whitespace-nowrap rounded-md') &&
     approvalTraySource.includes('pl-1 pr-2.5 text-left'),

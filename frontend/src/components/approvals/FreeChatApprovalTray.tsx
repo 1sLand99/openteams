@@ -83,7 +83,7 @@ const ApprovalRequestRow: React.FC<{
       setAllowMenuPosition({
         left: Math.max(8, rect.left),
         top: rect.bottom + gap,
-        minWidth: rect.width,
+        minWidth: rect.width + 8,
       });
     };
     updatePosition();

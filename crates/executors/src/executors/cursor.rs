@@ -74,6 +74,20 @@ impl CursorAgent {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for CursorAgent {
+    fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
+        let env = env.clone().with_profile(&self.cmd);
+        let cli_login = dirs::home_dir().is_some_and(|home| {
+            [
+                home.join(".cursor").join("auth.json"),
+                home.join(".cursor").join("credentials.json"),
+                home.join(".cursor").join("cli-config.json"),
+            ]
+            .iter()
+            .any(|path| path.is_file())
+        });
+        self.authentication_detected(&env, &["CURSOR_API_KEY"], cli_login)
+    }
+
     async fn list_models(
         &self,
         current_dir: &Path,

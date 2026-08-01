@@ -192,6 +192,20 @@ impl ClaudeCode {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for ClaudeCode {
+    fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
+        let env = env.clone().with_profile(&self.cmd);
+        let oauth_login = matches!(
+            self.get_availability_info(),
+            AvailabilityInfo::LoginDetected { .. }
+        );
+        let api_key_vars = if self.disable_api_key.unwrap_or(false) {
+            &[][..]
+        } else {
+            &["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"][..]
+        };
+        self.authentication_detected(&env, api_key_vars, oauth_login)
+    }
+
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals_service = Some(approvals);
     }

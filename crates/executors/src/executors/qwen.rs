@@ -19,12 +19,24 @@ use crate::{
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        utils::{dotenv_has_nonempty_value, json_has_nonempty_string, read_json_file},
     },
     mcp_config::{McpConfig, read_canonical_mcp_config},
     model_discovery::{
         ProviderKind, cli_model_commands, discover_from_sources, runner_config_paths,
     },
 };
+
+const QWEN_AUTH_ENV_VARS: &[&str] = &[
+    "QWEN_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "BAILIAN_CODING_PLAN_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+];
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
@@ -234,6 +246,37 @@ fn invalid_reasoning_effort(message: impl Into<String>) -> ExecutorError {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for QwenCode {
+    fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
+        let env = env.clone().with_profile(&self.cmd);
+        let Some(home) = dirs::home_dir() else {
+            return self.authentication_detected(&env, QWEN_AUTH_ENV_VARS, false);
+        };
+        let qwen_home = home.join(".qwen");
+        let oauth_login =
+            read_json_file(&qwen_home.join("oauth_creds.json")).is_some_and(|value| {
+                json_has_nonempty_string(&value, &["/access_token", "/refresh_token"])
+            });
+        let settings = read_json_file(&qwen_home.join("settings.json"));
+        let provider_configured = settings
+            .as_ref()
+            .is_some_and(|value| qwen_provider_configured(value, &env));
+        let mut dotenv_env_vars = QWEN_AUTH_ENV_VARS.to_vec();
+        if let Some(settings) = settings.as_ref() {
+            dotenv_env_vars.extend(
+                settings
+                    .get("modelProviders")
+                    .into_iter()
+                    .flat_map(auth_env_keys),
+            );
+        }
+        let dotenv_key = dotenv_has_nonempty_value(&qwen_home.join(".env"), &dotenv_env_vars);
+        self.authentication_detected(
+            &env,
+            QWEN_AUTH_ENV_VARS,
+            oauth_login || provider_configured || dotenv_key,
+        )
+    }
+
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals = Some(approvals);
     }
@@ -361,9 +404,75 @@ impl StandardCodingAgentExecutor for QwenCode {
     }
 }
 
+fn qwen_provider_configured(value: &Value, env: &ExecutionEnv) -> bool {
+    let has_provider = value
+        .get("modelProviders")
+        .and_then(Value::as_object)
+        .is_some_and(|providers| {
+            providers.values().any(|provider| match provider {
+                Value::Array(models) => !models.is_empty(),
+                Value::Object(config) => !config.is_empty(),
+                _ => false,
+            })
+        });
+    let has_inline_key =
+        json_has_nonempty_string(value, &["/security/auth/apiKey", "/security/auth/token"])
+            || value
+                .get("env")
+                .and_then(Value::as_object)
+                .is_some_and(|vars| {
+                    vars.values()
+                        .any(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))
+                });
+    let has_referenced_key = value
+        .get("modelProviders")
+        .into_iter()
+        .flat_map(auth_env_keys)
+        .any(|key| {
+            env.get(key).is_some_and(|value| !value.trim().is_empty())
+                || std::env::var_os(key).is_some_and(|value| !value.is_empty())
+        });
+
+    has_provider || has_inline_key || has_referenced_key
+}
+
+fn auth_env_keys(value: &Value) -> Box<dyn Iterator<Item = &str> + '_> {
+    match value {
+        Value::Array(values) => Box::new(values.iter().flat_map(auth_env_keys)),
+        Value::Object(object) => Box::new(
+            object
+                .get("envKey")
+                .and_then(Value::as_str)
+                .into_iter()
+                .chain(object.values().flat_map(auth_env_keys)),
+        ),
+        _ => Box::new(std::iter::empty()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_model_provider_counts_as_authentication() {
+        let value = serde_json::json!({
+            "modelProviders": {
+                "openai": [{
+                    "id": "local-model",
+                    "baseUrl": "http://localhost:11434/v1",
+                    "envKey": "LOCAL_MODEL_API_KEY"
+                }]
+            }
+        });
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        assert!(qwen_provider_configured(&value, &env));
+        assert!(!qwen_provider_configured(
+            &serde_json::json!({"modelProviders": {}}),
+            &env
+        ));
+    }
 
     fn qwen_with_approval(approval_mode: Option<AcpApprovalMode>) -> QwenCode {
         QwenCode {

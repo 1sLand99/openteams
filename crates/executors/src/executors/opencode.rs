@@ -926,6 +926,21 @@ fn user_opencode_config_provider_ids(current_dir: &Path) -> HashSet<String> {
     ids
 }
 
+fn user_opencode_global_config_provider_ids() -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for path in opencode_config_paths(
+        std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+        dirs::home_dir(),
+        None,
+    ) {
+        let Some(value) = read_opencode_config_value(&path) else {
+            continue;
+        };
+        ids.extend(opencode_config_provider_ids(&value));
+    }
+    ids
+}
+
 fn opencode_auth_provider_ids(value: &Value) -> HashSet<String> {
     value
         .as_object()
@@ -1226,6 +1241,33 @@ async fn wait_for_server_url(
 
 #[async_trait]
 impl StandardCodingAgentExecutor for Opencode {
+    fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
+        let env = env.clone().with_profile(&self.cmd);
+        let cli_auth = !user_opencode_auth_provider_ids().is_empty()
+            || !user_opencode_global_config_provider_ids().is_empty()
+            || env
+                .get("OPENCODE_CONFIG_CONTENT")
+                .and_then(|content| serde_json::from_str::<Value>(content).ok())
+                .is_some_and(|value| !opencode_config_provider_ids(&value).is_empty());
+        self.authentication_detected(
+            &env,
+            &[
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "OPENROUTER_API_KEY",
+                "GOOGLE_API_KEY",
+                "GEMINI_API_KEY",
+                "GITHUB_TOKEN",
+                "COPILOT_TOKEN",
+                "DASHSCOPE_API_KEY",
+                "QWEN_API_KEY",
+                "MOONSHOT_API_KEY",
+                "KIMI_API_KEY",
+            ],
+            cli_auth,
+        )
+    }
+
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals = Some(approvals);
     }

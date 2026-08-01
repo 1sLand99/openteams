@@ -59,6 +59,14 @@ impl Amp {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for Amp {
+    fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
+        let env = env.clone().with_profile(&self.cmd);
+        let cli_login = dirs::home_dir()
+            .map(|home| home.join(".config").join("amp").join("settings.json"))
+            .is_some_and(|path| path.is_file());
+        self.authentication_detected(&env, &["AMP_API_KEY"], cli_login)
+    }
+
     async fn list_models(
         &self,
         current_dir: &Path,
