@@ -88,6 +88,15 @@ pub struct ChatRunActivityLine {
     pub line_type: ChatRunActivityLineType,
     pub stream_type: ChatStreamDeltaType,
     pub content: String,
+    /// Runtime-native session that emitted this line (for example, an OpenCode child session).
+    #[serde(default)]
+    pub runtime_session_id: Option<String>,
+    /// Runtime-native parent session, present for delegated child-session activity.
+    #[serde(default)]
+    pub runtime_parent_session_id: Option<String>,
+    /// Best available runtime-native session title.
+    #[serde(default)]
+    pub runtime_session_title: Option<String>,
     pub created_at: String,
 }
 

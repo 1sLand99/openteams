@@ -104,6 +104,7 @@
   "workflow.inspector.tokenRuns": "{count} 次运行",
   "workflow.inspector.tokenTotal": "Token",
   "workflow.inspector.tokenUsageUnavailable": "此步骤暂时没有 Token 用量。",
+  "workflow.inspector.toggleTokenUsage": "Token 用量明细",
   "workflow.iterationFeedback.accept": "接受",
   "workflow.iterationFeedback.additionalNotesLabel": "补充说明",
   "workflow.iterationFeedback.additionalNotesPlaceholder": "可选说明...",

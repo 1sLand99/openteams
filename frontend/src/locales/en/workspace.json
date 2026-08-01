@@ -25,6 +25,7 @@
   "agentActivity.group.failures": "{count} failed",
   "agentActivity.loading": "Loading thinking details...",
   "agentActivity.running": "Agent is working on the task",
+  "agentActivity.runLabel": "Run {count}",
   "agentActivity.starting": "Agent is starting",
   "agentActivity.toggle": "Thinking details",
   "agentArtifacts.more": "+{count} more",

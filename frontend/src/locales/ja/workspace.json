@@ -25,6 +25,7 @@
   "agentActivity.group.failures": "{count} 件失敗",
   "agentActivity.loading": "思考プロセスを読み込み中...",
   "agentActivity.running": "エージェントがタスクを実行中です",
+  "agentActivity.runLabel": "{count} 回目の実行",
   "agentActivity.starting": "エージェントを起動中です",
   "agentActivity.toggle": "思考プロセス",
   "agentActivity.tool.activity.completed": "?????????",

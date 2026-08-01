@@ -1253,6 +1253,9 @@ impl ChatRunner {
             line_type: activity_line.line_type,
             stream_type: activity_line.stream_type,
             content: activity_line.content,
+            runtime_session_id: activity_line.runtime_session_id,
+            runtime_parent_session_id: activity_line.runtime_parent_session_id,
+            runtime_session_title: activity_line.runtime_session_title,
             created_at: Utc::now().to_rfc3339(),
         };
         *sequence = (*sequence).saturating_add(1);

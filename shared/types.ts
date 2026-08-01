@@ -637,7 +637,19 @@ export type ChatStreamDeltaType = "assistant" | "thinking" | "error";
 
 export type ChatRunActivityLineType = "thinking" | "tool" | "assistant" | "error";
 
-export type ChatRunActivityLine = { line_id: string, run_id: string, session_id: string, session_agent_id: string, agent_id: string, agent_name: string, sequence: bigint, line_type: ChatRunActivityLineType, stream_type: ChatStreamDeltaType, content: string, created_at: string, };
+export type ChatRunActivityLine = { line_id: string, run_id: string, session_id: string, session_agent_id: string, agent_id: string, agent_name: string, sequence: bigint, line_type: ChatRunActivityLineType, stream_type: ChatStreamDeltaType, content: string,
+/**
+ * Runtime-native session that emitted this line (for example, an OpenCode child session).
+ */
+runtime_session_id: string | null,
+/**
+ * Runtime-native parent session, present for delegated child-session activity.
+ */
+runtime_parent_session_id: string | null,
+/**
+ * Best available runtime-native session title.
+ */
+runtime_session_title: string | null, created_at: string, };
 
 export type ChatProtocolNoticeCode = "invalid_json" | "not_json_array" | "empty_message" | "missing_send_target" | "invalid_send_target" | "invalid_send_intent";
 

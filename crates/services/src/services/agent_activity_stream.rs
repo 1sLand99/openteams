@@ -14,17 +14,26 @@ pub struct AgentActivityEntryLine {
     pub line_type: ChatRunActivityLineType,
     pub content: String,
     pub immediate: bool,
+    pub runtime_session_id: Option<String>,
+    pub runtime_parent_session_id: Option<String>,
+    pub runtime_session_title: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PendingLineBuffer {
+    content: String,
+    index: Option<usize>,
+    runtime_session_id: Option<String>,
+    runtime_parent_session_id: Option<String>,
+    runtime_session_title: Option<String>,
 }
 
 #[derive(Default)]
 pub struct AgentActivityStreamState {
     last_content_by_index: HashMap<usize, String>,
-    assistant_buffer: String,
-    assistant_buffer_index: Option<usize>,
-    thinking_buffer: String,
-    thinking_buffer_index: Option<usize>,
-    error_buffer: String,
-    error_buffer_index: Option<usize>,
+    assistant: PendingLineBuffer,
+    thinking: PendingLineBuffer,
+    error: PendingLineBuffer,
 }
 
 impl AgentActivityStreamState {
@@ -53,7 +62,10 @@ impl AgentActivityStreamState {
             return vec![line];
         }
 
-        self.mark_stream_entry_boundary(&line.stream_type, index);
+        let mut emitted = self
+            .mark_stream_entry_boundary(&line, index)
+            .into_iter()
+            .collect::<Vec<_>>();
 
         let chunk = if line.content.starts_with(&previous) {
             line.content[previous.len()..].to_string()
@@ -61,24 +73,37 @@ impl AgentActivityStreamState {
             line.content
         };
 
-        self.drain_chunk_lines(line.stream_type, line.line_type, &chunk)
+        emitted.extend(self.drain_chunk_lines(line.stream_type, line.line_type, &chunk));
+        emitted
     }
 
-    fn mark_stream_entry_boundary(&mut self, stream_type: &ChatStreamDeltaType, index: usize) {
-        let (buffer, buffer_index) = match stream_type {
-            ChatStreamDeltaType::Assistant => {
-                (&mut self.assistant_buffer, &mut self.assistant_buffer_index)
-            }
-            ChatStreamDeltaType::Thinking => {
-                (&mut self.thinking_buffer, &mut self.thinking_buffer_index)
-            }
-            ChatStreamDeltaType::Error => (&mut self.error_buffer, &mut self.error_buffer_index),
+    fn buffer_mut(&mut self, stream_type: &ChatStreamDeltaType) -> &mut PendingLineBuffer {
+        match stream_type {
+            ChatStreamDeltaType::Assistant => &mut self.assistant,
+            ChatStreamDeltaType::Thinking => &mut self.thinking,
+            ChatStreamDeltaType::Error => &mut self.error,
+        }
+    }
+
+    fn mark_stream_entry_boundary(
+        &mut self,
+        line: &AgentActivityEntryLine,
+        index: usize,
+    ) -> Option<AgentActivityEntryLine> {
+        let buffer = self.buffer_mut(&line.stream_type);
+        let emitted = if buffer.index.is_some_and(|current| current != index) {
+            take_pending_line(buffer, line.stream_type.clone(), line.line_type.clone())
+        } else {
+            None
         };
 
-        if buffer_index.is_some_and(|current| current != index) && !buffer.is_empty() {
-            buffer.push('\n');
+        if buffer.index != Some(index) {
+            buffer.index = Some(index);
+            buffer.runtime_session_id = line.runtime_session_id.clone();
+            buffer.runtime_parent_session_id = line.runtime_parent_session_id.clone();
+            buffer.runtime_session_title = line.runtime_session_title.clone();
         }
-        *buffer_index = Some(index);
+        emitted
     }
 
     fn drain_chunk_lines(
@@ -92,25 +117,24 @@ impl AgentActivityStreamState {
         }
 
         let normalized = chunk.replace("\r\n", "\n").replace('\r', "\n");
-        let buffer = match stream_type {
-            ChatStreamDeltaType::Assistant => &mut self.assistant_buffer,
-            ChatStreamDeltaType::Thinking => &mut self.thinking_buffer,
-            ChatStreamDeltaType::Error => &mut self.error_buffer,
-        };
-        buffer.push_str(&normalized);
+        let buffer = self.buffer_mut(&stream_type);
+        buffer.content.push_str(&normalized);
 
         let mut emitted = Vec::new();
-        while let Some(newline_index) = buffer.find('\n') {
-            let line = buffer[..newline_index].trim();
+        while let Some(newline_index) = buffer.content.find('\n') {
+            let line = buffer.content[..newline_index].trim();
             if !line.is_empty() {
                 emitted.push(AgentActivityEntryLine {
                     stream_type: stream_type.clone(),
                     line_type: line_type.clone(),
                     content: line.to_string(),
                     immediate: false,
+                    runtime_session_id: buffer.runtime_session_id.clone(),
+                    runtime_parent_session_id: buffer.runtime_parent_session_id.clone(),
+                    runtime_session_title: buffer.runtime_session_title.clone(),
                 });
             }
-            buffer.drain(..=newline_index);
+            buffer.content.drain(..=newline_index);
         }
 
         emitted
@@ -123,35 +147,72 @@ impl AgentActivityStreamState {
             (
                 ChatStreamDeltaType::Assistant,
                 ChatRunActivityLineType::Assistant,
-                &mut self.assistant_buffer,
+                &mut self.assistant,
             ),
             (
                 ChatStreamDeltaType::Thinking,
                 ChatRunActivityLineType::Thinking,
-                &mut self.thinking_buffer,
+                &mut self.thinking,
             ),
             (
                 ChatStreamDeltaType::Error,
                 ChatRunActivityLineType::Error,
-                &mut self.error_buffer,
+                &mut self.error,
             ),
         ] {
-            let line = buffer.trim();
-            if !line.is_empty() {
-                emitted.push(AgentActivityEntryLine {
-                    stream_type,
-                    line_type,
-                    content: line.to_string(),
-                    immediate: false,
-                });
+            if let Some(line) = take_pending_line(buffer, stream_type, line_type) {
+                emitted.push(line);
             }
-            buffer.clear();
         }
-        self.assistant_buffer_index = None;
-        self.thinking_buffer_index = None;
-        self.error_buffer_index = None;
 
         emitted
+    }
+}
+
+fn take_pending_line(
+    buffer: &mut PendingLineBuffer,
+    stream_type: ChatStreamDeltaType,
+    line_type: ChatRunActivityLineType,
+) -> Option<AgentActivityEntryLine> {
+    let content = std::mem::take(&mut buffer.content).trim().to_string();
+    let line = (!content.is_empty()).then(|| AgentActivityEntryLine {
+        stream_type,
+        line_type,
+        content,
+        immediate: false,
+        runtime_session_id: buffer.runtime_session_id.clone(),
+        runtime_parent_session_id: buffer.runtime_parent_session_id.clone(),
+        runtime_session_title: buffer.runtime_session_title.clone(),
+    });
+    buffer.index = None;
+    buffer.runtime_session_id = None;
+    buffer.runtime_parent_session_id = None;
+    buffer.runtime_session_title = None;
+    line
+}
+
+#[derive(Default)]
+struct ActivitySessionProjection {
+    runtime_session_id: Option<String>,
+    runtime_parent_session_id: Option<String>,
+    runtime_session_title: Option<String>,
+}
+
+fn session_projection(entry: &NormalizedEntry) -> ActivitySessionProjection {
+    let metadata = entry.metadata.as_ref();
+    ActivitySessionProjection {
+        runtime_session_id: metadata
+            .and_then(|value| value.get("runtime_session_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        runtime_parent_session_id: metadata
+            .and_then(|value| value.get("runtime_parent_session_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        runtime_session_title: metadata
+            .and_then(|value| value.get("runtime_session_title"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     }
 }
 
@@ -159,6 +220,7 @@ pub fn activity_line_for_entry(
     entry: &NormalizedEntry,
     include_assistant: bool,
 ) -> Option<AgentActivityEntryLine> {
+    let projection = session_projection(entry);
     match &entry.entry_type {
         NormalizedEntryType::AssistantMessage if include_assistant => {
             Some(AgentActivityEntryLine {
@@ -166,6 +228,9 @@ pub fn activity_line_for_entry(
                 line_type: ChatRunActivityLineType::Assistant,
                 content: entry.content.clone(),
                 immediate: false,
+                runtime_session_id: projection.runtime_session_id,
+                runtime_parent_session_id: projection.runtime_parent_session_id,
+                runtime_session_title: projection.runtime_session_title,
             })
         }
         NormalizedEntryType::Thinking => Some(AgentActivityEntryLine {
@@ -173,6 +238,9 @@ pub fn activity_line_for_entry(
             line_type: ChatRunActivityLineType::Thinking,
             content: entry.content.clone(),
             immediate: false,
+            runtime_session_id: projection.runtime_session_id,
+            runtime_parent_session_id: projection.runtime_parent_session_id,
+            runtime_session_title: projection.runtime_session_title,
         }),
         NormalizedEntryType::ToolUse {
             tool_name,
@@ -184,6 +252,9 @@ pub fn activity_line_for_entry(
                 line_type: ChatRunActivityLineType::Tool,
                 content,
                 immediate: true,
+                runtime_session_id: projection.runtime_session_id,
+                runtime_parent_session_id: projection.runtime_parent_session_id,
+                runtime_session_title: projection.runtime_session_title,
             }
         }),
         NormalizedEntryType::ErrorMessage { .. } => Some(AgentActivityEntryLine {
@@ -191,6 +262,9 @@ pub fn activity_line_for_entry(
             line_type: ChatRunActivityLineType::Error,
             content: entry.content.clone(),
             immediate: true,
+            runtime_session_id: projection.runtime_session_id,
+            runtime_parent_session_id: projection.runtime_parent_session_id,
+            runtime_session_title: projection.runtime_session_title,
         }),
         _ => None,
     }
@@ -451,6 +525,71 @@ mod tests {
         let flushed = state.flush_pending_lines();
         assert_eq!(flushed.len(), 1);
         assert_eq!(flushed[0].content, "**Reading existing package**");
+    }
+
+    #[test]
+    fn chat_runner_interleaved_child_output_keeps_its_session_identity() {
+        let mut state = AgentActivityStreamState::default();
+        let child_a = ConversationPatch::add_normalized_entry(
+            0,
+            NormalizedEntry {
+                timestamp: None,
+                entry_type: NormalizedEntryType::Thinking,
+                content: "A is inspecting".to_string(),
+                metadata: Some(serde_json::json!({
+                    "runtime_session_id": "child-a",
+                    "runtime_parent_session_id": "root",
+                    "runtime_session_title": "Inspect API"
+                })),
+            },
+        );
+        let child_b = ConversationPatch::add_normalized_entry(
+            1,
+            NormalizedEntry {
+                timestamp: None,
+                entry_type: NormalizedEntryType::Thinking,
+                content: "B is testing".to_string(),
+                metadata: Some(serde_json::json!({
+                    "runtime_session_id": "child-b",
+                    "runtime_parent_session_id": "root",
+                    "runtime_session_title": "Inspect tests"
+                })),
+            },
+        );
+
+        assert!(state.drain_patch_lines(&child_a, true).is_empty());
+        let first = state.drain_patch_lines(&child_b, true);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].content, "A is inspecting");
+        assert_eq!(first[0].runtime_session_id.as_deref(), Some("child-a"));
+        assert_eq!(
+            first[0].runtime_session_title.as_deref(),
+            Some("Inspect API")
+        );
+
+        let child_a_continues = ConversationPatch::replace(
+            0,
+            NormalizedEntry {
+                timestamp: None,
+                entry_type: NormalizedEntryType::Thinking,
+                content: "A is inspecting\nA found routes".to_string(),
+                metadata: Some(serde_json::json!({
+                    "runtime_session_id": "child-a",
+                    "runtime_parent_session_id": "root",
+                    "runtime_session_title": "Inspect API"
+                })),
+            },
+        );
+        let second = state.drain_patch_lines(&child_a_continues, true);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].content, "B is testing");
+        assert_eq!(second[0].runtime_session_id.as_deref(), Some("child-b"));
+
+        let tail = state.flush_pending_lines();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].content, "A found routes");
+        assert_eq!(tail[0].runtime_session_id.as_deref(), Some("child-a"));
+        assert_eq!(tail[0].runtime_parent_session_id.as_deref(), Some("root"));
     }
 
     #[test]

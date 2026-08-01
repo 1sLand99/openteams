@@ -564,3 +564,80 @@ body[data-mode="light"] :is(.workflow-window-root, .wf-log-panel-inline) .wf-log
   font-size: 14px;
   white-space: nowrap;
 }
+
+/* ---------------------------------------------------------------------------
+ * Workflow log panes — vertical split per agent, collapsible previous runs
+ * --------------------------------------------------------------------------- */
+
+.wf-log-split {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.wf-log-pane {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wf-log-pane + .wf-log-pane {
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+body[data-mode="light"] .workflow-window-root .wf-log-pane + .wf-log-pane {
+  border-top-color: rgba(0, 0, 0, 0.12);
+}
+
+.wf-log-pane-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.wf-log-pane-latest {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Earlier runs of the same agent collapse behind a disclosure */
+.wf-log-run-disclosure {
+  flex-shrink: 0;
+  padding: 2px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+body[data-mode="light"] .workflow-window-root .wf-log-run-disclosure {
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+}
+
+.wf-log-run-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 26px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--ink-tertiary, #62666d);
+}
+
+.wf-log-run-summary::-webkit-details-marker {
+  display: none;
+}
+
+.wf-log-run-summary:hover {
+  color: var(--ink-subtle, #8a8f98);
+}
+
+.wf-log-run-disclosure[open] > .wf-log-run-summary .wf-log-task-chevron {
+  transform: rotate(90deg);
+}
+
+/* Expanded previous runs scroll independently instead of filling the pane */
+.wf-log-run-disclosure .wf-log-panel {
+  height: auto;
+  max-height: 320px;
+  padding-top: 0;
+}

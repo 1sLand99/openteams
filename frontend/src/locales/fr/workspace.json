@@ -25,6 +25,7 @@
   "agentActivity.group.failures": "{count} échecs",
   "agentActivity.loading": "Chargement du processus de réflexion...",
   "agentActivity.running": "L’agent travaille sur la tâche",
+  "agentActivity.runLabel": "Exécution {count}",
   "agentActivity.starting": "L’agent démarre",
   "agentActivity.toggle": "Processus de réflexion",
   "agentActivity.tool.activity.completed": "Activit? termin?e",

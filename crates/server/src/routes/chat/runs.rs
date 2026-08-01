@@ -595,6 +595,9 @@ mod tests {
             line_type: ChatRunActivityLineType::Thinking,
             stream_type: ChatStreamDeltaType::Thinking,
             content: content.to_string(),
+            runtime_session_id: None,
+            runtime_parent_session_id: None,
+            runtime_session_title: None,
             created_at: Utc::now().to_rfc3339(),
         }
     }

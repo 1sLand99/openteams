@@ -148,5 +148,14 @@ assert.ok(
     !approvalTraySource.includes('writeClipboardViaBridge(command)'),
   'approval command replaces the tool label inline and truncates within the action column',
 );
+assert.ok(
+  approvalTraySource.includes('const trigger = allowMenuRef.current;') &&
+    approvalTraySource.includes('left: Math.max(8, rect.left)') &&
+    approvalTraySource.includes('minWidth: rect.width') &&
+    approvalTraySource.includes('minWidth: allowMenuPosition.minWidth') &&
+    approvalTraySource.includes('whitespace-nowrap rounded-md') &&
+    approvalTraySource.includes('pl-1 pr-2.5 text-left'),
+  'always-allow menu stays compact and aligns its label with the primary allow action',
+);
 
 console.log('executor approval presentation tests passed');

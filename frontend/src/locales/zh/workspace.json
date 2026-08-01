@@ -25,6 +25,7 @@
   "agentActivity.group.failures": "{count} 条失败",
   "agentActivity.loading": "正在加载思考过程...",
   "agentActivity.running": "正在执行",
+  "agentActivity.runLabel": "第 {count} 次运行",
   "agentActivity.starting": "正在启动",
   "agentActivity.toggle": "思考过程",
   "agentArtifacts.more": "还有 {count} 个",

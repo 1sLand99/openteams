@@ -6,8 +6,8 @@ use serde_json::Value;
 use workspace_utils::{approvals::ApprovalStatus, msg_store::MsgStore, path::make_path_relative};
 
 use super::types::{
-    MessageInfo, MessageRole, OpencodeExecutorEvent, Part, PermissionAskedEvent, SdkEvent, SdkTodo,
-    SessionStatus, ToolPart, ToolStateUpdate,
+    MessageInfo, MessageRole, OpencodeExecutorEvent, OpencodeSessionMetadata, Part,
+    PermissionAskedEvent, SdkEvent, SdkTodo, SessionStatus, ToolPart, ToolStateUpdate,
 };
 use crate::{
     approvals::ToolCallMetadata,
@@ -30,6 +30,35 @@ fn system_message(content: String) -> NormalizedEntry {
         content,
         metadata: None,
     }
+}
+
+fn activity_metadata(
+    session: Option<&OpencodeSessionMetadata>,
+    existing: Option<Value>,
+) -> Option<Value> {
+    let Some(session) = session else {
+        return existing;
+    };
+    let mut metadata = existing
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    metadata.insert(
+        "runtime_session_id".to_string(),
+        Value::String(session.session_id.clone()),
+    );
+    if let Some(parent_session_id) = &session.parent_session_id {
+        metadata.insert(
+            "runtime_parent_session_id".to_string(),
+            Value::String(parent_session_id.clone()),
+        );
+    }
+    if let Some(title) = &session.title {
+        metadata.insert(
+            "runtime_session_title".to_string(),
+            Value::String(title.clone()),
+        );
+    }
+    Some(Value::Object(metadata))
 }
 
 pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
@@ -67,8 +96,8 @@ pub fn normalize_logs(msg_store: Arc<MsgStore>, worktree_path: &Path) {
                         stored_session_id = true;
                     }
                 }
-                OpencodeExecutorEvent::SdkEvent { event } => {
-                    state.handle_sdk_event(&event, &worktree_path, &msg_store);
+                OpencodeExecutorEvent::SdkEvent { event, session } => {
+                    state.handle_sdk_event(&event, session.as_ref(), &worktree_path, &msg_store);
                 }
                 OpencodeExecutorEvent::TokenUsage {
                     total_tokens,
@@ -201,8 +230,7 @@ struct LogState {
     tool_states: HashMap<String, ToolCallState>,
     approvals: HashMap<String, ApprovalStatus>,
     model_system_message_emitted: bool,
-    todo_update_entry: Option<usize>,
-    todo_update_fingerprint: Option<String>,
+    todo_updates: HashMap<String, (usize, String)>,
     retry_status_fingerprint: Option<String>,
 }
 
@@ -217,13 +245,18 @@ impl LogState {
             tool_states: HashMap::new(),
             approvals: HashMap::new(),
             model_system_message_emitted: false,
-            todo_update_entry: None,
-            todo_update_fingerprint: None,
+            todo_updates: HashMap::new(),
             retry_status_fingerprint: None,
         }
     }
 
-    fn handle_sdk_event(&mut self, raw: &Value, worktree_path: &Path, msg_store: &Arc<MsgStore>) {
+    fn handle_sdk_event(
+        &mut self,
+        raw: &Value,
+        session: Option<&OpencodeSessionMetadata>,
+        worktree_path: &Path,
+        msg_store: &Arc<MsgStore>,
+    ) {
         let Some(event) = SdkEvent::parse(raw) else {
             let raw_text = raw.to_string();
             if !raw_text.trim().is_empty() {
@@ -244,12 +277,13 @@ impl LogState {
                 self.handle_part_update(
                     event.part,
                     event.delta.as_deref(),
+                    session,
                     worktree_path,
                     msg_store,
                 );
             }
             SdkEvent::TodoUpdated(event) => {
-                self.handle_todo_updated(&event.todos, msg_store);
+                self.handle_todo_updated(&event.todos, session, msg_store);
             }
             SdkEvent::SessionStatus(event) => {
                 self.handle_session_status(event.status);
@@ -259,7 +293,7 @@ impl LogState {
                 self.add_normalized_entry(system_message("Session compacted".to_string()));
             }
             SdkEvent::PermissionAsked(event) => {
-                self.handle_permission_asked(event, worktree_path, msg_store);
+                self.handle_permission_asked(event, session, worktree_path, msg_store);
             }
             SdkEvent::PermissionReplied
             | SdkEvent::MessageRemoved
@@ -297,7 +331,7 @@ impl LogState {
                         timestamp: None,
                         entry_type: NormalizedEntryType::ErrorMessage { error_type },
                         content: message,
-                        metadata: None,
+                        metadata: activity_metadata(session, None),
                     },
                 );
             }
@@ -330,12 +364,23 @@ impl LogState {
         }
     }
 
-    fn handle_todo_updated(&mut self, todos: &[SdkTodo], msg_store: &Arc<MsgStore>) {
+    fn handle_todo_updated(
+        &mut self,
+        todos: &[SdkTodo],
+        session: Option<&OpencodeSessionMetadata>,
+        msg_store: &Arc<MsgStore>,
+    ) {
         let fingerprint = fingerprint_todos(todos);
-        if self.todo_update_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+        let session_key = session
+            .map(|session| session.session_id.clone())
+            .unwrap_or_default();
+        if self
+            .todo_updates
+            .get(&session_key)
+            .is_some_and(|(_, existing)| existing == &fingerprint)
+        {
             return;
         }
-        self.todo_update_fingerprint = Some(fingerprint);
 
         let mapped = todos
             .iter()
@@ -357,14 +402,15 @@ impl LogState {
                 status: ToolStatus::Success,
             },
             content: "TODO list updated".to_string(),
-            metadata: None,
+            metadata: activity_metadata(session, None),
         };
 
-        if let Some(index) = self.todo_update_entry {
-            replace_normalized_entry(msg_store, index, entry);
+        if let Some((index, _)) = self.todo_updates.get(&session_key) {
+            replace_normalized_entry(msg_store, *index, entry);
+            self.todo_updates.insert(session_key, (*index, fingerprint));
         } else {
             let index = add_normalized_entry(msg_store, &self.entry_index, entry);
-            self.todo_update_entry = Some(index);
+            self.todo_updates.insert(session_key, (index, fingerprint));
         }
     }
 
@@ -390,6 +436,7 @@ impl LogState {
         &mut self,
         part: Part,
         delta: Option<&str>,
+        session: Option<&OpencodeSessionMetadata>,
         worktree_path: &Path,
         msg_store: &Arc<MsgStore>,
     ) {
@@ -412,12 +459,15 @@ impl LogState {
                 let entry_index = self.entry_index.clone();
                 update_streaming_text(
                     &entry_index,
-                    text,
-                    NormalizedEntryType::AssistantMessage,
-                    &part.message_id,
                     &mut self.assistant_text,
                     msg_store,
-                    mode,
+                    StreamingTextUpdate {
+                        text,
+                        entry_type: NormalizedEntryType::AssistantMessage,
+                        message_id: &part.message_id,
+                        mode,
+                        metadata: activity_metadata(session, None),
+                    },
                 );
             }
             Part::Reasoning(part) => {
@@ -430,12 +480,15 @@ impl LogState {
                 let entry_index = self.entry_index.clone();
                 update_streaming_text(
                     &entry_index,
-                    text,
-                    NormalizedEntryType::Thinking,
-                    &part.message_id,
                     &mut self.thinking_text,
                     msg_store,
-                    mode,
+                    StreamingTextUpdate {
+                        text,
+                        entry_type: NormalizedEntryType::Thinking,
+                        message_id: &part.message_id,
+                        mode,
+                        metadata: activity_metadata(session, None),
+                    },
                 );
             }
             Part::Tool(part) => {
@@ -453,6 +506,7 @@ impl LogState {
                     .or_insert_with(|| ToolCallState::new(part.call_id.clone()));
 
                 tool_state.set_approval_if_missing(self.approvals.get(&part.call_id).cloned());
+                tool_state.set_session(session.cloned());
 
                 tool_state.update_from_part(part);
                 let entry = tool_state.to_normalized_entry(worktree_path);
@@ -522,6 +576,7 @@ impl LogState {
     fn handle_permission_asked(
         &mut self,
         event: PermissionAskedEvent,
+        session: Option<&OpencodeSessionMetadata>,
         worktree_path: &Path,
         msg_store: &Arc<MsgStore>,
     ) {
@@ -542,6 +597,7 @@ impl LogState {
             .tool_states
             .entry(call_id.to_string())
             .or_insert_with(|| ToolCallState::new(call_id.to_string()));
+        tool_state.set_session(session.cloned());
 
         // `permission` is an approval category (e.g. "edit", "bash"), not necessarily the tool
         // name ("write" vs "edit"). Only fall back to it when we haven't seen a tool name yet.
@@ -600,42 +656,47 @@ impl LogState {
     }
 }
 
+struct StreamingTextUpdate<'a> {
+    text: &'a str,
+    entry_type: NormalizedEntryType,
+    message_id: &'a str,
+    mode: UpdateMode,
+    metadata: Option<Value>,
+}
+
 fn update_streaming_text(
     entry_index: &EntryIndexProvider,
-    text: &str,
-    entry_type: NormalizedEntryType,
-    message_id: &str,
     map: &mut HashMap<String, StreamingText>,
     msg_store: &Arc<MsgStore>,
-    mode: UpdateMode,
+    update: StreamingTextUpdate<'_>,
 ) {
-    if text.is_empty() {
+    if update.text.is_empty() {
         return;
     }
 
-    let is_new = !map.contains_key(message_id);
+    let is_new = !map.contains_key(update.message_id);
 
-    if is_new && text == "\n" {
+    if is_new && update.text == "\n" {
         return;
     }
 
     let state = map
-        .entry(message_id.to_string())
+        .entry(update.message_id.to_string())
         .or_insert_with(|| StreamingText {
             index: entry_index.next(),
             content: String::new(),
         });
 
-    match mode {
-        UpdateMode::Append => state.content.push_str(text),
-        UpdateMode::Set => state.content = text.to_string(),
+    match update.mode {
+        UpdateMode::Append => state.content.push_str(update.text),
+        UpdateMode::Set => state.content = update.text.to_string(),
     }
 
     let entry = NormalizedEntry {
         timestamp: None,
-        entry_type,
+        entry_type: update.entry_type,
         content: state.content.clone(),
-        metadata: None,
+        metadata: update.metadata,
     };
     upsert_normalized_entry(msg_store, state.index, entry, is_new);
 }
@@ -649,6 +710,7 @@ struct ToolCallState {
     title: Option<String>,
     approval: Option<ApprovalStatus>,
     data: ToolData,
+    session: Option<OpencodeSessionMetadata>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -721,6 +783,7 @@ impl ToolCallState {
                 output: None,
                 error: None,
             },
+            session: None,
         }
     }
 
@@ -739,6 +802,12 @@ impl ToolCallState {
     fn set_approval_if_missing(&mut self, approval: Option<ApprovalStatus>) {
         if self.approval.is_none() {
             self.approval = approval;
+        }
+    }
+
+    fn set_session(&mut self, session: Option<OpencodeSessionMetadata>) {
+        if session.is_some() {
+            self.session = session;
         }
     }
 
@@ -1004,10 +1073,13 @@ impl ToolCallState {
                 status: self.tool_status(),
             },
             content,
-            metadata: serde_json::to_value(ToolCallMetadata {
-                tool_call_id: self.call_id.clone(),
-            })
-            .ok(),
+            metadata: activity_metadata(
+                self.session.as_ref(),
+                serde_json::to_value(ToolCallMetadata {
+                    tool_call_id: self.call_id.clone(),
+                })
+                .ok(),
+            ),
         }
     }
 
@@ -1234,5 +1306,29 @@ fn extract_file_path_from_permission_metadata(metadata: &Value) -> Option<&str> 
         None
     } else {
         Some(trimmed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{OpencodeSessionMetadata, activity_metadata};
+
+    #[test]
+    fn normalized_activity_metadata_preserves_tool_identity_and_child_session() {
+        let session = OpencodeSessionMetadata {
+            session_id: "child-a".to_string(),
+            parent_session_id: Some("root".to_string()),
+            title: Some("Inspect API".to_string()),
+        };
+
+        let metadata = activity_metadata(Some(&session), Some(json!({ "tool_call_id": "call-1" })))
+            .expect("metadata");
+
+        assert_eq!(metadata["tool_call_id"], "call-1");
+        assert_eq!(metadata["runtime_session_id"], "child-a");
+        assert_eq!(metadata["runtime_parent_session_id"], "root");
+        assert_eq!(metadata["runtime_session_title"], "Inspect API");
     }
 }

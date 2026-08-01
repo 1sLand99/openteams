@@ -22,9 +22,15 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use workspace_utils::{approvals::ApprovalStatus, msg_store::SESSION_INACTIVITY_TIMEOUT};
 
-use super::{slash_commands, types::OpencodeExecutorEvent};
+use super::{
+    slash_commands,
+    types::{OpencodeExecutorEvent, OpencodeSessionMetadata},
+};
 use crate::{
-    approvals::{ExecutorApprovalError, ExecutorApprovalService},
+    approvals::{
+        ExecutorApprovalError, ExecutorApprovalOption, ExecutorApprovalRequest,
+        ExecutorApprovalService,
+    },
     env::RepoContext,
     executors::{
         ExecutorError,
@@ -1228,6 +1234,7 @@ pub async fn spawn_event_listener(config: EventListenerConfig, initial_resp: req
     } = config;
 
     let mut seen_permissions: HashSet<String> = HashSet::new();
+    let mut sessions = ProjectedSessionGraph::new(session_id.clone());
     let mut last_event_id: Option<String> = None;
     let mut base_retry_delay = Duration::from_millis(3000);
     let mut attempt: u32 = 0;
@@ -1268,10 +1275,10 @@ pub async fn spawn_event_listener(config: EventListenerConfig, initial_resp: req
         let outcome = process_event_stream(
             EventStreamContext {
                 seen_permissions: &mut seen_permissions,
+                sessions: &mut sessions,
                 client: &client,
                 base_url: &base_url,
                 directory: &directory,
-                session_id: &session_id,
                 log_writer: &log_writer,
                 approvals: approvals.clone(),
                 auto_approve,
@@ -1343,12 +1350,88 @@ enum EventStreamOutcome {
     Disconnected,
 }
 
+#[derive(Debug)]
+struct ProjectedSessionGraph {
+    root_session_id: String,
+    sessions: HashMap<String, OpencodeSessionMetadata>,
+}
+
+impl ProjectedSessionGraph {
+    fn new(root_session_id: String) -> Self {
+        let root = OpencodeSessionMetadata {
+            session_id: root_session_id.clone(),
+            parent_session_id: None,
+            title: None,
+        };
+        Self {
+            root_session_id,
+            sessions: HashMap::from([(root.session_id.clone(), root)]),
+        }
+    }
+
+    fn observe_session_event(&mut self, event_type: &str, event: &Value) {
+        if !matches!(event_type, "session.created" | "session.updated") {
+            return;
+        }
+
+        let Some(session_id) = event
+            .pointer("/properties/info/id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+        else {
+            return;
+        };
+        let parent_session_id = event
+            .pointer("/properties/info/parentID")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty());
+
+        let belongs_to_run = session_id == self.root_session_id
+            || self.sessions.contains_key(session_id)
+            || parent_session_id.is_some_and(|parent| self.sessions.contains_key(parent));
+        if !belongs_to_run {
+            return;
+        }
+
+        let title = event
+            .pointer("/properties/info/title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string);
+        let existing = self.sessions.get(session_id);
+        self.sessions.insert(
+            session_id.to_string(),
+            OpencodeSessionMetadata {
+                session_id: session_id.to_string(),
+                parent_session_id: parent_session_id
+                    .map(str::to_string)
+                    .or_else(|| existing.and_then(|session| session.parent_session_id.clone())),
+                title: title.or_else(|| existing.and_then(|session| session.title.clone())),
+            },
+        );
+    }
+
+    fn metadata_for_event(
+        &self,
+        event_type: &str,
+        event: &Value,
+    ) -> Option<OpencodeSessionMetadata> {
+        let session_id = event_session_id(event_type, event)?;
+        self.sessions.get(session_id).cloned()
+    }
+
+    fn is_root_event(&self, event_type: &str, event: &Value) -> bool {
+        event_session_id(event_type, event) == Some(self.root_session_id.as_str())
+    }
+}
+
 pub(super) struct EventStreamContext<'a> {
     seen_permissions: &'a mut HashSet<String>,
+    sessions: &'a mut ProjectedSessionGraph,
     pub client: &'a reqwest::Client,
     pub base_url: &'a str,
     pub directory: &'a str,
-    pub session_id: &'a str,
     pub log_writer: &'a LogWriter,
     approvals: Option<Arc<dyn ExecutorApprovalService>>,
     auto_approve: bool,
@@ -1406,16 +1489,37 @@ async fn process_event_stream(
             continue;
         };
 
-        if !event_matches_session(event_type, &data, ctx.session_id) {
+        ctx.sessions.observe_session_event(event_type, &data);
+        if matches!(event_type, "session.created" | "session.updated") {
             continue;
         }
 
-        let _ = ctx
-            .log_writer
-            .log_event(&OpencodeExecutorEvent::SdkEvent {
-                event: data.clone(),
-            })
-            .await;
+        let session = ctx.sessions.metadata_for_event(event_type, &data);
+        let root_state_event = matches!(
+            event_type,
+            "session.idle" | "session.error" | "session.status"
+        );
+        let permission_event = matches!(event_type, "permission.asked" | "permission.replied");
+        if root_state_event {
+            if !ctx.sessions.is_root_event(event_type, &data) {
+                continue;
+            }
+        } else if session.is_none() && !permission_event {
+            continue;
+        }
+
+        // Unknown-session permission requests are still bridged because a child may request
+        // approval before its creation event is observed. Do not project those unverified events
+        // into the run log; all visible activity must belong to the tracked root session tree.
+        if session.is_some() || root_state_event {
+            let _ = ctx
+                .log_writer
+                .log_event(&OpencodeExecutorEvent::SdkEvent {
+                    event: data.clone(),
+                    session,
+                })
+                .await;
+        }
         let _ = ctx.control_tx.send(ControlEvent::Activity);
 
         match event_type {
@@ -1492,7 +1596,7 @@ async fn process_event_stream(
                 let auto_approve = ctx.auto_approve;
                 let cancel = ctx.cancel.clone();
                 tokio::spawn(async move {
-                    let status = match request_permission_approval(
+                    let reply = match request_permission_approval(
                         auto_approve,
                         approvals,
                         &permission,
@@ -1502,7 +1606,7 @@ async fn process_event_stream(
                     )
                     .await
                     {
-                        Ok(status) => status,
+                        Ok(reply) => reply,
                         Err(ExecutorApprovalError::Cancelled) => {
                             tracing::debug!(
                                 "OpenCode approval cancelled for tool_call_id={}",
@@ -1519,6 +1623,16 @@ async fn process_event_stream(
                         }
                     };
 
+                    let (status, message) = match reply {
+                        OpencodePermissionReply::Once | OpencodePermissionReply::Always => {
+                            (ApprovalStatus::Approved, None)
+                        }
+                        OpencodePermissionReply::Reject => {
+                            let message = "User denied this tool use request".to_string();
+                            (ApprovalStatus::Denied { reason: None }, Some(message))
+                        }
+                    };
+
                     let _ = log_writer
                         .log_event(&OpencodeExecutorEvent::ApprovalResponse {
                             tool_call_id: tool_call_id.clone(),
@@ -1526,42 +1640,12 @@ async fn process_event_stream(
                         })
                         .await;
 
-                    let (reply, message) = match status {
-                        ApprovalStatus::Approved => ("once", None),
-                        ApprovalStatus::Denied { reason } => {
-                            let msg = reason
-                                .unwrap_or_else(|| "User denied this tool use request".to_string())
-                                .trim()
-                                .to_string();
-                            let msg = if msg.is_empty() {
-                                "User denied this tool use request".to_string()
-                            } else {
-                                msg
-                            };
-                            ("reject", Some(msg))
-                        }
-                        ApprovalStatus::TimedOut => (
-                            "reject",
-                            Some(
-                                "Approval request timed out; proceed without using this tool call."
-                                    .to_string(),
-                            ),
-                        ),
-                        ApprovalStatus::Pending => (
-                            "reject",
-                            Some(
-                                "Approval request could not be completed; proceed without using this tool call."
-                                    .to_string(),
-                            ),
-                        ),
-                    };
-
                     // If we reject without a message, OpenCode treats it as a hard stop.
                     // Provide a message so the agent can continue with guidance.
-                    let payload = if reply == "reject" {
-                        serde_json::json!({ "reply": reply, "message": message.unwrap_or_else(|| "User denied this tool use request".to_string()) })
+                    let payload = if reply == OpencodePermissionReply::Reject {
+                        serde_json::json!({ "reply": reply.as_str(), "message": message.unwrap_or_else(|| "User denied this tool use request".to_string()) })
                     } else {
-                        serde_json::json!({ "reply": reply })
+                        serde_json::json!({ "reply": reply.as_str() })
                     };
 
                     let _ = client
@@ -1580,15 +1664,15 @@ async fn process_event_stream(
     Ok(EventStreamOutcome::Disconnected)
 }
 
-fn event_matches_session(event_type: &str, event: &Value, session_id: &str) -> bool {
-    let extracted = match event_type {
+fn event_session_id<'a>(event_type: &str, event: &'a Value) -> Option<&'a str> {
+    match event_type {
         "message.updated" => event
             .pointer("/properties/info/sessionID")
             .and_then(Value::as_str),
         "message.part.updated" => event
             .pointer("/properties/part/sessionID")
             .and_then(Value::as_str),
-        "permission.asked" | "permission.replied" | "session.idle" | "session.error" => event
+        "session.idle" | "session.error" => event
             .pointer("/properties/sessionID")
             .and_then(Value::as_str),
         _ => event
@@ -1604,9 +1688,35 @@ fn event_matches_session(event_type: &str, event: &Value, session_id: &str) -> b
                     .pointer("/properties/part/sessionID")
                     .and_then(Value::as_str)
             }),
-    };
+    }
+}
 
-    extracted == Some(session_id)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpencodePermissionReply {
+    Once,
+    Always,
+    Reject,
+}
+
+impl OpencodePermissionReply {
+    fn from_option_id(option_id: &str) -> Result<Self, ExecutorApprovalError> {
+        match option_id {
+            "once" => Ok(Self::Once),
+            "always" => Ok(Self::Always),
+            "reject" => Ok(Self::Reject),
+            _ => Err(ExecutorApprovalError::RequestFailed(format!(
+                "OpenCode approval service selected unknown option `{option_id}`"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Once => "once",
+            Self::Always => "always",
+            Self::Reject => "reject",
+        }
+    }
 }
 
 async fn request_permission_approval(
@@ -1616,39 +1726,138 @@ async fn request_permission_approval(
     tool_input: Value,
     tool_call_id: &str,
     cancel: CancellationToken,
-) -> Result<ApprovalStatus, ExecutorApprovalError> {
+) -> Result<OpencodePermissionReply, ExecutorApprovalError> {
     if auto_approve {
-        return Ok(ApprovalStatus::Approved);
+        return Ok(OpencodePermissionReply::Once);
     }
 
     let Some(approvals) = approvals else {
-        return Ok(ApprovalStatus::Approved);
+        return Ok(OpencodePermissionReply::Once);
     };
 
+    // Reuse the option-preserving approval bridge so `always` is not collapsed into
+    // the same binary approved status as `once`.
     match approvals
-        .request_tool_approval(tool_name, tool_input, tool_call_id, cancel)
+        .request_acp_tool_approval(
+            ExecutorApprovalRequest {
+                tool_name: tool_name.to_string(),
+                tool_input,
+                tool_call_id: tool_call_id.to_string(),
+                options: vec![
+                    ExecutorApprovalOption {
+                        option_id: "once".to_string(),
+                        kind: "allow_once".to_string(),
+                        label: "Allow once".to_string(),
+                    },
+                    ExecutorApprovalOption {
+                        option_id: "always".to_string(),
+                        kind: "allow_always".to_string(),
+                        label: "Always allow".to_string(),
+                    },
+                    ExecutorApprovalOption {
+                        option_id: "reject".to_string(),
+                        kind: "reject_once".to_string(),
+                        label: "Reject".to_string(),
+                    },
+                ],
+            },
+            cancel,
+        )
         .await
     {
-        Ok(status) => Ok(status),
+        Ok(option_id) => OpencodePermissionReply::from_option_id(&option_id),
         Err(
             ExecutorApprovalError::ServiceUnavailable | ExecutorApprovalError::SessionNotRegistered,
-        ) => Ok(ApprovalStatus::Approved),
+        ) => Ok(OpencodePermissionReply::Once),
         Err(err) => Err(err),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{future, io, time::Duration};
+    use std::{future, io, sync::Arc, time::Duration};
 
     use serde_json::json;
-    use tokio::sync::mpsc;
+    use tokio::sync::{Mutex, mpsc};
+    use tokio_util::sync::CancellationToken;
 
     use super::{
-        ControlEvent, event_matches_session, extract_retry_status, run_request_with_control,
-        run_request_with_control_timeout,
+        ControlEvent, OpencodePermissionReply, ProjectedSessionGraph, extract_retry_status,
+        request_permission_approval, run_request_with_control, run_request_with_control_timeout,
     };
-    use crate::executors::ExecutorError;
+    use crate::{
+        approvals::{ExecutorApprovalError, ExecutorApprovalRequest, ExecutorApprovalService},
+        executors::ExecutorError,
+    };
+
+    struct CapturingApprovalService {
+        selected_option_id: &'static str,
+        request: Mutex<Option<ExecutorApprovalRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutorApprovalService for CapturingApprovalService {
+        async fn request_tool_approval(
+            &self,
+            _tool_name: &str,
+            _tool_input: serde_json::Value,
+            _tool_call_id: &str,
+            _cancel: CancellationToken,
+        ) -> Result<workspace_utils::approvals::ApprovalStatus, ExecutorApprovalError> {
+            unreachable!("OpenCode preserves the native permission options")
+        }
+
+        async fn request_acp_tool_approval(
+            &self,
+            request: ExecutorApprovalRequest,
+            _cancel: CancellationToken,
+        ) -> Result<String, ExecutorApprovalError> {
+            *self.request.lock().await = Some(request);
+            Ok(self.selected_option_id.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode_permission_approval_preserves_always_option() {
+        let approvals = Arc::new(CapturingApprovalService {
+            selected_option_id: "always",
+            request: Mutex::new(None),
+        });
+
+        let reply = request_permission_approval(
+            false,
+            Some(approvals.clone()),
+            "bash",
+            json!({ "patterns": ["cargo test"] }),
+            "tool-call",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("resolve OpenCode permission");
+
+        assert_eq!(reply, OpencodePermissionReply::Always);
+        assert_eq!(reply.as_str(), "always");
+        let request = approvals
+            .request
+            .lock()
+            .await
+            .take()
+            .expect("captured approval request");
+        assert_eq!(request.tool_name, "bash");
+        assert_eq!(request.tool_call_id, "tool-call");
+        assert_eq!(
+            request
+                .options
+                .iter()
+                .map(|option| (option.option_id.as_str(), option.kind.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("once", "allow_once"),
+                ("always", "allow_always"),
+                ("reject", "reject_once"),
+            ]
+        );
+    }
 
     #[test]
     fn extract_retry_status_parses_retry_payload() {
@@ -1683,26 +1892,124 @@ mod tests {
     }
 
     #[test]
-    fn idle_events_only_match_the_active_session() {
-        let active = json!({
-            "type": "session.idle",
-            "properties": { "sessionID": "main-session" }
-        });
-        let child = json!({
-            "type": "session.idle",
-            "properties": { "sessionID": "child-session" }
+    fn child_terminal_events_do_not_match_the_root_session() {
+        let sessions = ProjectedSessionGraph::new("main-session".to_string());
+        for event_type in ["session.idle", "session.error", "session.status"] {
+            let active = json!({
+                "type": event_type,
+                "properties": { "sessionID": "main-session" }
+            });
+            let child = json!({
+                "type": event_type,
+                "properties": { "sessionID": "child-session" }
+            });
+
+            assert!(sessions.is_root_event(event_type, &active));
+            assert!(!sessions.is_root_event(event_type, &child));
+        }
+    }
+
+    #[test]
+    fn interleaved_child_activity_keeps_stable_session_metadata() {
+        let mut sessions = ProjectedSessionGraph::new("main-session".to_string());
+        for (id, title) in [("child-a", "Explore API"), ("child-b", "Inspect tests")] {
+            sessions.observe_session_event(
+                "session.created",
+                &json!({
+                    "type": "session.created",
+                    "properties": {
+                        "info": {
+                            "id": id,
+                            "parentID": "main-session",
+                            "title": title
+                        }
+                    }
+                }),
+            );
+        }
+
+        let events = [
+            json!({ "properties": { "part": { "sessionID": "child-a" } } }),
+            json!({ "properties": { "part": { "sessionID": "child-b" } } }),
+            json!({ "properties": { "part": { "sessionID": "child-a" } } }),
+        ];
+        let projected = events
+            .iter()
+            .map(|event| {
+                sessions
+                    .metadata_for_event("message.part.updated", event)
+                    .expect("child activity should project")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(projected[0].session_id, "child-a");
+        assert_eq!(projected[0].title.as_deref(), Some("Explore API"));
+        assert_eq!(projected[1].session_id, "child-b");
+        assert_eq!(projected[1].title.as_deref(), Some("Inspect tests"));
+        assert_eq!(projected[2], projected[0]);
+        assert!(
+            projected
+                .iter()
+                .all(|session| session.parent_session_id.as_deref() == Some("main-session"))
+        );
+    }
+
+    #[test]
+    fn foreign_run_activity_is_not_projected() {
+        let mut sessions = ProjectedSessionGraph::new("main-session".to_string());
+        sessions.observe_session_event(
+            "session.created",
+            &json!({
+                "type": "session.created",
+                "properties": {
+                    "info": {
+                        "id": "foreign-child",
+                        "parentID": "foreign-root",
+                        "title": "Other run"
+                    }
+                }
+            }),
+        );
+        let event = json!({
+            "properties": {
+                "part": { "sessionID": "foreign-child" }
+            }
         });
 
-        assert!(event_matches_session(
-            "session.idle",
-            &active,
-            "main-session"
-        ));
-        assert!(!event_matches_session(
-            "session.idle",
-            &child,
-            "main-session"
-        ));
+        assert!(
+            sessions
+                .metadata_for_event("message.part.updated", &event)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn permission_events_from_descendant_sessions_are_projected() {
+        let mut sessions = ProjectedSessionGraph::new("main-session".to_string());
+        sessions.observe_session_event(
+            "session.created",
+            &json!({
+                "type": "session.created",
+                "properties": {
+                    "info": {
+                        "id": "child-session",
+                        "parentID": "main-session",
+                        "title": "Delegated task"
+                    }
+                }
+            }),
+        );
+        let asked = json!({
+            "properties": {
+                "sessionID": "child-session"
+            }
+        });
+
+        let metadata = sessions
+            .metadata_for_event("permission.asked", &asked)
+            .expect("child approval should keep projection metadata");
+        assert_eq!(metadata.session_id, "child-session");
+        assert_eq!(metadata.parent_session_id.as_deref(), Some("main-session"));
     }
 
     #[tokio::test]
