@@ -265,8 +265,9 @@ fn extract_enabled_tools(tools_enabled: &serde_json::Value) -> Vec<String> {
 /// planning agent descriptor.
 pub(crate) const CAPABILITY_PROFILE_MAX_CHARS: usize = 600;
 
-/// Builds a whitespace-normalized, length-capped capability profile from the
-/// underlying agent's system prompt. Returns `None` when the prompt is blank.
+/// Builds a whitespace-normalized capability profile from the underlying
+/// agent's system prompt, capped at `CAPABILITY_PROFILE_MAX_CHARS` including
+/// the trailing ellipsis. Returns `None` when the prompt is blank.
 pub(crate) fn capability_profile_from_system_prompt(system_prompt: &str) -> Option<String> {
     let normalized = system_prompt.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.is_empty() {
@@ -275,7 +276,11 @@ pub(crate) fn capability_profile_from_system_prompt(system_prompt: &str) -> Opti
     if normalized.chars().count() <= CAPABILITY_PROFILE_MAX_CHARS {
         return Some(normalized);
     }
-    let truncated: String = normalized.chars().take(CAPABILITY_PROFILE_MAX_CHARS).collect();
+    // Reserve one char for the ellipsis so the total stays within the cap.
+    let truncated: String = normalized
+        .chars()
+        .take(CAPABILITY_PROFILE_MAX_CHARS - 1)
+        .collect();
     Some(format!("{}…", truncated.trim_end()))
 }
 
@@ -338,9 +343,16 @@ pub(crate) fn compose_workflow_planning_agent(
 }
 
 /// Resolves the declared professional role (`ProjectMember.role`) for each
-/// session member, following the same linking rules as execution config
-/// refresh: explicit `project_member_id` first, then project-level match by
-/// underlying agent. Returns a map keyed by session agent id.
+/// session member. Returns a map keyed by session agent id.
+///
+/// Resolution rules (never "first match"):
+/// - An explicit `project_member_id` link is honored only when the member
+///   belongs to the session's project, is an agent member, and matches the
+///   session member's underlying agent. An invalid link yields no role.
+/// - Without a link, the role is taken from the project roster only when
+///   exactly one agent member matches the underlying agent; zero or multiple
+///   matches yield no role, so members sharing one underlying agent can never
+///   inherit the same role by accident.
 async fn resolve_planning_member_roles(
     pool: &SqlitePool,
     session: &ChatSession,
@@ -348,42 +360,70 @@ async fn resolve_planning_member_roles(
 ) -> Result<HashMap<Uuid, String>, WorkflowRuntimeError> {
     use db::models::project_member::{ProjectMember, ProjectMemberType};
 
-    let mut roles = HashMap::new();
-    let mut project_members: Option<Vec<ProjectMember>> = None;
-    for session_agent in session_agents {
-        let mut member = if let Some(project_member_id) = session_agent.project_member_id {
-            ProjectMember::find_by_id(pool, project_member_id).await?
-        } else {
-            None
-        };
-        if member.as_ref().is_some_and(|member| {
-            member.member_type != ProjectMemberType::Agent
-                || member.agent_id != Some(session_agent.agent_id)
-        }) {
-            member = None;
-        }
-        if member.is_none()
-            && let Some(project_id) = session.project_id
-        {
-            if project_members.is_none() {
-                project_members = Some(ProjectMember::find_by_project(pool, project_id).await?);
-            }
-            member = project_members.as_ref().and_then(|members| {
-                members
-                    .iter()
-                    .find(|member| {
-                        member.member_type == ProjectMemberType::Agent
-                            && member.agent_id == Some(session_agent.agent_id)
-                    })
-                    .cloned()
-            });
-        }
-        if let Some(role) = member
+    fn usable_role(member: Option<ProjectMember>) -> Option<String> {
+        member
             .and_then(|member| member.role)
             .map(|role| role.trim().to_string())
             .filter(|role| !role.is_empty())
-        {
-            roles.insert(session_agent.id, role);
+    }
+
+    let mut roles = HashMap::new();
+    let mut project_members: Option<Vec<ProjectMember>> = None;
+    for session_agent in session_agents {
+        if let Some(project_member_id) = session_agent.project_member_id {
+            let member = ProjectMember::find_by_id(pool, project_member_id).await?;
+            let link_valid = member.as_ref().is_some_and(|member| {
+                member.member_type == ProjectMemberType::Agent
+                    && member.agent_id == Some(session_agent.agent_id)
+                    && session.project_id == Some(member.project_id)
+            });
+            if link_valid {
+                if let Some(role) = usable_role(member) {
+                    roles.insert(session_agent.id, role);
+                }
+            } else {
+                tracing::warn!(
+                    session_agent_id = %session_agent.id,
+                    project_member_id = %project_member_id,
+                    "[plan_generation] ignoring project member role link: project, type, or agent mismatch"
+                );
+            }
+            continue;
+        }
+
+        let Some(project_id) = session.project_id else {
+            continue;
+        };
+        if project_members.is_none() {
+            project_members = Some(ProjectMember::find_by_project(pool, project_id).await?);
+        }
+        let matches: Vec<&ProjectMember> = project_members
+            .as_ref()
+            .map(|members| {
+                members
+                    .iter()
+                    .filter(|member| {
+                        member.member_type == ProjectMemberType::Agent
+                            && member.agent_id == Some(session_agent.agent_id)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        match matches.as_slice() {
+            [only] => {
+                if let Some(role) = usable_role(Some((*only).clone())) {
+                    roles.insert(session_agent.id, role);
+                }
+            }
+            [] => {}
+            _ => {
+                tracing::warn!(
+                    session_agent_id = %session_agent.id,
+                    agent_id = %session_agent.agent_id,
+                    match_count = matches.len(),
+                    "[plan_generation] ambiguous project member role: multiple project members share the underlying agent; leaving role unset"
+                );
+            }
         }
     }
     Ok(roles)

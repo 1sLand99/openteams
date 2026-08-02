@@ -878,9 +878,285 @@ mod tests {
     fn capability_profile_from_system_prompt_is_length_capped() {
         let long_prompt = "word ".repeat(1000);
         let profile = capability_profile_from_system_prompt(&long_prompt).expect("profile");
-        assert!(profile.chars().count() <= CAPABILITY_PROFILE_MAX_CHARS + 1);
+        assert!(profile.chars().count() <= CAPABILITY_PROFILE_MAX_CHARS);
         assert!(profile.ends_with('…'));
         assert!(capability_profile_from_system_prompt("  \n\t  ").is_none());
+    }
+
+    struct PlanningRolesFixture {
+        pool: SqlitePool,
+        project: db::models::project::Project,
+        agent: ChatAgent,
+        backend_member: db::models::project_member::ProjectMember,
+        frontend_member: db::models::project_member::ProjectMember,
+    }
+
+    /// Builds a project with two agent project members sharing one underlying
+    /// ChatAgent, each with a distinct declared role.
+    async fn setup_planning_roles_fixture() -> PlanningRolesFixture {
+        use db::models::{
+            chat_agent::CreateChatAgent,
+            project::{CreateProject, Project},
+            project_member::{ProjectMember, ProjectMemberType},
+        };
+
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("create sqlite memory pool");
+        sqlx::migrate!("../db/migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+
+        let project = Project::create(
+            &pool,
+            &CreateProject {
+                name: "roles-project".to_string(),
+                repositories: vec![],
+                description: None,
+                status: None,
+                default_workspace_path: None,
+                active_repo_id: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create project");
+        let agent = ChatAgent::create(
+            &pool,
+            &CreateChatAgent {
+                name: "shared-agent".to_string(),
+                runner_type: "codex".to_string(),
+                system_prompt: None,
+                tools_enabled: None,
+                model_name: None,
+                owner_project_id: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create shared agent");
+
+        let backend_member = ProjectMember::create(
+            &pool,
+            project.id,
+            ProjectMemberType::Agent,
+            None,
+            Some(agent.id),
+            Some("Backend".to_string()),
+            Some("后端工程师".to_string()),
+            0,
+            None,
+            vec![],
+            MemberExecutionConfig::default(),
+            false,
+        )
+        .await
+        .expect("create backend project member");
+        let frontend_member = ProjectMember::create(
+            &pool,
+            project.id,
+            ProjectMemberType::Agent,
+            None,
+            Some(agent.id),
+            Some("Frontend".to_string()),
+            Some("前端工程师".to_string()),
+            1,
+            None,
+            vec![],
+            MemberExecutionConfig::default(),
+            false,
+        )
+        .await
+        .expect("create frontend project member");
+
+        PlanningRolesFixture {
+            pool,
+            project,
+            agent,
+            backend_member,
+            frontend_member,
+        }
+    }
+
+    async fn add_session_member(
+        fixture: &PlanningRolesFixture,
+        session: &ChatSession,
+        name: &str,
+        project_member_id: Option<Uuid>,
+    ) -> ChatSessionAgent {
+        use db::models::chat_session_agent::CreateChatSessionAgent;
+
+        ChatSessionAgent::create(
+            &fixture.pool,
+            &CreateChatSessionAgent {
+                session_id: session.id,
+                agent_id: fixture.agent.id,
+                member_name: Some(name.to_string()),
+                workspace_path: None,
+                allowed_skill_ids: vec![],
+                project_member_id,
+                execution_config: MemberExecutionConfig::default(),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create session member")
+    }
+
+    async fn create_session(
+        fixture: &PlanningRolesFixture,
+        project_id: Option<Uuid>,
+    ) -> ChatSession {
+        use db::models::chat_session::CreateChatSession;
+
+        ChatSession::create(
+            &fixture.pool,
+            &CreateChatSession {
+                title: None,
+                workspace_path: None,
+                project_id,
+                worktree_mode: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create chat session")
+    }
+
+    #[tokio::test]
+    async fn planning_member_roles_separate_shared_agent_members_via_explicit_links() {
+        let fixture = setup_planning_roles_fixture().await;
+        let session = create_session(&fixture, Some(fixture.project.id)).await;
+        // Two session members reuse the same underlying agent but link to
+        // different project members.
+        let backend = add_session_member(&fixture, &session, "Backend", Some(fixture.backend_member.id)).await;
+        let frontend = add_session_member(&fixture, &session, "Frontend", Some(fixture.frontend_member.id)).await;
+
+        let roles = resolve_planning_member_roles(&fixture.pool, &session, &[backend.clone(), frontend.clone()])
+            .await
+            .expect("resolve member roles");
+
+        assert_eq!(
+            roles.get(&backend.id).map(String::as_str),
+            Some("后端工程师")
+        );
+        assert_eq!(
+            roles.get(&frontend.id).map(String::as_str),
+            Some("前端工程师")
+        );
+    }
+
+    #[tokio::test]
+    async fn planning_member_roles_never_guess_on_ambiguous_or_invalid_links() {
+        let fixture = setup_planning_roles_fixture().await;
+        let session = create_session(&fixture, Some(fixture.project.id)).await;
+
+        // Unlinked members: two project members share the underlying agent,
+        // so no role may be assigned to either session member.
+        let unlinked_one = add_session_member(&fixture, &session, "MemberOne", None).await;
+        let unlinked_two = add_session_member(&fixture, &session, "MemberTwo", None).await;
+        let roles = resolve_planning_member_roles(
+            &fixture.pool,
+            &session,
+            &[unlinked_one.clone(), unlinked_two.clone()],
+        )
+        .await
+        .expect("resolve member roles");
+        assert!(!roles.contains_key(&unlinked_one.id));
+        assert!(!roles.contains_key(&unlinked_two.id));
+
+        // A link pointing at a member of a different project is rejected.
+        let foreign_project = db::models::project::Project::create(
+            &fixture.pool,
+            &db::models::project::CreateProject {
+                name: "foreign-project".to_string(),
+                repositories: vec![],
+                description: None,
+                status: None,
+                default_workspace_path: None,
+                active_repo_id: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create foreign project");
+        let foreign_member = db::models::project_member::ProjectMember::create(
+            &fixture.pool,
+            foreign_project.id,
+            db::models::project_member::ProjectMemberType::Agent,
+            None,
+            Some(fixture.agent.id),
+            Some("Foreign".to_string()),
+            Some("外部角色".to_string()),
+            0,
+            None,
+            vec![],
+            MemberExecutionConfig::default(),
+            false,
+        )
+        .await
+        .expect("create foreign project member");
+        let cross_linked =
+            add_session_member(&fixture, &session, "CrossLinked", Some(foreign_member.id)).await;
+        let roles =
+            resolve_planning_member_roles(&fixture.pool, &session, std::slice::from_ref(&cross_linked))
+                .await
+                .expect("resolve member roles");
+        assert!(!roles.contains_key(&cross_linked.id));
+    }
+
+    #[tokio::test]
+    async fn planning_member_roles_fall_back_only_on_unique_project_match() {
+        use db::models::project_member::{ProjectMember, ProjectMemberType};
+
+        let fixture = setup_planning_roles_fixture().await;
+        // A second project where exactly one project member matches the
+        // shared underlying agent.
+        let solo_project = db::models::project::Project::create(
+            &fixture.pool,
+            &db::models::project::CreateProject {
+                name: "solo-project".to_string(),
+                repositories: vec![],
+                description: None,
+                status: None,
+                default_workspace_path: None,
+                active_repo_id: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create solo project");
+        ProjectMember::create(
+            &fixture.pool,
+            solo_project.id,
+            ProjectMemberType::Agent,
+            None,
+            Some(fixture.agent.id),
+            Some("Solo".to_string()),
+            Some("独立工程师".to_string()),
+            0,
+            None,
+            vec![],
+            MemberExecutionConfig::default(),
+            false,
+        )
+        .await
+        .expect("create solo project member");
+        let solo_session = create_session(&fixture, Some(solo_project.id)).await;
+        let solo_member = add_session_member(&fixture, &solo_session, "Solo", None).await;
+
+        let roles = resolve_planning_member_roles(
+            &fixture.pool,
+            &solo_session,
+            std::slice::from_ref(&solo_member),
+        )
+        .await
+        .expect("resolve member roles");
+        assert_eq!(
+            roles.get(&solo_member.id).map(String::as_str),
+            Some("独立工程师")
+        );
     }
 
     #[test]
