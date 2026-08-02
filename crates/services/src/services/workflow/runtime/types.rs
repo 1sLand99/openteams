@@ -25,6 +25,35 @@ pub struct WorkflowCardAgent {
     pub name: String,
 }
 
+/// Plan-generation-time agent descriptor exposed to the planner.
+///
+/// Built from `ChatAgent`, `ChatSessionAgent` (member execution config and
+/// `allowed_skill_ids`) and the resolved skill data — never inferred from the
+/// member name. `agent_id` is the unique session-member planning id produced
+/// by `workflow_plan_agent_id`, so multiple session members backed by the same
+/// underlying agent stay individually assignable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowPlanningAgent {
+    /// Unique session-member planning id. Plans must reference this id in
+    /// `agents.lead`, `agents.available`, and `nodes[].data.agentId`.
+    pub agent_id: String,
+    pub session_agent_id: String,
+    /// Underlying `ChatAgent` id backing this session member.
+    pub underlying_agent_id: String,
+    pub name: String,
+    /// `lead` or `worker`.
+    pub role: String,
+    pub runner_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    /// Tools enabled on the underlying agent configuration.
+    pub tools_enabled: Vec<String>,
+    /// Skills actually enabled and allowed for this session member.
+    pub skills: Vec<String>,
+    /// Responsibility boundary for this member inside the workflow.
+    pub responsibilities: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowCardState {

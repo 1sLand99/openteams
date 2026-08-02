@@ -2,8 +2,23 @@
 mod tests {
     use super::*;
 
-    fn sample_plan_json() -> &'static str {
-        r#"{
+    /// Task node data satisfying the mandatory verifiable contract fields.
+    fn task_data(agent_id: &str, title: &str, instructions: &str) -> serde_json::Value {
+        serde_json::json!({
+            "stepType": "task",
+            "agentId": agent_id,
+            "title": title,
+            "instructions": instructions,
+            "acceptance": ["满足验收标准"],
+            "outputs": ["out/result.txt"],
+            "checklist": ["完成核心工作"],
+            "verificationCommands": ["cargo test"],
+            "completionEvidence": ["测试通过输出"]
+        })
+    }
+
+    fn sample_plan_json() -> String {
+        serde_json::json!({
             "version": 1,
             "title": "测试计划",
             "goal": "测试编译",
@@ -12,12 +27,12 @@ mod tests {
                 {
                     "id": "task_1", "type": "workflowStep",
                     "position": { "x": 0, "y": 0 },
-                    "data": { "stepType": "task", "agentId": "agent-1", "title": "任务1", "instructions": "做事1" }
+                    "data": task_data("agent-1", "任务1", "做事1")
                 },
                 {
                     "id": "task_2", "type": "workflowStep",
                     "position": { "x": 240, "y": 0 },
-                    "data": { "stepType": "task", "agentId": "agent-2", "title": "任务2", "instructions": "做事2" }
+                    "data": task_data("agent-2", "任务2", "做事2")
                 },
                 {
                     "id": "result", "type": "workflowStep",
@@ -29,7 +44,8 @@ mod tests {
                 { "id": "task_1->result", "source": "task_1", "target": "result" },
                 { "id": "task_2->result", "source": "task_2", "target": "result" }
             ]
-        }"#
+        })
+        .to_string()
     }
 
     fn agents() -> Vec<String> {
@@ -46,12 +62,12 @@ mod tests {
                 {
                     "id": "draft", "type": "workflowStep",
                     "position": { "x": 0, "y": 0 },
-                    "data": { "stepType": "task", "agentId": "agent-1", "title": "起草", "instructions": "产出初稿" }
+                    "data": task_data("agent-1", "起草", "产出初稿")
                 },
                 {
                     "id": "revise", "type": "workflowStep",
                     "position": { "x": 200, "y": 0 },
-                    "data": { "stepType": "task", "agentId": "agent-2", "title": "修订", "instructions": "补充细节" }
+                    "data": task_data("agent-2", "修订", "补充细节")
                 },
                 {
                     "id": "review", "type": "workflowStep",
@@ -75,7 +91,7 @@ mod tests {
     }
     #[test]
     fn test_compile_success() {
-        let graph = WorkflowCompiler::compile_from_json(sample_plan_json(), &agents()).unwrap();
+        let graph = WorkflowCompiler::compile_from_json(&sample_plan_json(), &agents()).unwrap();
         assert_eq!(graph.steps.len(), 3);
         assert_eq!(graph.edges.len(), 2);
         assert!(!graph.plan_hash.is_empty());
@@ -84,7 +100,7 @@ mod tests {
 
     #[test]
     fn test_ready_steps() {
-        let graph = WorkflowCompiler::compile_from_json(sample_plan_json(), &agents()).unwrap();
+        let graph = WorkflowCompiler::compile_from_json(&sample_plan_json(), &agents()).unwrap();
         // task_1 and task_2 have no incoming edges
         assert!(graph.ready_step_keys.contains(&"task_1".to_string()));
         assert!(graph.ready_step_keys.contains(&"task_2".to_string()));
@@ -93,7 +109,7 @@ mod tests {
 
     #[test]
     fn detects_parallel_task_members_sharing_workspace_before_run() {
-        let graph = WorkflowCompiler::compile_from_json(sample_plan_json(), &agents()).unwrap();
+        let graph = WorkflowCompiler::compile_from_json(&sample_plan_json(), &agents()).unwrap();
         let workspaces = HashMap::from([
             ("agent-1".to_string(), "/workspace/project".to_string()),
             ("agent-2".to_string(), "/workspace/project/".to_string()),
@@ -127,8 +143,8 @@ mod tests {
             "goal": "Serial task members share workspace but cannot run together",
             "agents": { "lead": "lead-agent", "available": ["agent-1", "agent-2"] },
             "nodes": [
-                { "id": "a", "type": "workflowStep", "position": { "x": 0, "y": 0 }, "data": { "stepType": "task", "agentId": "agent-1", "title": "A", "instructions": "A" } },
-                { "id": "b", "type": "workflowStep", "position": { "x": 200, "y": 0 }, "data": { "stepType": "task", "agentId": "agent-2", "title": "B", "instructions": "B" } },
+                { "id": "a", "type": "workflowStep", "position": { "x": 0, "y": 0 }, "data": task_data("agent-1", "A", "A") },
+                { "id": "b", "type": "workflowStep", "position": { "x": 200, "y": 0 }, "data": task_data("agent-2", "B", "B") },
                 { "id": "result", "type": "workflowStep", "position": { "x": 400, "y": 0 }, "data": { "stepType": "result", "title": "Result", "instructions": "Result" } }
             ],
             "edges": [
@@ -150,8 +166,8 @@ mod tests {
 
     #[test]
     fn test_deterministic_hash() {
-        let graph1 = WorkflowCompiler::compile_from_json(sample_plan_json(), &agents()).unwrap();
-        let graph2 = WorkflowCompiler::compile_from_json(sample_plan_json(), &agents()).unwrap();
+        let graph1 = WorkflowCompiler::compile_from_json(&sample_plan_json(), &agents()).unwrap();
+        let graph2 = WorkflowCompiler::compile_from_json(&sample_plan_json(), &agents()).unwrap();
         assert_eq!(graph1.plan_hash, graph2.plan_hash);
         assert_eq!(graph1.compiled_graph_hash, graph2.compiled_graph_hash);
     }
@@ -171,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_topological_order() {
-        let graph = WorkflowCompiler::compile_from_json(sample_plan_json(), &agents()).unwrap();
+        let graph = WorkflowCompiler::compile_from_json(&sample_plan_json(), &agents()).unwrap();
         // result must come after task_1 and task_2
         let result_pos = graph
             .steps
@@ -236,7 +252,7 @@ mod tests {
             "goal": "验证节点不能属于多个回路",
             "agents": { "lead": "lead-agent", "available": ["agent-1", "agent-2"] },
             "nodes": [
-                { "id": "a1", "type": "workflowStep", "position": { "x": 0, "y": 0 }, "data": { "stepType": "task", "agentId": "agent-1", "title": "A1", "instructions": "A1" } },
+                { "id": "a1", "type": "workflowStep", "position": { "x": 0, "y": 0 }, "data": task_data("agent-1", "A1", "A1") },
                 { "id": "a_review", "type": "workflowStep", "position": { "x": 0, "y": 100 }, "data": { "stepType": "review", "title": "A Review", "instructions": "review", "reviewScope": ["a1"] } },
                 { "id": "b_review", "type": "workflowStep", "position": { "x": 200, "y": 100 }, "data": { "stepType": "review", "title": "B Review", "instructions": "review", "reviewScope": ["a1"] } },
                 { "id": "result", "type": "workflowStep", "position": { "x": 400, "y": 50 }, "data": { "stepType": "result", "title": "Result", "instructions": "汇总" } }
@@ -264,7 +280,7 @@ mod tests {
             "goal": "Review without scope is not a loop",
             "agents": { "lead": "lead-agent", "available": ["agent-1", "agent-2"] },
             "nodes": [
-                { "id": "a", "type": "workflowStep", "position": { "x": 0, "y": 0 }, "data": { "stepType": "task", "agentId": "agent-1", "title": "A", "instructions": "A" } },
+                { "id": "a", "type": "workflowStep", "position": { "x": 0, "y": 0 }, "data": task_data("agent-1", "A", "A") },
                 { "id": "b", "type": "workflowStep", "position": { "x": 200, "y": 0 }, "data": { "stepType": "review", "title": "B", "instructions": "review" } },
                 { "id": "result", "type": "workflowStep", "position": { "x": 400, "y": 0 }, "data": { "stepType": "result", "title": "Result", "instructions": "result" } }
             ],
@@ -298,9 +314,9 @@ mod tests {
             "goal": "Collect all review scope errors",
             "agents": { "lead": "lead-agent", "available": ["agent-1", "agent-2"] },
             "nodes": [
-                { "id": "draft", "type": "workflowStep", "position": { "x": 0, "y": 0 }, "data": { "stepType": "task", "agentId": "agent-1", "title": "Draft", "instructions": "Draft" } },
-                { "id": "revise", "type": "workflowStep", "position": { "x": 200, "y": 0 }, "data": { "stepType": "task", "agentId": "agent-2", "title": "Revise", "instructions": "Revise" } },
-                { "id": "side", "type": "workflowStep", "position": { "x": 200, "y": 100 }, "data": { "stepType": "task", "agentId": "agent-2", "title": "Side", "instructions": "Side" } },
+                { "id": "draft", "type": "workflowStep", "position": { "x": 0, "y": 0 }, "data": task_data("agent-1", "Draft", "Draft") },
+                { "id": "revise", "type": "workflowStep", "position": { "x": 200, "y": 0 }, "data": task_data("agent-2", "Revise", "Revise") },
+                { "id": "side", "type": "workflowStep", "position": { "x": 200, "y": 100 }, "data": task_data("agent-2", "Side", "Side") },
                 { "id": "review", "type": "workflowStep", "position": { "x": 400, "y": 0 }, "data": { "stepType": "review", "title": "Review", "instructions": "Review", "reviewScope": ["draft", "draft", "missing", "review", "side"] } },
                 { "id": "result", "type": "workflowStep", "position": { "x": 600, "y": 0 }, "data": { "stepType": "result", "title": "Result", "instructions": "Result" } }
             ],
@@ -327,7 +343,7 @@ mod tests {
     #[test]
     fn test_no_loops_without_review_nodes() {
         // Plans without review nodes should have no loops
-        let graph = WorkflowCompiler::compile_from_json(sample_plan_json(), &agents()).unwrap();
+        let graph = WorkflowCompiler::compile_from_json(&sample_plan_json(), &agents()).unwrap();
         assert!(graph.loops.is_none());
     }
 }

@@ -99,22 +99,13 @@ impl<'a> IterationManager<'a> {
             self.session_agents,
             self.agents,
         )?;
-        let available_agents = self
-            .session_agents
-            .iter()
-            .map(|session_agent| {
-                let workflow_agent_session = workflow_sessions
-                    .iter()
-                    .find(|item| item.session_agent_id == session_agent.id);
-                WorkflowCardAgent {
-                    session_agent_id: session_agent.id.to_string(),
-                    workflow_agent_session_id: workflow_agent_session
-                        .map(|item| item.id.to_string()),
-                    agent_id: workflow_plan_agent_id(session_agent),
-                    name: session_agent.member_name.clone(),
-                }
-            })
-            .collect::<Vec<_>>();
+        let available_agents = build_workflow_planning_agents(
+            self.pool,
+            self.session_agents,
+            self.agents,
+            lead_session_agent.id,
+        )
+        .await;
         let history = WorkflowIterationFeedback::find_by_execution(self.pool, execution.id).await?;
         let original_plan: WorkflowPlanJson = serde_json::from_str(&active_revision.plan_json)?;
         let ui_config = config::load_config_from_file(&config_path()).await;

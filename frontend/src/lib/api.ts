@@ -45,7 +45,6 @@ import type {
   DirectoryListResponse,
   ExecutePlanRequest,
   ExecutePlanResponse,
-  GeneratePlanAndRunResponse,
   GitignoreTemplatesResponse,
   GitHubAccount,
   GitHubCreatePrResponse,
@@ -1652,16 +1651,6 @@ export const workflowApi = {
       { method: "GET" },
     );
     return handleApiResponse<WorkflowSessionStatusResponse>(r);
-  },
-  generatePlanAndRun: async (
-    sessionId: string,
-    userGoal?: string,
-  ): Promise<GeneratePlanAndRunResponse> => {
-    const r = await makeRequest(
-      `/api/chat/sessions/${encodeURIComponent(sessionId)}/workflow/generate-plan-and-run`,
-      { method: "POST", body: JSON.stringify({ user_goal: userGoal ?? null }) },
-    );
-    return handleApiResponse<GeneratePlanAndRunResponse>(r);
   },
   executePlan: async (
     sessionId: string,

@@ -119,18 +119,9 @@ pub fn resolve_workflow_response_language_instruction(
     }
 }
 
-pub fn build_plan_generation_prompt(
-    plan_goal: &str,
-    lead_agent_id: &str,
-    available_agents: &[WorkflowCardAgent],
-    previous_failure_reason: Option<&str>,
-    previous_plan_json: Option<&str>,
-    response_language_instruction: &str,
-    design_doc_paths: Option<&[String]>,
-) -> String {
-    let available_agents_json =
-        serde_json::to_string_pretty(available_agents).unwrap_or_else(|_| "[]".to_string());
-    let plan_schema_definition = r#"{
+/// WorkflowPlanJson schema shared by initial and iteration plan generation
+/// prompts. Keep a single definition so the two entries cannot drift.
+pub(crate) static PLAN_SCHEMA_DEFINITION: &str = r#"{
   "version": "1",
   "title": "string",
   "goal": "string",
@@ -152,8 +143,11 @@ pub fn build_plan_generation_prompt(
         "agentId": "optional string",
         "title": "string",
         "instructions": "string",
-        "acceptance": ["optional string"],
-        "outputs": ["optional string"],
+        "acceptance": ["string, required non-empty for task nodes"],
+        "outputs": ["string, required non-empty for task nodes"],
+        "checklist": ["string, required non-empty for task nodes"],
+        "verificationCommands": ["string, required non-empty for task nodes"],
+        "completionEvidence": ["string, required non-empty for task nodes"],
         "interruptible": true,
         "status": "optional string",
         "reviewScope": ["optional node_id list, review nodes only"]
@@ -179,15 +173,8 @@ pub fn build_plan_generation_prompt(
   }
 }"#;
 
-    let mut prompt = String::new();
-    prompt.push_str(
-        r#"# Workflow Plan Generation
-
-You are generating an executable workflow plan from a confirmed implementation brief.
-The output source of truth is React Flow compatible workflow JSON. Do not output Markdown, YAML, comments, explanations, or prose outside the JSON object.
-
-
-## Stable Output Contract
+/// Stable output contract shared by initial and iteration plan generation.
+pub(crate) static PLAN_STABLE_OUTPUT_CONTRACT: &str = r#"## Stable Output Contract
 
 Return exactly one workflow plan JSON object.
 
@@ -199,7 +186,7 @@ Hard requirements:
 5. There must be exactly one `result` node, and that result node must have no outgoing edges.
 6. All node ids, edge ids, and step keys must be unique.
 7. The graph must be a directed acyclic graph. Dependencies must be represented only through `edges`.
-8. `agents.lead`, `agents.available`, and `nodes[].data.agentId` may only use the provided agent ids.
+8. `agents.lead`, `agents.available`, and `nodes[].data.agentId` may only use the `agent_id` values from the provided Available agents JSON.
 9. Leave `nodes[].data.agentId` empty or omit it only when a step does not need a specific agent. Never invent agent ids.
 10. Node `title` and `instructions` must be concrete, actionable, and specific enough for an agent to execute.
 11. Prefer the smallest executable closed loop that can satisfy the goal. Avoid unnecessary step expansion.
@@ -208,35 +195,234 @@ Hard requirements:
 14. Do not output or infer `leadReview` or `userReview`. The system writes those fields from frontend card selections.
 15. Retry counts are not controlled by the plan JSON.
 16. Your output is validated, compiled, and may start execution directly. Schema errors, cyclic dependencies, invalid agent references, invalid `agents.available`, or missing result nodes will fail this generation.
+17. Every `task` node MUST define a verifiable contract in `nodes[].data`: non-empty `acceptance` (acceptance criteria), `outputs` (expected deliverable paths), `checklist` (verifiable work items), `verificationCommands` (commands or methods that prove the work, e.g. test/build commands), and `completionEvidence` (evidence the executor must produce, e.g. test output summaries). `review` and `result` nodes are exempt from these field requirements.
 
-## WorkflowPlanJson Schema Reference
+"#;
 
-"#,
-    );
-    prompt.push_str(plan_schema_definition);
-    prompt.push_str(
-        r#"
-
-## Additional Static Constraints
+/// Static constraints shared by initial and iteration plan generation.
+pub(crate) static PLAN_STATIC_CONSTRAINTS: &str = r#"## Additional Static Constraints
 
 - `version` must be string `"1"`.
-- `agents.available` and `nodes[].data.agentId` may only use the provided `agent_id` values.
-- `globals`, `policies`, and optional node/edge fields may be omitted when unnecessary.
+- `agents.available` and `nodes[].data.agentId` may only use the `agent_id` values from the provided Available agents JSON.
+- `globals`, `policies`, and optional node/edge fields may be omitted when unnecessary, except the required `task` node contract fields.
 - `reviewScope` rules: task-only ids, upstream predecessors only, include intermediates, each task in at most one scope, no result/review/unknown/downstream ids. If two loops need similar work, split into separate tasks or keep shared setup outside `reviewScope`.
 - when multiple agents need to edit the same file or directory in parallel, use git worktree for isolation and merge changes back to the mainline afterward. If Git is not available, use alternative isolation methods.
 
-## Recommended Skills
-- For tasks that include coding, please ensure you utilize the `writing-plans` skill.
-- For `task` nodes that include coding, add an explicit instruction to use the `code-guidelines` skill before editing code.
-- For general non-coding tasks, use the planning-mode skill.
-- In case of any discrepancy with the skill's format, the specified JSON schema shall prevail.
+"#;
+
+/// Dynamic-skills guidance shared by initial and iteration plan generation.
+/// Skills are never hardcoded here; only the per-member resolved skills listed
+/// in the Available agents JSON may be referenced.
+pub(crate) static PLAN_SKILLS_GUIDANCE: &str = r#"## Agent Skills
+
+- Each entry in the Available agents JSON lists the skills actually enabled for that session member in its `skills` field, along with its runner, tools, and responsibility boundary.
+- When a task benefits from a skill, assign the step to a member whose `skills` include it and name that skill explicitly in the step instructions. Never reference or recommend skills that are not listed for the assigned member.
+- In case of any discrepancy with a skill's format, the specified JSON schema shall prevail.
 - Store the generated plan details in the nodes[].data.instructions field of the workflow plan JSON, using Markdown format.
 
-## Dynamic Inputs
+"#;
+
+/// Extract the enabled tool entries from an agent's `tools_enabled` config.
+/// Enabled MCP servers are reported as `mcp:<name>`; other boolean-true flags
+/// are reported by key.
+fn extract_enabled_tools(tools_enabled: &serde_json::Value) -> Vec<String> {
+    let mut tools = Vec::new();
+    if let Some(servers) = tools_enabled
+        .get("mcpServers")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, setting) in servers {
+            let enabled = match setting {
+                serde_json::Value::Bool(enabled) => *enabled,
+                serde_json::Value::Object(setting) => setting
+                    .get("enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true),
+                _ => false,
+            };
+            if enabled {
+                tools.push(format!("mcp:{name}"));
+            }
+        }
+    }
+    if let Some(entries) = tools_enabled.as_object() {
+        for (key, value) in entries {
+            if key == "mcpServers" {
+                continue;
+            }
+            if value.as_bool() == Some(true) {
+                tools.push(key.clone());
+            }
+        }
+    }
+    tools.sort();
+    tools.dedup();
+    tools
+}
+
+/// Builds plan-generation agent descriptors for every session member.
+///
+/// Capabilities are taken from the real configuration: `ChatAgent`
+/// (runner, tools, model), `ChatSessionAgent.execution_config` (member
+/// overrides), `ChatSessionAgent.allowed_skill_ids`, and the resolved enabled
+/// native skills — never inferred from member names. The planning `agent_id`
+/// is `workflow_plan_agent_id(session_agent)`, so members backed by the same
+/// underlying agent remain individually assignable.
+pub async fn build_workflow_planning_agents(
+    pool: &SqlitePool,
+    session_agents: &[ChatSessionAgent],
+    agents: &[ChatAgent],
+    lead_session_agent_id: Uuid,
+) -> Vec<WorkflowPlanningAgent> {
+    use crate::services::{
+        member_execution::parse_runner_type, native_skills::list_native_skills_for_runner,
+        workflow::workflow_orchestrator::workflow_plan_agent_id,
+    };
+
+    // runner -> [(skill_id, skill_name)] for enabled native skills
+    let mut enabled_skills_by_runner: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut planning_agents = Vec::with_capacity(session_agents.len());
+
+    for session_agent in session_agents {
+        let agent = agents
+            .iter()
+            .find(|agent| agent.id == session_agent.agent_id);
+        let is_lead = session_agent.id == lead_session_agent_id;
+
+        let runner_type = agent
+            .map(|agent| agent.runner_type.trim().to_string())
+            .unwrap_or_default();
+        let model_name = session_agent
+            .execution_config
+            .0
+            .model_name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| agent.and_then(|agent| agent.model_name.clone()));
+        let tools_enabled = agent
+            .map(|agent| extract_enabled_tools(&agent.tools_enabled.0))
+            .unwrap_or_default();
+
+        let mut skills: Vec<String> = Vec::new();
+        if let Some(agent) = agent {
+            match parse_runner_type(&agent.runner_type) {
+                Ok(runner) => {
+                    let cache_key = format!("{runner:?}");
+                    if !enabled_skills_by_runner.contains_key(&cache_key) {
+                        let enabled = list_native_skills_for_runner(pool, runner)
+                            .await
+                            .map(|installed| {
+                                installed
+                                    .into_iter()
+                                    .filter(|item| item.enabled)
+                                    .map(|item| (item.skill.id.to_string(), item.skill.name))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_else(|err| {
+                                tracing::debug!(
+                                    runner = %cache_key,
+                                    error = %err,
+                                    "[plan_generation] failed to resolve native skills for runner"
+                                );
+                                Vec::new()
+                            });
+                        enabled_skills_by_runner.insert(cache_key.clone(), enabled);
+                    }
+                    if let Some(enabled) = enabled_skills_by_runner.get(&cache_key) {
+                        let allowed_skill_ids: HashSet<&str> = session_agent
+                            .allowed_skill_ids
+                            .0
+                            .iter()
+                            .map(|skill_id| skill_id.trim())
+                            .filter(|skill_id| !skill_id.is_empty())
+                            .collect();
+                        skills = enabled
+                            .iter()
+                            .filter(|(skill_id, _)| allowed_skill_ids.contains(skill_id.as_str()))
+                            .map(|(_, name)| name.clone())
+                            .collect();
+                        skills.sort();
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        runner_type = %agent.runner_type,
+                        error = %err,
+                        "[plan_generation] unknown runner type while resolving member skills"
+                    );
+                }
+            }
+        }
+
+        let (role, responsibilities) = if is_lead {
+            (
+                "lead",
+                "Owns the workflow plan, reviews worker outputs, and produces the final result. Plan generation and final acceptance support stay with the lead; do not assign them to workers.",
+            )
+        } else {
+            (
+                "worker",
+                "Executes only the steps assigned via nodes[].data.agentId. Must not redefine the plan, reassign work, or take over lead duties.",
+            )
+        };
+
+        planning_agents.push(WorkflowPlanningAgent {
+            agent_id: workflow_plan_agent_id(session_agent),
+            session_agent_id: session_agent.id.to_string(),
+            underlying_agent_id: session_agent.agent_id.to_string(),
+            name: session_agent.member_name.clone(),
+            role: role.to_string(),
+            runner_type,
+            model_name,
+            tools_enabled,
+            skills,
+            responsibilities: responsibilities.to_string(),
+        });
+    }
+
+    planning_agents
+}
+
+/// Appends the shared lead/available-agents dynamic section to a plan
+/// generation prompt.
+pub(crate) fn push_plan_agent_context(
+    prompt: &mut String,
+    lead_agent_id: &str,
+    available_agents: &[WorkflowPlanningAgent],
+) {
+    let available_agents_json =
+        serde_json::to_string_pretty(available_agents).unwrap_or_else(|_| "[]".to_string());
+    prompt.push_str("Lead agent id:\n");
+    prompt.push_str(lead_agent_id);
+    prompt.push_str("\n\nAvailable agents JSON:\n");
+    prompt.push_str(&available_agents_json);
+}
+
+pub fn build_plan_generation_prompt(
+    plan_goal: &str,
+    lead_agent_id: &str,
+    available_agents: &[WorkflowPlanningAgent],
+    previous_failure_reason: Option<&str>,
+    previous_plan_json: Option<&str>,
+    response_language_instruction: &str,
+    design_doc_paths: Option<&[String]>,
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(
+        r#"# Workflow Plan Generation
+
+You are generating an executable workflow plan from a confirmed implementation brief.
+The output source of truth is React Flow compatible workflow JSON. Do not output Markdown, YAML, comments, explanations, or prose outside the JSON object.
 
 "#,
     );
-    // 根据任务类型来选择读取不同的提示词
+    prompt.push_str(PLAN_STABLE_OUTPUT_CONTRACT);
+    prompt.push_str("## WorkflowPlanJson Schema Reference\n\n");
+    prompt.push_str(PLAN_SCHEMA_DEFINITION);
+    prompt.push_str("\n\n");
+    prompt.push_str(PLAN_STATIC_CONSTRAINTS);
+    prompt.push_str(PLAN_SKILLS_GUIDANCE);
+    prompt.push_str("## Dynamic Inputs\n\n");
 
     if let Some(reason) = previous_failure_reason
         .map(str::trim)
@@ -263,10 +449,8 @@ Hard requirements:
             "\n```\nUse this existing plan as the baseline. Apply the requested changes from the plan goal brief, preserve correct unchanged work, and return the complete revised workflow plan JSON.",
         );
     }
-    prompt.push_str("\n\nLead agent id:\n");
-    prompt.push_str(lead_agent_id);
-    prompt.push_str("\n\nAvailable agents JSON:\n");
-    prompt.push_str(&available_agents_json);
+    prompt.push_str("\n\n");
+    push_plan_agent_context(&mut prompt, lead_agent_id, available_agents);
     if let Some(doc_paths) = design_doc_paths.filter(|paths| !paths.is_empty()) {
         prompt.push_str("\n\nDesign document paths:\n");
         for path in doc_paths {

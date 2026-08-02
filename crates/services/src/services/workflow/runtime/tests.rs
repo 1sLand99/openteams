@@ -731,6 +731,31 @@ mod tests {
     }
 
     #[test]
+    fn build_plan_generation_prompt_enforces_task_contract_and_no_hardcoded_skills() {
+        let prompt = build_plan_generation_prompt(
+            "Ship the confirmed implementation plan.",
+            "lead-agent-id",
+            &[],
+            None,
+            None,
+            "You MUST write human-readable JSON string values in English.",
+            None,
+        );
+
+        // Task contract fields are part of the shared schema and hard rules.
+        assert!(prompt.contains("checklist"));
+        assert!(prompt.contains("verificationCommands"));
+        assert!(prompt.contains("completionEvidence"));
+        assert!(prompt.contains("Every `task` node MUST define a verifiable contract"));
+        // Hardcoded skill recommendations must be gone; only the dynamic
+        // per-member skill listing rule remains.
+        assert!(!prompt.contains("## Recommended Skills"));
+        assert!(!prompt.contains("planning-mode"));
+        assert!(prompt.contains("## Agent Skills"));
+        assert!(prompt.contains("Never reference or recommend skills that are not listed"));
+    }
+
+    #[test]
     fn workflow_response_language_instruction_follows_ui_language() {
         assert_eq!(
             resolve_workflow_response_language_instruction(&UiLanguage::ZhHans),

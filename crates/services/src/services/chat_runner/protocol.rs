@@ -1427,10 +1427,12 @@ impl ChatRunner {
         };
 
         use super::super::{
-            workflow_orchestrator::WorkflowOrchestrator,
+            workflow_orchestrator::{
+                WorkflowOrchestrator, workflow_plan_agent_id, workflow_valid_agent_ids,
+            },
             workflow_runtime::{
                 WorkflowCardAgent, WorkflowCardState, build_plan_generation_prompt,
-                extract_json_payload, resolve_lead_agent,
+                build_workflow_planning_agents, extract_json_payload, resolve_lead_agent,
                 resolve_workflow_response_language_instruction, run_workflow_agent_prompt,
             },
             workflow_validator,
@@ -1478,23 +1480,38 @@ impl ChatRunner {
             resolve_lead_agent(&session, &session_agents, &agents).map_err(|err| {
                 ChatRunnerError::AgentNotFound(format!("lead agent resolution failed: {err}"))
             })?;
-        let lead_agent_id = lead_agent.id.to_string();
         let mut lead_session_agent = lead_session_agent.clone();
+        // Planning ids are session-member scoped so members backed by the same
+        // underlying agent stay uniquely assignable.
+        let lead_agent_id = workflow_plan_agent_id(&lead_session_agent);
 
-        let _plan_skills = self
-            .prepare_and_resolve_agent_skills(
-                &mut lead_session_agent,
-                lead_agent,
-                crate::services::agent_skill_policy::AgentPromptContext::PlanGeneration,
-            )
-            .await?;
+        // Ensure the builtin plan-generation skills are installed and allowed
+        // for the lead, then build descriptors carrying each member's actually
+        // available skills into the prompt. The lead's ensured skills are
+        // reflected back so its descriptor lists them as well.
+        self.prepare_and_resolve_agent_skills(
+            &mut lead_session_agent,
+            lead_agent,
+            crate::services::agent_skill_policy::AgentPromptContext::PlanGeneration,
+        )
+        .await?;
+        let mut planning_members = session_agents.clone();
+        if let Some(entry) = planning_members
+            .iter_mut()
+            .find(|entry| entry.id == lead_session_agent.id)
+        {
+            entry.allowed_skill_ids = lead_session_agent.allowed_skill_ids.clone();
+        }
+        let planning_agents =
+            build_workflow_planning_agents(pool, &planning_members, &agents, lead_session_agent.id)
+                .await;
         let available_agents: Vec<WorkflowCardAgent> = session_agents
             .iter()
             .map(|session_agent| {
                 WorkflowCardAgent {
                     session_agent_id: session_agent.id.to_string(),
                     workflow_agent_session_id: None,
-                    agent_id: session_agent.agent_id.to_string(),
+                    agent_id: workflow_plan_agent_id(session_agent),
                     name: session_agent.member_name.clone(),
                 }
             })
@@ -1584,7 +1601,7 @@ impl ChatRunner {
         let prompt = build_plan_generation_prompt(
             plan_goal,
             &lead_agent_id,
-            &available_agents,
+            &planning_agents,
             previous_failure_reason,
             previous_plan_context
                 .as_ref()
@@ -1684,8 +1701,7 @@ impl ChatRunner {
             }
         };
 
-        let valid_agent_ids: Vec<String> =
-            agents.iter().map(|agent| agent.id.to_string()).collect();
+        let valid_agent_ids = workflow_valid_agent_ids(&session_agents);
         let validation = workflow_validator::validate_plan(&parsed_plan, &valid_agent_ids);
         if !validation.is_valid {
             let validation_summary = validation

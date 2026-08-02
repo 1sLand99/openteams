@@ -85,19 +85,31 @@ mod tests {
         }
     }
 
-    fn sample_card_agents() -> Vec<WorkflowCardAgent> {
+    fn sample_planning_agents() -> Vec<WorkflowPlanningAgent> {
         vec![
-            WorkflowCardAgent {
+            WorkflowPlanningAgent {
+                agent_id: "lead-session-agent".to_string(),
                 session_agent_id: "lead-session-agent".to_string(),
-                workflow_agent_session_id: Some("lead-workflow-session".to_string()),
-                agent_id: "lead-agent".to_string(),
+                underlying_agent_id: "lead-agent".to_string(),
                 name: "Lead".to_string(),
+                role: "lead".to_string(),
+                runner_type: "claude_code".to_string(),
+                model_name: None,
+                tools_enabled: vec![],
+                skills: vec!["writing-plans".to_string()],
+                responsibilities: "Owns the workflow plan.".to_string(),
             },
-            WorkflowCardAgent {
+            WorkflowPlanningAgent {
+                agent_id: "worker-session-agent".to_string(),
                 session_agent_id: "worker-session-agent".to_string(),
-                workflow_agent_session_id: Some("worker-workflow-session".to_string()),
-                agent_id: "worker-agent".to_string(),
+                underlying_agent_id: "worker-agent".to_string(),
                 name: "Worker".to_string(),
+                role: "worker".to_string(),
+                runner_type: "codex".to_string(),
+                model_name: None,
+                tools_enabled: vec![],
+                skills: vec!["code-guidelines".to_string()],
+                responsibilities: "Executes assigned steps.".to_string(),
             },
         ]
     }
@@ -153,7 +165,7 @@ mod tests {
             1,
             std::slice::from_ref(&feedback),
             "lead-agent",
-            &sample_card_agents(),
+            &sample_planning_agents(),
             &sample_plan(),
             "You MUST write human-readable JSON string values in English.",
         );
@@ -167,9 +179,90 @@ mod tests {
         assert!(prompt.contains("- what_wrong: Missing tests"));
         assert!(prompt.contains("- expected: Add regression coverage"));
         assert!(prompt.contains("Available agents JSON"));
-        assert!(prompt.contains("lead-agent"));
-        assert!(prompt.contains("worker-agent"));
+        assert!(prompt.contains("lead-session-agent"));
+        assert!(prompt.contains("worker-session-agent"));
+        assert!(prompt.contains("writing-plans"));
+        assert!(prompt.contains("code-guidelines"));
         assert!(prompt.contains("Return exactly one workflow plan JSON object"));
         assert!(prompt.contains("Final instruction: return the workflow plan JSON object only."));
+    }
+
+    #[test]
+    fn build_iteration_plan_prompt_injects_full_previous_plan_json() {
+        let mut previous_plan = sample_plan();
+        previous_plan.nodes = vec![
+            db::models::workflow_types::WorkflowPlanNode {
+                id: "draft".to_string(),
+                node_type: "workflowStep".to_string(),
+                position: db::models::workflow_types::WorkflowNodePosition { x: 0.0, y: 0.0 },
+                data: db::models::workflow_types::WorkflowNodeData {
+                    step_type: "task".to_string(),
+                    agent_id: Some("worker-session-agent".to_string()),
+                    title: "Draft".to_string(),
+                    instructions: "Draft the feature".to_string(),
+                    acceptance: Some(vec!["Draft accepted".to_string()]),
+                    outputs: Some(vec!["out/draft.md".to_string()]),
+                    checklist: Some(vec!["Draft written".to_string()]),
+                    verification_commands: Some(vec!["cargo test draft".to_string()]),
+                    completion_evidence: Some(vec!["test output".to_string()]),
+                    interruptible: true,
+                    max_retry: None,
+                    status: None,
+                    loop_key: None,
+                    review_scope: None,
+                },
+            },
+            db::models::workflow_types::WorkflowPlanNode {
+                id: "result".to_string(),
+                node_type: "workflowStep".to_string(),
+                position: db::models::workflow_types::WorkflowNodePosition { x: 0.0, y: 140.0 },
+                data: db::models::workflow_types::WorkflowNodeData {
+                    step_type: "result".to_string(),
+                    agent_id: None,
+                    title: "Result".to_string(),
+                    instructions: "Summarize".to_string(),
+                    acceptance: None,
+                    outputs: None,
+                    checklist: None,
+                    verification_commands: None,
+                    completion_evidence: None,
+                    interruptible: true,
+                    max_retry: None,
+                    status: None,
+                    loop_key: None,
+                    review_scope: None,
+                },
+            },
+        ];
+        previous_plan.edges = vec![db::models::workflow_types::WorkflowPlanEdge {
+            id: "draft->result".to_string(),
+            source: "draft".to_string(),
+            target: "result".to_string(),
+            edge_type: None,
+            data: None,
+        }];
+
+        let prompt = build_iteration_plan_prompt(
+            "Ship a stable workflow",
+            "Round 1 completed",
+            r#"{"action":"reject","feedback":{"what_wrong":"Missing tests"}}"#,
+            1,
+            &[],
+            "lead-session-agent",
+            &sample_planning_agents(),
+            &previous_plan,
+            "You MUST write human-readable JSON string values in English.",
+        );
+
+        assert!(prompt.contains("### Previous Round Workflow Plan JSON"));
+        // Full previous plan content must be present: node ids, edges, and
+        // the original acceptance/outputs contract fields.
+        assert!(prompt.contains("\"id\": \"draft\""));
+        assert!(prompt.contains("\"id\": \"draft->result\""));
+        assert!(prompt.contains("Draft accepted"));
+        assert!(prompt.contains("out/draft.md"));
+        assert!(prompt.contains("cargo test draft"));
+        assert!(prompt.contains("Preserve existing node ids, edge ids, and edge structure"));
+        assert!(prompt.contains("Do not discard completed work"));
     }
 }

@@ -402,6 +402,16 @@ pub struct WorkflowNodeData {
     pub acceptance: Option<Vec<String>>,
     #[serde(default)]
     pub outputs: Option<Vec<String>>,
+    /// Verifiable checklist items the task must satisfy (task nodes only).
+    #[serde(default)]
+    pub checklist: Option<Vec<String>>,
+    /// Verification/test commands or methods used to prove the task is done
+    /// (task nodes only).
+    #[serde(default)]
+    pub verification_commands: Option<Vec<String>>,
+    /// Evidence the task must produce on completion (task nodes only).
+    #[serde(default)]
+    pub completion_evidence: Option<Vec<String>>,
     #[serde(default = "default_true")]
     pub interruptible: bool,
     #[serde(default)]

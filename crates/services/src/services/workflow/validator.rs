@@ -172,6 +172,40 @@ pub fn validate_structure(plan: &WorkflowPlanJson) -> ValidationResult {
         }
     }
 
+    // task 节点必须建立可验证契约：acceptance、outputs、checklist、
+    // 验证命令/方法、完成证据均不能为空；review/result 节点不适用该规则
+    for node in &plan.nodes {
+        if node.data.step_type != "task" {
+            continue;
+        }
+        let required_lists = [
+            ("acceptance", &node.data.acceptance, "验收标准"),
+            ("outputs", &node.data.outputs, "产出物"),
+            ("checklist", &node.data.checklist, "检查清单"),
+            (
+                "verificationCommands",
+                &node.data.verification_commands,
+                "验证命令/方法",
+            ),
+            (
+                "completionEvidence",
+                &node.data.completion_evidence,
+                "完成证据要求",
+            ),
+        ];
+        for (field_name, value, label) in required_lists {
+            if !has_non_empty_items(value) {
+                errors.push(ValidationError {
+                    field: format!("nodes[id={}].data.{}", node.id, field_name),
+                    message: format!(
+                        "任务节点 '{}' 必须提供非空的{}（至少一条有效条目）",
+                        node.id, label
+                    ),
+                });
+            }
+        }
+    }
+
     // 边 id 唯一性
     let mut edge_ids = HashSet::new();
     for edge in &plan.edges {
@@ -191,6 +225,13 @@ pub fn validate_structure(plan: &WorkflowPlanJson) -> ValidationResult {
 // ---------------------------------------------------------------------------
 // 语义校验 (Semantic Validation)
 // ---------------------------------------------------------------------------
+
+/// 判断可选字符串列表是否包含至少一条非空白条目
+fn has_non_empty_items(value: &Option<Vec<String>>) -> bool {
+    value
+        .as_ref()
+        .is_some_and(|items| items.iter().any(|item| !item.trim().is_empty()))
+}
 
 /// 对 workflow plan JSON 做语义校验：DAG、agent 引用、result 节点约束
 pub fn validate_semantics(plan: &WorkflowPlanJson, valid_agent_ids: &[String]) -> ValidationResult {
@@ -429,8 +470,11 @@ mod tests {
                         agent_id: Some("agent-1".into()),
                         title: "任务 1".into(),
                         instructions: "执行任务 1".into(),
-                        acceptance: None,
-                        outputs: None,
+                        acceptance: Some(vec!["功能按预期工作".into()]),
+                        outputs: Some(vec!["src/task1.rs".into()]),
+                        checklist: Some(vec!["实现核心逻辑".into()]),
+                        verification_commands: Some(vec!["cargo test task1".into()]),
+                        completion_evidence: Some(vec!["测试通过输出".into()]),
                         interruptible: true,
                         max_retry: None,
                         status: None,
@@ -449,6 +493,9 @@ mod tests {
                         instructions: "汇总结果".into(),
                         acceptance: None,
                         outputs: None,
+                        checklist: None,
+                        verification_commands: None,
+                        completion_evidence: None,
                         interruptible: true,
                         max_retry: None,
                         status: None,
@@ -561,6 +608,9 @@ mod tests {
                 instructions: "不应存在".into(),
                 acceptance: None,
                 outputs: None,
+                checklist: None,
+                verification_commands: None,
+                completion_evidence: None,
                 interruptible: true,
                 max_retry: None,
                 status: None,
@@ -586,6 +636,9 @@ mod tests {
                 instructions: "不应被 result 后继".into(),
                 acceptance: None,
                 outputs: None,
+                checklist: None,
+                verification_commands: None,
+                completion_evidence: None,
                 interruptible: true,
                 max_retry: None,
                 status: None,
@@ -653,5 +706,66 @@ mod tests {
         let result = validate_semantics(&plan, &agents);
         assert!(!result.is_valid);
         assert!(result.errors.iter().any(|e| e.field == "agents.lead"));
+    }
+
+    #[test]
+    fn test_task_node_missing_verifiable_contract_rejected() {
+        let mut plan = make_valid_plan();
+        let task = &mut plan.nodes[0].data;
+        task.acceptance = None;
+        task.outputs = Some(vec!["   ".into()]);
+        task.checklist = None;
+        task.verification_commands = Some(vec![]);
+        task.completion_evidence = None;
+        let result = validate_structure(&plan);
+        assert!(!result.is_valid);
+        for field in [
+            "acceptance",
+            "outputs",
+            "checklist",
+            "verificationCommands",
+            "completionEvidence",
+        ] {
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .any(|e| e.field == format!("nodes[id=task_1].data.{field}")),
+                "missing error for {field}: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    #[test]
+    fn test_review_and_result_nodes_exempt_from_task_contract() {
+        let mut plan = make_valid_plan();
+        // Insert a review node without any task contract fields.
+        plan.nodes.insert(
+            1,
+            WorkflowPlanNode {
+                id: "review_1".into(),
+                node_type: "workflowStep".into(),
+                position: WorkflowNodePosition { x: 0.0, y: 70.0 },
+                data: WorkflowNodeData {
+                    step_type: "review".into(),
+                    agent_id: Some("agent-2".into()),
+                    title: "评审任务 1".into(),
+                    instructions: "检查任务 1 的产出".into(),
+                    acceptance: None,
+                    outputs: None,
+                    checklist: None,
+                    verification_commands: None,
+                    completion_evidence: None,
+                    interruptible: true,
+                    max_retry: None,
+                    status: None,
+                    loop_key: None,
+                    review_scope: None,
+                },
+            },
+        );
+        let result = validate_structure(&plan);
+        assert!(result.is_valid, "errors: {:?}", result.errors);
     }
 }

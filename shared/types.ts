@@ -499,7 +499,20 @@ export type WorkflowPlanNode = { id: string, type: string, position: WorkflowNod
 
 export type WorkflowNodePosition = { x: number, y: number, };
 
-export type WorkflowNodeData = { stepType: string, agentId: string | null, title: string, instructions: string, acceptance: Array<string> | null, outputs: Array<string> | null, interruptible: boolean, maxRetry: number | null, status: string | null, loopKey: string | null, reviewScope: Array<string> | null, };
+export type WorkflowNodeData = { stepType: string, agentId: string | null, title: string, instructions: string, acceptance: Array<string> | null, outputs: Array<string> | null,
+/**
+ * Verifiable checklist items the task must satisfy (task nodes only).
+ */
+checklist: Array<string> | null,
+/**
+ * Verification/test commands or methods used to prove the task is done
+ * (task nodes only).
+ */
+verificationCommands: Array<string> | null,
+/**
+ * Evidence the task must produce on completion (task nodes only).
+ */
+completionEvidence: Array<string> | null, interruptible: boolean, maxRetry: number | null, status: string | null, loopKey: string | null, reviewScope: Array<string> | null, };
 
 export type WorkflowLoopDef = { loopKey: string, memberSteps: Array<string>, reviewStep: string, maxRetry: number | null, userReviewRequired: boolean | null, };
 

@@ -1503,11 +1503,6 @@ export interface WorkflowTranscriptEntry {
   agent_name?: string | null;
 }
 
-export interface GeneratePlanAndRunResponse {
-  execution_id: string;
-  workflow_card_message: BackendChatMessage;
-}
-
 export interface ExecutePlanReviewOverride {
   stepId: string;
   leadReview: boolean | null;
