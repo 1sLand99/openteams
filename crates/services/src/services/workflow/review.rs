@@ -5,7 +5,11 @@ use db::models::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::workflow_runtime::{WorkflowRuntimeError, extract_json_payload};
+use super::workflow_runtime::{
+    MAX_DYNAMIC_CONTENT_BUDGET_BYTES, WorkflowRuntimeError,
+    budget_and_sanitize, extract_json_payload, maybe_prepend_safety_preamble,
+    sanitize_dynamic_content,
+};
 
 #[derive(Debug, Clone)]
 pub struct LoopReviewPromptStepInput {
@@ -119,18 +123,24 @@ pub fn build_loop_review_prompt(
                     )
                 })
                 .unwrap_or_default();
+            let sanitized_instructions = sanitize_dynamic_content("step_instructions", &step.instructions);
+            let sanitized_content = budget_and_sanitize(
+                "step_content",
+                &step.content,
+                MAX_DYNAMIC_CONTENT_BUDGET_BYTES / review_steps.len().max(1),
+            );
             format!(
                 "#### [{}] {} (`{}`)\n- Instructions: {}\n- Acceptance criteria: {}\n- Expected output contract: {}\n- Predecessor handoffs: {}\n- Successor contracts: {}\n- Execution summary: {}\n- Detailed content: {}\n- Actual outputs: {}{}",
                 index + 1,
                 step.title,
                 step.step_key,
-                step.instructions,
+                sanitized_instructions,
                 acceptance,
                 expected_outputs,
                 predecessor_handoffs,
                 successor_contracts,
                 step.summary,
-                step.content,
+                sanitized_content,
                 outputs,
                 user_skip_waiver,
             )
@@ -167,7 +177,7 @@ pub fn build_loop_review_prompt(
 You are {reviewer_name}, the {reviewer_role} assigned to this workflow's Review node. Review all execution results in the following loop or stage as one coherent unit. Do not represent yourself as the Lead unless your assigned role is Lead.
 
 ### Workflow Goal
-{workflow_goal}
+{workflow_goal_sanitized}
 
 ### Loop Information
 - Loop key: {loop_key}
@@ -229,7 +239,7 @@ If the entire loop needs rework, omit step_feedbacks or return an empty array.
 {rejected_feedback_template}
   ]
 }}"#,
-        workflow_goal = workflow_goal,
+        workflow_goal_sanitized = sanitize_dynamic_content("workflow_goal", workflow_goal),
         loop_key = loop_def.loop_key,
         execution_id = execution_id,
         review_attempt = review_attempt,
@@ -249,6 +259,7 @@ If the entire loop needs rework, omit step_feedbacks or return an empty array.
     prompt.push_str("\n\nRequired JSON Schema:\n```json\n");
     prompt.push_str(&json_schema);
     prompt.push_str("\n```\nReturn ONLY one JSON object matching this schema.\n");
+    prompt = maybe_prepend_safety_preamble(&prompt);
     prompt
 }
 
@@ -360,7 +371,7 @@ pub fn build_loop_rejection_prompt(input: LoopRejectionPromptInput<'_>) -> Strin
         input.your_previous_outputs.join(", ")
     };
 
-    format!(
+    let prompt = format!(
         r#"## Loop Rework Request (loop retry {loop_retry_count})
 
 The overall loop review did not pass. Re-run your task according to the feedback below.
@@ -373,13 +384,10 @@ Retry {loop_retry_count} of {loop_retry_budget}. {loop_current_state_summary}
 
 ### Loop Review Decision
 {loop_rejection_reason}
-
 ### Revision Feedback for Your Step
 {step_specific_feedback}
-
 ### Other Steps' Revision Direction (for reference)
 {other_steps_feedback_summary}
-
 ### Your Previous Execution Result
 Summary: {your_previous_summary}
 Outputs: {previous_outputs}
@@ -401,26 +409,37 @@ Outputs: {previous_outputs}
 
 ### Original Task Instructions
 Step title: {step_title}
-Step instructions: {step_instructions}
-
+{step_instructions_sanitized}
 ### Completed Upstream Step Summaries (outside the loop)
-{external_dependency_text}"#,
+{external_dependency_text_sanitized}"#,
         loop_retry_count = input.loop_retry_count,
         loop_retry_budget = input.loop_retry_budget,
-        loop_current_state_summary = input.loop_current_state_summary,
-        workflow_goal = input.workflow_goal,
-        loop_rejection_reason = input.loop_rejection_reason,
-        step_specific_feedback = input.step_specific_feedback,
-        other_steps_feedback_summary = other_steps_feedback_summary,
-        your_previous_summary = input.your_previous_summary,
-        previous_outputs = previous_outputs,
-        acceptance = acceptance,
-        expected_outputs = expected_outputs,
+        loop_current_state_summary = sanitize_dynamic_content(
+            "loop_state_summary",
+            input.loop_current_state_summary,
+        ),
+        workflow_goal = sanitize_dynamic_content("workflow_goal", input.workflow_goal),
+        loop_rejection_reason =
+            sanitize_dynamic_content("loop_rejection_reason", input.loop_rejection_reason),
+        step_specific_feedback =
+            sanitize_dynamic_content("step_specific_feedback", input.step_specific_feedback),
+        other_steps_feedback_summary =
+            sanitize_dynamic_content("other_steps_feedback", &other_steps_feedback_summary),
+        your_previous_summary = sanitize_dynamic_content(
+            "previous_summary",
+            input.your_previous_summary,
+        ),
+        previous_outputs = sanitize_dynamic_content("previous_outputs", &previous_outputs),
+        acceptance = sanitize_dynamic_content("acceptance", &acceptance),
+        expected_outputs = sanitize_dynamic_content("expected_outputs", &expected_outputs),
         step_title = input.step.title,
-        step_instructions = input.step.instructions,
-        external_dependency_text = external_dependency_text,
+        step_instructions_sanitized =
+            sanitize_dynamic_content("step_instructions", &input.step.instructions),
+        external_dependency_text_sanitized =
+            sanitize_dynamic_content("external_dependencies", &external_dependency_text),
         response_language_instruction = input.response_language_instruction.trim(),
-    )
+    );
+    maybe_prepend_safety_preamble(&prompt)
 }
 
 pub fn build_loop_user_rejection_prompt(
@@ -451,7 +470,7 @@ pub fn build_loop_user_rejection_prompt(
     } else {
         expected_outputs.join(", ")
     };
-    format!(
+    let prompt = format!(
         r#"## User Loop Rework Request (loop retry {loop_retry_count})
 
 The overall loop result did not pass user review. Re-run your task according to the user feedback.
@@ -464,10 +483,8 @@ Current retry {loop_retry_count} of {loop_retry_budget}
 
 ### User Feedback
 {user_feedback}
-
 ### Current Loop State Summary
 {loop_current_state_summary}
-
 ### Your Previous Execution Result
 Summary: {your_previous_summary}
 Outputs: {previous_outputs}
@@ -484,20 +501,23 @@ Outputs: {previous_outputs}
 
 ### Original Task Instructions
 Step title: {step_title}
-Step instructions: {step_instructions}"#,
+{step_instructions_sanitized}"#,
         loop_retry_count = loop_retry_count,
         loop_retry_budget = loop_retry_budget,
-        workflow_goal = workflow_goal,
-        user_feedback = user_feedback,
-        loop_current_state_summary = loop_current_state_summary,
-        your_previous_summary = your_previous_summary,
-        previous_outputs = previous_outputs,
-        acceptance = acceptance,
-        expected_outputs = expected_outputs,
+        workflow_goal = sanitize_dynamic_content("workflow_goal", workflow_goal),
+        user_feedback = sanitize_dynamic_content("user_feedback", user_feedback),
+        loop_current_state_summary =
+            sanitize_dynamic_content("loop_state_summary", loop_current_state_summary),
+        your_previous_summary = sanitize_dynamic_content("previous_summary", your_previous_summary),
+        previous_outputs = sanitize_dynamic_content("previous_outputs", &previous_outputs),
+        acceptance = sanitize_dynamic_content("acceptance", &acceptance),
+        expected_outputs = sanitize_dynamic_content("expected_outputs", &expected_outputs),
         step_title = step.title,
-        step_instructions = step.instructions,
+        step_instructions_sanitized =
+            sanitize_dynamic_content("step_instructions", &step.instructions),
         response_language_instruction = response_language_instruction.trim(),
-    )
+    );
+    maybe_prepend_safety_preamble(&prompt)
 }
 
 pub fn parse_loop_review_output(

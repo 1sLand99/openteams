@@ -607,7 +607,7 @@ impl WorkflowOrchestrator {
                 agent_session_id: None,
                 event_type: WorkflowEventType::RoundStarted,
                 status_before: None,
-                status_after: Some(format!("{:?}", execution.status).to_lowercase()),
+                status_after: Some(to_workflow_wire_value(&execution.status)),
                 detail_json: None,
             },
             Uuid::new_v4(),

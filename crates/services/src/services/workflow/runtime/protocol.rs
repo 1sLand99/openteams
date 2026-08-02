@@ -371,7 +371,17 @@ pub fn build_workflow_protocol_retry_prompt(
     previous_input: &str,
     previous_output: &str,
 ) -> String {
-    format!(
+    let sanitized_input = budget_and_sanitize(
+        "previous_workflow_request",
+        previous_input,
+        MAX_DYNAMIC_CONTENT_BUDGET_BYTES / 2,
+    );
+    let sanitized_output = budget_and_sanitize(
+        "previous_invalid_response",
+        previous_output,
+        MAX_DYNAMIC_CONTENT_BUDGET_BYTES / 2,
+    );
+    let prompt = format!(
         r#"Your previous workflow {protocol_name} response did not match the required JSON protocol.
 Error: {error}
 
@@ -383,15 +393,12 @@ Required JSON Schema:
 ```
 
 Previous workflow request:
-<BEGIN_WORKFLOW_REQUEST>
-{previous_input}
-<END_WORKFLOW_REQUEST>
+{sanitized_input}
 
 Previous invalid response:
-<BEGIN_INVALID_RESPONSE>
-{previous_output}
-<END_INVALID_RESPONSE>"#
-    )
+{sanitized_output}"#
+    );
+    maybe_prepend_safety_preamble(&prompt)
 }
 
 pub fn should_retry_workflow_protocol_parse_failure(raw_output: &str) -> bool {

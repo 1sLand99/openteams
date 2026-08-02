@@ -83,6 +83,7 @@ use crate::services::{
 
 include!("dependencies.rs");
 include!("types.rs");
+include!("prompt_safety.rs");
 include!("protocol.rs");
 include!("prompts.rs");
 include!("projection.rs");

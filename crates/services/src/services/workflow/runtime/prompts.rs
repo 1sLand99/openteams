@@ -552,8 +552,7 @@ The output source of truth is React Flow compatible workflow JSON. Do not output
         .filter(|reason| !reason.is_empty())
     {
         prompt.push_str("Previous generation failed. Regenerate the workflow plan.\n");
-        prompt.push_str("Error details:\n");
-        prompt.push_str(reason);
+        prompt.push_str(&sanitize_dynamic_content("previous_failure_reason", reason));
         prompt.push_str(
             "\n\nFix the error above in this regeneration request. Do not repeat the same failure.\n\n",
         );
@@ -561,15 +560,18 @@ The output source of truth is React Flow compatible workflow JSON. Do not output
     prompt.push_str("Response language requirement:\n");
     prompt.push_str(response_language_instruction.trim());
     prompt.push_str("\n\nPlan goal brief:\n");
-    prompt.push_str(plan_goal.trim());
+    prompt.push_str(&sanitize_dynamic_content("plan_goal", plan_goal.trim()));
     if let Some(previous_plan) = previous_plan_json
         .map(str::trim)
         .filter(|previous_plan| !previous_plan.is_empty())
     {
-        prompt.push_str("\n\nExisting workflow plan JSON:\n```json\n");
-        prompt.push_str(previous_plan);
+        prompt.push_str(&budget_and_sanitize(
+            "previous_plan_json",
+            previous_plan,
+            MAX_DYNAMIC_CONTENT_BUDGET_BYTES,
+        ));
         prompt.push_str(
-            "\n```\nUse this existing plan as the baseline. Apply the requested changes from the plan goal brief, preserve correct unchanged work, and return the complete revised workflow plan JSON.",
+            "\nUse this existing plan as the baseline. Apply the requested changes from the plan goal brief, preserve correct unchanged work, and return the complete revised workflow plan JSON.",
         );
     }
     prompt.push_str("\n\n");
@@ -586,40 +588,9 @@ The output source of truth is React Flow compatible workflow JSON. Do not output
         );
     }
     prompt.push_str("\n\nFinal instruction: return the workflow plan JSON object only.");
+    prompt = maybe_prepend_safety_preamble(&prompt);
     prompt
 }
-
-/// Core PUA (Performance Improvement Plan) skill content, embedded for forced activation
-/// during high-retry revision attempts (retry_count > 2).
-static PUA_SKILL_CORE: &str = r#"### PUA Skill — Three Non-Negotiables
-
-**Non-Negotiable One: Exhaust all options.** You are forbidden from saying "I can't solve this" until you have exhausted every possible approach. This is **Bias for Action**.
-
-**Non-Negotiable Two: Act before asking.** You have search, file reading, and command execution tools. Before asking the user anything, you must investigate on your own first. If, after investigating, you genuinely lack information only the user can provide, you may ask — but you must attach evidence you've already gathered. This is **Dive Deep**.
-
-**Non-Negotiable Three: Take the initiative.** Don't just do "barely enough." Found a bug? Check for similar bugs. Fixed a config? Verify related configs are consistent. This is **Ownership** — leaders never say "that's not my job."
-
-### Mandatory Actions
-
-- Stop current approach and switch to a **fundamentally different** solution if the same approach has failed before.
-- Read failure signals word by word — error messages, rejection reasons, review feedback. 90% of the answers are right there.
-- Proactively search for relevant code, docs, and examples before implementing. Don't rely on memory.
-- Verify all underlying assumptions with tools, not memory. Every condition you assumed true — confirm it.
-- Invert your assumptions: if you've been assuming "the problem is in A," now assume "the problem is NOT in A."
-- Self-verify: build it, test it, run it. "Done" without evidence is not done.
-
-### Pressure Escalation
-
-Your peers are shipping while you're spinning. The calibration committee sees everything. This is your Performance Improvement Plan — an opportunity, not a termination. But if we don't see sustained, measurable improvement, we'll need to have a different conversation.
-
-### Anti-Rationalization
-
-- "I can't solve this" → Exhaust every option first. Your peers handle this routinely.
-- "I suggest the user handle this manually" → That's deflection. This is your problem to solve.
-- "I've already tried everything" → Did you search? Read the source? Where's your methodology?
-- Repeatedly tweaking the same code → You're spinning your wheels. Switch to a fundamentally different approach.
-- Claims "done" without verification → Show me the evidence. Build, test, run, paste the output.
-"#;
 
 static STEP_EXECUTION_PROMPT_PREFIX: &str = r#"## Output Format
 
@@ -744,14 +715,9 @@ pub fn build_step_execution_prompt(
     _step_transcript_context: Option<&str>,
 ) -> String {
     let dependency_text = if completed_dependency_summaries.is_empty() {
-        "无".to_string()
+        "None".to_string()
     } else {
         completed_dependency_summaries.join("\n\n")
-    };
-    let dependency_text = if completed_dependency_summaries.is_empty() {
-        "无".to_string()
-    } else {
-        dependency_text
     };
 
     let mut prompt = String::with_capacity(4096);
@@ -764,9 +730,6 @@ pub fn build_step_execution_prompt(
         prompt.push_str("You are reviewing the results of the current workflow execution.\n\n");
     }
 
-    // if step.step_type == WorkflowStepType::Task {
-    //     prompt.push_str(STEP_EXECUTION_TDD_WORKFLOW_FOR_TASK_TYPE);
-    // } else
     if step.step_type == WorkflowStepType::Review {
         prompt.push_str(STEP_EXECUTION_TDD_WORKFLOW_FOR_REVIEW_TYPE);
         prompt.push_str(
@@ -786,19 +749,11 @@ pub fn build_step_execution_prompt(
 
 Step: {step_title}
 Type: {step_type}
-
-<Instructions>
-{step_instructions}
-</Instructions>
-
+{step_instructions_sanitized}
 ## Context
 
-Workflow goal: {workflow_goal}
-
-<PredecessorSummaries>
-{dependency_text}
-</PredecessorSummaries>
-
+{workflow_goal_sanitized}
+{dependency_text_sanitized}
 ## Report
 
 Return one JSON object. Fill `step_key` with `{step_key}`, `execution_id` with `{execution_id}`.
@@ -807,12 +762,13 @@ Report must include: what tests were written first, what was implemented, test r
 "#,
         step_key = step.step_key,
         execution_id = execution.id,
-        step_type = format!("{:?}", step.step_type).to_lowercase(),
+        step_type = to_workflow_wire_value(&step.step_type),
         step_title = step.title,
-        step_instructions = step.instructions,
-        workflow_goal = workflow_goal,
-        dependency_text = dependency_text,
+        step_instructions_sanitized = sanitize_dynamic_content("step_instructions", &step.instructions),
+        workflow_goal_sanitized = sanitize_dynamic_content("workflow_goal", workflow_goal),
+        dependency_text_sanitized = sanitize_dynamic_content("predecessor_summaries", &dependency_text),
     ));
+    prompt = maybe_prepend_safety_preamble(&prompt);
     prompt
 }
 
@@ -956,28 +912,25 @@ pub fn build_lead_review_prompt(
         r#"## Step Under Review
 
 - Title: {step_title}
-- Instructions: {step_instructions}
+{step_instructions_sanitized}
 - Acceptance criteria:
 {acceptance_text}
 
 ## Worker's Report
 
 - Summary: {step_summary}
-- Content: {step_content}
+{step_content_sanitized}
 - Output files:
 {step_outputs}
 
 ## Context
 
-Workflow goal: {workflow_goal}
-
+{workflow_goal_sanitized}
 Review attempt: {review_attempt} of at most {max_review_attempts}.
 
 This workflow permits no more than {max_review_attempts} review attempts. Perform the complete review now. If rejecting, report every issue you can identify in this single response, with concrete evidence and revision guidance. Do not hold back, defer, or drip-feed issues into later review attempts.
 
-Predecessor summaries:
-{dependency_text}
-
+{dependency_text_sanitized}
 ## Report
 
 Return one JSON object. Fill `step_key` with `{step_key}`, `execution_id` with `{execution_id}`.
@@ -985,16 +938,17 @@ Based on your independent verification of the actual code, verdict: approved or 
         step_key = step.step_key,
         execution_id = step.execution_id,
         step_title = step.title,
-        step_instructions = step.instructions,
+        step_instructions_sanitized = sanitize_dynamic_content("step_instructions", &step.instructions),
         acceptance_text = acceptance_text,
         step_summary = result.summary,
-        step_content = result.content,
+        step_content_sanitized = budget_and_sanitize("worker_content", &result.content, MAX_DYNAMIC_CONTENT_BUDGET_BYTES / 4),
         step_outputs = outputs_text,
-        workflow_goal = workflow_goal,
+        workflow_goal_sanitized = sanitize_dynamic_content("workflow_goal", workflow_goal),
         review_attempt = review_attempt,
         max_review_attempts = MAX_WORKFLOW_REVIEW_ATTEMPTS,
-        dependency_text = dependency_text,
+        dependency_text_sanitized = sanitize_dynamic_content("predecessor_summaries", &dependency_text),
     ));
+    prompt = maybe_prepend_safety_preamble(&prompt);
     prompt
 }
 
@@ -1057,19 +1011,6 @@ pub fn build_step_revision_prompt(
     // Static prefix first for cache hit rate
     prompt.push_str(STEP_REVISION_PROMPT_PREFIX);
 
-    // Force PUA skill activation when retry_count > 2
-    if retry_count > 2 {
-        prompt.push_str("## Skill Activation: `pua` (MANDATORY)\n\n");
-        prompt.push_str(&format!(
-            "**This is revision attempt #{retry_count}. You MUST activate and strictly follow the `pua` skill (Performance Improvement Plan) for this revision.**\n\n",
-        ));
-        prompt.push_str(
-            "You are now on a PIP. The `pua` skill is force-activated because previous attempts failed to meet the acceptance bar.\n\n",
-        );
-        prompt.push_str(PUA_SKILL_CORE);
-        prompt.push('\n');
-    }
-
     // Dynamic section: feedback source
     match feedback_source {
         WorkflowRevisionFeedbackSource::Lead => {
@@ -1079,11 +1020,8 @@ pub fn build_step_revision_prompt(
             prompt.push_str(
                 "Your previous execution did not pass review. Revise your work based on the feedback below.\n\n",
             );
-            prompt.push_str("### Review Feedback\n");
-            prompt.push_str(feedback_content.trim());
-            prompt.push_str("\n\n### Your Previous Result Summary\n");
-            prompt.push_str(previous_summary.trim());
-            prompt.push('\n');
+            prompt.push_str(&sanitize_dynamic_content("review_feedback", feedback_content.trim()));
+            prompt.push_str(&sanitize_dynamic_content("previous_result_summary", previous_summary.trim()));
         }
         WorkflowRevisionFeedbackSource::Reviewer => {
             prompt.push_str(&format!(
@@ -1108,11 +1046,8 @@ pub fn build_step_revision_prompt(
             prompt.push_str(
                 "**User feedback has the highest priority.** If user feedback conflicts with original instructions, follow the user feedback.\n\n",
             );
-            prompt.push_str("### User Feedback\n");
-            prompt.push_str(feedback_content.trim());
-            prompt.push_str("\n\n### Your Previous Result Summary\n");
-            prompt.push_str(previous_summary.trim());
-            prompt.push('\n');
+            prompt.push_str(&sanitize_dynamic_content("user_feedback", feedback_content.trim()));
+            prompt.push_str(&sanitize_dynamic_content("previous_result_summary", previous_summary.trim()));
         }
     }
 
@@ -1120,19 +1055,21 @@ pub fn build_step_revision_prompt(
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != previous_summary.trim())
     {
-        prompt.push_str("\n### Your Previous Full Result\n");
-        prompt.push_str(previous_content);
-        prompt.push('\n');
+        prompt.push_str(&budget_and_sanitize(
+            "previous_full_result",
+            previous_content,
+            MAX_DYNAMIC_CONTENT_BUDGET_BYTES / 2,
+        ));
     }
 
     // Original task context
     prompt.push_str("\n### Original Task Instructions\n");
     prompt.push_str("- Title: ");
     prompt.push_str(&step.title);
-    prompt.push_str("\n- Instructions: ");
-    prompt.push_str(&step.instructions);
+    prompt.push_str(&sanitize_dynamic_content("step_instructions", &step.instructions));
     prompt.push('\n');
 
+    prompt = maybe_prepend_safety_preamble(&prompt);
     prompt
 }
 

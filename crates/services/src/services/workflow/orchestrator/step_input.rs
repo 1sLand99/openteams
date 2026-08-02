@@ -16,8 +16,9 @@ use super::{
         chat_runner::ChatRunner,
         workflow_analytics,
         workflow_runtime::{
-            SummaryPayload, WorkflowRuntimeError, parse_summary_payload,
-            workflow_step_protocol_json_schema_for_step,
+            MAX_DYNAMIC_CONTENT_BUDGET_BYTES, SummaryPayload, WorkflowRuntimeError,
+            budget_and_sanitize, maybe_prepend_safety_preamble, parse_summary_payload,
+            sanitize_dynamic_content, workflow_step_protocol_json_schema_for_step,
         },
     },
     OrchestratorError, ResolvedTranscriptAction, WorkflowOrchestrator, load_agents_for_session,
@@ -627,15 +628,13 @@ impl WorkflowOrchestrator {
             true,
             &step.step_type,
         );
-        format!(
+        let prompt = format!(
             r#"{opening}
 
 Previous agent message:
 {previous_message_content}
-
 Latest user input:
 {input_text}
-
 Continue from the same session context and reply with exactly one workflow protocol JSON object.
 {resume_rule}
 
@@ -644,8 +643,7 @@ Workflow step context:
 - execution_id: {execution_id}
 - step_type: {step_type}
 - step_title: {step_title}
-- step_instructions: {step_instructions}
-
+{step_instructions_sanitized}
 Workflow step protocol JSON schema:
 {{
   "type": "final_result | error | approval_request | permission_request | continue_confirmation | input_request",
@@ -679,14 +677,20 @@ Rules:
 "#,
             opening = opening,
             step_title = step.title,
-            previous_message_content = previous_message_content.trim(),
-            input_text = input_text,
+            previous_message_content = budget_and_sanitize(
+                "previous_agent_message",
+                previous_message_content.trim(),
+                MAX_DYNAMIC_CONTENT_BUDGET_BYTES / 2
+            ),
+            input_text = sanitize_dynamic_content("user_input", input_text),
             resume_rule = resume_rule,
             step_key = step.step_key,
             execution_id = step.execution_id,
-            step_type = format!("{:?}", step.step_type).to_lowercase(),
-            step_instructions = step.instructions,
+            step_type = to_workflow_wire_value(&step.step_type),
+            step_instructions_sanitized =
+                sanitize_dynamic_content("step_instructions", &step.instructions),
             json_schema = json_schema,
-        )
+        );
+        maybe_prepend_safety_preamble(&prompt)
     }
 }

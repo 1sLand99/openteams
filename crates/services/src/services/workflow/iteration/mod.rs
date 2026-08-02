@@ -21,6 +21,7 @@ use db::{
         workflow_types::{
             WorkflowAgentSessionRole, WorkflowEventType, WorkflowPlanJson, WorkflowRevisionEditor,
             WorkflowRoundStatus, WorkflowStepStatus, WorkflowStepType, WorkflowValidationStatus,
+            to_workflow_wire_value,
         },
     },
 };

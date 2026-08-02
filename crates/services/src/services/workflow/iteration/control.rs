@@ -548,7 +548,7 @@ async fn emit_iteration_event(
             agent_session_id: None,
             event_type,
             status_before: None,
-            status_after: Some(format!("{:?}", execution.status).to_lowercase()),
+            status_after: Some(to_workflow_wire_value(&execution.status)),
             detail_json: Some(detail_json.to_string()),
         },
         Uuid::new_v4(),
