@@ -26,6 +26,16 @@ pub fn build_iteration_plan_prompt(
     let feedback_text = format_iteration_feedback(user_feedback_json);
     let previous_plan_json = serde_json::to_string_pretty(previous_plan)
         .unwrap_or_else(|_| "{}".to_string());
+    let available_agents_json =
+        serde_json::to_string_pretty(available_agents).unwrap_or_else(|_| "[]".to_string());
+    let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+        .add("original_goal", original_goal.trim(), 2)
+        .add("current_state_summary", current_state_summary.trim(), 1)
+        .add("user_feedback", &feedback_text, 2)
+        .add("iteration_history", &history_text, 1)
+        .add("available_agents_json", &available_agents_json, 1)
+        .add("previous_plan_json", &previous_plan_json, 3)
+        .build();
 
     let next_round = iteration_round + 1;
 
@@ -50,23 +60,25 @@ The output source of truth is React Flow compatible workflow JSON. Do not output
     prompt.push_str("Response language requirement:\n");
     prompt.push_str(response_language_instruction.trim());
     prompt.push_str("\n\nPlan goal brief:\n");
-    prompt.push_str(original_goal.trim());
-    prompt.push_str("\n\n");
-    push_plan_agent_context(&mut prompt, lead_agent_id, available_agents);
+    prompt.push_str(data.get("original_goal"));
+    prompt.push_str("\n\nLead agent id:\n");
+    prompt.push_str(lead_agent_id);
+    prompt.push_str("\n\nAvailable agents JSON:\n");
+    prompt.push_str(data.get("available_agents_json"));
 
     prompt.push_str("\n\n## Iteration Context\n\n");
     prompt.push_str(&format!(
         "Iteration request: user rejected the previous round and requested a revised plan for round {next_round}. Preserve correct work; change only what the feedback requires.\n"
     ));
     prompt.push_str("\n### Previous Round State\n");
-    prompt.push_str(current_state_summary.trim());
+    prompt.push_str(data.get("current_state_summary"));
     prompt.push_str("\n\n### User Feedback (reason for rejection)\n");
-    prompt.push_str(&feedback_text);
+    prompt.push_str(data.get("user_feedback"));
     prompt.push_str("\n\n### Iteration History\n");
-    prompt.push_str(&history_text);
+    prompt.push_str(data.get("iteration_history"));
 
     prompt.push_str("\n\n### Previous Round Workflow Plan JSON\n```json\n");
-    prompt.push_str(&previous_plan_json);
+    prompt.push_str(data.get("previous_plan_json"));
     prompt.push_str(
         r#"
 ```
@@ -81,6 +93,7 @@ This is the complete plan JSON that produced the rejected round. Use it as the b
     );
 
     prompt.push_str("\nFinal instruction: return the workflow plan JSON object only.");
+    prompt = maybe_prepend_safety_preamble(&prompt);
     prompt
 }
 

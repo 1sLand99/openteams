@@ -6,9 +6,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::workflow_runtime::{
-    MAX_DYNAMIC_CONTENT_BUDGET_BYTES, WorkflowRuntimeError,
-    budget_and_sanitize, extract_json_payload, maybe_prepend_safety_preamble,
-    sanitize_dynamic_content,
+    MAX_DYNAMIC_CONTENT_BUDGET_BYTES, PromptDataBuilder,
+    WorkflowRuntimeError, extract_json_payload, maybe_prepend_safety_preamble,
 };
 
 #[derive(Debug, Clone)]
@@ -84,19 +83,46 @@ pub fn build_loop_review_prompt(
         .map(|step| step.title.clone())
         .collect::<Vec<_>>()
         .join(", ");
-    let step_sections = review_steps
+    let scope_edges = if review_context.review_scope_edges.is_empty() {
+        "No edges inside the review scope.".to_string()
+    } else {
+        review_context.review_scope_edges.join("\n")
+    };
+
+    let mut budget_items = vec![
+        ("workflow_goal".to_string(), workflow_goal.to_string(), 2),
+        (
+            "review_scope_step_titles".to_string(),
+            review_scope_step_titles.clone(),
+            1,
+        ),
+        (
+            "reviewer_name".to_string(),
+            review_context.reviewer_name.clone(),
+            1,
+        ),
+        (
+            "reviewer_role".to_string(),
+            review_context.reviewer_role.clone(),
+            1,
+        ),
+        (
+            "review_step_instructions".to_string(),
+            review_context.review_step_instructions.clone(),
+            2,
+        ),
+        ("review_scope_edges".to_string(), scope_edges.clone(), 1),
+    ];
+
+    let prepared_steps: Vec<_> = review_steps
         .iter()
         .enumerate()
         .map(|(index, step)| {
+            let lbl = format!("s{index}");
             let acceptance = if step.acceptance.is_empty() {
                 "None".to_string()
             } else {
                 step.acceptance.join("; ")
-            };
-            let outputs = if step.outputs.is_empty() {
-                "None".to_string()
-            } else {
-                step.outputs.join(", ")
             };
             let expected_outputs = if step.expected_outputs.is_empty() {
                 "None declared".to_string()
@@ -113,36 +139,63 @@ pub fn build_loop_review_prompt(
             } else {
                 step.successor_contracts.join("; ")
             };
-            let user_skip_waiver = step
-                .user_skip_waiver
-                .as_deref()
-                .map(|waiver| {
-                    format!(
-                        "\n- User-approved skip waiver: {}\n- Review constraint: Do not reject this loop solely because of the waived skipped work.",
-                        waiver
-                    )
-                })
-                .unwrap_or_default();
-            let sanitized_instructions = sanitize_dynamic_content("step_instructions", &step.instructions);
-            let sanitized_content = budget_and_sanitize(
-                "step_content",
-                &step.content,
-                MAX_DYNAMIC_CONTENT_BUDGET_BYTES / review_steps.len().max(1),
-            );
+            let outputs = if step.outputs.is_empty() {
+                "None".to_string()
+            } else {
+                step.outputs.join(", ")
+            };
+            let fields = [
+                ("title", step.title.clone(), 1),
+                ("instructions", step.instructions.clone(), 2),
+                ("acceptance", acceptance, 1),
+                ("expected_outputs", expected_outputs, 1),
+                ("predecessor_handoffs", predecessor_handoffs, 1),
+                ("successor_contracts", successor_contracts, 1),
+                ("summary", step.summary.clone(), 1),
+                ("content", step.content.clone(), 2),
+                ("outputs", outputs, 1),
+            ];
+            for (field, content, weight) in fields {
+                budget_items.push((format!("step_{lbl}_{field}"), content, weight));
+            }
+            if let Some(waiver) = step.user_skip_waiver.as_deref() {
+                budget_items.push((format!("step_{lbl}_skip_waiver"), waiver.to_string(), 1));
+            }
+            (index, step, lbl)
+        })
+        .collect();
+
+    let mut builder = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES);
+    for (label, content, weight) in budget_items {
+        builder = builder.add(label, content, weight);
+    }
+    let data = builder.build();
+
+    let step_sections = prepared_steps
+        .iter()
+        .map(|(index, step, lbl)| {
+            let waiver = data.get(&format!("step_{lbl}_skip_waiver"));
+            let waiver_section = if waiver.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n- User-approved skip waiver: {waiver}\n- Review constraint: Do not reject this loop solely because of the waived skipped work."
+                )
+            };
             format!(
                 "#### [{}] {} (`{}`)\n- Instructions: {}\n- Acceptance criteria: {}\n- Expected output contract: {}\n- Predecessor handoffs: {}\n- Successor contracts: {}\n- Execution summary: {}\n- Detailed content: {}\n- Actual outputs: {}{}",
                 index + 1,
-                step.title,
+                data.get(&format!("step_{lbl}_title")),
                 step.step_key,
-                sanitized_instructions,
-                acceptance,
-                expected_outputs,
-                predecessor_handoffs,
-                successor_contracts,
-                step.summary,
-                sanitized_content,
-                outputs,
-                user_skip_waiver,
+                data.get(&format!("step_{lbl}_instructions")),
+                data.get(&format!("step_{lbl}_acceptance")),
+                data.get(&format!("step_{lbl}_expected_outputs")),
+                data.get(&format!("step_{lbl}_predecessor_handoffs")),
+                data.get(&format!("step_{lbl}_successor_contracts")),
+                data.get(&format!("step_{lbl}_summary")),
+                data.get(&format!("step_{lbl}_content")),
+                data.get(&format!("step_{lbl}_outputs")),
+                waiver_section,
             )
         })
         .collect::<Vec<_>>()
@@ -165,19 +218,13 @@ pub fn build_loop_review_prompt(
         .collect::<Vec<_>>();
     let json_schema =
         loop_review_protocol_json_schema(execution_id, &loop_def.loop_key, &allowed_step_keys);
-    let scope_edges = if review_context.review_scope_edges.is_empty() {
-        "No edges inside the review scope.".to_string()
-    } else {
-        review_context.review_scope_edges.join("\n")
-    };
-
     let mut prompt = format!(
         r#"## Loop Review Task
 
 You are {reviewer_name}, the {reviewer_role} assigned to this workflow's Review node. Review all execution results in the following loop or stage as one coherent unit. Do not represent yourself as the Lead unless your assigned role is Lead.
 
 ### Workflow Goal
-{workflow_goal_sanitized}
+{goal}
 
 ### Loop Information
 - Loop key: {loop_key}
@@ -239,19 +286,19 @@ If the entire loop needs rework, omit step_feedbacks or return an empty array.
 {rejected_feedback_template}
   ]
 }}"#,
-        workflow_goal_sanitized = sanitize_dynamic_content("workflow_goal", workflow_goal),
+        goal = data.get("workflow_goal"),
         loop_key = loop_def.loop_key,
         execution_id = execution_id,
         review_attempt = review_attempt,
         max_review_attempts = max_review_attempts,
-        review_scope_step_titles = review_scope_step_titles,
-        reviewer_name = review_context.reviewer_name,
-        reviewer_role = review_context.reviewer_role,
-        review_step_instructions = review_context.review_step_instructions,
+        review_scope_step_titles = data.get("review_scope_step_titles"),
+        reviewer_name = data.get("reviewer_name"),
+        reviewer_role = data.get("reviewer_role"),
+        review_step_instructions = data.get("review_step_instructions"),
         current_round = review_context.current_round,
         loop_retry_count = review_context.loop_retry_count,
         retry_budget = review_context.retry_budget,
-        scope_edges = scope_edges,
+        scope_edges = data.get("review_scope_edges"),
         step_sections = step_sections,
         rejected_feedback_template = rejected_feedback_template,
         response_language_instruction = response_language_instruction.trim(),
@@ -371,6 +418,21 @@ pub fn build_loop_rejection_prompt(input: LoopRejectionPromptInput<'_>) -> Strin
         input.your_previous_outputs.join(", ")
     };
 
+    let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+        .add("workflow_goal", input.workflow_goal, 2)
+        .add("loop_state_summary", input.loop_current_state_summary, 1)
+        .add("loop_rejection_reason", input.loop_rejection_reason, 2)
+        .add("step_specific_feedback", input.step_specific_feedback, 2)
+        .add("other_steps_feedback", &other_steps_feedback_summary, 1)
+        .add("your_previous_summary", input.your_previous_summary, 1)
+        .add("previous_outputs", &previous_outputs, 1)
+        .add("acceptance", &acceptance, 1)
+        .add("expected_outputs", &expected_outputs, 1)
+        .add("step_title", &input.step.title, 1)
+        .add("step_instructions", &input.step.instructions, 2)
+        .add("external_dependencies", &external_dependency_text, 1)
+        .build();
+
     let prompt = format!(
         r#"## Loop Rework Request (loop retry {loop_retry_count})
 
@@ -383,11 +445,11 @@ The overall loop review did not pass. Re-run your task according to the feedback
 Retry {loop_retry_count} of {loop_retry_budget}. {loop_current_state_summary}
 
 ### Loop Review Decision
-{loop_rejection_reason}
+{rejection_reason}
 ### Revision Feedback for Your Step
-{step_specific_feedback}
+{step_feedback}
 ### Other Steps' Revision Direction (for reference)
-{other_steps_feedback_summary}
+{other_feedback}
 ### Your Previous Execution Result
 Summary: {your_previous_summary}
 Outputs: {previous_outputs}
@@ -409,34 +471,23 @@ Outputs: {previous_outputs}
 
 ### Original Task Instructions
 Step title: {step_title}
-{step_instructions_sanitized}
+{step_instructions}
 ### Completed Upstream Step Summaries (outside the loop)
-{external_dependency_text_sanitized}"#,
+{ext_deps}"#,
         loop_retry_count = input.loop_retry_count,
         loop_retry_budget = input.loop_retry_budget,
-        loop_current_state_summary = sanitize_dynamic_content(
-            "loop_state_summary",
-            input.loop_current_state_summary,
-        ),
-        workflow_goal = sanitize_dynamic_content("workflow_goal", input.workflow_goal),
-        loop_rejection_reason =
-            sanitize_dynamic_content("loop_rejection_reason", input.loop_rejection_reason),
-        step_specific_feedback =
-            sanitize_dynamic_content("step_specific_feedback", input.step_specific_feedback),
-        other_steps_feedback_summary =
-            sanitize_dynamic_content("other_steps_feedback", &other_steps_feedback_summary),
-        your_previous_summary = sanitize_dynamic_content(
-            "previous_summary",
-            input.your_previous_summary,
-        ),
-        previous_outputs = sanitize_dynamic_content("previous_outputs", &previous_outputs),
-        acceptance = sanitize_dynamic_content("acceptance", &acceptance),
-        expected_outputs = sanitize_dynamic_content("expected_outputs", &expected_outputs),
-        step_title = input.step.title,
-        step_instructions_sanitized =
-            sanitize_dynamic_content("step_instructions", &input.step.instructions),
-        external_dependency_text_sanitized =
-            sanitize_dynamic_content("external_dependencies", &external_dependency_text),
+        loop_current_state_summary = data.get("loop_state_summary"),
+        workflow_goal = data.get("workflow_goal"),
+        rejection_reason = data.get("loop_rejection_reason"),
+        step_feedback = data.get("step_specific_feedback"),
+        other_feedback = data.get("other_steps_feedback"),
+        your_previous_summary = data.get("your_previous_summary"),
+        previous_outputs = data.get("previous_outputs"),
+        acceptance = data.get("acceptance"),
+        expected_outputs = data.get("expected_outputs"),
+        step_title = data.get("step_title"),
+        step_instructions = data.get("step_instructions"),
+        ext_deps = data.get("external_dependencies"),
         response_language_instruction = input.response_language_instruction.trim(),
     );
     maybe_prepend_safety_preamble(&prompt)
@@ -470,6 +521,17 @@ pub fn build_loop_user_rejection_prompt(
     } else {
         expected_outputs.join(", ")
     };
+    let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+        .add("workflow_goal", workflow_goal, 2)
+        .add("user_feedback", user_feedback, 2)
+        .add("loop_state_summary", loop_current_state_summary, 1)
+        .add("your_previous_summary", your_previous_summary, 1)
+        .add("previous_outputs", &previous_outputs, 1)
+        .add("acceptance", &acceptance, 1)
+        .add("expected_outputs", &expected_outputs, 1)
+        .add("step_title", &step.title, 1)
+        .add("step_instructions", &step.instructions, 2)
+        .build();
     let prompt = format!(
         r#"## User Loop Rework Request (loop retry {loop_retry_count})
 
@@ -484,7 +546,7 @@ Current retry {loop_retry_count} of {loop_retry_budget}
 ### User Feedback
 {user_feedback}
 ### Current Loop State Summary
-{loop_current_state_summary}
+{loop_state}
 ### Your Previous Execution Result
 Summary: {your_previous_summary}
 Outputs: {previous_outputs}
@@ -501,20 +563,18 @@ Outputs: {previous_outputs}
 
 ### Original Task Instructions
 Step title: {step_title}
-{step_instructions_sanitized}"#,
+{step_instructions}"#,
         loop_retry_count = loop_retry_count,
         loop_retry_budget = loop_retry_budget,
-        workflow_goal = sanitize_dynamic_content("workflow_goal", workflow_goal),
-        user_feedback = sanitize_dynamic_content("user_feedback", user_feedback),
-        loop_current_state_summary =
-            sanitize_dynamic_content("loop_state_summary", loop_current_state_summary),
-        your_previous_summary = sanitize_dynamic_content("previous_summary", your_previous_summary),
-        previous_outputs = sanitize_dynamic_content("previous_outputs", &previous_outputs),
-        acceptance = sanitize_dynamic_content("acceptance", &acceptance),
-        expected_outputs = sanitize_dynamic_content("expected_outputs", &expected_outputs),
-        step_title = step.title,
-        step_instructions_sanitized =
-            sanitize_dynamic_content("step_instructions", &step.instructions),
+        workflow_goal = data.get("workflow_goal"),
+        user_feedback = data.get("user_feedback"),
+        loop_state = data.get("loop_state_summary"),
+        your_previous_summary = data.get("your_previous_summary"),
+        previous_outputs = data.get("previous_outputs"),
+        acceptance = data.get("acceptance"),
+        expected_outputs = data.get("expected_outputs"),
+        step_title = data.get("step_title"),
+        step_instructions = data.get("step_instructions"),
         response_language_instruction = response_language_instruction.trim(),
     );
     maybe_prepend_safety_preamble(&prompt)

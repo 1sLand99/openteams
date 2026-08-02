@@ -547,12 +547,22 @@ The output source of truth is React Flow compatible workflow JSON. Do not output
     prompt.push_str(PLAN_SKILLS_GUIDANCE);
     prompt.push_str("## Dynamic Inputs\n\n");
 
-    if let Some(reason) = previous_failure_reason
+    let prev_failure = previous_failure_reason
         .map(str::trim)
-        .filter(|reason| !reason.is_empty())
-    {
+        .filter(|r| !r.is_empty());
+    let prev_plan = previous_plan_json
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+
+    let mut builder = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+        .add("plan_goal", plan_goal.trim(), 2);
+    builder = builder.add_optional("previous_failure_reason", prev_failure, 1);
+    builder = builder.add_optional("previous_plan_json", prev_plan, 3);
+    let data = builder.build();
+
+    if !data.get("previous_failure_reason").is_empty() {
         prompt.push_str("Previous generation failed. Regenerate the workflow plan.\n");
-        prompt.push_str(&sanitize_dynamic_content("previous_failure_reason", reason));
+        prompt.push_str(data.get("previous_failure_reason"));
         prompt.push_str(
             "\n\nFix the error above in this regeneration request. Do not repeat the same failure.\n\n",
         );
@@ -560,16 +570,9 @@ The output source of truth is React Flow compatible workflow JSON. Do not output
     prompt.push_str("Response language requirement:\n");
     prompt.push_str(response_language_instruction.trim());
     prompt.push_str("\n\nPlan goal brief:\n");
-    prompt.push_str(&sanitize_dynamic_content("plan_goal", plan_goal.trim()));
-    if let Some(previous_plan) = previous_plan_json
-        .map(str::trim)
-        .filter(|previous_plan| !previous_plan.is_empty())
-    {
-        prompt.push_str(&budget_and_sanitize(
-            "previous_plan_json",
-            previous_plan,
-            MAX_DYNAMIC_CONTENT_BUDGET_BYTES,
-        ));
+    prompt.push_str(data.get("plan_goal"));
+    if !data.get("previous_plan_json").is_empty() {
+        prompt.push_str(data.get("previous_plan_json"));
         prompt.push_str(
             "\nUse this existing plan as the baseline. Apply the requested changes from the plan goal brief, preserve correct unchanged work, and return the complete revised workflow plan JSON.",
         );
@@ -638,7 +641,7 @@ Return exactly one JSON object — no Markdown, no comments, no prose outside th
 9. Always include test files in `outputs` alongside implementation files.
 
 ## Language Requirement
-You MUST respond in the same language as the Instructions field above. 
+You MUST respond in the same language as the Instructions field below.
 The `summary`, `content`, and `message` fields in your JSON output must use the same language as the step instructions.
 
 "#;
@@ -720,6 +723,12 @@ pub fn build_step_execution_prompt(
         completed_dependency_summaries.join("\n\n")
     };
 
+    let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+        .add("step_instructions", &step.instructions, 2)
+        .add("workflow_goal", workflow_goal, 1)
+        .add("predecessor_summaries", &dependency_text, 1)
+        .build();
+
     let mut prompt = String::with_capacity(4096);
     if step.step_type == WorkflowStepType::Task {
         prompt.push_str("You are implementing a task in an workflow step.\n\n");
@@ -749,11 +758,11 @@ pub fn build_step_execution_prompt(
 
 Step: {step_title}
 Type: {step_type}
-{step_instructions_sanitized}
+{instructions}
 ## Context
 
-{workflow_goal_sanitized}
-{dependency_text_sanitized}
+{goal}
+{deps}
 ## Report
 
 Return one JSON object. Fill `step_key` with `{step_key}`, `execution_id` with `{execution_id}`.
@@ -764,9 +773,9 @@ Report must include: what tests were written first, what was implemented, test r
         execution_id = execution.id,
         step_type = to_workflow_wire_value(&step.step_type),
         step_title = step.title,
-        step_instructions_sanitized = sanitize_dynamic_content("step_instructions", &step.instructions),
-        workflow_goal_sanitized = sanitize_dynamic_content("workflow_goal", workflow_goal),
-        dependency_text_sanitized = sanitize_dynamic_content("predecessor_summaries", &dependency_text),
+        instructions = data.get("step_instructions"),
+        goal = data.get("workflow_goal"),
+        deps = data.get("predecessor_summaries"),
     ));
     prompt = maybe_prepend_safety_preamble(&prompt);
     prompt
@@ -863,7 +872,7 @@ Rejected:
 ```
 
 ## Language Requirement
-You MUST respond in the same language as the step Instructions above. 
+You MUST respond in the same language as the step Instructions below.
 The `feedback` field in your JSON output must use the same language as the step instructions.
 "#;
 
@@ -906,31 +915,41 @@ pub fn build_lead_review_prompt(
             .join("\n")
     };
 
+    let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+        .add("step_instructions", &step.instructions, 2)
+        .add("workflow_goal", workflow_goal, 1)
+        .add("worker_content", &result.content, 2)
+        .add("worker_summary", &result.summary, 1)
+        .add("predecessor_summaries", &dependency_text, 1)
+        .add("acceptance_criteria", &acceptance_text, 1)
+        .add("worker_outputs", &outputs_text, 1)
+        .build();
+
     let mut prompt = String::with_capacity(4096);
     prompt.push_str(LEAD_REVIEW_PROMPT_PREFIX);
     prompt.push_str(&format!(
         r#"## Step Under Review
 
 - Title: {step_title}
-{step_instructions_sanitized}
+{instructions}
 - Acceptance criteria:
-{acceptance_text}
+{acceptance}
 
 ## Worker's Report
 
-- Summary: {step_summary}
-{step_content_sanitized}
+{summary}
+{content}
 - Output files:
-{step_outputs}
+{outputs}
 
 ## Context
 
-{workflow_goal_sanitized}
+{goal}
 Review attempt: {review_attempt} of at most {max_review_attempts}.
 
 This workflow permits no more than {max_review_attempts} review attempts. Perform the complete review now. If rejecting, report every issue you can identify in this single response, with concrete evidence and revision guidance. Do not hold back, defer, or drip-feed issues into later review attempts.
 
-{dependency_text_sanitized}
+{deps}
 ## Report
 
 Return one JSON object. Fill `step_key` with `{step_key}`, `execution_id` with `{execution_id}`.
@@ -938,15 +957,15 @@ Based on your independent verification of the actual code, verdict: approved or 
         step_key = step.step_key,
         execution_id = step.execution_id,
         step_title = step.title,
-        step_instructions_sanitized = sanitize_dynamic_content("step_instructions", &step.instructions),
-        acceptance_text = acceptance_text,
-        step_summary = result.summary,
-        step_content_sanitized = budget_and_sanitize("worker_content", &result.content, MAX_DYNAMIC_CONTENT_BUDGET_BYTES / 4),
-        step_outputs = outputs_text,
-        workflow_goal_sanitized = sanitize_dynamic_content("workflow_goal", workflow_goal),
+        instructions = data.get("step_instructions"),
+        acceptance = data.get("acceptance_criteria"),
+        summary = data.get("worker_summary"),
+        content = data.get("worker_content"),
+        outputs = data.get("worker_outputs"),
+        goal = data.get("workflow_goal"),
         review_attempt = review_attempt,
         max_review_attempts = MAX_WORKFLOW_REVIEW_ATTEMPTS,
-        dependency_text_sanitized = sanitize_dynamic_content("predecessor_summaries", &dependency_text),
+        deps = data.get("predecessor_summaries"),
     ));
     prompt = maybe_prepend_safety_preamble(&prompt);
     prompt
@@ -1006,6 +1025,22 @@ pub fn build_step_revision_prompt(
     previous_content: Option<&str>,
     retry_count: i32,
 ) -> String {
+    let feedback_label = match feedback_source {
+        WorkflowRevisionFeedbackSource::Lead => "review_feedback",
+        WorkflowRevisionFeedbackSource::User => "user_feedback",
+    };
+
+    let prev_content_trimmed = previous_content
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != previous_summary.trim());
+
+    let mut builder = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+        .add(feedback_label, feedback_content.trim(), 2)
+        .add("previous_result_summary", previous_summary.trim(), 1)
+        .add("step_instructions", &step.instructions, 2);
+    builder = builder.add_optional("previous_full_result", prev_content_trimmed, 2);
+    let data = builder.build();
+
     let mut prompt = String::with_capacity(4096);
 
     // Static prefix first for cache hit rate
@@ -1020,8 +1055,8 @@ pub fn build_step_revision_prompt(
             prompt.push_str(
                 "Your previous execution did not pass review. Revise your work based on the feedback below.\n\n",
             );
-            prompt.push_str(&sanitize_dynamic_content("review_feedback", feedback_content.trim()));
-            prompt.push_str(&sanitize_dynamic_content("previous_result_summary", previous_summary.trim()));
+            prompt.push_str(data.get(feedback_label));
+            prompt.push_str(data.get("previous_result_summary"));
         }
         WorkflowRevisionFeedbackSource::Reviewer => {
             prompt.push_str(&format!(
@@ -1046,27 +1081,21 @@ pub fn build_step_revision_prompt(
             prompt.push_str(
                 "**User feedback has the highest priority.** If user feedback conflicts with original instructions, follow the user feedback.\n\n",
             );
-            prompt.push_str(&sanitize_dynamic_content("user_feedback", feedback_content.trim()));
-            prompt.push_str(&sanitize_dynamic_content("previous_result_summary", previous_summary.trim()));
+            prompt.push_str(data.get(feedback_label));
+            prompt.push_str(data.get("previous_result_summary"));
         }
     }
 
-    if let Some(previous_content) = previous_content
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != previous_summary.trim())
-    {
-        prompt.push_str(&budget_and_sanitize(
-            "previous_full_result",
-            previous_content,
-            MAX_DYNAMIC_CONTENT_BUDGET_BYTES / 2,
-        ));
+    let prev_full = data.get("previous_full_result");
+    if !prev_full.is_empty() {
+        prompt.push_str(prev_full);
     }
 
     // Original task context
     prompt.push_str("\n### Original Task Instructions\n");
     prompt.push_str("- Title: ");
     prompt.push_str(&step.title);
-    prompt.push_str(&sanitize_dynamic_content("step_instructions", &step.instructions));
+    prompt.push_str(data.get("step_instructions"));
     prompt.push('\n');
 
     prompt = maybe_prepend_safety_preamble(&prompt);
