@@ -9,7 +9,7 @@ use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
-use workspace_utils::{msg_store::MsgStore, shell::resolve_executable_path_blocking};
+use workspace_utils::msg_store::MsgStore;
 
 use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
@@ -19,10 +19,13 @@ use super::acp::{
 };
 use crate::{
     approvals::ExecutorApprovalService,
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
+    command::{
+        CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides, command_is_available,
+    },
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        utils::{json_has_nonempty_string, read_json_file},
     },
     mcp_config::{McpConfig, read_canonical_mcp_config},
     model_discovery::{discover_model_map_from_cli_command, read_config_value},
@@ -210,6 +213,30 @@ impl KimiCode {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for KimiCode {
+    fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
+        let env = env.clone().with_profile(&self.cmd);
+        let Some(home) = kimi_code_home(Some(&env)) else {
+            return self.authentication_detected(
+                &env,
+                &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+                false,
+            );
+        };
+        let oauth_login = read_json_file(&home.join("credentials").join("kimi-code.json"))
+            .is_some_and(|value| {
+                json_has_nonempty_string(&value, &["/access_token", "/refresh_token"])
+            });
+        let provider_configured = std::fs::read_to_string(home.join("config.toml"))
+            .ok()
+            .and_then(|content| toml::from_str::<toml::Value>(&content).ok())
+            .is_some_and(|value| kimi_provider_configured(&value));
+        self.authentication_detected(
+            &env,
+            &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+            oauth_login || provider_configured,
+        )
+    }
+
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals = Some(approvals);
     }
@@ -333,18 +360,36 @@ impl StandardCodingAgentExecutor for KimiCode {
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
-        let command = self
-            .cmd
-            .base_command_override
-            .as_deref()
-            .and_then(shlex::split)
-            .and_then(|parts| parts.into_iter().next())
-            .unwrap_or_else(|| Self::BASE_COMMAND.to_string());
-        if resolve_executable_path_blocking(&command).is_some() {
+        if command_is_available(Self::BASE_COMMAND, &self.cmd) {
             AvailabilityInfo::InstallationFound
         } else {
             AvailabilityInfo::NotFound
         }
+    }
+}
+
+fn kimi_provider_configured(value: &toml::Value) -> bool {
+    value
+        .get("providers")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|providers| !providers.is_empty())
+        || value
+            .get("services")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|services| services.values().any(toml_value_has_credential))
+}
+
+fn toml_value_has_credential(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Table(table) => table.iter().any(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "api_key" | "apiKey" | "token" | "access_token"
+            ) && value.as_str().is_some_and(|value| !value.trim().is_empty())
+                || toml_value_has_credential(value)
+        }),
+        toml::Value::Array(values) => values.iter().any(toml_value_has_credential),
+        _ => false,
     }
 }
 
@@ -404,6 +449,31 @@ mod tests {
             acp_mcp_policy: AcpMcpPolicy::default(),
             approvals: None,
         }
+    }
+
+    #[test]
+    fn provider_or_service_credentials_count_as_authentication() {
+        let provider: toml::Value = toml::from_str(
+            r#"
+                [providers.custom]
+                type = "openai"
+                base_url = "http://localhost:11434/v1"
+            "#,
+        )
+        .unwrap();
+        let service: toml::Value = toml::from_str(
+            r#"
+                [services.search]
+                api_key = "service-token"
+            "#,
+        )
+        .unwrap();
+
+        assert!(kimi_provider_configured(&provider));
+        assert!(kimi_provider_configured(&service));
+        assert!(!kimi_provider_configured(&toml::Value::Table(
+            Default::default()
+        )));
     }
 
     #[test]

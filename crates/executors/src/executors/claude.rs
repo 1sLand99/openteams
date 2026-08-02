@@ -35,7 +35,8 @@ use crate::{
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
-        codex::client::LogWriter, utils::reorder_slash_commands,
+        codex::client::LogWriter,
+        utils::{json_has_nonempty_string, read_json_file, reorder_slash_commands},
     },
     logs::{
         ActionType, FileChange, NormalizedEntry, NormalizedEntryError, NormalizedEntryType,
@@ -58,6 +59,19 @@ fn base_command(claude_code_router: bool) -> &'static str {
     } else {
         CLAUDE_CODE_BASE_COMMAND
     }
+}
+
+fn claude_auth_value_has_credentials(value: &serde_json::Value) -> bool {
+    json_has_nonempty_string(
+        value,
+        &[
+            "/claudeAiOauth/accessToken",
+            "/claudeAiOauth/refreshToken",
+            "/oauthAccount/accountUuid",
+            "/oauthAccount/emailAddress",
+            "/userID",
+        ],
+    )
 }
 
 use derivative::Derivative;
@@ -192,6 +206,25 @@ impl ClaudeCode {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for ClaudeCode {
+    fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
+        let env = env.clone().with_profile(&self.cmd);
+        let oauth_login = dirs::home_dir().is_some_and(|home| {
+            [
+                home.join(".claude").join(".credentials.json"),
+                home.join(".claude.json"),
+            ]
+            .iter()
+            .filter_map(|path| read_json_file(path))
+            .any(|value| claude_auth_value_has_credentials(&value))
+        });
+        let api_key_vars = if self.disable_api_key.unwrap_or(false) {
+            &[][..]
+        } else {
+            &["ANTHROPIC_API_KEY", "CLAUDE_API_KEY"][..]
+        };
+        self.authentication_detected(&env, api_key_vars, oauth_login)
+    }
+
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals_service = Some(approvals);
     }
@@ -2282,6 +2315,16 @@ mod tests {
 
     use super::*;
     use crate::logs::utils::{EntryIndexProvider, patch::extract_normalized_entry_from_patch};
+
+    #[test]
+    fn claude_auth_requires_nonempty_account_or_token() {
+        assert!(!claude_auth_value_has_credentials(
+            &serde_json::json!({"projects": {}, "userID": " "})
+        ));
+        assert!(claude_auth_value_has_credentials(
+            &serde_json::json!({"claudeAiOauth": {"refreshToken": "token"}})
+        ));
+    }
 
     fn patches_to_entries(patches: &[json_patch::Patch]) -> Vec<NormalizedEntry> {
         patches

@@ -4,7 +4,10 @@
 //     pnpm exec tsx src/lib/agentActivityFormatter.test.ts
 
 import type { ChatRunActivityLine } from "@/types";
-import { formatAgentActivityLines } from "./agentActivityFormatter";
+import {
+  formatAgentActivityLines,
+  isThinkingHeaderContent,
+} from "./agentActivityFormatter";
 
 let failures = 0;
 const check = (label: string, cond: boolean, detail?: unknown) => {
@@ -23,6 +26,7 @@ const line = (
   line_type: ChatRunActivityLine["line_type"],
   content: string,
   agent_name = "codex",
+  created_at = "2026-06-02T00:00:00.000Z",
 ): ChatRunActivityLine => ({
   line_id: `line-${sequence}`,
   run_id: "run-1",
@@ -34,7 +38,7 @@ const line = (
   line_type,
   stream_type: line_type === "error" ? "error" : "thinking",
   content,
-  created_at: "2026-06-02T00:00:00.000Z",
+  created_at,
 });
 
 console.log("agentActivityFormatter");
@@ -157,6 +161,145 @@ console.log("agentActivityFormatter");
   ]);
 
   check("does not strip empty HTML comments for non-Codex activity lines", rows[0]?.content === "<!-- -->visible non-codex text", rows);
+}
+
+{
+  const rows = formatAgentActivityLines([
+    line(
+      1,
+      "thinking",
+      "Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill.",
+    ),
+    line(2, "thinking", "Real reasoning step"),
+  ]);
+
+  check("drops harness-internal notices from the activity log", rows.length === 1, rows);
+  check("keeps genuine thinking lines", rows[0]?.content === "Real reasoning step", rows);
+}
+
+{
+  const rows = formatAgentActivityLines([
+    line(1, "tool", "Started command: /bin/zsh -lc 'cd /tmp/repo && rg -n \"prompt\" crates/services'"),
+    line(2, "tool", "Completed command: /bin/zsh -lc 'cd /tmp/repo && rg -n \"prompt\" crates/services'"),
+  ]);
+
+  check("merges shell-wrapped command into one row", rows.length === 1, rows);
+  check(
+    "strips the shell wrapper and cd prefix from command details",
+    rows[0]?.detail === 'rg -n "prompt" crates/services',
+    rows,
+  );
+}
+
+{
+  const rows = formatAgentActivityLines([
+    line(1, "tool", 'Started command: bash -lc "pnpm test"'),
+  ]);
+
+  check(
+    "unwraps double-quoted bash wrappers",
+    rows[0]?.detail === "pnpm test",
+    rows,
+  );
+}
+
+{
+  const rows = formatAgentActivityLines([
+    line(1, "tool", `Started command: /bin/zsh -lc 'rg -n "prompt" crates'`),
+    line(
+      2,
+      "tool",
+      `Completed command: /bin/zsh -lc 'rg -n "prompt" crates': crates/a.rs:1: match`,
+    ),
+  ]);
+
+  check("merges quoted command with result suffix", rows.length === 1, rows);
+  check(
+    "strips quotes while keeping the result preview split",
+    rows[0]?.detail === 'rg -n "prompt" crates' &&
+      rows[0]?.resultDetail === "crates/a.rs:1: match",
+    rows,
+  );
+}
+
+{
+  const rows = formatAgentActivityLines([
+    line(
+      1,
+      "tool",
+      `Completed command: "sed -n '1,240p' a.ts; sed -n '700,850p' b.tsx": use std::fmt`,
+    ),
+  ]);
+
+  check(
+    "strips double quotes around semicolon chains with result suffix",
+    rows[0]?.detail === "sed -n '1,240p' a.ts; sed -n '700,850p' b.tsx: use std::fmt",
+    rows,
+  );
+}
+
+{
+  const rows = formatAgentActivityLines([
+    line(
+      1,
+      "error",
+      "2026-08-01T01:34:06.922061Z ERROR codex_models_manager::cache: failed to load models cache: missing field `supports_reasoning_summaries`",
+    ),
+    line(2, "thinking", "Real reasoning step"),
+  ]);
+
+  check(
+    "drops timestamped harness log lines from the activity log",
+    rows.length === 1 && rows[0]?.content === "Real reasoning step",
+    rows,
+  );
+}
+
+{
+  const rows = formatAgentActivityLines([
+    line(1, "tool", "Started command: pnpm test", "codex", "2026-06-02T00:00:00.000Z"),
+    line(2, "tool", "Completed command: pnpm test", "codex", "2026-06-02T00:00:02.500Z"),
+  ]);
+
+  check(
+    "computes elapsed time from start to completion",
+    rows[0]?.durationMs === 2500,
+    rows,
+  );
+  check(
+    "keeps the start timestamp on the merged row",
+    rows[0]?.startedAt === "2026-06-02T00:00:00.000Z" &&
+      rows[0]?.endedAt === "2026-06-02T00:00:02.500Z",
+    rows,
+  );
+}
+
+{
+  const rows = formatAgentActivityLines([
+    line(1, "tool", "Started command: pnpm test", "codex", "2026-06-02T00:00:00.000Z"),
+    line(2, "tool", "Completed command: pnpm test", "codex", "not-a-date"),
+  ]);
+
+  check(
+    "leaves duration undefined when timestamps are unparseable",
+    rows[0]?.durationMs === undefined,
+    rows,
+  );
+}
+
+{
+  check(
+    "promotes fully-bold summary lines to thinking headers",
+    isThinkingHeaderContent("**Planning file inspection**"),
+  );
+  check(
+    "keeps prose thinking lines as body text",
+    !isThinkingHeaderContent("让我写回复。由于内容较多，我会尽量精炼但完整。"),
+  );
+  check(
+    "keeps partially bold lines as body text",
+    !isThinkingHeaderContent("**Header** followed by trailing prose"),
+  );
 }
 
 if (failures > 0) {

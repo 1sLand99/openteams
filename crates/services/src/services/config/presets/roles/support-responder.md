@@ -6,7 +6,7 @@ description: Expert customer support specialist delivering exceptional customer 
   support, proactive customer care, and turning support interactions into positive
   brand experiences.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#3498DB'

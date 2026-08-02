@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import {
   approvalCommand,
   approvalOptionLabel,
@@ -75,6 +77,35 @@ assert.equal(
 );
 assert.equal(
   approvalCommand({
+    display_input: {
+      command: '   ',
+      permission: 'bash',
+      metadata: { command: 'rg -n approval crates frontend' },
+      patterns: ['rg -n approval crates frontend'],
+    },
+  } as unknown as ChatExecutorApprovalRequest),
+  'rg -n approval crates frontend',
+);
+assert.equal(
+  approvalCommand({
+    display_input: {
+      permission: 'bash',
+      patterns: ['pnpm run frontend:check'],
+    },
+  } as unknown as ChatExecutorApprovalRequest),
+  'pnpm run frontend:check',
+);
+assert.equal(
+  approvalCommand({
+    display_input: {
+      permission: 'edit',
+      patterns: ['frontend/src/**/*.tsx'],
+    },
+  } as unknown as ChatExecutorApprovalRequest),
+  null,
+);
+assert.equal(
+  approvalCommand({
     display_input: { tool_call: { rawInput: {} } },
   } as unknown as ChatExecutorApprovalRequest),
   null,
@@ -101,5 +132,30 @@ assert.deepEqual(
 assert.equal(shouldShowApprovalSummary(1, 1), false);
 assert.equal(shouldShowApprovalSummary(2, 1), true);
 assert.equal(shouldShowApprovalSummary(2, 2), true);
+
+const approvalTraySource = readFileSync(
+  fileURLToPath(new URL('./FreeChatApprovalTray.tsx', import.meta.url)),
+  'utf8',
+);
+assert.ok(
+  approvalTraySource.includes(
+    'const displayedAction = command ?? request.tool_name;',
+  ) &&
+    approvalTraySource.includes('title={displayedAction}') &&
+    approvalTraySource.includes('{displayedAction}') &&
+    approvalTraySource.includes('min-w-0 flex-1 truncate whitespace-nowrap') &&
+    !approvalTraySource.includes('commandExpanded') &&
+    !approvalTraySource.includes('writeClipboardViaBridge(command)'),
+  'approval command replaces the tool label inline and truncates within the action column',
+);
+assert.ok(
+  approvalTraySource.includes('const trigger = allowMenuRef.current;') &&
+    approvalTraySource.includes('left: Math.max(8, rect.left)') &&
+    approvalTraySource.includes('minWidth: rect.width + 8') &&
+    approvalTraySource.includes('minWidth: allowMenuPosition.minWidth') &&
+    approvalTraySource.includes('whitespace-nowrap rounded-md') &&
+    approvalTraySource.includes('pl-1 pr-2.5 text-left'),
+  'always-allow menu stays compact and aligns its label with the primary allow action',
+);
 
 console.log('executor approval presentation tests passed');

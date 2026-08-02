@@ -6,7 +6,7 @@ description: Expert recruitment operations and talent acquisition specialist —
   Helps companies efficiently attract, screen, and retain top talent while building
   a competitive employer brand.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#3498DB'

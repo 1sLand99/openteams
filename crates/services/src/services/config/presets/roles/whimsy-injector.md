@@ -5,7 +5,7 @@ description: Expert creative specialist focused on adding personality, delight, 
   playful elements to brand experiences. Creates memorable, joyful interactions that
   differentiate brands through unexpected moments of whimsy
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#E84393'

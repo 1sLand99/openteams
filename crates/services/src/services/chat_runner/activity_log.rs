@@ -47,6 +47,9 @@ mod tests {
             line_type: ChatRunActivityLineType::Thinking,
             stream_type: ChatStreamDeltaType::Thinking,
             content: content.to_string(),
+            runtime_session_id: None,
+            runtime_parent_session_id: None,
+            runtime_session_title: None,
             created_at: Utc::now().to_rfc3339(),
         }
     }
@@ -56,8 +59,12 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let path = temp.path().join("activity.jsonl");
         let run_id = Uuid::new_v4();
+        let mut first_line = activity_line(run_id, 0, "first");
+        first_line.runtime_session_id = Some("child-a".to_string());
+        first_line.runtime_parent_session_id = Some("root".to_string());
+        first_line.runtime_session_title = Some("Inspect API".to_string());
 
-        append_activity_line(&path, &activity_line(run_id, 0, "first"))
+        append_activity_line(&path, &first_line)
             .await
             .expect("append first");
         append_activity_line(&path, &activity_line(run_id, 1, "second"))
@@ -71,6 +78,9 @@ mod tests {
         let first: ChatRunActivityLine = serde_json::from_str(lines[0]).expect("parse first");
         let second: ChatRunActivityLine = serde_json::from_str(lines[1]).expect("parse second");
         assert_eq!((first.sequence, first.content.as_str()), (0, "first"));
+        assert_eq!(first.runtime_session_id.as_deref(), Some("child-a"));
+        assert_eq!(first.runtime_parent_session_id.as_deref(), Some("root"));
+        assert_eq!(first.runtime_session_title.as_deref(), Some("Inspect API"));
         assert_eq!((second.sequence, second.content.as_str()), (1, "second"));
     }
 

@@ -10,7 +10,7 @@
   overflow-y: auto;
   padding: 16px 20px;
   font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.8;
   background: var(--surface-2, #141516);
 }
@@ -23,7 +23,7 @@
 }
 
 .wf-log-panel-message {
-  font-size: 12px;
+  font-size: 14px;
   color: var(--ink-tertiary, #62666d);
 }
 
@@ -96,6 +96,7 @@ body[data-mode="light"] .workflow-window-root .wf-log-group + .wf-log-group {
 .wf-log-group-tasks {
   display: flex;
   flex-direction: column;
+  row-gap: 6px;
 }
 
 /* Task Row */
@@ -107,14 +108,14 @@ body[data-mode="light"] .workflow-window-root .wf-log-group + .wf-log-group {
   min-height: 20px;
   color: var(--ink-muted, #a1a5ad);
   font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
+  font-size: 14px;
   white-space: nowrap;
   overflow: hidden;
 }
 
 /* Content rows (body text) keep normal size */
 .wf-log-task-row--content {
-  font-size: 12px;
+  font-size: 14px;
   min-height: 24px;
   padding: 2px 0;
   gap: 12px;
@@ -141,6 +142,13 @@ body[data-mode="light"] .workflow-window-root .wf-log-group + .wf-log-group {
 
 .wf-log-task-disclosure[open] .wf-log-task-chevron {
   transform: rotate(90deg);
+}
+
+/* Expand affordance pinned to the row end; the status column keeps the
+ * status icon even on expandable rows. */
+.wf-log-task-chevron--end {
+  flex-shrink: 0;
+  margin-left: 2px;
 }
 
 .wf-log-task-result {
@@ -220,7 +228,7 @@ body[data-mode="light"] .workflow-window-root .wf-log-group + .wf-log-group {
 
 /* Content rows restore label size */
 .wf-log-task-row--content .wf-log-task-label {
-  font-size: 12px;
+  font-size: 14px;
 }
 
 /* Command target text shares the error-log typography. */
@@ -242,7 +250,7 @@ body[data-mode="light"] :is(.workflow-window-root, .wf-log-panel-inline) .wf-log
 /* Content-type tasks (skill output, think) keep high-contrast text */
 .wf-log-task-row--content .wf-log-task-target {
   color: var(--ink, #f7f8f8);
-  font-size: 12px;
+  font-size: 14px;
 }
 
 /* Content entry — markdown body text */
@@ -317,7 +325,7 @@ body[data-mode="light"] .workflow-window-root .wf-log-markdown pre {
 
 .wf-log-panel-inline {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.8;
   margin-top: 4px;
   max-width: 100%;
@@ -331,7 +339,7 @@ body[data-mode="light"] .workflow-window-root .wf-log-markdown pre {
   flex: 1;
   min-width: 0;
   font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1.7;
   color: var(--ink, #f7f8f8);
   overflow-wrap: anywhere;
@@ -339,12 +347,31 @@ body[data-mode="light"] .workflow-window-root .wf-log-markdown pre {
   word-break: break-word;
 }
 
+/* Inline code inside body/thinking lines (lightweight markdown) */
+.wf-log-inline-code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 0.92em;
+}
+
+body[data-mode="light"] :is(.workflow-window-root, .wf-log-panel-inline) .wf-log-inline-code {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+/* Prose blocks render through the shared AgentMarkdown renderer and use the
+ * same sans font as chat body text; tool rows stay monospace. */
+.wf-log-markdown-block-body {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-sans, 'Inter', sans-serif);
+}
+
 /* Error entries render as neutral terminal-like text. */
 .wf-log-error-block {
-  margin: 3px 0;
   color: var(--ink-muted, #a1a5ad);
   font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.55;
 }
 
@@ -413,4 +440,204 @@ body[data-mode="light"] .workflow-window-root .wf-log-markdown pre {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* ---------------------------------------------------------------------------
+ * Tool row status colors, durations, thinking headers, collapsed groups
+ * --------------------------------------------------------------------------- */
+
+/* Status-tinted rows */
+.wf-log-task-row--failed {
+  color: #e5484d;
+}
+
+.wf-log-task-row--denied,
+.wf-log-task-row--timed_out {
+  color: #f5a524;
+}
+
+/* Status icons (shown when the row is not expandable) */
+.wf-log-task-status-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.wf-log-task-status-icon--completed {
+  color: #46a758;
+}
+
+.wf-log-task-status-icon--failed {
+  color: #e5484d;
+}
+
+.wf-log-task-status-icon--denied,
+.wf-log-task-status-icon--timed_out {
+  color: #f5a524;
+}
+
+.wf-log-task-status-icon--running,
+.wf-log-task-status-icon--waiting_approval {
+  color: var(--ink-subtle, #8a8f98);
+  animation: wf-log-spin 0.9s linear infinite;
+}
+
+/* Per-row elapsed time */
+.wf-log-task-duration {
+  flex-shrink: 0;
+  padding-left: 8px;
+  color: var(--ink-tertiary, #62666d);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/* Thinking lines render as section headers above the rows they introduce.
+ * Structure comes from weight alone; row spacing is uniform (row-gap). */
+.wf-log-task-row--thinking {
+  align-items: center;
+}
+
+.wf-log-thinking-text {
+  flex: 1;
+  min-width: 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+  color: var(--ink, #f7f8f8);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.wf-log-thinking-text strong {
+  font-weight: 600;
+}
+
+/* Collapsed run of tool calls (Codex-style summary row) */
+.wf-log-collapsed-group {
+  display: block;
+}
+
+.wf-log-collapsed-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 22px;
+  padding: 2px 0;
+  cursor: pointer;
+  list-style: none;
+  color: var(--ink-tertiary, #62666d);
+}
+
+.wf-log-collapsed-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.wf-log-collapsed-group > summary:hover {
+  color: var(--ink-subtle, #8a8f98);
+}
+
+.wf-log-collapsed-group[open] > summary .wf-log-task-chevron {
+  transform: rotate(90deg);
+}
+
+.wf-log-collapsed-group[open] > summary {
+  margin-bottom: 2px;
+}
+
+.wf-log-collapsed-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-log-collapsed-failures {
+  flex-shrink: 0;
+  padding-left: 8px;
+  color: #e5484d;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+ * Workflow log panes — vertical split per agent, collapsible previous runs
+ * --------------------------------------------------------------------------- */
+
+.wf-log-split {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.wf-log-pane {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.wf-log-pane + .wf-log-pane {
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+body[data-mode="light"] .workflow-window-root .wf-log-pane + .wf-log-pane {
+  border-top-color: rgba(0, 0, 0, 0.12);
+}
+
+.wf-log-pane-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.wf-log-pane-latest {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Earlier runs of the same agent collapse behind a disclosure */
+.wf-log-run-disclosure {
+  flex-shrink: 0;
+  padding: 2px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+body[data-mode="light"] .workflow-window-root .wf-log-run-disclosure {
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+}
+
+.wf-log-run-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 26px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--ink-tertiary, #62666d);
+}
+
+.wf-log-run-summary::-webkit-details-marker {
+  display: none;
+}
+
+.wf-log-run-summary:hover {
+  color: var(--ink-subtle, #8a8f98);
+}
+
+.wf-log-run-disclosure[open] > .wf-log-run-summary .wf-log-task-chevron {
+  transform: rotate(90deg);
+}
+
+/* Expanded previous runs scroll independently instead of filling the pane */
+.wf-log-run-disclosure .wf-log-panel {
+  height: auto;
+  max-height: 320px;
+  padding-top: 0;
 }

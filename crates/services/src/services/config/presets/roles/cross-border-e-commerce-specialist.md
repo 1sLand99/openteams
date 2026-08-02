@@ -6,7 +6,7 @@ description: Full-funnel cross-border e-commerce strategist covering Amazon, Sho
   overseas warehousing, compliance and taxation, multilingual listing optimization,
   brand globalization, and DTC independent site development.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#3498DB'

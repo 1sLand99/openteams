@@ -26,6 +26,7 @@ import {
   isWorkflowExecutionRecompiling,
 } from './workflowControlContract';
 import { workflowExecutionStatusLabel } from './workflowStepPresentation';
+import { localizeWorkflowRuntimeError } from './workflowRuntimeError';
 
 type ChatMessage = {
   id: string;
@@ -349,6 +350,10 @@ export function ChatWorkflowCard({
   pendingActionType,
 }: ChatWorkflowCardProps) {
   const { t } = useAppTranslation();
+  const translateRuntimeError = (message: string) =>
+    localizeWorkflowRuntimeError(message, (key, fallback, replacements) =>
+      t(key, { defaultValue: fallback, ...replacements })
+    );
   const projection =
     projectionProp ?? extractWorkflowCardProjection(message.meta);
   const roundGraphs = useMemo(
@@ -415,10 +420,16 @@ export function ChatWorkflowCard({
     isPlanGenerationCard && generationMeta?.status === 'failed';
   const isPlanGenerationPending =
     isPlanGenerationCard && !isPlanGenerationFailed;
-  const generationErrorMessage =
+  const generationErrorSource =
     generationMeta?.error_message?.trim() ||
     projection.error_message?.trim() ||
     null;
+  const generationErrorMessage = generationErrorSource
+    ? translateRuntimeError(generationErrorSource)
+    : null;
+  const localizedProjectionErrorMessage = projection.error_message
+    ? translateRuntimeError(projection.error_message)
+    : null;
   const displayGoal = generationMeta?.plan_goal?.trim() || projection.goal;
   const hasWorkflowGraph = graphPlan.nodes.length > 0;
   const emptyGraphDescription = isPlanGenerationFailed
@@ -927,9 +938,9 @@ export function ChatWorkflowCard({
       {!isPlanGenerationCard &&
         (projection.state === 'failed' ||
           projection.execution_status === 'failed') &&
-        projection.error_message && (
-          <div className="mt-4 rounded-xl border border-[color-mix(in_srgb,var(--workflow-danger,#ef4444)_30%,var(--hairline))] bg-[color-mix(in_srgb,var(--workflow-danger,#ef4444)_10%,var(--surface-1))] p-4 text-sm leading-6 text-[var(--workflow-danger,#ef4444)]">
-            {projection.error_message}
+        localizedProjectionErrorMessage && (
+          <div className="mt-4 whitespace-pre-wrap rounded-xl border border-[color-mix(in_srgb,var(--workflow-danger,#ef4444)_30%,var(--hairline))] bg-[color-mix(in_srgb,var(--workflow-danger,#ef4444)_10%,var(--surface-1))] p-4 text-sm leading-6 text-[var(--workflow-danger,#ef4444)]">
+            {localizedProjectionErrorMessage}
           </div>
         )}
       {markCompletedConfirmationOpen && projection.execution_id && (

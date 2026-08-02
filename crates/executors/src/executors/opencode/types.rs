@@ -17,6 +17,8 @@ pub enum OpencodeExecutorEvent {
     },
     SdkEvent {
         event: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<OpencodeSessionMetadata>,
     },
     TokenUsage {
         total_tokens: u32,
@@ -43,6 +45,16 @@ pub enum OpencodeExecutorEvent {
         message: String,
     },
     Done,
+}
+
+/// Stable OpenCode session identity attached to projected activity events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpencodeSessionMetadata {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

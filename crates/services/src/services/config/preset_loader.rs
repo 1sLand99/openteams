@@ -1255,8 +1255,22 @@ mod tests {
         assert_eq!(designer.runner_type.as_deref(), Some("GEMINI"));
         assert_eq!(
             designer.recommended_model.as_deref(),
-            Some("gemini-3-pro-preview")
+            Some("gemini-3-flash-preview")
         );
+        let gemini_presets = presets
+            .members
+            .iter()
+            .filter(|preset| preset.runner_type.as_deref() == Some("GEMINI"))
+            .collect::<Vec<_>>();
+        assert!(!gemini_presets.is_empty());
+        for preset in gemini_presets {
+            assert_eq!(
+                preset.recommended_model.as_deref(),
+                Some("gemini-3-flash-preview"),
+                "Gemini preset `{}` must use a model advertised by the ACP probe",
+                preset.id
+            );
+        }
 
         let team = presets
             .teams

@@ -31,6 +31,9 @@ export interface AgentActivityDisplayRow {
   resultDetail?: string;
   toolKind?: AgentActivityToolKind;
   toolStatus?: AgentActivityToolStatus;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
   sourceLineIds: string[];
 }
 
@@ -158,6 +161,79 @@ const TERMINAL_STATUSES = new Set<AgentActivityToolStatus>([
 const normalizeDetail = (detail: string): string =>
   detail.trim().replace(/\s+/g, " ");
 
+/**
+ * Harness-internal notices (not agent activity) that should never be shown
+ * in the user-facing activity log.
+ */
+const HARNESS_NOISE_PATTERNS: RegExp[] = [
+  /^skill descriptions were shortened\b/i,
+  // Timestamped Rust log lines leaked from the harness, e.g.
+  // `2026-08-01T01:34:06.922061Z ERROR codex_models_manager::cache: …`.
+  /^\d{4}-\d{2}-\d{2}T\S+\s+(?:ERROR|WARN)\s+\w+::/,
+];
+
+export const isHarnessNoiseLine = (content: string): boolean => {
+  const trimmed = content.trim();
+  return (
+    trimmed.length > 0 &&
+    HARNESS_NOISE_PATTERNS.some((pattern) => pattern.test(trimmed))
+  );
+};
+
+/**
+ * Only fully-bold one-line summaries (Codex-style `**Planning …**`) are
+ * promoted to section headers. Agents like Claude stream prose thinking
+ * split across many lines; treating each line as a header would fragment
+ * the log, so those stay regular body text.
+ */
+const THINKING_HEADER_PATTERN = /^\*\*[^*]+\*\*$/;
+
+export const isThinkingHeaderContent = (content: string): boolean =>
+  THINKING_HEADER_PATTERN.test(content.trim());
+
+const SHELL_WRAPPER_PREFIX =
+  /^(?:\/\S*\/)?(?:zsh|bash|sh|fish|dash)\s+-[a-z]*c\s+/i;
+
+const CD_CHAIN_PREFIX = /^(?:cd\s+\S+\s*&&\s*)+/;
+
+/**
+ * Commands are often wrapped in quotes by the harness, and completed lines
+ * append a result preview after the closing quote:
+ *   `'rg -n "a" crates': docs/foo.rs:1: match`
+ * Strip the enclosing quotes while keeping the result suffix intact. If the
+ * quotes are unbalanced (e.g. truncated output), the value is left as-is.
+ */
+const QUOTED_COMMAND = /^(['"])((?:\\.|(?!\1)[\s\S])*)\1(?::\s([\s\S]*))?$/;
+
+const stripCommandQuotes = (value: string): string => {
+  const match = value.match(QUOTED_COMMAND);
+  if (!match) return value;
+  const command = match[2].trim();
+  if (!command) return value;
+  const result = match[3]?.trim();
+  return result ? `${command}: ${result}` : command;
+};
+
+/** Strips shell wrappers (`/bin/zsh -lc '…'`) and `cd … &&` prefixes. */
+export const cleanCommandDetail = (detail: string): string => {
+  const trimmed = detail.trim();
+  let cleaned = trimmed;
+
+  const wrapperMatch = cleaned.match(SHELL_WRAPPER_PREFIX);
+  if (wrapperMatch) {
+    cleaned = cleaned.slice(wrapperMatch[0].length).trim();
+  }
+
+  cleaned = stripCommandQuotes(cleaned);
+
+  const withoutCd = cleaned.replace(CD_CHAIN_PREFIX, "");
+  if (withoutCd.trim()) {
+    cleaned = withoutCd;
+  }
+
+  return cleaned.trim() || trimmed;
+};
+
 const matchPrefix = (
   value: string,
   prefixes: Array<{ prefix: string; status: AgentActivityToolStatus }>,
@@ -223,7 +299,7 @@ export const parseToolActivityContent = (
   return {
     kind,
     status: statusMatch.status,
-    detail,
+    detail: kind === "command" ? cleanCommandDetail(detail) : detail,
   };
 };
 
@@ -323,6 +399,15 @@ const applyParsedToolToRow = (
   const resultDetail = hasResultDetail
     ? parsed.detail.slice(resultPrefix.length).trim()
     : undefined;
+  const startedMs = row.startedAt ? Date.parse(row.startedAt) : NaN;
+  const endedMs = Date.parse(line.created_at);
+  const durationMs =
+    TERMINAL_STATUSES.has(parsed.status) &&
+    Number.isFinite(startedMs) &&
+    Number.isFinite(endedMs) &&
+    endedMs >= startedMs
+      ? endedMs - startedMs
+      : undefined;
   return {
     ...row,
     line_type: "tool",
@@ -332,6 +417,8 @@ const applyParsedToolToRow = (
     resultDetail: resultDetail || undefined,
     toolKind: parsed.kind,
     toolStatus: parsed.status,
+    endedAt: line.created_at,
+    durationMs,
     sourceLineIds: [...row.sourceLineIds, line.line_id],
   };
 };
@@ -347,7 +434,7 @@ export const formatAgentActivityLines = (
   for (const line of lines) {
     if (line.line_type !== "tool") {
       const content = displayContentForLine(line, options);
-      if (content.trim()) {
+      if (content.trim() && !isHarnessNoiseLine(content)) {
         rows.push(displayRowFromLine(line, content));
       }
       continue;
@@ -356,7 +443,7 @@ export const formatAgentActivityLines = (
     const parsed = parseToolActivityContent(line.content);
     if (!parsed) {
       const content = displayContentForLine(line, options);
-      if (content.trim()) {
+      if (content.trim() && !isHarnessNoiseLine(content)) {
         rows.push(displayRowFromLine(line, content));
       }
       continue;
@@ -383,6 +470,7 @@ export const formatAgentActivityLines = (
         detail: parsed.detail || undefined,
         toolKind: parsed.kind,
         toolStatus: parsed.status,
+        startedAt: line.created_at,
         sourceLineIds: [line.line_id],
       });
 

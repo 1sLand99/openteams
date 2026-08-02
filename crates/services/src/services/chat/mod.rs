@@ -34,7 +34,12 @@ use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use ts_rs::TS;
-use utils::{assets::config_path, log_msg::LogMsg, msg_store::MsgStore, utf8::Utf8LossyDecoder};
+use utils::{
+    assets::config_path,
+    log_msg::LogMsg,
+    msg_store::{MsgStore, SESSION_INACTIVITY_TIMEOUT},
+    utf8::Utf8LossyDecoder,
+};
 use uuid::Uuid;
 
 use super::{analytics::AnalyticsService, workflow_analytics};

@@ -23,12 +23,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
-use utils::approvals::{ApprovalRequest, ApprovalStatus};
+use utils::{
+    approvals::{ApprovalRequest, ApprovalStatus},
+    msg_store::SESSION_INACTIVITY_TIMEOUT,
+};
 use uuid::Uuid;
 
 use crate::services::inbox::InboxService;
 
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const APPROVAL_TIMEOUT: Duration = SESSION_INACTIVITY_TIMEOUT;
 const MAX_DISPLAY_INPUT_BYTES: usize = 16 * 1024;
 
 static WAITERS: LazyLock<DashMap<Uuid, oneshot::Sender<String>>> = LazyLock::new(DashMap::new);
@@ -505,6 +508,50 @@ async fn restore_agent_if_no_pending(
     Ok(())
 }
 
+fn display_input_command(value: &Value) -> Option<&str> {
+    let direct = [
+        "/command",
+        "/metadata/command",
+        "/tool_call/rawInput/command",
+        "/tool_call/raw_input/command",
+        "/toolCall/rawInput/command",
+        "/toolCall/raw_input/command",
+        "/tool_call/command",
+        "/toolCall/command",
+    ]
+    .into_iter()
+    .find_map(|pointer| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+    });
+    direct.or_else(|| {
+        let permission = value
+            .pointer("/permission")
+            .and_then(Value::as_str)
+            .map(str::to_ascii_lowercase)?;
+        let command = if matches!(
+            permission.as_str(),
+            "bash" | "shell" | "command" | "execute"
+        ) {
+            value.pointer("/patterns/0").and_then(Value::as_str)
+        } else {
+            None
+        };
+        command.map(str::trim).filter(|command| !command.is_empty())
+    })
+}
+
+fn normalize_display_input(mut value: Value) -> Value {
+    let command = display_input_command(&value).map(str::to_string);
+    if let (Value::Object(fields), Some(command)) = (&mut value, command) {
+        fields.insert("command".to_string(), Value::String(command));
+    }
+    value
+}
+
 fn sanitize_display_input(value: Value) -> Value {
     fn redact(value: Value) -> Value {
         match value {
@@ -539,10 +586,22 @@ fn sanitize_display_input(value: Value) -> Value {
             other => other,
         }
     }
-    let redacted = redact(value);
+    let redacted = redact(normalize_display_input(value));
     let encoded = serde_json::to_vec(&redacted).unwrap_or_default();
     if encoded.len() <= MAX_DISPLAY_INPUT_BYTES {
         redacted
+    } else if let Some(command) = display_input_command(&redacted) {
+        let command_only = serde_json::json!({
+            "command": command,
+            "details_truncated": true,
+        });
+        if serde_json::to_vec(&command_only)
+            .is_ok_and(|encoded| encoded.len() <= MAX_DISPLAY_INPUT_BYTES)
+        {
+            command_only
+        } else {
+            Value::String("[TRUNCATED]".to_string())
+        }
     } else {
         Value::String("[TRUNCATED]".to_string())
     }
@@ -713,8 +772,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn approval_timeout_is_thirty_minutes() {
-        assert_eq!(APPROVAL_TIMEOUT, Duration::from_secs(30 * 60));
+    fn approval_timeout_is_forty_minutes() {
+        assert_eq!(APPROVAL_TIMEOUT, Duration::from_secs(40 * 60));
     }
 
     #[test]
@@ -727,5 +786,59 @@ mod tests {
         assert_eq!(redacted["headers"], "[REDACTED]");
         assert_eq!(redacted["nested"]["api_key"], "[REDACTED]");
         assert_eq!(redacted["command"], "cargo test");
+    }
+
+    #[test]
+    fn display_input_normalizes_opencode_metadata_command() {
+        let normalized = sanitize_display_input(serde_json::json!({
+            "permission": "bash",
+            "metadata": {"command": "pnpm run frontend:check"},
+            "patterns": ["pnpm run frontend:check"]
+        }));
+
+        assert_eq!(normalized["command"], "pnpm run frontend:check");
+        assert_eq!(normalized["metadata"]["command"], "pnpm run frontend:check");
+    }
+
+    #[test]
+    fn display_input_normalizes_acp_raw_input_command() {
+        let normalized = sanitize_display_input(serde_json::json!({
+            "tool_call": {
+                "rawInput": {"command": "cargo test -p services"}
+            }
+        }));
+
+        assert_eq!(normalized["command"], "cargo test -p services");
+    }
+
+    #[test]
+    fn display_input_uses_opencode_pattern_when_metadata_command_is_missing() {
+        let normalized = sanitize_display_input(serde_json::json!({
+            "permission": "bash",
+            "patterns": ["rg -n approval crates frontend"]
+        }));
+
+        assert_eq!(normalized["command"], "rg -n approval crates frontend");
+    }
+
+    #[test]
+    fn display_input_does_not_treat_non_shell_pattern_as_a_command() {
+        let normalized = sanitize_display_input(serde_json::json!({
+            "permission": "edit",
+            "patterns": ["crates/**/*.rs"]
+        }));
+
+        assert!(normalized.get("command").is_none());
+    }
+
+    #[test]
+    fn oversized_display_input_keeps_a_safe_sized_command() {
+        let normalized = sanitize_display_input(serde_json::json!({
+            "metadata": {"command": "cargo test -p services"},
+            "output": "x".repeat(MAX_DISPLAY_INPUT_BYTES)
+        }));
+
+        assert_eq!(normalized["command"], "cargo test -p services");
+        assert_eq!(normalized["details_truncated"], true);
     }
 }

@@ -1310,11 +1310,22 @@ mod tests {
             ),
         ];
 
-        let message = workflow_executor_failure_message("codex", "workflow failed", &history);
+        let message = workflow_executor_failure_message(
+            "codex",
+            WorkflowRuntimeErrorCode::ExecutionFailed,
+            &history,
+        );
+        let (payload, detail) = message
+            .strip_prefix(WORKFLOW_RUNTIME_ERROR_PREFIX)
+            .expect("runtime error prefix")
+            .split_once(WORKFLOW_RUNTIME_ERROR_DETAIL_PREFIX)
+            .expect("executor detail");
+        let payload: serde_json::Value = serde_json::from_str(payload).expect("runtime payload");
 
-        assert!(message.contains("Executor error:"));
-        assert!(message.contains("ERROR: model overloaded"));
-        assert!(!message.contains("debug detail that should not be surfaced"));
+        assert_eq!(payload["code"], "execution_failed");
+        assert_eq!(payload["agent_name"], "codex");
+        assert!(detail.trim().contains("ERROR: model overloaded"));
+        assert!(!detail.contains("debug detail that should not be surfaced"));
     }
 
     #[test]
@@ -1330,7 +1341,11 @@ mod tests {
             .to_string(),
         )];
 
-        let message = workflow_executor_failure_message("gemini", "workflow failed", &history);
+        let message = workflow_executor_failure_message(
+            "gemini",
+            WorkflowRuntimeErrorCode::ExecutionFailed,
+            &history,
+        );
 
         assert!(message.contains("Gemini API key is invalid"));
         assert!(!message.contains("large payload omitted"));
@@ -1344,16 +1359,42 @@ mod tests {
 
         let message = workflow_executor_signal_failure_message(
             "backend",
-            Some("OpenTeamsCli request timed out after 1800s without session activity"),
+            Some("OpenTeamsCli request timed out after 2400s without session activity"),
             &history,
         );
 
+        let (payload, detail) = message
+            .strip_prefix(WORKFLOW_RUNTIME_ERROR_PREFIX)
+            .expect("runtime error prefix")
+            .split_once(WORKFLOW_RUNTIME_ERROR_DETAIL_PREFIX)
+            .expect("executor detail");
+        let payload: serde_json::Value = serde_json::from_str(payload).expect("runtime payload");
+
+        assert_eq!(payload["code"], "execution_failed");
+        assert_eq!(payload["agent_name"], "backend");
         assert_eq!(
-            message,
-            "OpenTeamsCli request timed out after 1800s without session activity：backend"
+            detail.trim(),
+            "OpenTeamsCli request timed out after 2400s without session activity"
         );
-        assert!(!message.contains("Executor error:"));
         assert!(!message.contains("stale provider error"));
+    }
+
+    #[test]
+    fn workflow_runtime_inactivity_error_uses_localizable_payload() {
+        let message = workflow_runtime_error_message(
+            WorkflowRuntimeErrorCode::SessionInactivityTimeout,
+            Some("opencode"),
+            Some(40),
+            None,
+        );
+        let payload = message
+            .strip_prefix(WORKFLOW_RUNTIME_ERROR_PREFIX)
+            .expect("runtime error prefix");
+        let payload: serde_json::Value = serde_json::from_str(payload).expect("runtime payload");
+
+        assert_eq!(payload["code"], "session_inactivity_timeout");
+        assert_eq!(payload["agent_name"], "opencode");
+        assert_eq!(payload["inactivity_minutes"], 40);
     }
 
     #[test]
@@ -1386,8 +1427,10 @@ mod tests {
         command.args(["-c", "exit 17"]);
         let mut child = command.group_spawn().expect("spawn test child");
         let (_signal_tx, mut signal_rx) = tokio::sync::oneshot::channel();
+        let msg_store = MsgStore::new();
 
-        let event = wait_for_executor_exit_or_cancel(&mut child, &mut signal_rx, None)
+        let event =
+            wait_for_executor_exit_or_cancel(&mut child, &mut signal_rx, None, &msg_store)
             .await
             .expect("wait for child exit");
 
@@ -1397,6 +1440,30 @@ mod tests {
             }
             other => panic!("expected child exit, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workflow_executor_wait_times_out_after_session_inactivity() {
+        use command_group::AsyncCommandGroup;
+
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        let mut child = command.group_spawn().expect("spawn test child");
+        let (_signal_tx, mut signal_rx) = tokio::sync::oneshot::channel();
+        let msg_store = MsgStore::new();
+
+        let result = wait_for_executor_exit_or_cancel_with_inactivity_timeout(
+            &mut child,
+            &mut signal_rx,
+            None,
+            &msg_store,
+            Duration::from_millis(25),
+        )
+        .await;
+
+        assert!(matches!(result, Err(SessionInactivityTimeout)));
+        let _ = child.kill().await;
     }
 
     #[test]

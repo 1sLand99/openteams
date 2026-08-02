@@ -4,7 +4,7 @@ name: Senior Project Manager
 description: Converts specs to tasks and remembers previous projects. Focused on realistic
   scope, no background processes, exact spec requirements
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#3498DB'

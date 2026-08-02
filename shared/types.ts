@@ -557,7 +557,14 @@ export type AgentRuntimeModelSource = "runner" | "profile_fallback" | "none";
 
 export type AgentRuntimeReasoningCapability = { "kind": "effort", options: Array<string>, } | { "kind": "variant", options: Array<string>, };
 
-export type AgentRuntimeStatus = { runner_type: BaseCodingAgent, installed: boolean, executable: boolean, availability: AvailabilityInfo, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, };
+export type AgentRuntimeAuthState = "authenticated" | "unauthenticated";
+
+export type AgentRuntimeStatus = { runner_type: BaseCodingAgent, installed: boolean, executable: boolean, availability: AvailabilityInfo, auth_state: AgentRuntimeAuthState,
+/**
+ * Whether a Node.js runtime was detected on this machine. Drives the
+ * "install Node.js" guidance for Node-based runners.
+ */
+node_available: boolean, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, };
 
 export type AgentRuntimeListResponse = { runners: Array<AgentRuntimeStatus>, };
 
@@ -565,7 +572,7 @@ export type AgentRuntimeRefreshError = { runner_type: BaseCodingAgent, message: 
 
 export type AgentRuntimeRefreshResponse = { runners: Array<AgentRuntimeStatus>, errors: Array<AgentRuntimeRefreshError>, };
 
-export type AgentRuntimeDiagnostics = { runner_type: BaseCodingAgent, installed: boolean, executable: boolean, availability: AvailabilityInfo, config_path: string, install_indicator_path: string | null, resolved_command: string | null, command_source: string | null, acp_probe: AcpCapabilityProbe | null, acp_probe_error: string | null, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, };
+export type AgentRuntimeDiagnostics = { runner_type: BaseCodingAgent, installed: boolean, executable: boolean, availability: AvailabilityInfo, auth_state: AgentRuntimeAuthState, node_available: boolean, config_path: string, install_indicator_path: string | null, resolved_command: string | null, command_source: string | null, acp_probe: AcpCapabilityProbe | null, acp_probe_error: string | null, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, };
 
 export type AcpAuthMethodInfo = { id: string, name: string, description: string | null, };
 
@@ -637,7 +644,19 @@ export type ChatStreamDeltaType = "assistant" | "thinking" | "error";
 
 export type ChatRunActivityLineType = "thinking" | "tool" | "assistant" | "error";
 
-export type ChatRunActivityLine = { line_id: string, run_id: string, session_id: string, session_agent_id: string, agent_id: string, agent_name: string, sequence: bigint, line_type: ChatRunActivityLineType, stream_type: ChatStreamDeltaType, content: string, created_at: string, };
+export type ChatRunActivityLine = { line_id: string, run_id: string, session_id: string, session_agent_id: string, agent_id: string, agent_name: string, sequence: bigint, line_type: ChatRunActivityLineType, stream_type: ChatStreamDeltaType, content: string,
+/**
+ * Runtime-native session that emitted this line (for example, an OpenCode child session).
+ */
+runtime_session_id: string | null,
+/**
+ * Runtime-native parent session, present for delegated child-session activity.
+ */
+runtime_parent_session_id: string | null,
+/**
+ * Best available runtime-native session title.
+ */
+runtime_session_title: string | null, created_at: string, };
 
 export type ChatProtocolNoticeCode = "invalid_json" | "not_json_array" | "empty_message" | "missing_send_target" | "invalid_send_target" | "invalid_send_intent";
 

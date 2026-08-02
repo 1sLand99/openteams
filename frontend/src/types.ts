@@ -1157,6 +1157,8 @@ export type AgentRunMode = 'auto' | 'local' | 'disabled';
 
 export type AgentRuntimeModelSource = 'runner' | 'profile_fallback' | 'none';
 
+export type AgentRuntimeAuthState = 'authenticated' | 'unauthenticated';
+
 export interface UpdateAgentRuntimeConfig {
   run_mode: AgentRunMode | null;
   env_json: Record<string, string> | null;
@@ -1177,6 +1179,8 @@ export interface AgentRuntimeStatus {
   installed: boolean;
   executable: boolean;
   availability: AvailabilityInfo;
+  auth_state: AgentRuntimeAuthState;
+  node_available: boolean;
   discovered_models: string[];
   model_source: AgentRuntimeModelSource;
   version: string | null;
@@ -1207,6 +1211,8 @@ export interface AgentRuntimeDiagnostics {
   installed: boolean;
   executable: boolean;
   availability: AvailabilityInfo;
+  auth_state: AgentRuntimeAuthState;
+  node_available: boolean;
   config_path: string;
   install_indicator_path: string | null;
   resolved_command: string | null;

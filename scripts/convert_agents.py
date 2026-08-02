@@ -21,7 +21,7 @@ MANIFEST_PATH = Path(r"E:\workspace\projectSS\agents-chatgroup\scripts\manifest.
 # Category-based model mapping
 CATEGORY_MAPPING = {
     'Development': ('CLAUDE_CODE', 'claude-opus-4-6'),
-    'Product & Design': ('GEMINI', 'gemini-3-pro-preview'),
+    'Product & Design': ('GEMINI', 'gemini-3-flash-preview'),
     'Sales & Business': ('CLAUDE_CODE', 'claude-sonnet-4-6'),
     'Content & Marketing': ('CLAUDE_CODE', 'claude-sonnet-4-6'),
     'Game Development': ('CLAUDE_CODE', 'claude-opus-4-6'),

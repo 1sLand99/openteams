@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use ts_rs::TS;
-use workspace_utils::{msg_store::MsgStore, shell::resolve_executable_path_blocking};
+use workspace_utils::msg_store::MsgStore;
 
 use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
@@ -15,10 +15,13 @@ use super::acp::{
 };
 use crate::{
     approvals::ExecutorApprovalService,
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
+    command::{
+        CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides, command_is_available,
+    },
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        utils::{dotenv_has_nonempty_value, json_has_nonempty_string, read_json_file},
     },
     mcp_config::{McpConfig, read_canonical_mcp_config},
     model_discovery::{
@@ -26,6 +29,12 @@ use crate::{
     },
     skill_config::NativeSkillConfigBackend,
 };
+
+const GEMINI_AUTH_ENV_VARS: &[&str] = &[
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+];
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
@@ -264,6 +273,31 @@ fn invalid_thinking_effort(message: impl Into<String>) -> ExecutorError {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for Gemini {
+    fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
+        let env = env.clone().with_profile(&self.cmd);
+        let Some(home) = dirs::home_dir() else {
+            return self.authentication_detected(&env, GEMINI_AUTH_ENV_VARS, false);
+        };
+        let gemini_home = home.join(".gemini");
+        let oauth_login =
+            read_json_file(&gemini_home.join("oauth_creds.json")).is_some_and(|value| {
+                json_has_nonempty_string(&value, &["/access_token", "/refresh_token"])
+            });
+        let settings_key =
+            read_json_file(&gemini_home.join("settings.json")).is_some_and(|value| {
+                json_has_nonempty_string(
+                    &value,
+                    &["/security/auth/apiKey", "/security/auth/token", "/apiKey"],
+                )
+            });
+        let dotenv_key = dotenv_has_nonempty_value(&gemini_home.join(".env"), GEMINI_AUTH_ENV_VARS);
+        self.authentication_detected(
+            &env,
+            GEMINI_AUTH_ENV_VARS,
+            oauth_login || settings_key || dotenv_key,
+        )
+    }
+
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals = Some(approvals);
     }
@@ -385,14 +419,7 @@ impl StandardCodingAgentExecutor for Gemini {
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
-        let command = self
-            .cmd
-            .base_command_override
-            .as_deref()
-            .and_then(shlex::split)
-            .and_then(|parts| parts.into_iter().next())
-            .unwrap_or_else(|| Self::BASE_COMMAND.to_string());
-        if resolve_executable_path_blocking(&command).is_some() {
+        if command_is_available(Self::BASE_COMMAND, &self.cmd) {
             AvailabilityInfo::InstallationFound
         } else {
             AvailabilityInfo::NotFound

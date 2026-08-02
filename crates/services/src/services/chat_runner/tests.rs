@@ -32,8 +32,8 @@ use uuid::Uuid;
 
 use super::{
     AgentProtocolError, AgentProtocolMessageType, ChatProtocolNoticeCode, ChatRunner,
-    ChatStreamEvent, MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON, MAX_PROTOCOL_PARSE_RETRIES,
-    PROTOCOL_OUTPUT_SCHEMA_JSON, RUNS_MAX_TOTAL_BYTES_PER_WORKSPACE,
+    ChatStreamEvent, LifecycleEvent, MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON,
+    MAX_PROTOCOL_PARSE_RETRIES, PROTOCOL_OUTPUT_SCHEMA_JSON, RUNS_MAX_TOTAL_BYTES_PER_WORKSPACE,
     RUNS_PRUNE_TARGET_BYTES_PER_WORKSPACE, ResolvedPromptLanguage, RunCompletionStatus,
     TokenUsageInfo, runtime::RunLogForwarders,
 };
@@ -1945,7 +1945,7 @@ async fn exit_signal_preserves_authoritative_failure_reason() {
     exit_tx
         .send(
             executors::executors::ExecutorExitResult::FailureWithError(
-                "OpenTeamsCli request timed out after 1800s without session activity".to_string(),
+                "OpenTeamsCli request timed out after 2400s without session activity".to_string(),
             ),
         )
         .expect("send exit signal");
@@ -1970,8 +1970,29 @@ async fn exit_signal_preserves_authoritative_failure_reason() {
     );
     assert_eq!(
         terminal_failure_reason.lock().await.as_deref(),
-        Some("OpenTeamsCli request timed out after 1800s without session activity")
+        Some("OpenTeamsCli request timed out after 2400s without session activity")
     );
+}
+
+#[tokio::test]
+async fn lifecycle_wait_times_out_after_session_inactivity() {
+    let mut child = sleep_command(30).group_spawn().expect("spawn child");
+    let stop = CancellationToken::new();
+    let msg_store = MsgStore::new();
+    let mut exit_signal = None;
+
+    let event = ChatRunner::wait_for_lifecycle_event_with_inactivity_timeout(
+        &mut child,
+        &stop,
+        &mut exit_signal,
+        &msg_store,
+        Uuid::new_v4(),
+        std::time::Duration::from_millis(25),
+    )
+    .await;
+
+    assert!(matches!(event, LifecycleEvent::SessionInactivityTimeout));
+    let _ = child.kill().await;
 }
 
 #[tokio::test]

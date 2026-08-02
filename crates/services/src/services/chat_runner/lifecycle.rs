@@ -8,6 +8,7 @@ enum LifecycleEvent {
     ProcessExited(std::io::Result<std::process::ExitStatus>),
     ExitSignal(executors::executors::ExecutorExitResult),
     StopRequested,
+    SessionInactivityTimeout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

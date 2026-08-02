@@ -252,6 +252,18 @@ impl AvailabilityInfo {
     }
 }
 
+fn authentication_detected(
+    env: &ExecutionEnv,
+    auth_env_vars: &[&str],
+    cli_auth_detected: bool,
+) -> bool {
+    cli_auth_detected
+        || auth_env_vars.iter().any(|key| {
+            env.get(key).is_some_and(|value| !value.trim().is_empty())
+                || std::env::var_os(key).is_some_and(|value| !value.is_empty())
+        })
+}
+
 #[async_trait]
 #[enum_dispatch(CodingAgent)]
 pub trait StandardCodingAgentExecutor {
@@ -281,6 +293,28 @@ pub trait StandardCodingAgentExecutor {
         _auth_method_id: Option<&str>,
     ) -> Result<Option<acp::AcpCapabilityProbe>, ExecutorError> {
         Ok(None)
+    }
+
+    /// Report whether this CLI can currently authenticate model requests.
+    /// Production executors override this with their CLI-specific OAuth and
+    /// provider configuration rules.
+    fn is_authenticated(&self, _env: &ExecutionEnv) -> bool {
+        matches!(
+            self.get_availability_info(),
+            AvailabilityInfo::LoginDetected { .. }
+        )
+    }
+
+    /// Shared authentication primitive used by executor-specific detectors.
+    /// A CLI login artifact, an executor runtime/profile variable, or a
+    /// process environment variable with a non-blank value is sufficient.
+    fn authentication_detected(
+        &self,
+        env: &ExecutionEnv,
+        auth_env_vars: &[&str],
+        cli_auth_detected: bool,
+    ) -> bool {
+        authentication_detected(env, auth_env_vars, cli_auth_detected)
     }
 
     async fn spawn(
@@ -363,16 +397,7 @@ pub trait StandardCodingAgentExecutor {
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
-        let config_files_found = self
-            .default_mcp_config_path()
-            .map(|path| path.exists())
-            .unwrap_or(false);
-
-        if config_files_found {
-            AvailabilityInfo::InstallationFound
-        } else {
-            AvailabilityInfo::NotFound
-        }
+        AvailabilityInfo::NotFound
     }
 }
 
@@ -473,6 +498,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn login_state_remains_available_for_legacy_executors() {
+        assert!(
+            AvailabilityInfo::LoginDetected {
+                last_auth_timestamp: 1,
+            }
+            .is_available()
+        );
+        assert!(AvailabilityInfo::InstallationFound.is_available());
+        assert!(!AvailabilityInfo::NotFound.is_available());
+    }
+
+    #[test]
     fn test_cursor_agent_deserialization() {
         // Test that CURSOR_AGENT is accepted
         let result = BaseCodingAgent::from_str("CURSOR_AGENT");
@@ -508,5 +545,31 @@ mod tests {
             BaseCodingAgent::from_str("ACP_QA").unwrap(),
             BaseCodingAgent::AcpQa
         );
+    }
+
+    #[test]
+    fn authentication_accepts_cli_login_or_nonblank_runtime_key() {
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert("OPENTEAMS_TEST_AUTH_KEY", "secret");
+
+        assert!(authentication_detected(
+            &env,
+            &["OPENTEAMS_TEST_AUTH_KEY"],
+            false
+        ));
+        assert!(authentication_detected(&env, &[], true));
+    }
+
+    #[test]
+    fn authentication_rejects_blank_and_foreign_runtime_keys() {
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert("OPENTEAMS_TEST_AUTH_KEY", "   ");
+        env.insert("OPENTEAMS_FOREIGN_AUTH_KEY", "secret");
+
+        assert!(!authentication_detected(
+            &env,
+            &["OPENTEAMS_TEST_AUTH_KEY"],
+            false
+        ));
     }
 }

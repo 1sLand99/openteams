@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use axum::response::sse::Event;
@@ -15,6 +16,9 @@ use crate::{log_msg::LogMsg, stream_lines::LinesStreamExt};
 
 // 100 MB Limit
 const HISTORY_BYTES: usize = 100000 * 1024;
+/// All agent execution surfaces use the same inactivity watchdog. There is no
+/// absolute execution deadline; every message resets this timer.
+pub const SESSION_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 
 #[derive(Clone)]
 struct StoredMsg {
@@ -107,6 +111,20 @@ impl MsgStore {
             .iter()
             .map(|s| s.msg.clone())
             .collect()
+    }
+
+    /// Wait until the store receives no messages for `inactivity_timeout`.
+    ///
+    /// Lagged broadcast receivers still indicate activity, so they reset the
+    /// timer just like a successfully received message.
+    pub async fn wait_for_inactivity(&self, inactivity_timeout: Duration) {
+        let mut receiver = self.get_receiver();
+        loop {
+            match tokio::time::timeout(inactivity_timeout, receiver.recv()).await {
+                Ok(Ok(_) | Err(broadcast::error::RecvError::Lagged(_))) => {}
+                Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => return,
+            }
+        }
     }
 
     fn subscribe_lossless(&self) -> (Vec<LogMsg>, mpsc::UnboundedReceiver<LogMsg>) {
@@ -233,6 +251,32 @@ mod tests {
     use futures::StreamExt;
 
     use super::*;
+
+    #[test]
+    fn session_inactivity_timeout_is_forty_minutes() {
+        assert_eq!(SESSION_INACTIVITY_TIMEOUT, Duration::from_secs(40 * 60));
+    }
+
+    #[tokio::test]
+    async fn inactivity_wait_resets_when_messages_arrive() {
+        let store = Arc::new(MsgStore::new());
+        let waiting_store = Arc::clone(&store);
+        let waiter = tokio::spawn(async move {
+            waiting_store
+                .wait_for_inactivity(Duration::from_millis(40))
+                .await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        store.push_stdout("activity");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(!waiter.is_finished());
+
+        tokio::time::timeout(Duration::from_millis(30), waiter)
+            .await
+            .expect("waiter should finish after the reset inactivity window")
+            .expect("waiter task");
+    }
 
     #[tokio::test]
     async fn history_plus_stream_keeps_critical_patch_after_heavy_live_logs() {

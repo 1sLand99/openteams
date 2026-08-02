@@ -179,6 +179,71 @@ fn safe_detached_command_cwd() -> PathBuf {
     std::env::temp_dir()
 }
 
+#[tauri::command]
+fn open_system_terminal() -> Result<(), String> {
+    open_system_terminal_impl()
+}
+
+#[cfg(target_os = "macos")]
+fn open_system_terminal_impl() -> Result<(), String> {
+    let mut command = StdCommand::new("open");
+    command.args(["-a", "Terminal"]);
+    spawn_detached_command(&mut command)
+        .map_err(|err| format!("Failed to open Terminal: {err}"))
+}
+
+#[cfg(target_os = "windows")]
+fn open_system_terminal_impl() -> Result<(), String> {
+    let candidates = ["wt.exe", "powershell.exe", "cmd.exe"];
+    let mut failures = Vec::new();
+
+    for program in candidates {
+        let mut command = StdCommand::new(program);
+        match spawn_detached_command(&mut command) {
+            Ok(()) => return Ok(()),
+            Err(err) => failures.push(format!("{program}: {err}")),
+        }
+    }
+
+    Err(format!(
+        "Failed to open a system terminal ({})",
+        failures.join("; ")
+    ))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_system_terminal_impl() -> Result<(), String> {
+    let mut candidates = Vec::new();
+    if let Some(terminal) = std::env::var_os("TERMINAL").filter(|value| !value.is_empty()) {
+        candidates.push(terminal);
+    }
+    candidates.extend(
+        [
+            "xdg-terminal-exec",
+            "gnome-terminal",
+            "konsole",
+            "xfce4-terminal",
+            "xterm",
+        ]
+        .into_iter()
+        .map(std::ffi::OsString::from),
+    );
+
+    let mut failures = Vec::new();
+    for program in candidates {
+        let mut command = StdCommand::new(&program);
+        match spawn_detached_command(&mut command) {
+            Ok(()) => return Ok(()),
+            Err(err) => failures.push(format!("{}: {err}", program.to_string_lossy())),
+        }
+    }
+
+    Err(format!(
+        "No supported system terminal could be opened ({})",
+        failures.join("; ")
+    ))
+}
+
 #[cfg(target_os = "macos")]
 fn reveal_path_in_file_manager_impl(path: &Path, is_directory: bool) -> Result<(), std::io::Error> {
     let mut command = StdCommand::new("open");
@@ -362,6 +427,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             delete_all_user_data,
             delete_cache_data,
+            open_system_terminal,
             reveal_path_in_file_manager,
             select_directory_dialog,
             update::get_desktop_update_context,

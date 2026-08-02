@@ -5,7 +5,7 @@ description: Expert UI designer specializing in visual design systems, component
   and pixel-perfect interface creation. Creates beautiful, consistent, accessible
   user interfaces that enhance UX and reflect brand identity
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#9B59B6'

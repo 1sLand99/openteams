@@ -66,10 +66,6 @@ assert.match(
 );
 assert.match(
   source,
-  /t\("agents\.details\.commandHint"\)/u,
-);
-assert.match(
-  source,
   /currentDiagnostics &&[\s\S]*?!currentDiagnostics\.installed[\s\S]*?!diagnosticsLoading[\s\S]*?t\("agents\.details\.nativeCliMissing"\)/u,
 );
 assert.doesNotMatch(source, /npx/iu);

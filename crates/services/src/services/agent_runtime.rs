@@ -11,7 +11,7 @@ use std::{
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use executors::{
-    command::{CmdOverrides, CommandBuilder},
+    command::{CmdOverrides, CommandBuilder, redacted_command},
     env::ExecutionEnv,
     executors::{
         AvailabilityInfo, BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor,
@@ -96,6 +96,14 @@ pub enum AgentRuntimeModelSource {
     None,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum AgentRuntimeAuthState {
+    Authenticated,
+    Unauthenticated,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AgentRuntimeStatus {
@@ -103,6 +111,10 @@ pub struct AgentRuntimeStatus {
     pub installed: bool,
     pub executable: bool,
     pub availability: AvailabilityInfo,
+    pub auth_state: AgentRuntimeAuthState,
+    /// Whether a Node.js runtime was detected on this machine. Drives the
+    /// "install Node.js" guidance for Node-based runners.
+    pub node_available: bool,
     pub discovered_models: Vec<String>,
     pub model_source: AgentRuntimeModelSource,
     pub version: Option<String>,
@@ -150,6 +162,8 @@ pub struct AgentRuntimeDiagnostics {
     pub installed: bool,
     pub executable: bool,
     pub availability: AvailabilityInfo,
+    pub auth_state: AgentRuntimeAuthState,
+    pub node_available: bool,
     pub config_path: String,
     pub install_indicator_path: Option<String>,
     pub resolved_command: Option<String>,
@@ -290,10 +304,12 @@ enum RunnerDiscoveryOutcome {
         runner: BaseCodingAgent,
         models: Vec<String>,
         detected_version: Option<String>,
+        version_error: Option<String>,
     },
     VersionOnly {
         runner: BaseCodingAgent,
         detected_version: Option<String>,
+        version_error: Option<String>,
     },
     Failed {
         runner: BaseCodingAgent,
@@ -315,23 +331,49 @@ fn apply_discovery_outcomes(
                 runner,
                 models,
                 detected_version,
+                version_error,
             } => {
                 let version = version_for_discovery_update(store, runner, detected_version);
+                let last_error =
+                    version_error.map(|error| status_error_detail("version_check", error));
+                if let Some(message) = last_error.clone() {
+                    errors.push(AgentRuntimeRefreshError {
+                        runner_type: runner,
+                        message,
+                        preserved_models: models.clone(),
+                    });
+                }
                 store.discoveries.insert(
                     runner,
                     AgentRuntimeDiscovery {
                         models,
                         version,
                         last_checked_at: Utc::now(),
-                        last_error: None,
+                        last_error,
                     },
                 );
             }
             RunnerDiscoveryOutcome::VersionOnly {
                 runner,
                 detected_version,
+                version_error,
             } => {
-                cache_version_only_discovery(store, runner, detected_version);
+                let preserved_models = store
+                    .discoveries
+                    .get(&runner)
+                    .map(|entry| entry.models.clone())
+                    .unwrap_or_default();
+                if let Some(message) = version_error
+                    .clone()
+                    .map(|error| status_error_detail("version_check", error))
+                {
+                    errors.push(AgentRuntimeRefreshError {
+                        runner_type: runner,
+                        message,
+                        preserved_models,
+                    });
+                }
+                cache_version_only_discovery(store, runner, detected_version, version_error);
             }
             RunnerDiscoveryOutcome::Failed {
                 runner,
@@ -386,24 +428,31 @@ async fn discover_runner_runtime(
         return Ok(RunnerDiscoveryOutcome::Skipped);
     }
 
-    let (detected_version, discovered_models) = tokio::join!(
-        detect_refresh_version(&base, &env),
+    let (version_result, discovered_models) = tokio::join!(
+        detect_cli_version(&base, &env),
         discover_models_for_executor(&base, current_dir, &env)
     );
+    let (detected_version, version_error) = split_probe_result(version_result);
 
     Ok(match discovered_models {
         Ok(Some(models)) => RunnerDiscoveryOutcome::ModelsDiscovered {
             runner,
             models,
             detected_version,
+            version_error,
         },
         Ok(None) => RunnerDiscoveryOutcome::VersionOnly {
             runner,
             detected_version,
+            version_error,
         },
         Err(message) => RunnerDiscoveryOutcome::Failed {
             runner,
-            message,
+            message: merge_status_error_details([
+                Some(status_error_detail("model_discovery", message)),
+                version_error.map(|error| status_error_detail("version_check", error)),
+            ])
+            .expect("model discovery failure always produces an error detail"),
             detected_version,
             preserved_models: models_for_runner(runner, executor_config, store),
         },
@@ -484,18 +533,21 @@ pub async fn runtime_diagnostics(
     let cli_config_path = base
         .default_mcp_config_path()
         .map(|path| path.display().to_string());
-    let status = build_status(runner, config, base, &store);
+    let node_available = detect_node_available();
+    let status = build_status(runner, config, base, &store, node_available);
     let mut runtime_executor = base.clone();
     let mut env = ExecutionEnv::new(Default::default(), false, String::new());
     apply_config_to_executor_and_env(runner, &mut runtime_executor, &mut env, &store)?;
 
-    let detected_version = if status.installed {
+    let version_result = if status.installed {
         detect_cli_version(&runtime_executor, &env).await
     } else {
-        None
+        Ok(None)
     };
-    let resolved_command = resolve_runtime_command(&runtime_executor).await;
-    let command_source = resolved_command.as_ref().map(|_| {
+    let (detected_version, version_error) = split_probe_result(version_result);
+    let (resolved_runtime_command, command_error) =
+        split_probe_result(resolve_runtime_command(&runtime_executor).await);
+    let command_source = resolved_runtime_command.as_ref().map(|_| {
         if cmd_overrides_for_executor(&runtime_executor)
             .and_then(|cmd| cmd.base_command_override.as_deref())
             .is_some_and(|command| !command.trim().is_empty())
@@ -511,6 +563,10 @@ pub async fn runtime_diagnostics(
             .to_string()
         }
     });
+    let install_indicator_path = resolved_runtime_command
+        .as_ref()
+        .map(|command| command.executable_path.clone());
+    let resolved_command = resolved_runtime_command.map(|command| command.rendered);
     let (acp_probe, acp_probe_error) = match runtime_executor
         .probe_acp(probe_dir, &env, auth_method_id)
         .await
@@ -527,18 +583,28 @@ pub async fn runtime_diagnostics(
     } else {
         read_store(&path)?
     };
-    let latest_status = build_status(runner, config, base, &latest_store);
+    let latest_status = build_status(runner, config, base, &latest_store, node_available);
     let version = detected_version.or(latest_status.version.clone());
+    let last_error = merge_status_error_details([
+        latest_status.last_error.clone(),
+        version_error.map(|error| status_error_detail("version_check", error)),
+        command_error.map(|error| status_error_detail("command_resolution", error)),
+        acp_probe_error
+            .clone()
+            .map(|error| status_error_detail("acp_probe", error)),
+    ]);
 
     Ok(AgentRuntimeDiagnostics {
         runner_type: latest_status.runner_type,
         installed: latest_status.installed,
         executable: latest_status.executable,
         availability: latest_status.availability,
+        auth_state: latest_status.auth_state,
+        node_available: latest_status.node_available,
         config_path: cli_config_path
             .clone()
             .unwrap_or_else(|| path.display().to_string()),
-        install_indicator_path: cli_config_path,
+        install_indicator_path,
         resolved_command,
         command_source,
         acp_probe,
@@ -547,23 +613,41 @@ pub async fn runtime_diagnostics(
         model_source: latest_status.model_source,
         version,
         last_checked_at: latest_status.last_checked_at,
-        last_error: latest_status.last_error,
+        last_error,
         run_mode: latest_status.run_mode,
         env_summary: latest_status.env_summary,
         executor_options: latest_status.executor_options,
     })
 }
 
-async fn resolve_runtime_command(executor: &CodingAgent) -> Option<String> {
-    let base = version_command_base(executor)?;
-    let parts = CommandBuilder::new(base).build_initial().ok()?;
-    let (executable, args) = parts.into_resolved().await.ok()?;
-    let mut rendered = executable.display().to_string();
-    for argument in args {
-        rendered.push(' ');
-        rendered.push_str(&argument);
-    }
-    Some(rendered)
+struct ResolvedRuntimeCommand {
+    executable_path: String,
+    rendered: String,
+}
+
+async fn resolve_runtime_command(
+    executor: &CodingAgent,
+) -> Result<Option<ResolvedRuntimeCommand>, String> {
+    let Some(base) = version_command_base(executor) else {
+        return Ok(None);
+    };
+    let parts = CommandBuilder::new(base).build_initial().map_err(|error| {
+        command_failure_detail(
+            "<configured command could not be parsed>",
+            "parse runtime command",
+            error,
+        )
+    })?;
+    let unresolved_command = parts.redacted_display();
+    let (executable, args) = parts.into_resolved().await.map_err(|error| {
+        command_failure_detail(&unresolved_command, "resolve runtime executable", error)
+    })?;
+    let executable_path = executable.display().to_string();
+    let rendered = redacted_command(&executable_path, &args);
+    Ok(Some(ResolvedRuntimeCommand {
+        executable_path,
+        rendered,
+    }))
 }
 
 pub fn apply_agent_runtime_config(
@@ -649,16 +733,29 @@ fn merge_agent_env_without_overwriting_session(
     }
 }
 
-async fn detect_cli_version(executor: &CodingAgent, env: &ExecutionEnv) -> Option<String> {
-    let base = version_command_base(executor)?;
+async fn detect_cli_version(
+    executor: &CodingAgent,
+    env: &ExecutionEnv,
+) -> Result<Option<String>, String> {
+    let Some(base) = version_command_base(executor) else {
+        return Ok(None);
+    };
     let parts = CommandBuilder::new(base)
         .extend_params(["--version"])
         .build_initial()
-        .ok()?
-        .into_resolved()
-        .await
-        .ok()?;
+        .map_err(|error| {
+            command_failure_detail(
+                "<configured command could not be parsed>",
+                "parse version command",
+                error,
+            )
+        })?;
+    let unresolved_command = parts.redacted_display();
+    let parts = parts.into_resolved().await.map_err(|error| {
+        command_failure_detail(&unresolved_command, "resolve version executable", error)
+    })?;
     let (executable_path, args) = parts;
+    let command_display = redacted_command(&executable_path.display().to_string(), &args);
 
     let mut command = Command::new(executable_path);
     command
@@ -678,13 +775,52 @@ async fn detect_cli_version(executor: &CodingAgent, env: &ExecutionEnv) -> Optio
 
     let output = timeout(Duration::from_secs(12), command.output())
         .await
-        .ok()?
-        .ok()?;
+        .map_err(|_| {
+            command_failure_detail(
+                &command_display,
+                "execute version command",
+                "timed out after 12 seconds",
+            )
+        })?
+        .map_err(|error| {
+            command_failure_detail(&command_display, "execute version command", error)
+        })?;
+    if !output.status.success() {
+        let status = output
+            .status
+            .code()
+            .map(|code| format!("exit code {code}"))
+            .unwrap_or_else(|| "terminated by signal".to_string());
+        let evidence = normalize_cli_version_output(&output.stderr, &output.stdout)
+            .map(|line| format!(": {line}"))
+            .unwrap_or_default();
+        return Err(command_failure_detail(
+            &command_display,
+            "execute version command",
+            format!("process failed with {status}{evidence}"),
+        ));
+    }
+
     normalize_cli_version_output(&output.stdout, &output.stderr)
+        .map(Some)
+        .ok_or_else(|| {
+            command_failure_detail(
+                &command_display,
+                "parse version output",
+                "process exited successfully but produced no version output",
+            )
+        })
 }
 
-async fn detect_refresh_version(executor: &CodingAgent, env: &ExecutionEnv) -> Option<String> {
-    detect_cli_version(executor, env).await
+fn command_failure_detail(
+    command: &str,
+    operation: &str,
+    result: impl std::fmt::Display,
+) -> String {
+    format!(
+        "command=`{command}`; operation={operation}; result={}",
+        result.to_string().trim()
+    )
 }
 
 fn version_command_base(executor: &CodingAgent) -> Option<String> {
@@ -704,7 +840,7 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
                 "npx -y @anthropic-ai/claude-code@2.1.161".to_string()
             }
         }
-        CodingAgent::Amp(_) => "npx -y @sourcegraph/amp@0.0.1780464815-g688406".to_string(),
+        CodingAgent::Amp(_) => "amp".to_string(),
         CodingAgent::Gemini(_) => "gemini".to_string(),
         CodingAgent::Codex(_) => "npx -y @openai/codex@0.144.1".to_string(),
         CodingAgent::Opencode(_) => {
@@ -713,7 +849,7 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
         CodingAgent::OpenTeamsCli(_) => openteams_cli_binary_base(),
         CodingAgent::CursorAgent(_) => "cursor-agent".to_string(),
         CodingAgent::QwenCode(_) => "qwen".to_string(),
-        CodingAgent::Copilot(_) => "npx -y @github/copilot@1.0.59".to_string(),
+        CodingAgent::Copilot(_) => "copilot".to_string(),
         CodingAgent::Droid(_) => "droid".to_string(),
         CodingAgent::KimiCode(_) => "kimi".to_string(),
         #[cfg(feature = "qa-mode")]
@@ -783,7 +919,7 @@ fn openteams_cli_binary_base() -> String {
     which::which("openteams-cli")
         .ok()
         .map(command_base_from_path)
-        .unwrap_or_else(|| "npx -y openteams-cli@latest".to_string())
+        .unwrap_or_else(|| "openteams-cli".to_string())
 }
 
 fn command_base_from_path(path: PathBuf) -> String {
@@ -819,6 +955,8 @@ fn cache_runner_version(store: &mut AgentRuntimeStore, runner: BaseCodingAgent, 
         .and_modify(|entry| {
             entry.version = Some(version.clone());
             entry.last_checked_at = now;
+            entry.last_error =
+                remove_status_error_stage(entry.last_error.as_deref(), "version_check");
         })
         .or_insert_with(|| AgentRuntimeDiscovery {
             models: Vec::new(),
@@ -832,14 +970,16 @@ fn cache_version_only_discovery(
     store: &mut AgentRuntimeStore,
     runner: BaseCodingAgent,
     detected_version: Option<String>,
+    version_error: Option<String>,
 ) {
     let now = Utc::now();
+    let last_error = version_error.map(|error| status_error_detail("version_check", error));
     store
         .discoveries
         .entry(runner)
         .and_modify(|entry| {
             entry.last_checked_at = now;
-            entry.last_error = None;
+            entry.last_error.clone_from(&last_error);
             if let Some(version) = detected_version.clone() {
                 entry.version = Some(version);
             }
@@ -848,7 +988,7 @@ fn cache_version_only_discovery(
             models: Vec::new(),
             version: detected_version,
             last_checked_at: now,
-            last_error: None,
+            last_error,
         });
 }
 
@@ -889,6 +1029,7 @@ fn build_statuses(
     profiles: &ExecutorConfigs,
     store: &AgentRuntimeStore,
 ) -> Vec<AgentRuntimeStatus> {
+    let node_available = detect_node_available();
     let mut runners = profiles
         .executors
         .iter()
@@ -896,7 +1037,7 @@ fn build_statuses(
             let base = config
                 .get_default()
                 .or_else(|| config.configurations.values().next())?;
-            Some(build_status(*runner, config, base, store))
+            Some(build_status(*runner, config, base, store, node_available))
         })
         .collect::<Vec<_>>();
     runners.sort_by_key(|status| status.runner_type.to_string());
@@ -934,6 +1075,7 @@ fn build_status(
     executor_config: &ExecutorConfig,
     base: &CodingAgent,
     store: &AgentRuntimeStore,
+    node_available: bool,
 ) -> AgentRuntimeStatus {
     let config = store
         .configs
@@ -942,7 +1084,7 @@ fn build_status(
         .unwrap_or_else(|| default_config(runner));
     let discovery = store.discoveries.get(&runner);
     let mut configured_base = base.clone();
-    if let Err(error) =
+    let configuration_error = if let Err(error) =
         apply_executor_options(runner, &mut configured_base, &config.executor_options)
     {
         tracing::warn!(
@@ -950,25 +1092,79 @@ fn build_status(
             error = %error,
             "failed to apply runtime config while checking availability"
         );
-    }
+        Some(status_error_detail("runtime_configuration", error))
+    } else {
+        None
+    };
     let availability = configured_base.get_availability_info();
     let installed = availability.is_available();
     let executable = installed && config.run_mode != AgentRunMode::Disabled;
+    let mut auth_env = ExecutionEnv::new(Default::default(), false, String::new());
+    auth_env.merge(&config.env_json);
+    let auth_state = if configured_base.is_authenticated(&auth_env) {
+        AgentRuntimeAuthState::Authenticated
+    } else {
+        AgentRuntimeAuthState::Unauthenticated
+    };
 
     AgentRuntimeStatus {
         runner_type: runner,
         installed,
         executable,
         availability,
+        auth_state,
+        node_available,
         discovered_models: models_for_runner(runner, executor_config, store),
         model_source: model_source_for_runner(runner, executor_config, store),
         version: discovery.and_then(|entry| entry.version.clone()),
         last_checked_at: discovery.map(|entry| entry.last_checked_at),
-        last_error: discovery.and_then(|entry| entry.last_error.clone()),
+        last_error: merge_status_error_details([
+            discovery.and_then(|entry| entry.last_error.clone()),
+            configuration_error,
+        ]),
         run_mode: config.run_mode,
         env_summary: summarize_env(&config.env_json),
         executor_options: config.executor_options,
     }
+}
+
+fn status_error_detail(stage: &str, error: impl std::fmt::Display) -> String {
+    format!("[{stage}] {}", error.to_string().trim())
+}
+
+fn merge_status_error_details(errors: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    let mut details = Vec::new();
+    for error in errors.into_iter().flatten() {
+        let error = error.trim();
+        if !error.is_empty() && !details.iter().any(|existing| existing == error) {
+            details.push(error.to_string());
+        }
+    }
+    (!details.is_empty()).then(|| details.join("\n"))
+}
+
+fn remove_status_error_stage(error: Option<&str>, stage: &str) -> Option<String> {
+    let prefix = format!("[{stage}]");
+    merge_status_error_details(
+        error
+            .into_iter()
+            .flat_map(str::lines)
+            .map(|line| (!line.trim_start().starts_with(&prefix)).then(|| line.to_string())),
+    )
+}
+
+fn split_probe_result<T>(result: Result<Option<T>, String>) -> (Option<T>, Option<String>) {
+    match result {
+        Ok(value) => (value, None),
+        Err(error) => (None, Some(error)),
+    }
+}
+
+/// Whether a `node` executable resolves on this machine. Resolution
+/// refreshes the login-shell PATH, so Node installed from a regular
+/// terminal is found without restarting the app.
+fn detect_node_available() -> bool {
+    utils::shell::resolve_executable_path_blocking("node").is_some()
 }
 
 fn reasoning_capability_for_runner(
@@ -1264,7 +1460,12 @@ mod tests {
             },
         );
 
-        cache_version_only_discovery(&mut store, runner, Some("opencode 1.2.24".to_string()));
+        cache_version_only_discovery(
+            &mut store,
+            runner,
+            Some("opencode 1.2.24".to_string()),
+            None,
+        );
 
         let discovery = store
             .discoveries
@@ -1273,6 +1474,115 @@ mod tests {
         assert_eq!(discovery.models, vec!["openai/gpt-5.2-codex"]);
         assert_eq!(discovery.version.as_deref(), Some("opencode 1.2.24"));
         assert_eq!(discovery.last_error, None);
+    }
+
+    #[test]
+    fn version_only_discovery_reports_version_probe_error() {
+        let runner = BaseCodingAgent::Opencode;
+        let mut store = AgentRuntimeStore::default();
+
+        cache_version_only_discovery(
+            &mut store,
+            runner,
+            None,
+            Some("failed to resolve version executable: opencode not found".to_string()),
+        );
+
+        let discovery = store
+            .discoveries
+            .get(&runner)
+            .expect("version failure should be cached for status reporting");
+        assert_eq!(
+            discovery.last_error.as_deref(),
+            Some("[version_check] failed to resolve version executable: opencode not found")
+        );
+    }
+
+    #[test]
+    fn refresh_response_reports_version_probe_error() {
+        let runner = BaseCodingAgent::Opencode;
+        let mut store = AgentRuntimeStore::default();
+
+        let errors = apply_discovery_outcomes(
+            &mut store,
+            vec![RunnerDiscoveryOutcome::VersionOnly {
+                runner,
+                detected_version: None,
+                version_error: Some("version command timed out after 12 seconds".to_string()),
+            }],
+        );
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].runner_type, runner);
+        assert_eq!(
+            errors[0].message,
+            "[version_check] version command timed out after 12 seconds"
+        );
+        assert_eq!(
+            store.discoveries[&runner].last_error,
+            Some("[version_check] version command timed out after 12 seconds".to_string())
+        );
+    }
+
+    #[test]
+    fn successful_version_probe_clears_only_version_error() {
+        let runner = BaseCodingAgent::Opencode;
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: Vec::new(),
+                version: None,
+                last_checked_at: Utc::now(),
+                last_error: Some(
+                    "[model_discovery] provider unavailable\n[version_check] executable not found"
+                        .to_string(),
+                ),
+            },
+        );
+
+        cache_runner_version(&mut store, runner, "opencode 1.2.24".to_string());
+
+        let discovery = &store.discoveries[&runner];
+        assert_eq!(discovery.version.as_deref(), Some("opencode 1.2.24"));
+        assert_eq!(
+            discovery.last_error.as_deref(),
+            Some("[model_discovery] provider unavailable")
+        );
+    }
+
+    #[test]
+    fn status_error_details_preserve_each_failed_stage() {
+        let merged = merge_status_error_details([
+            Some(status_error_detail(
+                "model_discovery",
+                "provider request failed",
+            )),
+            Some(status_error_detail(
+                "version_check",
+                "version command timed out after 12 seconds",
+            )),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            merged,
+            "[model_discovery] provider request failed\n[version_check] version command timed out after 12 seconds"
+        );
+    }
+
+    #[test]
+    fn command_failure_identifies_command_operation_and_result() {
+        let detail = command_failure_detail(
+            "/Users/test/.local/bin/copilot --version",
+            "execute version command",
+            "process failed with exit code 1: authentication required",
+        );
+
+        assert_eq!(
+            detail,
+            "command=`/Users/test/.local/bin/copilot --version`; operation=execute version command; result=process failed with exit code 1: authentication required"
+        );
     }
 
     #[test]
@@ -1295,6 +1605,7 @@ mod tests {
                 runner,
                 models: vec!["gemini-new".to_string()],
                 detected_version: Some("gemini 1.1.0".to_string()),
+                version_error: None,
             }],
         );
 
@@ -1356,6 +1667,27 @@ mod tests {
             AgentRuntimeModelSource::ProfileFallback
         );
         assert_eq!(statuses[0].env_summary[0].value, "secret");
+        assert_eq!(statuses[0].auth_state, AgentRuntimeAuthState::Authenticated);
+    }
+
+    #[test]
+    fn status_reports_invalid_runtime_configuration_detail() {
+        let runner = BaseCodingAgent::KimiCode;
+        let executor_config = ExecutorConfig::new_with_default(model_agent(None));
+        let mut runtime = default_config(runner);
+        runtime.executor_options = serde_json::json!({ "model": 42 });
+        let mut store = AgentRuntimeStore::default();
+        store.configs.insert(runner, runtime);
+        let base = executor_config.get_default().unwrap();
+
+        let status = build_status(runner, &executor_config, base, &store, true);
+
+        let error = status
+            .last_error
+            .expect("invalid runtime configuration should be reported");
+        assert!(error.starts_with("[runtime_configuration]"));
+        assert!(error.contains("invalid type"));
+        assert!(error.contains("expected a string"));
     }
 
     #[test]
@@ -1461,6 +1793,7 @@ mod tests {
                         runner,
                         models: vec!["kimi-k2.6".to_string()],
                         detected_version: Some("kimi 1.0.0".to_string()),
+                        version_error: None,
                     }],
                 ))
             })
@@ -1536,6 +1869,8 @@ mod tests {
             installed: true,
             executable: true,
             availability: AvailabilityInfo::InstallationFound,
+            auth_state: AgentRuntimeAuthState::Authenticated,
+            node_available: true,
             discovered_models: vec!["gpt-5.2-codex".to_string()],
             model_source: AgentRuntimeModelSource::Runner,
             version: None,

@@ -347,7 +347,7 @@ check(
     errorDetailCss.includes("padding: 3px 0 0 58px") &&
     taskStatusCss.includes("width: 14px") &&
     taskRowCss.includes("font-family: 'JetBrains Mono', monospace") &&
-    taskRowCss.includes("font-size: 11px") &&
+    taskRowCss.includes("font-size: 14px") &&
     taskRowCss.includes("color: var(--ink-muted") &&
     taskLabelCss.includes("font-size: inherit") &&
     taskLabelCss.includes("color: inherit") &&
@@ -721,8 +721,16 @@ check(
   "activity panel uses compact Codex-like line rows",
   activityPanelSource.includes("labels.cleaned") &&
     activityPanelSource.includes("formatAgentActivityLines") &&
-    activityPanelSource.includes("renderSimpleBoldMarkdown") &&
-    activityPanelSource.includes("<strong key={`bold-${partIndex}`}") &&
+    activityPanelSource.includes("renderSimpleInlineMarkdown") &&
+    activityPanelSource.includes("INLINE_MARKDOWN_PATTERN") &&
+    activityPanelSource.includes("MarkdownBlockItem") &&
+    activityPanelSource.includes("isProseLine") &&
+    activityPanelSource.includes("<AgentMarkdown") &&
+    activityPanelSource.includes("wf-log-markdown-block-body") &&
+    activityPanelCssSource.includes(".wf-log-markdown-block-body") &&
+    activityPanelSource.includes("wf-log-inline-code") &&
+    activityPanelCssSource.includes(".wf-log-inline-code") &&
+    activityPanelSource.includes("<strong key={`bold-${index}`}") &&
     messageContentSource.includes("translate={t}") &&
     activityPanelSource.includes("wf-log-task-row") &&
     activityPanelSource.includes("wf-log-task-content-text") &&
@@ -743,6 +751,52 @@ check(
     activityPanelSource.includes("onWheel: noteUserInteraction") &&
     activityPanelSource.includes("onScroll: handleScroll"),
   activityPanelSource,
+);
+check(
+  "tool rows use status icons and tinted rows instead of repeated labels",
+  activityPanelSource.includes("statusIconByStatus") &&
+    activityPanelSource.includes('status !== "completed"') &&
+    activityPanelSource.includes("wf-log-task-status-icon--${status}") &&
+    activityPanelSource.includes("wf-log-task-row--${status}") &&
+    activityPanelCssSource.includes(".wf-log-task-row--failed") &&
+    activityPanelCssSource.includes(".wf-log-task-row--denied") &&
+    activityPanelCssSource.includes(".wf-log-task-status-icon--completed"),
+  { activityPanelSource, activityPanelCssSource },
+);
+check(
+  "thinking lines render as section headers",
+  activityPanelSource.includes('line.line_type === "thinking"') &&
+    activityPanelSource.includes("isThinkingHeaderContent") &&
+    activityPanelSource.includes("wf-log-task-row--thinking") &&
+    activityPanelSource.includes("wf-log-thinking-text") &&
+    activityPanelCssSource.includes(".wf-log-task-row--thinking") &&
+    activityPanelCssSource.includes(".wf-log-thinking-text"),
+  { activityPanelSource, activityPanelCssSource },
+);
+check(
+  "collapses runs of tool calls into a Codex-style summary row",
+  activityPanelSource.includes("COLLAPSED_TOOL_GROUP_MIN") &&
+    activityPanelSource.includes("renderRowsWithCollapse") &&
+    activityPanelSource.includes("summarizeToolGroup") &&
+    activityPanelSource.includes("GROUP_KIND_ORDER") &&
+    activityPanelSource.includes("agentActivity.group.") &&
+    activityPanelSource.includes("wf-log-collapsed-group") &&
+    activityPanelSource.includes("wf-log-collapsed-failures") &&
+    activityPanelCssSource.includes(".wf-log-collapsed-group") &&
+    activityPanelCssSource.includes(".wf-log-collapsed-group > summary"),
+  { activityPanelSource, activityPanelCssSource },
+);
+check(
+  "shows per-row elapsed time and expands long command details on click",
+  activityPanelSource.includes("formatDurationMs") &&
+    activityPanelSource.includes("MIN_VISIBLE_DURATION_MS") &&
+    activityPanelSource.includes("wf-log-task-duration") &&
+    activityPanelSource.includes("TOOL_DETAIL_EXPAND_THRESHOLD") &&
+    activityPanelSource.includes("hasLongDetail") &&
+    activityPanelSource.includes("wf-log-task-chevron--end") &&
+    activityPanelCssSource.includes(".wf-log-task-duration") &&
+    activityPanelCssSource.includes(".wf-log-task-chevron--end"),
+  { activityPanelSource, activityPanelCssSource },
 );
 check(
   "composer links to the latest unfinished workflow card",

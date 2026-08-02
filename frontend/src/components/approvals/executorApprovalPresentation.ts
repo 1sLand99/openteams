@@ -49,14 +49,35 @@ export const approvalCommand = (
   request: ChatExecutorApprovalRequest,
 ): string | null => {
   const displayInput = asJsonObject(request.display_input);
+  const metadata = asJsonObject(displayInput?.metadata);
   const toolCall = asJsonObject(
     displayInput?.tool_call ?? displayInput?.toolCall,
   );
   const rawInput = asJsonObject(
     toolCall?.rawInput ?? toolCall?.raw_input,
   );
-  const command = rawInput?.command ?? toolCall?.command ?? displayInput?.command;
-  return typeof command === 'string' && command.trim() ? command : null;
+  const patterns = Array.isArray(displayInput?.patterns)
+    ? displayInput.patterns
+    : [];
+  const permission =
+    typeof displayInput?.permission === 'string'
+      ? displayInput.permission.toLowerCase()
+      : null;
+  const patternCommand =
+    permission && ['bash', 'shell', 'command', 'execute'].includes(permission)
+      ? patterns[0]
+      : undefined;
+  const command = [
+    displayInput?.command,
+    metadata?.command,
+    rawInput?.command,
+    toolCall?.command,
+    patternCommand,
+  ].find(
+    (candidate): candidate is string =>
+      typeof candidate === 'string' && Boolean(candidate.trim()),
+  );
+  return command ?? null;
 };
 
 export type ApprovalRequestGroup = {

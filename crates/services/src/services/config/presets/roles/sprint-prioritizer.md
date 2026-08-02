@@ -5,7 +5,7 @@ description: Expert product manager specializing in agile sprint planning, featu
   prioritization, and resource allocation. Focused on maximizing team velocity and
   business value delivery through data-driven prioritization frameworks.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#2ECC71'

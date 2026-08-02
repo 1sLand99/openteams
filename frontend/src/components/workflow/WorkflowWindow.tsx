@@ -1,4 +1,11 @@
-import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import {
+  useState,
+  useMemo,
+  useCallback,
+  useEffect,
+  useRef,
+  type ReactNode,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { useQuery } from '@/lib/queryCompat';
 import { useAppTranslation } from '@/hooks/useAppTranslation';
@@ -121,23 +128,19 @@ function WorkflowStepTokenUsageStrip({
   loading: boolean;
 }) {
   const { t } = useAppTranslation();
+  const [expanded, setExpanded] = useState(false);
 
   if (loading) {
     return (
-      <div className="mb-8 flex gap-2">
-        {Array.from({ length: 4 }).map((_, index) => (
-          <div
-            key={index}
-            className="h-11 w-24 animate-pulse rounded-md bg-[var(--surface-3)]"
-          />
-        ))}
+      <div className="mb-5">
+        <div className="h-3 w-44 animate-pulse rounded bg-[var(--surface-3)]" />
       </div>
     );
   }
 
   if (!usage) {
     return (
-      <div className="mb-8 text-[12px] text-[#8A8F98]">
+      <div className="mb-5 text-[11px] text-[var(--ink-tertiary)]">
         {t('workflow.inspector.tokenUsageUnavailable', {
           defaultValue: 'Token usage is not available for this step yet.',
         })}
@@ -175,35 +178,60 @@ function WorkflowStepTokenUsageStrip({
   ];
 
   return (
-    <div className="mb-8">
-      <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-[#8A8F98]">
+    <div className="mb-5">
+      <button
+        type="button"
+        onClick={() => setExpanded((prev) => !prev)}
+        aria-expanded={expanded}
+        aria-label={t('workflow.inspector.toggleTokenUsage', {
+          defaultValue: 'Token usage details',
+        })}
+        className="group flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-[var(--ink-tertiary)] transition-colors hover:text-[var(--ink-subtle)]"
+      >
+        <ChevronRight
+          className={cn(
+            'h-3 w-3 transition-transform',
+            expanded && 'rotate-90'
+          )}
+        />
+        <span className="font-mono text-[var(--ink-subtle)] group-hover:text-[var(--ink-muted)]">
+          {formatNumber(usage.total_tokens)} tokens
+        </span>
+        <span aria-hidden="true">·</span>
+        <span className="font-mono">{formatPrice(usage.estimated_cost)}</span>
         {usage.model_name || usage.model_id ? (
-          <span>{usage.model_name || usage.model_id}</span>
+          <>
+            <span aria-hidden="true">·</span>
+            <span>{usage.model_name || usage.model_id}</span>
+          </>
         ) : null}
         {usage.run_count > 1 ? (
-          <span>
-            {t('workflow.inspector.tokenRuns', {
-              count: usage.run_count,
-              defaultValue: '{count} runs',
-            })}
-          </span>
+          <>
+            <span aria-hidden="true">·</span>
+            <span>
+              {t('workflow.inspector.tokenRuns', {
+                count: usage.run_count,
+                defaultValue: '{count} runs',
+              })}
+            </span>
+          </>
         ) : null}
-      </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
-        {metrics.map((metric) => (
-          <div
-            key={metric.label}
-            className="rounded-md border border-[var(--hairline)] bg-[var(--surface-1)] px-2.5 py-2"
-          >
-            <div className="text-[10px] font-medium uppercase text-[#8A8F98]">
-              {metric.label}
+      </button>
+      {expanded && (
+        <div className="mt-2.5 grid grid-cols-2 gap-x-8 gap-y-1.5 pl-4 sm:grid-cols-3">
+          {metrics.map((metric) => (
+            <div
+              key={metric.label}
+              className="flex items-baseline justify-between gap-3 text-[11px]"
+            >
+              <span className="text-[var(--ink-tertiary)]">{metric.label}</span>
+              <span className="font-mono text-[var(--ink-muted)]">
+                {metric.value}
+              </span>
             </div>
-            <div className="mt-0.5 font-mono text-[12px] font-semibold text-[#F3F6FB]">
-              {metric.value}
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -226,14 +254,14 @@ const REVIEW_SETTINGS_EXECUTION_FINISHED_ERROR =
 const REVIEW_SETTINGS_ACTIVE_EXECUTION_ERROR =
   'Review settings can only be changed while execution is not running or waiting for review.';
 const workflowDetailMarkdownTextClassName = [
-  'text-[13px] text-[#A0A5B1] leading-[1.7]',
+  'text-[13px] text-[var(--ink-subtle)] leading-[1.7]',
   '[&_h1]:text-[var(--ink)] [&_h1]:font-semibold [&_h1]:text-[17px] [&_h1]:mb-3 [&_h1]:mt-6',
   '[&_h2]:text-[var(--ink)] [&_h2]:font-semibold [&_h2]:text-[15px] [&_h2]:mb-3 [&_h2]:mt-5',
   '[&_h3]:text-[var(--ink)] [&_h3]:font-medium [&_h3]:text-[14px] [&_h3]:mb-2 [&_h3]:mt-4',
   '[&_p]:mb-3',
   '[&_ul]:mb-3 [&_ul]:pl-4',
   '[&_ol]:mb-3 [&_ol]:pl-4',
-  '[&_li]:mb-2 [&_li]:text-[#A0A5B1]',
+  '[&_li]:mb-2 [&_li]:text-[var(--ink-subtle)]',
   '[&_li::marker]:text-[rgba(255,255,255,0.3)]',
   '[&_strong]:text-[#F2F2F3] [&_strong]:font-medium',
   '[&_em]:text-[#8A8F98]',
@@ -378,17 +406,6 @@ function chooseWorkflowTranscriptEntry(
   const currentPriority = getWorkflowTranscriptMergePriority(current);
   const incomingPriority = getWorkflowTranscriptMergePriority(incoming);
   return incomingPriority >= currentPriority ? incoming : current;
-}
-
-function formatWorkflowLogTimestamp(createdAt: string): string {
-  const date = parseWorkflowTranscriptTime(createdAt);
-  if (Number.isNaN(date.getTime())) return '--:--:--';
-  return date.toLocaleTimeString(undefined, {
-    hour12: false,
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
 }
 
 function mergeAndSortTranscriptEntries(
@@ -648,7 +665,7 @@ function getWorkflowOutputEntryIconClass(
   if (entry.entry_type === 'error') {
     return 'text-[#E5484D]';
   }
-  return 'text-[rgba(255,255,255,0.4)]';
+  return 'text-[var(--ink-tertiary)]';
 }
 
 function isWorkflowCardStepReviewEntry(
@@ -928,6 +945,23 @@ export function ContinueConfirmationCard({
 // Inspector Card (side drawer)
 // -----------------------------------------------------------------------
 
+function InspectorSection({
+  title,
+  children,
+}: {
+  title: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section className="mt-6 border-t border-[var(--hairline)] pt-5">
+      <h3 className="mb-2.5 text-[13px] font-semibold uppercase tracking-[0.04em] text-[var(--ink)]">
+        {title}
+      </h3>
+      {children}
+    </section>
+  );
+}
+
 function InspectorCard({
   step,
   planNode,
@@ -1045,9 +1079,10 @@ function InspectorCard({
             if (!content) return groups;
             const line = {
               key: entry.id,
-              timestamp: formatWorkflowLogTimestamp(entry.created_at),
+              timestamp: entry.created_at,
               content,
               entryType: entry.entry_type,
+              runId: entry.workflow_agent_session_id ?? null,
             };
             if (existing) {
               existing.lines.push(line);
@@ -1059,7 +1094,7 @@ function InspectorCard({
               });
             }
             return groups;
-          }, new Map<string, { key: string; agentName: string; lines: Array<{ key: string; timestamp: string; content: string; entryType?: string }> }>())
+          }, new Map<string, { key: string; agentName: string; lines: Array<{ key: string; timestamp: string; content: string; entryType?: string; runId?: string | null }> }>())
           .values()
       ),
     [agentName, step.id, streamEntries, t]
@@ -1074,6 +1109,20 @@ function InspectorCard({
       ),
     [transcriptEntries]
   );
+  const [expandedOutputEntryIds, setExpandedOutputEntryIds] = useState<
+    ReadonlySet<string>
+  >(new Set());
+  const toggleOutputEntry = useCallback((entryId: string) => {
+    setExpandedOutputEntryIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(entryId)) {
+        next.delete(entryId);
+      } else {
+        next.add(entryId);
+      }
+      return next;
+    });
+  }, []);
   return (
     <motion.div
       initial={{ x: 60, opacity: 0 }}
@@ -1085,7 +1134,7 @@ function InspectorCard({
       <button
         type="button"
         onClick={onClose}
-        className="absolute top-3 right-3 p-1.5 text-[rgba(255,255,255,0.4)] hover:text-[#A0A5B1] rounded-md transition-colors z-20"
+        className="absolute top-3 right-3 p-1.5 text-[var(--ink-tertiary)] hover:text-[var(--ink-subtle)] rounded-md transition-colors z-20"
       >
         <X className="w-4 h-4" />
       </button>
@@ -1129,7 +1178,7 @@ function InspectorCard({
                     ? 'bg-[rgba(46,160,67,0.1)] text-[#4ADE80] border-[rgba(46,160,67,0.2)]'
                     : (step.status === 'waiting_review' || step.status === 'waiting_input')
                       ? 'bg-[rgba(139,92,246,0.1)] text-[#A78BFA] border-[rgba(139,92,246,0.2)]'
-                      : 'bg-[rgba(255,255,255,0.04)] text-[#8A8F98] border-[rgba(255,255,255,0.08)]'
+                      : 'bg-[var(--surface-3)] text-[var(--ink-subtle)] border-[var(--hairline)]'
             )}
           >
             {(step.status === 'failed' || step.status === 'interrupted') && (
@@ -1151,20 +1200,20 @@ function InspectorCard({
 
       <div className="flex-1 overflow-hidden relative">
         {activeTab === 'DETAILS' ? (
-          <div className="absolute inset-0 p-8 overflow-y-auto bg-[var(--surface-2)]">
-            <h2 className="text-[17px] font-semibold mb-3 text-[#F3F6FB] tracking-[-0.01em]">
+          <div className="absolute inset-0 overflow-y-auto bg-[var(--surface-2)] px-6 pb-8 pt-3">
+            <h2 className="mb-1.5 text-[15px] font-semibold tracking-[-0.01em] text-[var(--ink)]">
               {step.title}
             </h2>
 
-            <div className="mb-8 flex flex-wrap items-center gap-2 text-[10px] leading-[1.4] text-[#8A8F98] font-normal">
-              <span className="inline-flex items-center gap-1">
+            <div className="mb-4 flex flex-wrap items-center gap-1.5 text-[11px] leading-[1.4] text-[var(--ink-tertiary)]">
+              <span className="inline-flex items-center gap-1 text-[var(--ink-subtle)]">
                 <Bot className="w-3 h-3" /> {agentName}
               </span>
-              <span className="w-[3px] h-[3px] rounded-full bg-[#3A3B3E]"></span>
+              <span aria-hidden="true">·</span>
               <span>{step.step_type}</span>
               {loopName && (
                 <>
-                  <span className="w-[3px] h-[3px] rounded-full bg-[#3A3B3E]"></span>
+                  <span aria-hidden="true">·</span>
                   <span>
                     {t('workflow.inspector.loopPrefix', {
                       name: loopName,
@@ -1175,7 +1224,7 @@ function InspectorCard({
               )}
               {reviewPhase && (
                 <>
-                  <span className="w-[3px] h-[3px] rounded-full bg-[#3A3B3E]"></span>
+                  <span aria-hidden="true">·</span>
                   <span>
                     {t('workflow.inspector.reviewPrefix', {
                       label: reviewPhase.label,
@@ -1191,158 +1240,167 @@ function InspectorCard({
               loading={isLoadingTokenUsage}
             />
 
-            <div className="mt-0">
-              <h3 className="text-[14px] font-semibold text-[var(--ink)] tracking-normal mb-3">
-                {t('workflow.inspector.instructionHeading', {
-                  defaultValue: 'Instruction',
+            <InspectorSection
+              title={t('workflow.inspector.instructionHeading', {
+                defaultValue: 'Instruction',
+              })}
+            >
+              <ChatMarkdown
+                content={instruction}
+                maxWidth="100%"
+                textClassName={workflowDetailMarkdownTextClassName}
+                className="w-full select-text"
+              />
+            </InspectorSection>
+
+            {(isFailed || isCompleted) && (
+              <InspectorSection
+                title={t('workflow.inspector.summaryHeading', {
+                  defaultValue: 'Summary',
                 })}
-              </h3>
-              <div className="pl-0 pt-1">
+              >
                 <ChatMarkdown
-                  content={instruction}
+                  content={summaryText}
                   maxWidth="100%"
                   textClassName={workflowDetailMarkdownTextClassName}
                   className="w-full select-text"
                 />
-              </div>
-            </div>
-
-            {(isFailed || isCompleted) && (
-              <div className="mt-10 pt-10 border-t border-[rgba(255,255,255,0.06)]">
-                <h3 className="text-[14px] font-semibold text-[var(--ink)] tracking-normal mb-3">
-                  {t('workflow.inspector.summaryHeading', {
-                    defaultValue: 'Summary',
-                  })}
-                </h3>
-                <div className="pl-0 pt-1">
-                  <ChatMarkdown
-                    content={summaryText}
-                    maxWidth="100%"
-                    textClassName={workflowDetailMarkdownTextClassName}
-                    className="w-full select-text"
-                  />
-                </div>
-              </div>
+              </InspectorSection>
             )}
 
             {latestReviewLabel && (
-              <div className="mt-10 pt-10 border-t border-[rgba(255,255,255,0.06)]">
-                <h3 className="text-[14px] font-semibold text-[var(--ink)] tracking-normal mb-3">
-                  {t('workflow.inspector.feedbackHeading', {
-                    defaultValue: 'Feedback',
-                  })}
-                </h3>
-                <div className="bg-[var(--surface-2)] border border-[var(--hairline)] rounded-xl p-4">
-                  <ChatMarkdown
-                    content={
-                      localizedLatestReviewFeedback ||
-                      localizedLatestReviewLabel ||
-                      ''
-                    }
-                    maxWidth="100%"
-                    textClassName={workflowDetailMarkdownTextClassName}
-                    className="w-full select-text"
-                  />
-                </div>
-              </div>
+              <InspectorSection
+                title={t('workflow.inspector.feedbackHeading', {
+                  defaultValue: 'Feedback',
+                })}
+              >
+                <ChatMarkdown
+                  content={
+                    localizedLatestReviewFeedback ||
+                    localizedLatestReviewLabel ||
+                    ''
+                  }
+                  maxWidth="100%"
+                  textClassName={workflowDetailMarkdownTextClassName}
+                  className="w-full select-text"
+                />
+              </InspectorSection>
             )}
 
-            <div className="mt-10 pt-10 border-t border-[rgba(255,255,255,0.06)]">
-              <h3 className="text-[14px] font-semibold text-[var(--ink)] tracking-normal mb-3">
-                {t('workflow.inspector.executionRecordHeading', {
-                  defaultValue: 'Execution Record Output',
-                })}
-              </h3>
-              <div className="text-[13px] text-slate-600 leading-relaxed">
-                {isLoadingTranscript ? (
-                  <div className="flex items-center gap-2 text-xs text-slate-400">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    {t('workflow.inspector.loadingTranscript', {
-                      defaultValue: 'Loading transcript...',
-                    })}
-                  </div>
-                ) : outputEntries.length > 0 ? (
-                  <div className="space-y-6">
-                    {outputEntries.map((entry) => {
-                      const markdownContent = getLocalizedTranscriptMarkdown(
-                        entry,
-                        t
-                      );
-                      const OutputIcon = getWorkflowOutputEntryIcon(entry);
-                      const outputAgentName =
-                        entry.entry_type === 'message' ||
-                        entry.entry_type === 'output'
-                          ? entry.agent_name?.trim() || undefined
-                          : isWorkflowReviewEntry(entry)
-                            ? getWorkflowReviewAgentName(entry, 'Reviewer', t)
-                            : null;
-                      const outputLabel =
-                        outputAgentName || getWorkflowOutputEntryLabel(entry);
-                      return (
-                        <div
-                          key={entry.id}
-                          className="flex gap-3"
+            <InspectorSection
+              title={t('workflow.inspector.executionRecordHeading', {
+                defaultValue: 'Execution Record Output',
+              })}
+            >
+              {isLoadingTranscript ? (
+                <div className="flex items-center gap-2 text-[11px] text-[var(--ink-tertiary)]">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  {t('workflow.inspector.loadingTranscript', {
+                    defaultValue: 'Loading transcript...',
+                  })}
+                </div>
+              ) : outputEntries.length > 0 ? (
+                <div className="divide-y divide-[var(--hairline)]">
+                  {outputEntries.map((entry) => {
+                    const content =
+                      getLocalizedTranscriptMarkdown(entry, t) ||
+                      localizeWorkflowGeneratedText(entry.content, t);
+                    const OutputIcon = getWorkflowOutputEntryIcon(entry);
+                    const outputAgentName =
+                      entry.entry_type === 'message' ||
+                      entry.entry_type === 'output'
+                        ? entry.agent_name?.trim() || undefined
+                        : isWorkflowReviewEntry(entry)
+                          ? getWorkflowReviewAgentName(entry, 'Reviewer', t)
+                          : null;
+                    const outputLabel =
+                      outputAgentName || getWorkflowOutputEntryLabel(entry);
+                    const isEntryExpanded = expandedOutputEntryIds.has(
+                      entry.id
+                    );
+                    const preview = content.replace(/\s+/g, ' ').trim();
+                    return (
+                      <div key={entry.id}>
+                        <button
+                          type="button"
+                          onClick={() => toggleOutputEntry(entry.id)}
+                          aria-expanded={isEntryExpanded}
+                          className="group flex w-full items-center gap-2 py-2 text-left"
                         >
                           <span
                             className={cn(
-                              'mt-0.5 shrink-0',
+                              'shrink-0',
                               getWorkflowOutputEntryIconClass(entry)
                             )}
                           >
                             <OutputIcon className="h-3.5 w-3.5" />
                           </span>
-                          <div className="min-w-0 flex-1">
-                            <div className="mb-1 text-[11px] font-medium text-[#8A8F98]">
-                              {outputLabel}
-                            </div>
+                          <span className="shrink-0 text-[12px] font-medium text-[var(--ink-muted)]">
+                            {outputLabel}
+                          </span>
+                          {!isEntryExpanded && preview ? (
+                            <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--ink-tertiary)]">
+                              {preview}
+                            </span>
+                          ) : null}
+                          <ChevronRight
+                            className={cn(
+                              'ml-auto h-3.5 w-3.5 shrink-0 text-[var(--ink-tertiary)] transition-transform group-hover:text-[var(--ink-subtle)]',
+                              isEntryExpanded && 'rotate-90'
+                            )}
+                          />
+                        </button>
+                        {isEntryExpanded && (
+                          <div className="pb-3 pl-[22px]">
                             <ChatMarkdown
-                              content={
-                                markdownContent ||
-                                localizeWorkflowGeneratedText(entry.content, t)
-                              }
+                              content={content}
                               maxWidth="100%"
                               textClassName={
                                 entry.entry_type === 'error'
-                                  ? 'font-mono text-[12px] leading-[1.5] text-[#6E7681] [&_pre]:bg-transparent [&_pre]:border-0 [&_pre]:p-0 [&_pre]:m-0 [&_pre_code]:text-[#6E7681]'
+                                  ? 'font-mono text-[12px] leading-[1.5] text-[var(--ink-tertiary)] [&_pre]:bg-transparent [&_pre]:border-0 [&_pre]:p-0 [&_pre]:m-0 [&_pre_code]:text-[var(--ink-tertiary)]'
                                   : workflowDetailMarkdownTextClassName
                               }
                               className={cn(
                                 'w-full select-text',
-                                entry.entry_type === 'error' && 'max-h-40 overflow-y-auto'
+                                entry.entry_type === 'error' &&
+                                  'max-h-40 overflow-y-auto'
                               )}
                             />
                           </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="text-xs text-slate-400">
-                    {t('workflow.inspector.noOutputEntries', {
-                      defaultValue: 'No output entries for this step yet.',
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="text-[11px] text-[var(--ink-tertiary)]">
+                  {t('workflow.inspector.noOutputEntries', {
+                    defaultValue: 'No output entries for this step yet.',
+                  })}
+                </div>
+              )}
+            </InspectorSection>
 
             {hasError && (
-              <div className="mt-10 pt-10 border-t border-[rgba(255,255,255,0.06)]">
-                <h3 className="text-[14px] font-semibold text-[#E5484D] tracking-normal mb-3 flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4" />
-                  {t('workflow.inspector.errorHeading', {
-                    defaultValue: 'Error',
-                  })}
-                </h3>
-                <div className="max-h-48 overflow-y-auto font-mono text-[12px] leading-[1.5] text-[#6E7681] whitespace-pre-wrap break-all">
+              <InspectorSection
+                title={
+                  <span className="flex items-center gap-1.5 text-[#E5484D]">
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    {t('workflow.inspector.errorHeading', {
+                      defaultValue: 'Error',
+                    })}
+                  </span>
+                }
+              >
+                <div className="max-h-48 overflow-y-auto whitespace-pre-wrap break-all">
                   <ChatMarkdown
                     content={summaryText}
                     maxWidth="100%"
-                    textClassName="font-mono text-[12px] leading-[1.5] text-[#6E7681] [&_pre]:bg-transparent [&_pre]:border-0 [&_pre]:p-0 [&_pre]:m-0 [&_pre_code]:text-[#6E7681]"
+                    textClassName="font-mono text-[12px] leading-[1.5] text-[var(--ink-tertiary)] [&_pre]:bg-transparent [&_pre]:border-0 [&_pre]:p-0 [&_pre]:m-0 [&_pre_code]:text-[var(--ink-tertiary)]"
                     className="w-full select-text"
                   />
                 </div>
-              </div>
+              </InspectorSection>
             )}
           </div>
         ) : (
@@ -1351,6 +1409,7 @@ function InspectorCard({
               agentLogGroups={agentLogGroups}
               isLoading={isLoadingTranscript}
               stepStatus={step.status}
+              translate={t}
               emptyMessage={t('workflow.inspector.noLogs', {
                 defaultValue: 'No logs for this step yet.',
               })}

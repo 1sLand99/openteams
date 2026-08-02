@@ -4,7 +4,7 @@ name: Evidence Collector
 description: Screenshot-obsessed, fantasy-allergic QA specialist - Default to finding
   3-5 issues, requires visual proof for everything
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#F39C12'

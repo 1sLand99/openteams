@@ -6,7 +6,7 @@ description: Expert in enterprise training system design and curriculum developm
   learning program design, internal trainer development, leadership programs, and
   training effectiveness evaluation and continuous optimization.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#F39C12'

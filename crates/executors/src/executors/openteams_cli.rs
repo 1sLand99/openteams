@@ -19,7 +19,9 @@ use workspace_utils::msg_store::MsgStore;
 
 use crate::{
     approvals::ExecutorApprovalService,
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
+    command::{
+        CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides, command_is_available,
+    },
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorExitResult, SpawnedChild,
@@ -93,7 +95,6 @@ const MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl OpenTeamsCli {
     const BINARY_NAME: &'static str = "openteams-cli";
-    const NPX_FALLBACK: &'static str = "npx -y openteams-cli@latest";
 
     /// Discover the openteams-cli binary using a priority chain:
     /// 1. OPENTEAMS_CLI_PATH environment variable
@@ -102,7 +103,7 @@ impl OpenTeamsCli {
     /// 4. Bundled binary at ~/.openteams/bin/openteams-cli
     /// 5. System PATH lookup
     ///
-    /// Returns None if not found (will fallback to npx).
+    /// Returns None if no explicit, bundled, or PATH-resolved binary is found.
     fn find_binary() -> Option<PathBuf> {
         let binary_name = if cfg!(windows) {
             "openteams-cli.exe"
@@ -164,8 +165,8 @@ impl OpenTeamsCli {
         None
     }
 
-    fn resolve_base_command() -> String {
-        match Self::find_binary() {
+    fn base_command_from_binary(binary: Option<PathBuf>) -> String {
+        match binary {
             Some(path) => {
                 let s = path.to_string_lossy().to_string();
                 // Quote the path if it contains spaces so that
@@ -176,8 +177,12 @@ impl OpenTeamsCli {
                     s
                 }
             }
-            None => Self::NPX_FALLBACK.to_string(),
+            None => Self::BINARY_NAME.to_string(),
         }
+    }
+
+    fn resolve_base_command() -> String {
+        Self::base_command_from_binary(Self::find_binary())
     }
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
@@ -505,6 +510,10 @@ async fn wait_for_server_url(
 
 #[async_trait]
 impl StandardCodingAgentExecutor for OpenTeamsCli {
+    fn is_authenticated(&self, _env: &ExecutionEnv) -> bool {
+        true
+    }
+
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
         self.approvals = Some(approvals);
     }
@@ -611,18 +620,7 @@ impl StandardCodingAgentExecutor for OpenTeamsCli {
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
-        let mcp_config_found = self
-            .default_mcp_config_path()
-            .map(|p| p.exists())
-            .unwrap_or(false);
-
-        let home_openteams_exists = dirs::home_dir()
-            .map(|home| home.join(".openteams").exists())
-            .unwrap_or(false);
-
-        let binary_found = Self::find_binary().is_some();
-
-        if mcp_config_found || home_openteams_exists || binary_found {
+        if command_is_available(&Self::resolve_base_command(), &self.cmd) {
             AvailabilityInfo::InstallationFound
         } else {
             AvailabilityInfo::NotFound
@@ -811,20 +809,29 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        executor_failure_message, merge_builtin_provider_config, parse_models_command_output,
+        OpenTeamsCli, executor_failure_message, merge_builtin_provider_config,
+        parse_models_command_output,
     };
     use crate::executors::ExecutorError;
+
+    #[test]
+    fn missing_bundled_cli_falls_back_to_native_command() {
+        assert_eq!(
+            OpenTeamsCli::base_command_from_binary(None),
+            "openteams-cli"
+        );
+    }
 
     #[test]
     fn openteams_cli_failure_message_preserves_specific_io_cause() {
         let error = ExecutorError::Io(io::Error::new(
             io::ErrorKind::TimedOut,
-            "OpenTeamsCli request timed out after 1800s without session activity",
+            "OpenTeamsCli request timed out after 2400s without session activity",
         ));
 
         assert_eq!(
             executor_failure_message(&error),
-            "OpenTeamsCli request timed out after 1800s without session activity"
+            "OpenTeamsCli request timed out after 2400s without session activity"
         );
     }
 

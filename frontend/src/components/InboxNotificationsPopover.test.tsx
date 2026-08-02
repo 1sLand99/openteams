@@ -154,7 +154,8 @@ check(
     source.includes("sessionTitleById.get(item.session_id)") &&
     source.includes("formatInboxRelativeTime(item.created_at, translate)") &&
     source.includes("{item.title}") &&
-    source.includes("{item.body}"),
+    source.includes("localizeWorkflowRuntimeError(item.body, translate)") &&
+    source.includes("{localizedBody}"),
   source,
 );
 

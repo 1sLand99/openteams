@@ -38,14 +38,15 @@ const ApprovalRequestRow: React.FC<{
   const [allowMenuPosition, setAllowMenuPosition] = useState<{
     left: number;
     top: number;
+    minWidth: number;
   } | null>(null);
   const allowMenuRef = useRef<HTMLDivElement>(null);
-  const allowMenuButtonRef = useRef<HTMLButtonElement>(null);
   const allowMenuPopupRef = useRef<HTMLDivElement>(null);
   const { allowOnce, allowAlways, otherOptions } = partitionApprovalOptions(
     request.options,
   );
   const command = approvalCommand(request);
+  const displayedAction = command ?? request.tool_name;
 
   useEffect(() => {
     if (!allowMenuOpen) return;
@@ -75,20 +76,14 @@ const ApprovalRequestRow: React.FC<{
       return;
     }
     const updatePosition = () => {
-      const trigger = allowMenuButtonRef.current;
+      const trigger = allowMenuRef.current;
       if (!trigger) return;
       const rect = trigger.getBoundingClientRect();
-      const menuWidth = 144;
       const gap = 4;
       setAllowMenuPosition({
-        left: Math.max(
-          8,
-          Math.min(
-            rect.right - menuWidth,
-            window.innerWidth - menuWidth - 8,
-          ),
-        ),
+        left: Math.max(8, rect.left),
         top: rect.bottom + gap,
+        minWidth: rect.width + 8,
       });
     };
     updatePosition();
@@ -128,25 +123,15 @@ const ApprovalRequestRow: React.FC<{
           <span className="shrink-0 text-xs text-[var(--ink-subtle)]">
             {translate('approvals.requestAction', 'requests to run')}
           </span>
-          <div className="flex min-w-0 flex-1 items-baseline gap-2">
-            <code
-              title={request.tool_name}
-              className="shrink-0 font-mono text-[12px] font-medium text-[var(--ink)]"
-            >
-              {request.tool_name}
-            </code>
-            {command && (
-              <code
-                title={command}
-                className="min-w-0 truncate font-mono text-[12px] text-[var(--ink-muted)]"
-              >
-                {command}
-              </code>
-            )}
-          </div>
+          <code
+            title={displayedAction}
+            className="min-w-0 flex-1 truncate whitespace-nowrap font-mono text-[12px] font-medium text-[var(--ink)]"
+          >
+            {displayedAction}
+          </code>
           <time
             dateTime={new Date(request.created_at).toISOString()}
-            className="ml-auto shrink-0 font-mono text-[10px] text-[var(--ink-tertiary)]"
+            className="shrink-0 font-mono text-[10px] text-[var(--ink-tertiary)]"
           >
             {new Intl.DateTimeFormat(locale, {
               hour: '2-digit',
@@ -173,7 +158,6 @@ const ApprovalRequestRow: React.FC<{
               {allowAlways && (
                 <>
                   <button
-                    ref={allowMenuButtonRef}
                     type="button"
                     disabled={disabled}
                     aria-haspopup="menu"
@@ -198,15 +182,16 @@ const ApprovalRequestRow: React.FC<{
                         style={{
                           left: allowMenuPosition.left,
                           top: allowMenuPosition.top,
+                          minWidth: allowMenuPosition.minWidth,
                         }}
-                        className="fixed z-[100] min-w-44 rounded-md border border-[var(--hairline)] bg-[var(--surface-1)] p-1"
+                        className="fixed z-[100] rounded-md border border-[var(--hairline)] bg-[var(--surface-1)] p-1"
                       >
                         <button
                           type="button"
                           role="menuitem"
                           disabled={disabled}
                           onClick={() => resolveOption(allowAlways.option_id)}
-                          className="flex h-7 w-full items-center rounded-md bg-transparent px-2.5 text-left text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-focus)] disabled:opacity-50"
+                          className="flex h-7 items-center whitespace-nowrap rounded-md bg-transparent pl-1 pr-2.5 text-left text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-focus)] disabled:opacity-50"
                         >
                           {approvalOptionLabel(allowAlways, translate)}
                         </button>

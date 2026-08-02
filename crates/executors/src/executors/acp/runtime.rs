@@ -520,7 +520,10 @@ async fn probe_acp_command_inner(
     auth_method_id: Option<String>,
     create_probe_session: bool,
 ) -> Result<AcpCapabilityProbe, ExecutorError> {
-    let (program_path, args) = command_parts.into_resolved().await?;
+    let command_display = command_parts.redacted_display();
+    let (program_path, args) = command_parts.into_resolved().await.map_err(|error| {
+        acp_probe_diagnostic_error(&command_display, "resolve ACP probe executable", error)
+    })?;
     let mut command = Command::new(program_path);
     command
         .kill_on_drop(true)
@@ -532,15 +535,23 @@ async fn probe_acp_command_inner(
     env.clone()
         .with_profile(cmd_overrides)
         .apply_to_command(&mut command);
-    let mut child = command.group_spawn()?;
-    let stdout =
-        child.inner().stdout.take().ok_or_else(|| {
-            ExecutorError::Io(std::io::Error::other("ACP probe stdout unavailable"))
-        })?;
-    let stdin =
-        child.inner().stdin.take().ok_or_else(|| {
-            ExecutorError::Io(std::io::Error::other("ACP probe stdin unavailable"))
-        })?;
+    let mut child = command.group_spawn().map_err(|error| {
+        acp_probe_diagnostic_error(&command_display, "start ACP probe process", error)
+    })?;
+    let stdout = child.inner().stdout.take().ok_or_else(|| {
+        acp_probe_diagnostic_error(
+            &command_display,
+            "open ACP probe stdout",
+            "stdout pipe unavailable",
+        )
+    })?;
+    let stdin = child.inner().stdin.take().ok_or_else(|| {
+        acp_probe_diagnostic_error(
+            &command_display,
+            "open ACP probe stdin",
+            "stdin pipe unavailable",
+        )
+    })?;
     let (probe_tx, probe_rx) =
         tokio::sync::oneshot::channel::<Result<AcpCapabilityProbe, String>>();
     let probe_tx = Arc::new(StdMutex::new(Some(probe_tx)));
@@ -693,19 +704,35 @@ async fn probe_acp_command_inner(
     let result = tokio::time::timeout(Duration::from_secs(12), probe_rx)
         .await
         .map_err(|_| {
-            ExecutorError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "ACP initialize probe timed out",
-            ))
+            acp_probe_diagnostic_error(
+                &command_display,
+                "initialize ACP connection",
+                "timed out after 12 seconds",
+            )
         })?
         .map_err(|_| {
-            ExecutorError::Io(std::io::Error::other(
-                "ACP initialize probe exited without a response",
-            ))
+            acp_probe_diagnostic_error(
+                &command_display,
+                "initialize ACP connection",
+                "probe process exited without a response",
+            )
         })?
-        .map_err(|error| ExecutorError::Io(std::io::Error::other(error)));
+        .map_err(|error| {
+            acp_probe_diagnostic_error(&command_display, "initialize ACP connection", error)
+        });
     let _ = child.kill().await;
     result
+}
+
+fn acp_probe_diagnostic_error(
+    command: &str,
+    operation: &str,
+    result: impl std::fmt::Display,
+) -> ExecutorError {
+    ExecutorError::Io(std::io::Error::other(format!(
+        "command=`{command}`; operation={operation}; result={}",
+        result.to_string().trim()
+    )))
 }
 
 fn acp_client_capabilities(

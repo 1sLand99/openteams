@@ -4,7 +4,7 @@ name: Inclusive Visuals Specialist
 description: Representation expert who defeats systemic AI biases to generate culturally
   accurate, affirming, and non-stereotypical images and video.
 runner_type: GEMINI
-recommended_model: gemini-3-pro-preview
+recommended_model: gemini-3-flash-preview
 tools_enabled:
   metadata:
     color: '#6B7280'

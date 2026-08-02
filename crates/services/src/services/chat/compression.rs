@@ -223,24 +223,30 @@ async fn call_agent_for_summary(
     let mut status = None;
     if let Some(exit_signal) = spawned.exit_signal.take() {
         // Prefer explicit completion signal from executor, then reap child process.
-        match tokio::time::timeout(SUMMARY_EXECUTION_TIMEOUT, exit_signal).await {
-            Ok(Ok(ExecutorExitResult::Success)) => {}
-            Ok(Ok(ExecutorExitResult::Failure)) => failed_by_signal = true,
-            Ok(Ok(ExecutorExitResult::FailureWithError(_))) => failed_by_signal = true,
-            Ok(Err(err)) => {
+        let exit_result = tokio::select! {
+            result = exit_signal => Some(result),
+            _ = msg_store.wait_for_inactivity(SESSION_INACTIVITY_TIMEOUT) => None,
+        };
+        match exit_result {
+            Some(Ok(ExecutorExitResult::Success)) => {}
+            Some(Ok(ExecutorExitResult::Failure)) => failed_by_signal = true,
+            Some(Ok(ExecutorExitResult::FailureWithError(_))) => failed_by_signal = true,
+            Some(Err(err)) => {
                 tracing::warn!(
                     agent_name = %agent.name,
                     error = %err,
                     "Summarization exit signal dropped; falling back to process wait"
                 );
-                status = Some(wait_for_summary_process_exit(&mut spawned, &agent.name).await?);
+                status = Some(
+                    wait_for_summary_process_exit(&mut spawned, &agent.name, &msg_store).await?,
+                );
             }
-            Err(_) => {
+            None => {
                 terminate_summary_child(&mut spawned).await;
                 return Err(ChatServiceError::Validation(format!(
-                    "AI summarization timed out for agent {} after {} seconds",
+                    "AI summarization for agent {} timed out after {} minutes without session activity",
                     agent.name,
-                    SUMMARY_EXECUTION_TIMEOUT.as_secs()
+                    SESSION_INACTIVITY_TIMEOUT.as_secs() / 60
                 )));
             }
         }
@@ -260,7 +266,9 @@ async fn call_agent_for_summary(
             }
         }
     } else {
-        status = Some(wait_for_summary_process_exit(&mut spawned, &agent.name).await?);
+        status = Some(
+            wait_for_summary_process_exit(&mut spawned, &agent.name, &msg_store).await?,
+        );
     }
 
     msg_store.push_finished();
@@ -293,16 +301,16 @@ async fn call_agent_for_summary(
 async fn wait_for_summary_process_exit(
     spawned: &mut SpawnedChild,
     agent_name: &str,
+    msg_store: &MsgStore,
 ) -> Result<std::process::ExitStatus, ChatServiceError> {
-    match tokio::time::timeout(SUMMARY_EXECUTION_TIMEOUT, spawned.child.wait()).await {
-        Ok(Ok(status)) => Ok(status),
-        Ok(Err(err)) => Err(ChatServiceError::Io(err)),
-        Err(_) => {
+    tokio::select! {
+        result = spawned.child.wait() => result.map_err(ChatServiceError::Io),
+        _ = msg_store.wait_for_inactivity(SESSION_INACTIVITY_TIMEOUT) => {
             terminate_summary_child(spawned).await;
             Err(ChatServiceError::Validation(format!(
-                "AI summarization timed out for agent {} after {} seconds",
+                "AI summarization for agent {} timed out after {} minutes without session activity",
                 agent_name,
-                SUMMARY_EXECUTION_TIMEOUT.as_secs()
+                SESSION_INACTIVITY_TIMEOUT.as_secs() / 60
             )))
         }
     }

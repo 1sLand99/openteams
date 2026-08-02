@@ -55,6 +55,31 @@ export function getAvailabilityLabel(availability: AvailabilityInfo): string {
   }
 }
 
+export interface RuntimeErrorDetail {
+  /** Backend stage tag like `version_check`, null for unstaged lines. */
+  stage: string | null;
+  message: string;
+}
+
+/**
+ * Split the backend's staged `last_error` ("[stage] message" per line) into
+ * display rows. Unrecognized lines are shown verbatim.
+ */
+export function parseRuntimeErrorDetails(
+  lastError: string | null,
+): RuntimeErrorDetail[] {
+  if (!lastError) return [];
+  return lastError
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = /^\[([a-z_]+)\]\s*(.*)$/u.exec(line);
+      if (!match) return { stage: null, message: line };
+      return { stage: match[1], message: match[2] || line };
+    });
+}
+
 export function getRuntimeDisplayState(
   runner: Pick<AgentRuntimeStatus, "installed" | "executable" | "last_error">,
 ): RuntimeDisplayState {

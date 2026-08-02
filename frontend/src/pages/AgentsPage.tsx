@@ -40,9 +40,11 @@ import {
   getRunnerLabel,
   getRuntimeDisplayState,
   parseEnvText,
+  parseRuntimeErrorDetails,
   type AgentRuntimeFilter,
   type RuntimeDisplayState,
 } from "./agent-runtime/agentRuntimeViewModel";
+import { AgentInstallGuide } from "./agent-runtime/AgentInstallGuide";
 import { findAcpSelectConfigOption } from "./team/teamUtils";
 import ampSchema from "../../../shared/schemas/amp.json";
 import claudeCodeSchema from "../../../shared/schemas/claude_code.json";
@@ -250,6 +252,9 @@ const getRuntimeErrorMessage = (
   if (runner.installed && !runner.executable) return t("agents.status.error");
   return "";
 };
+
+const getErrorStageLabel = (stage: string, t: TranslateFn): string =>
+  translateWithFallback(t, `agents.error.stage.${stage}`, stage);
 
 const translateConfigFieldText = (
   t: TranslateFn,
@@ -1048,6 +1053,8 @@ function AgentConfigSidebar({
   onSave,
   onDiagnosticsLoaded,
   refreshRevision,
+  rechecking,
+  onRecheck,
   t,
 }: {
   runner: AgentRuntimeStatus;
@@ -1060,6 +1067,8 @@ function AgentConfigSidebar({
   ) => Promise<void>;
   onDiagnosticsLoaded: (diagnostics: AgentRuntimeDiagnostics) => void;
   refreshRevision: number;
+  rechecking: boolean;
+  onRecheck: () => void;
   t: TranslateFn;
 }) {
   const [formData, setFormData] = useState<
@@ -1100,6 +1109,7 @@ function AgentConfigSidebar({
   const currentDiagnostics =
     diagnostics?.runner_type === runner.runner_type ? diagnostics : null;
   const envSummary = runner.env_summary;
+  const runtimeErrorDetails = parseRuntimeErrorDetails(runner.last_error);
   const configPath =
     currentDiagnostics?.config_path ??
     (diagnosticsLoading
@@ -1262,6 +1272,8 @@ function AgentConfigSidebar({
             installed: runner.installed,
             executable: runner.executable,
             availability: runner.availability,
+            auth_state: runner.auth_state,
+            node_available: runner.node_available,
             discovered_models: runner.discovered_models,
             model_source: runner.model_source,
             last_checked_at: runner.last_checked_at,
@@ -1407,6 +1419,39 @@ function AgentConfigSidebar({
           "min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5 ot-scroll-area-styled",
         )}
       >
+        {runtimeErrorDetails.length > 0 && (
+          <section
+            role="alert"
+            className="rounded-[8px] border border-red-500/30 bg-red-500/5 p-4"
+          >
+            <h3 className="mb-3 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-red-400">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              {t("agents.error.title")}
+            </h3>
+            <div className="space-y-2">
+              {runtimeErrorDetails.map((detail, index) => (
+                <div key={index} className="flex items-start gap-2">
+                  {detail.stage && (
+                    <span className="mt-px shrink-0 rounded-[4px] border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 font-mono text-[10px] leading-[1.4] text-red-300">
+                      {getErrorStageLabel(detail.stage, t)}
+                    </span>
+                  )}
+                  <p className="min-w-0 break-words font-mono text-[12px] leading-[1.55] text-red-300/90">
+                    {detail.message}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <AgentInstallGuide
+          runner={runner}
+          rechecking={rechecking}
+          onRecheck={onRecheck}
+          t={t}
+        />
+
         <section className="rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] p-4">
           <h3 className="mb-3 text-[11px] font-semibold tracking-[0.12em] text-[var(--ink-subtle)] uppercase">
             {t("agents.details.runtime")}
@@ -1566,10 +1611,13 @@ function AgentConfigEmptyState({ t }: { t: TranslateFn }) {
 
 /* ========== Main page ========== */
 
+const FOCUS_RECHECK_INTERVAL_MS = 30_000;
+
 export function AgentsPage() {
   const { t, showToast } = useWorkspace();
   const [runners, setRunners] = useState<AgentRuntimeStatus[]>([]);
   const runnersRef = useRef<AgentRuntimeStatus[]>([]);
+  const lastFocusRecheckRef = useRef(0);
   const agentsPageRef = useRef<HTMLDivElement>(null);
   const [filter, setFilter] = useState<AgentRuntimeFilter>("all");
   const [loading, setLoading] = useState(true);
@@ -1736,6 +1784,33 @@ export function AgentsPage() {
     void loadRuntime();
   }, [loadRuntime]);
 
+  // Re-detect agents when the app regains focus, so installs or sign-ins
+  // finished in an external terminal are picked up without a manual refresh.
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      const now = Date.now();
+      if (now - lastFocusRecheckRef.current < FOCUS_RECHECK_INTERVAL_MS) return;
+      const needsAttention = runnersRef.current.some(
+        (runner) =>
+          getRuntimeDisplayState(runner) !== "available" ||
+          (runner.installed && runner.auth_state !== "authenticated"),
+      );
+      if (!needsAttention) return;
+      lastFocusRecheckRef.current = now;
+      void (async () => {
+        try {
+          const response = await agentRuntimeApi.refresh();
+          updateRuntimeRunners(response.runners);
+          setRefreshRevision((current) => current + 1);
+        } catch {
+          // Silent background recheck; explicit refresh surfaces errors.
+        }
+      })();
+    };
+    window.addEventListener("focus", handleWindowFocus);
+    return () => window.removeEventListener("focus", handleWindowFocus);
+  }, [updateRuntimeRunners]);
+
   useEffect(() => {
     setSelectedRunner((current) => {
       if (!current) return current;
@@ -1796,6 +1871,8 @@ export function AgentsPage() {
               installed: diagnostics.installed,
               executable: diagnostics.executable,
               availability: diagnostics.availability,
+              auth_state: diagnostics.auth_state,
+              node_available: diagnostics.node_available,
               discovered_models: diagnostics.discovered_models,
               model_source: diagnostics.model_source,
               version: diagnostics.version,
@@ -2011,6 +2088,8 @@ export function AgentsPage() {
                 onSave={handleSave}
                 onDiagnosticsLoaded={handleDiagnosticsLoaded}
                 refreshRevision={refreshRevision}
+                rechecking={refreshingConfig}
+                onRecheck={() => void handleRefreshConfig()}
                 t={t}
               />
             ) : (
