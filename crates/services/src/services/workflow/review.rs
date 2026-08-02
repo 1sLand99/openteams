@@ -5,9 +5,7 @@ use db::models::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::workflow_runtime::{
-    MAX_WORKFLOW_REVIEW_ATTEMPTS, WorkflowRuntimeError, extract_json_payload,
-};
+use super::workflow_runtime::{WorkflowRuntimeError, extract_json_payload};
 
 #[derive(Debug, Clone)]
 pub struct LoopReviewPromptStepInput {
@@ -48,6 +46,7 @@ pub fn build_loop_review_prompt(
     loop_def: &CompiledLoopDef,
     execution_id: Uuid,
     review_attempt: i32,
+    max_review_attempts: i32,
     review_steps: &[LoopReviewPromptStepInput],
     response_language_instruction: &str,
 ) -> String {
@@ -171,7 +170,7 @@ If the entire loop needs rework, omit step_feedbacks or return an empty array.
         loop_key = loop_def.loop_key,
         execution_id = execution_id,
         review_attempt = review_attempt,
-        max_review_attempts = MAX_WORKFLOW_REVIEW_ATTEMPTS,
+        max_review_attempts = max_review_attempts,
         review_scope_step_titles = review_scope_step_titles,
         step_sections = step_sections,
         rejected_feedback_template = rejected_feedback_template,
@@ -453,6 +452,7 @@ mod tests {
             &sample_loop_def(),
             Uuid::nil(),
             1,
+            3,
             &[
                 LoopReviewPromptStepInput {
                     step_key: "draft".to_string(),
@@ -495,7 +495,7 @@ mod tests {
         assert!(prompt.contains("Revise"));
         assert!(prompt.contains("docs/draft.md"));
         assert!(prompt.contains("\"type\": \"loop_review_result\""));
-        assert!(prompt.contains("Review attempt: 1 of at most 5"));
+        assert!(prompt.contains("Review attempt: 1 of at most 3"));
         assert!(
             prompt.contains("report every issue you can identify across the whole review scope")
         );

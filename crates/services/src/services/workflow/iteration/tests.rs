@@ -188,6 +188,11 @@ mod tests {
         assert!(prompt.contains("writing-plans"));
         assert!(prompt.contains("code-guidelines"));
         assert!(prompt.contains("Return exactly one workflow plan JSON object"));
+        assert!(prompt.contains("`globals.default_retry` and optional node `maxRetry`"));
+        assert!(prompt.contains("Do not output top-level `policies` or `loops`"));
+        assert!(prompt.contains("without a non-empty `reviewScope` is one independent review step"));
+        assert!(!prompt.contains("\"kind\": \"hard | soft\""));
+        assert!(!prompt.contains("\"policies\": {"));
         assert!(prompt.contains("Final instruction: return the workflow plan JSON object only."));
     }
 

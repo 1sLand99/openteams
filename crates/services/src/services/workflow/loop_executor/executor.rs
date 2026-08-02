@@ -317,6 +317,9 @@ impl<'a> LoopExecutor<'a> {
                     Some(serde_json::json!({
                         "feedback": feedback,
                         "retry_count": retry_loop.retry_count,
+                        "max_retry": retry_loop.max_retry,
+                        "review_attempt": retry_loop.retry_count,
+                        "max_review_attempts": max_loop_review_attempts(&retry_loop),
                     })),
                 )
                 .await?;
@@ -328,11 +331,12 @@ impl<'a> LoopExecutor<'a> {
                 feedback,
                 review_attempt,
             } => {
+                let max_review_attempts = max_loop_review_attempts(&active_loop);
                 let reason = format!(
                     "Loop review \"{}\" was rejected on the final allowed review attempt ({}/{}): {}",
                     active_loop.loop_key,
                     review_attempt,
-                    MAX_WORKFLOW_REVIEW_ATTEMPTS,
+                    max_review_attempts,
                     feedback
                 );
                 let failed_loop = WorkflowLoop::update_status(
@@ -351,7 +355,8 @@ impl<'a> LoopExecutor<'a> {
                         "reason": "review_limit_reached",
                         "feedback": feedback,
                         "review_attempt": review_attempt,
-                        "max_review_attempts": MAX_WORKFLOW_REVIEW_ATTEMPTS,
+                        "max_retry": active_loop.max_retry,
+                        "max_review_attempts": max_review_attempts,
                     })),
                 )
                 .await?;
@@ -596,10 +601,11 @@ impl<'a> LoopExecutor<'a> {
         let review_attempt =
             WorkflowOrchestrator::next_lead_review_attempt(self.pool, running_review_step.id)
                 .await?;
-        if review_attempt > MAX_WORKFLOW_REVIEW_ATTEMPTS {
+        let max_review_attempts = max_loop_review_attempts(workflow_loop);
+        if review_attempt > max_review_attempts {
             let feedback = format!(
                 "Loop review \"{}\" cannot run again: the maximum of {} review attempts has been reached.",
-                loop_def.loop_key, MAX_WORKFLOW_REVIEW_ATTEMPTS
+                loop_def.loop_key, max_review_attempts
             );
             WorkflowOrchestrator::transition_step_and_sync(
                 self.pool,
@@ -612,7 +618,7 @@ impl<'a> LoopExecutor<'a> {
             .await?;
             return Ok(LoopReviewDecision::LimitReached {
                 feedback,
-                review_attempt: MAX_WORKFLOW_REVIEW_ATTEMPTS,
+                review_attempt: max_review_attempts,
             });
         }
         let review_inputs = self.review_prompt_inputs(loop_def).await?;
@@ -624,6 +630,7 @@ impl<'a> LoopExecutor<'a> {
             loop_def,
             self.execution.id,
             review_attempt,
+            max_review_attempts,
             &review_inputs,
             response_language_instruction,
         );
@@ -723,6 +730,7 @@ impl<'a> LoopExecutor<'a> {
                 .await?;
                 let disposition = rejected_loop_review_disposition(
                     review_attempt,
+                    max_review_attempts,
                     &feedback_targets,
                 );
                 match disposition {
@@ -1265,15 +1273,16 @@ fn requires_user_acceptance_checkpoint(workflow_loop: &WorkflowLoop) -> bool {
 
 fn rejected_loop_review_disposition(
     review_attempt: i32,
+    max_review_attempts: i32,
     feedback_targets: &[LoopFeedbackTarget],
 ) -> RejectedLoopReviewDisposition {
     // A user waiver is authoritative only for its stable skipped-step issue
     // scope. When it covers every target there is nothing left to fail, even
-    // on attempt five.
+    // on the final configured attempt.
     if feedback_targets.is_empty() {
         return RejectedLoopReviewDisposition::PassedByUserWaiver;
     }
-    if workflow_review_attempt_limit_reached(review_attempt) {
+    if loop_review_attempt_limit_reached(review_attempt, max_review_attempts) {
         return RejectedLoopReviewDisposition::LimitReached;
     }
     if feedback_targets
@@ -1283,6 +1292,17 @@ fn rejected_loop_review_disposition(
         return RejectedLoopReviewDisposition::NeedsSkippedDecision;
     }
     RejectedLoopReviewDisposition::Retry
+}
+
+/// `max_retry` is the number of rework executions after the initial review.
+/// Clamp historical negative values so old/corrupt rows still get exactly one
+/// initial review rather than an impossible zero-attempt budget.
+fn max_loop_review_attempts(workflow_loop: &WorkflowLoop) -> i32 {
+    workflow_loop.max_retry.max(0).saturating_add(1)
+}
+
+fn loop_review_attempt_limit_reached(review_attempt: i32, max_review_attempts: i32) -> bool {
+    review_attempt >= max_review_attempts
 }
 
 pub(crate) fn loop_skip_waiver(step: &WorkflowStep, loop_key: &str) -> Option<String> {

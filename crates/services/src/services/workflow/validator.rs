@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use db::models::workflow_types::WorkflowPlanJson;
+use db::models::workflow_types::{MAX_WORKFLOW_RETRY, WorkflowPlanJson};
 
 /// 校验错误，包含人类可读的中文错误信息
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -73,6 +73,36 @@ pub fn validate_structure(plan: &WorkflowPlanJson) -> ValidationResult {
         });
     }
 
+    // These fields remain in the serde model only so historical plan JSON can
+    // still be read. They have no compiler/runtime consumer and must not be
+    // silently accepted on executable submissions.
+    if plan.loops.as_ref().is_some_and(|loops| !loops.is_empty()) {
+        errors.push(ValidationError {
+            field: "loops".into(),
+            message: "顶层 loops 已废弃且不会被运行时消费；请删除该字段，并在 review 节点使用非空 reviewScope 声明返工回路".into(),
+        });
+    }
+    if plan.policies.is_some() {
+        errors.push(ValidationError {
+            field: "policies".into(),
+            message:
+                "policies 仅为旧数据反序列化兼容保留，当前运行时不消费该字段；请从新计划中删除"
+                    .into(),
+        });
+    }
+
+    if let Some(globals) = &plan.globals
+        && globals.default_retry > MAX_WORKFLOW_RETRY
+    {
+        errors.push(ValidationError {
+            field: "globals.default_retry".into(),
+            message: format!(
+                "默认重试次数必须在 0..={MAX_WORKFLOW_RETRY} 范围内，当前值为 {}",
+                globals.default_retry
+            ),
+        });
+    }
+
     // agents.lead 非空
     if plan.agents.lead.trim().is_empty() {
         errors.push(ValidationError {
@@ -121,6 +151,30 @@ pub fn validate_structure(plan: &WorkflowPlanJson) -> ValidationResult {
             errors.push(ValidationError {
                 field: format!("nodes[id={}]", node.id),
                 message: format!("节点 id '{}' 重复，所有节点 id 必须唯一", node.id),
+            });
+        }
+
+        if let Some(max_retry) = node.data.max_retry
+            && max_retry > MAX_WORKFLOW_RETRY
+        {
+            errors.push(ValidationError {
+                field: format!("nodes[id={}].data.maxRetry", node.id),
+                message: format!(
+                    "节点重试次数必须在 0..={MAX_WORKFLOW_RETRY} 范围内，当前值为 {max_retry}",
+                ),
+            });
+        }
+
+        if node.data.step_type != "review"
+            && node
+                .data
+                .review_scope
+                .as_ref()
+                .is_some_and(|scope| !scope.is_empty())
+        {
+            errors.push(ValidationError {
+                field: format!("nodes[id={}].data.reviewScope", node.id),
+                message: "只有 review 节点可以声明非空 reviewScope".into(),
             });
         }
     }
@@ -350,16 +404,16 @@ pub fn validate_semantics(plan: &WorkflowPlanJson, valid_agent_ids: &[String]) -
         });
     }
 
-    // edge data.kind 校验
+    // Until soft dependencies have scheduler semantics, only hard edges are
+    // accepted. The persisted enum still contains Soft for old compiled data.
     for edge in &plan.edges {
         if let Some(ref data) = edge.data
             && data.kind != "hard"
-            && data.kind != "soft"
         {
             errors.push(ValidationError {
                 field: format!("edges[id={}].data.kind", edge.id),
                 message: format!(
-                    "边的依赖类型必须为 'hard' 或 'soft'，当前值为 '{}'",
+                    "边的依赖类型当前只支持 'hard'；'soft' 尚无独立调度语义，当前值为 '{}'",
                     data.kind
                 ),
             });
@@ -525,6 +579,103 @@ mod tests {
         let plan = make_valid_plan();
         let result = validate_plan(&plan, &valid_agents());
         assert!(result.is_valid, "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn test_legacy_dead_fields_deserialize_but_non_empty_values_are_rejected() {
+        let mut plan = make_valid_plan();
+        plan.loops = Some(vec![WorkflowLoopDef {
+            loop_key: "legacy-loop".into(),
+            member_steps: vec!["task_1".into()],
+            review_step: "result".into(),
+            max_retry: Some(1),
+            user_review_required: Some(true),
+        }]);
+        plan.policies = Some(WorkflowPlanPolicies {
+            approval_required_on: None,
+            permission_required_on: None,
+            on_failure: Some("continue".into()),
+            allow_plan_revision: true,
+        });
+
+        let serialized = serde_json::to_string(&plan).expect("serialize legacy fields");
+        let parsed: WorkflowPlanJson =
+            serde_json::from_str(&serialized).expect("legacy fields remain deserializable");
+        let result = validate_structure(&parsed);
+
+        assert!(result.errors.iter().any(|error| error.field == "loops"));
+        assert!(result.errors.iter().any(|error| error.field == "policies"));
+
+        plan.loops = Some(Vec::new());
+        plan.policies = None;
+        assert!(validate_structure(&plan).is_valid);
+    }
+
+    #[test]
+    fn test_soft_edge_is_rejected_until_scheduler_semantics_exist() {
+        assert_eq!(
+            serde_json::from_str::<WorkflowEdgeKind>("\"soft\"")
+                .expect("persisted soft edge kind remains deserializable"),
+            WorkflowEdgeKind::Soft
+        );
+        let mut plan = make_valid_plan();
+        plan.edges[0].data = Some(WorkflowEdgeData {
+            kind: "soft".into(),
+        });
+
+        let result = validate_semantics(&plan, &valid_agents());
+
+        assert!(!result.is_valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.field.ends_with("data.kind")
+                    && error.message.contains("只支持 'hard'"))
+        );
+    }
+
+    #[test]
+    fn test_retry_budget_accepts_zero_and_rejects_values_above_limit() {
+        let mut plan = make_valid_plan();
+        plan.globals = Some(WorkflowPlanGlobals {
+            interrupt_mode: "cooperative".into(),
+            default_retry: 0,
+            global_pause_supported: true,
+        });
+        plan.nodes[0].data.max_retry = Some(0);
+        assert!(validate_structure(&plan).is_valid);
+
+        plan.globals.as_mut().unwrap().default_retry = MAX_WORKFLOW_RETRY + 1;
+        plan.nodes[0].data.max_retry = Some(MAX_WORKFLOW_RETRY + 1);
+        let result = validate_structure(&plan);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.field == "globals.default_retry")
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.field.ends_with("data.maxRetry"))
+        );
+    }
+
+    #[test]
+    fn test_non_review_node_cannot_declare_non_empty_review_scope() {
+        let mut plan = make_valid_plan();
+        plan.nodes[0].data.review_scope = Some(vec!["task_1".into()]);
+
+        let result = validate_structure(&plan);
+
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.field.ends_with("data.reviewScope"))
+        );
     }
 
     #[test]

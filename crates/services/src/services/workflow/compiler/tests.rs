@@ -99,6 +99,67 @@ mod tests {
     }
 
     #[test]
+    fn test_compile_inherits_default_retry_and_honors_node_override() {
+        let mut plan: serde_json::Value = serde_json::from_str(sample_plan_json()).unwrap();
+        plan["globals"] = serde_json::json!({ "default_retry": 3 });
+        plan["nodes"][0]["data"]["maxRetry"] = serde_json::json!(0);
+
+        let graph = WorkflowCompiler::compile_from_json(&plan.to_string(), &agents()).unwrap();
+        let retry_by_step = graph
+            .steps
+            .iter()
+            .map(|step| (step.step_key.as_str(), step.max_retry))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(retry_by_step["task_1"], 0);
+        assert_eq!(retry_by_step["task_2"], 3);
+        assert_eq!(retry_by_step["result"], 3);
+
+        plan["globals"]["default_retry"] = serde_json::json!(0);
+        plan["nodes"][0]["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("maxRetry");
+        let zero_budget_graph =
+            WorkflowCompiler::compile_from_json(&plan.to_string(), &agents()).unwrap();
+        assert!(
+            zero_budget_graph
+                .steps
+                .iter()
+                .all(|step| step.max_retry == 0)
+        );
+    }
+
+    #[test]
+    fn test_compile_rejects_dead_fields() {
+        let mut plan: serde_json::Value = serde_json::from_str(sample_plan_json()).unwrap();
+        plan["policies"] = serde_json::json!({ "on_failure": "continue" });
+        plan["loops"] = serde_json::json!([{
+            "loopKey": "legacy",
+            "memberSteps": ["task_1"],
+            "reviewStep": "task_2"
+        }]);
+        let error = WorkflowCompiler::compile_from_json(&plan.to_string(), &agents())
+            .expect_err("dead fields must be rejected");
+        let message = error.to_string();
+
+        assert!(message.contains("loops"), "{message}");
+        assert!(message.contains("policies"), "{message}");
+    }
+
+    #[test]
+    fn test_compile_rejects_soft_edges() {
+        let mut plan: serde_json::Value = serde_json::from_str(sample_plan_json()).unwrap();
+        plan["edges"][0]["data"] = serde_json::json!({ "kind": "soft" });
+
+        let error = WorkflowCompiler::compile_from_json(&plan.to_string(), &agents())
+            .expect_err("soft edges must be rejected");
+        let message = error.to_string();
+
+        assert!(message.contains("soft"), "{message}");
+    }
+
+    #[test]
     fn test_ready_steps() {
         let graph = WorkflowCompiler::compile_from_json(&sample_plan_json(), &agents()).unwrap();
         // task_1 and task_2 have no incoming edges
@@ -230,6 +291,33 @@ mod tests {
                 assert_eq!(step.loop_key, None);
             }
         }
+    }
+
+    #[test]
+    fn test_loop_retry_budget_inherits_global_default() {
+        let mut plan: serde_json::Value = serde_json::from_str(&loop_plan_json()).unwrap();
+        plan["globals"] = serde_json::json!({ "default_retry": 4 });
+        plan["nodes"][2]["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("maxRetry");
+
+        let graph = WorkflowCompiler::compile_from_json(&plan.to_string(), &agents()).unwrap();
+        let loop_def = graph
+            .loops
+            .as_ref()
+            .and_then(|loops| loops.first())
+            .expect("reviewScope creates one loop");
+
+        assert_eq!(loop_def.max_retry, 4);
+        assert_eq!(
+            graph
+                .steps
+                .iter()
+                .find(|step| step.step_key == "review")
+                .map(|step| step.max_retry),
+            Some(4)
+        );
     }
 
     #[test]

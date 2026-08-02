@@ -701,6 +701,13 @@ mod tests {
         assert!(!prompt.contains("\"userReview\": \"optional boolean"));
         assert!(!prompt.contains("\"leadReview\": \"optional boolean"));
         assert!(prompt.contains("Do not output or infer `leadReview` or `userReview`."));
+        assert!(prompt.contains("`globals.default_retry` and optional node `maxRetry`"));
+        assert!(prompt.contains("`0` means one initial attempt and no rework"));
+        assert!(prompt.contains("Every edge must use `data.kind: \"hard\"`"));
+        assert!(prompt.contains("Do not output top-level `policies` or `loops`"));
+        assert!(prompt.contains("without a non-empty `reviewScope` is one independent review step"));
+        assert!(!prompt.contains("\"kind\": \"hard | soft\""));
+        assert!(!prompt.contains("\"policies\": {"));
         assert!(
             prompt
                 .find("## WorkflowPlanJson Schema Reference")

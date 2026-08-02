@@ -122,6 +122,11 @@ impl WorkflowOrchestrator {
                     .map(|loop_key| (step.step_key.clone(), loop_key))
             })
             .collect::<HashMap<_, _>>();
+        let max_retry_by_step_key = compiled_preview
+            .steps
+            .iter()
+            .map(|step| (step.step_key.as_str(), step.max_retry as i32))
+            .collect::<HashMap<_, _>>();
         for node in &mut parsed_plan.nodes {
             if let Some(loop_key) = loop_key_by_step_key.get(&node.id) {
                 node.data.loop_key = Some(loop_key.clone());
@@ -152,7 +157,10 @@ impl WorkflowOrchestrator {
                     lead_review_required,
                     user_review_required,
                     retry_count: 0,
-                    max_retry: n.data.max_retry.unwrap_or(1) as i32,
+                    max_retry: max_retry_by_step_key
+                        .get(n.id.as_str())
+                        .copied()
+                        .unwrap_or(1),
                     loop_key: loop_key_by_step_key
                         .get(&n.id)
                         .cloned()

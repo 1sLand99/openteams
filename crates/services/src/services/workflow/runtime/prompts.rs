@@ -149,6 +149,7 @@ pub(crate) static PLAN_SCHEMA_DEFINITION: &str = r#"{
         "verificationCommands": ["string, required non-empty for task nodes"],
         "completionEvidence": ["string, required non-empty for task nodes"],
         "interruptible": true,
+        "maxRetry": 1,
         "status": "optional string",
         "reviewScope": ["optional node_id list, review nodes only"]
       }
@@ -161,16 +162,10 @@ pub(crate) static PLAN_SCHEMA_DEFINITION: &str = r#"{
       "target": "node_id",
       "type": "optional string",
       "data": {
-        "kind": "hard | soft"
+        "kind": "hard"
       }
     }
-  ],
-  "policies": {
-    "approval_required_on": ["optional string"],
-    "permission_required_on": ["optional string"],
-    "on_failure": "optional string",
-    "allow_plan_revision": true
-  }
+  ]
 }"#;
 
 /// Stable output contract shared by initial and iteration plan generation.
@@ -190,12 +185,13 @@ Hard requirements:
 9. Leave `nodes[].data.agentId` empty or omit it only when a step does not need a specific agent. Never invent agent ids.
 10. Node `title` and `instructions` must be concrete, actionable, and specific enough for an agent to execute.
 11. Prefer the smallest executable closed loop that can satisfy the goal. Avoid unnecessary step expansion.
-12. Use `stepType: "review"` when execution-review-revision iteration is needed.
-13. A review node with a non-empty `reviewScope` creates a retry loop. `reviewScope` is the list of **task** node ids to re-run on rejection. All listed tasks must be upstream predecessors; include any intermediate tasks between a scoped task and the review. Each task may appear in at most one `reviewScope`. Never include result/review/unknown ids or downstream nodes.
+12. A `review` node without a non-empty `reviewScope` is one independent review step. It does not create a structured rejection-to-rework loop.
+13. Only a review node with a non-empty `reviewScope` creates a retry loop. `reviewScope` is the list of **task** node ids to re-run on rejection. All listed tasks must be upstream predecessors; include any intermediate tasks between a scoped task and the review. Each task may appear in at most one `reviewScope`. Never include result/review/unknown ids or downstream nodes.
 14. Do not output or infer `leadReview` or `userReview`. The system writes those fields from frontend card selections.
-15. Retry counts are not controlled by the plan JSON.
-16. Your output is validated, compiled, and may start execution directly. Schema errors, cyclic dependencies, invalid agent references, invalid `agents.available`, or missing result nodes will fail this generation.
-17. Every `task` node MUST define a verifiable contract in `nodes[].data`: non-empty `acceptance` (acceptance criteria), `outputs` (expected deliverable paths), `checklist` (verifiable work items), `verificationCommands` (commands or methods that prove the work, e.g. test/build commands), and `completionEvidence` (evidence the executor must produce, e.g. test output summaries). `review` and `result` nodes are exempt from these field requirements.
+15. Retry budgets are controlled by `globals.default_retry` and optional node `maxRetry`. Both must be integers from 0 through 10. `maxRetry` overrides the global value for that node. A retry budget counts rework after the initial execution/review: `0` means one initial attempt and no rework. For a loop review node, this gives one initial review plus at most `maxRetry` rework attempts.
+16. Every edge must use `data.kind: "hard"` or omit `data`; soft dependencies are not supported by the scheduler.
+17. Do not output top-level `policies` or `loops`; they are legacy compatibility fields with no runtime consumer. Your output is validated, compiled, and may start execution directly.
+18. Every `task` node MUST define a verifiable contract in `nodes[].data`: non-empty `acceptance` (acceptance criteria), `outputs` (expected deliverable paths), `checklist` (verifiable work items), `verificationCommands` (commands or methods that prove the work, e.g. test/build commands), and `completionEvidence` (evidence the executor must produce, e.g. test output summaries). `review` and `result` nodes are exempt from these field requirements.
 
 "#;
 
@@ -204,7 +200,10 @@ pub(crate) static PLAN_STATIC_CONSTRAINTS: &str = r#"## Additional Static Constr
 
 - `version` must be string `"1"`.
 - `agents.available` and `nodes[].data.agentId` may only use the `agent_id` values from the provided Available agents JSON.
-- `globals`, `policies`, and optional node/edge fields may be omitted when unnecessary, except the required `task` node contract fields.
+- `globals` and optional node/edge fields may be omitted when unnecessary. Omitted retry values inherit `globals.default_retry`, which defaults to 1.
+- Do not emit top-level `policies` or `loops`.
+- Edge dependency kind is hard-only; omit `data` or use `{ "kind": "hard" }`.
+- Required `task` contract fields may not be omitted.
 - `reviewScope` rules: task-only ids, upstream predecessors only, include intermediates, each task in at most one scope, no result/review/unknown/downstream ids. If two loops need similar work, split into separate tasks or keep shared setup outside `reviewScope`.
 - when multiple agents need to edit the same file or directory in parallel, use git worktree for isolation and merge changes back to the mainline afterward. If Git is not available, use alternative isolation methods.
 

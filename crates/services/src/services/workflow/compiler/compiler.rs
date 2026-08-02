@@ -79,24 +79,17 @@ impl WorkflowCompiler {
         };
 
         // 3. Compile edges into CompiledEdge.
+        // Validation currently admits only hard dependencies. Keep the
+        // WorkflowEdgeKind::Soft enum variant solely for old compiled rows.
         let edges: Vec<CompiledEdge> = plan
             .edges
             .iter()
             .map(|e| {
-                let kind = e
-                    .data
-                    .as_ref()
-                    .map(|d| match d.kind.as_str() {
-                        "soft" => WorkflowEdgeKind::Soft,
-                        _ => WorkflowEdgeKind::Hard,
-                    })
-                    .unwrap_or(WorkflowEdgeKind::Hard);
-
                 CompiledEdge {
                     edge_id: e.id.clone(),
                     from_step_key: e.source.clone(),
                     to_step_key: e.target.clone(),
-                    edge_kind: kind,
+                    edge_kind: WorkflowEdgeKind::Hard,
                 }
             })
             .collect();

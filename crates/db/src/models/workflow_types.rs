@@ -201,6 +201,9 @@ pub enum ReviewerType {
 #[ts(use_ts_enum)]
 pub enum WorkflowEdgeKind {
     Hard,
+    /// Kept so previously persisted compiled graphs can still be deserialized.
+    /// New plan submissions reject soft edges until the scheduler implements
+    /// distinct soft-dependency semantics.
     Soft,
 }
 
@@ -339,6 +342,10 @@ fn default_interrupt_mode() -> String {
 fn default_retry() -> u32 {
     1
 }
+
+/// Retry budgets count rework attempts after the initial execution/review.
+/// Zero therefore means one initial attempt and no automatic rework.
+pub const MAX_WORKFLOW_RETRY: u32 = 10;
 
 fn default_true() -> bool {
     true

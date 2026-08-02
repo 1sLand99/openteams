@@ -229,12 +229,22 @@ mod tests {
     }
 
     #[test]
-    fn all_waived_targets_pass_before_the_final_attempt_limit_is_applied() {
-        assert!(workflow_review_attempt_limit_reached(
-            MAX_WORKFLOW_REVIEW_ATTEMPTS
-        ));
+    fn persisted_loop_retry_budget_drives_review_attempt_limit() {
+        let mut workflow_loop = sample_loop("loop-a");
+        workflow_loop.max_retry = 0;
+        assert_eq!(max_loop_review_attempts(&workflow_loop), 1);
+        assert!(loop_review_attempt_limit_reached(1, 1));
+
+        workflow_loop.max_retry = 2;
+        assert_eq!(max_loop_review_attempts(&workflow_loop), 3);
+        assert!(!loop_review_attempt_limit_reached(2, 3));
+        assert!(loop_review_attempt_limit_reached(3, 3));
+    }
+
+    #[test]
+    fn all_waived_targets_pass_before_the_dynamic_attempt_limit_is_applied() {
         assert_eq!(
-            rejected_loop_review_disposition(MAX_WORKFLOW_REVIEW_ATTEMPTS, &[]),
+            rejected_loop_review_disposition(2, 2, &[]),
             RejectedLoopReviewDisposition::PassedByUserWaiver
         );
 
@@ -245,11 +255,16 @@ mod tests {
             feedback: "still unresolved".to_string(),
         };
         assert_eq!(
-            rejected_loop_review_disposition(
-                MAX_WORKFLOW_REVIEW_ATTEMPTS,
-                &[remaining_target]
-            ),
+            rejected_loop_review_disposition(2, 2, &[remaining_target]),
             RejectedLoopReviewDisposition::LimitReached
+        );
+        assert_eq!(
+            rejected_loop_review_disposition(1, 2, &[LoopFeedbackTarget {
+                step: sample_loop_step(&sample_loop("loop-a"), "retry"),
+                issue_scope_id: "retry-issue".to_string(),
+                feedback: "retry".to_string(),
+            }]),
+            RejectedLoopReviewDisposition::Retry
         );
     }
 
