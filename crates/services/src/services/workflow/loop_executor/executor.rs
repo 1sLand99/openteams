@@ -645,7 +645,7 @@ impl<'a> LoopExecutor<'a> {
                 loop_def,
                 &running_review_step,
                 workflow_loop,
-                agent,
+                &session_agent.member_name,
                 &reviewer_type,
             )
             .await?;
@@ -666,6 +666,15 @@ impl<'a> LoopExecutor<'a> {
             .iter()
             .map(|input| input.step_key.clone())
             .collect::<Vec<_>>();
+        let declared_acceptance = review_inputs
+            .iter()
+            .flat_map(|input| {
+                input
+                    .acceptance
+                    .iter()
+                    .map(|criterion| (input.step_key.clone(), criterion.clone()))
+            })
+            .collect::<Vec<_>>();
         let (review_message, raw_output) = self
             .run_loop_review_protocol_with_retry(
                 agent,
@@ -675,6 +684,7 @@ impl<'a> LoopExecutor<'a> {
                 &running_review_step,
                 &prompt,
                 &allowed_step_keys,
+                &declared_acceptance,
             )
             .await?;
         let LoopReviewProtocolMessage::LoopReviewResult {
@@ -683,45 +693,12 @@ impl<'a> LoopExecutor<'a> {
             issue_id,
             step_feedbacks,
             acceptance_results,
-            evidence: _,
+            evidence,
             ..
         } = review_message;
-        let normalize = |value: &str| value.split_whitespace().collect::<Vec<_>>().join(" ");
-        let expected_acceptance = review_inputs
-            .iter()
-            .flat_map(|input| {
-                input
-                    .acceptance
-                    .iter()
-                    .map(|criterion| (input.step_key.as_str(), normalize(criterion)))
-            })
-            .filter(|(_, criterion)| !criterion.is_empty())
-            .collect::<std::collections::HashSet<_>>();
-        let actual_acceptance = acceptance_results
-            .iter()
-            .map(|result| (result.step_key.as_str(), normalize(&result.criterion)))
-            .collect::<Vec<_>>();
-        if actual_acceptance.len() != expected_acceptance.len()
-            || actual_acceptance
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len()
-                != actual_acceptance.len()
-            || actual_acceptance
-                .iter()
-                .any(|item| !expected_acceptance.contains(item))
-        {
-            return Err(OrchestratorError::Runtime(
-                WorkflowRuntimeError::Validation(
-                    "loop review acceptance_results must cover every declared criterion exactly once"
-                        .to_string(),
-                ),
-            ));
-        }
-
         let result_summary = SummaryPayload {
             summary: feedback.clone(),
-            content: Some(raw_output),
+            content: Some(raw_output.clone()),
             outputs: Vec::new(),
         };
         let recorded_review_step = WorkflowStep::record_execution_result(
@@ -732,13 +709,49 @@ impl<'a> LoopExecutor<'a> {
             Some(feedback.clone()),
         )
         .await?;
-        WorkflowOrchestrator::save_step_review(
+        let persisted_review = WorkflowOrchestrator::save_step_review(
             self.pool,
             &recorded_review_step,
-            reviewer_type,
+            reviewer_type.clone(),
             Some(workflow_session.session_agent_id.to_string()),
             verdict.clone(),
             &feedback,
+        )
+        .await?;
+        let _ = WorkflowOrchestrator::write_transcript(
+            self.pool,
+            self.execution.id,
+            Some(recorded_review_step.round_id),
+            Some(workflow_session.id),
+            Some(recorded_review_step.id),
+            "agent",
+            "loop_review",
+            &feedback,
+            Some(
+                &serde_json::json!({
+                    "source": "workflow_structured_loop_review_result",
+                    "resolved": true,
+                    "review_kind": "loop_agent_review",
+                    "reviewer_type": to_workflow_wire_value(&reviewer_type),
+                    "reviewer_id": workflow_session.session_agent_id,
+                    "review_round": persisted_review.review_round,
+                    "verdict": verdict,
+                    "acceptance_results": acceptance_results,
+                    "evidence": evidence,
+                    "structured_result": {
+                        "type": "loop_review_result",
+                        "loop_key": workflow_loop.loop_key,
+                        "execution_id": self.execution.id,
+                        "verdict": verdict,
+                        "feedback": feedback,
+                        "acceptance_results": acceptance_results,
+                        "evidence": evidence,
+                        "issue_id": issue_id,
+                        "step_feedbacks": step_feedbacks,
+                    },
+                })
+                .to_string(),
+            ),
         )
         .await?;
 
@@ -1129,6 +1142,7 @@ impl<'a> LoopExecutor<'a> {
         review_step: &WorkflowStep,
         prompt: &str,
         allowed_step_keys: &[String],
+        declared_acceptance: &[(String, String)],
     ) -> Result<(LoopReviewProtocolMessage, String), OrchestratorError> {
         let mut attempt = 0;
         let mut run_as_follow_up = false;
@@ -1176,6 +1190,10 @@ impl<'a> LoopExecutor<'a> {
             let raw_output = agent_output.output;
 
             match parse_loop_review_output(self.execution.id, &workflow_loop.loop_key, &raw_output)
+                .and_then(|message| {
+                    validate_loop_review_acceptance_coverage(&message, declared_acceptance)?;
+                    Ok(message)
+                })
             {
                 Ok(message) => return Ok((message, raw_output)),
                 Err(err)
@@ -1214,7 +1232,7 @@ impl<'a> LoopExecutor<'a> {
         loop_def: &CompiledLoopDef,
         review_step: &WorkflowStep,
         workflow_loop: &WorkflowLoop,
-        reviewer: &ChatAgent,
+        reviewer_name: &str,
         reviewer_type: &ReviewerType,
     ) -> Result<(Vec<LoopReviewPromptStepInput>, LoopReviewPromptContext), OrchestratorError> {
         let steps = WorkflowStep::find_by_execution(self.pool, self.execution.id).await?;
@@ -1326,7 +1344,7 @@ impl<'a> LoopExecutor<'a> {
         Ok((
             inputs,
             LoopReviewPromptContext {
-                reviewer_name: reviewer.name.clone(),
+                reviewer_name: reviewer_name.to_string(),
                 reviewer_role: match reviewer_type {
                     ReviewerType::Lead => "Lead".to_string(),
                     ReviewerType::Reviewer => "Reviewer".to_string(),

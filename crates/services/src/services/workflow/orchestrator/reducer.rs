@@ -321,6 +321,7 @@ pub fn validate_step_in_execution(
                 | S::Revising
                 | S::Ready
                 | S::Completed
+                | S::Failed
                 | S::Skipped
                 | S::InterruptRequested
                 | S::Interrupted
@@ -1240,6 +1241,10 @@ mod tests {
         assert!(validate_step_in_execution(
             &WorkflowExecutionStatus::Waiting,
             &WorkflowStepStatus::WaitingReview,
+        ));
+        assert!(validate_step_in_execution(
+            &WorkflowExecutionStatus::Waiting,
+            &WorkflowStepStatus::Failed,
         ));
         assert!(!validate_step_in_execution(
             &WorkflowExecutionStatus::Paused,

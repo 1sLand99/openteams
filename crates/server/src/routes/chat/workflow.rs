@@ -1285,7 +1285,7 @@ fn workflow_reviewer_type_label(reviewer_type: &ReviewerType) -> &'static str {
 fn workflow_transcript_review_key(entry: &WorkflowTranscriptEntry) -> Option<(Uuid, String, i32)> {
     if !matches!(
         entry.entry_type.as_str(),
-        "lead_review" | "step_review" | "loop_review"
+        "lead_review" | "review" | "step_review" | "loop_review"
     ) {
         return None;
     }
@@ -1300,6 +1300,10 @@ fn workflow_transcript_review_key(entry: &WorkflowTranscriptEntry) -> Option<(Uu
         .unwrap_or_else(|| {
             if entry.entry_type == "lead_review" {
                 "lead"
+            } else if entry.entry_type == "review"
+                || (entry.entry_type == "loop_review" && entry.sender_type == "agent")
+            {
+                "reviewer"
             } else {
                 "user"
             }
@@ -1370,16 +1374,28 @@ async fn list_transcript_response(
     let mut entries: Vec<WorkflowTranscriptEntry> = transcripts
         .into_iter()
         .map(|t| {
-            let agent_name = t
+            let session_agent = t
                 .workflow_agent_session_id
                 .and_then(|was_id| workflow_agent_sessions.iter().find(|was| was.id == was_id))
                 .and_then(|was| {
                     session_agents
                         .iter()
                         .find(|sa| sa.id == was.session_agent_id)
-                })
-                .and_then(|sa| agents.iter().find(|a| a.id == sa.agent_id))
-                .map(|a| a.name.clone());
+                });
+            let is_review_entry = matches!(
+                t.entry_type.as_str(),
+                "lead_review" | "review" | "result_review" | "loop_review"
+            );
+            let agent_name = session_agent.and_then(|sa| {
+                if is_review_entry {
+                    Some(sa.member_name.clone())
+                } else {
+                    agents
+                        .iter()
+                        .find(|agent| agent.id == sa.agent_id)
+                        .map(|agent| agent.name.clone())
+                }
+            });
             WorkflowTranscriptEntry {
                 id: t.id,
                 execution_id: t.execution_id,
@@ -1462,7 +1478,14 @@ async fn list_transcript_response(
             id: review.id,
             execution_id: review.execution_id,
             round_id: Some(step.round_id),
-            workflow_agent_session_id: None,
+            workflow_agent_session_id: review.reviewer_id.as_deref().and_then(|reviewer_id| {
+                workflow_agent_sessions
+                    .iter()
+                    .find(|workflow_session| {
+                        workflow_session.session_agent_id.to_string() == reviewer_id
+                    })
+                    .map(|workflow_session| workflow_session.id)
+            }),
             step_id: Some(review.step_id),
             step_key: Some(step.step_key.clone()),
             sender_type: sender_type.to_string(),
@@ -1472,6 +1495,7 @@ async fn list_transcript_response(
                 serde_json::json!({
                     "source": "workflow_step_review",
                     "reviewer_type": reviewer_type,
+                    "reviewer_id": review.reviewer_id,
                     "verdict": workflow_review_verdict_label(&review.verdict),
                     "review_round": review.review_round,
                     "review_id": review.id,
@@ -2165,6 +2189,36 @@ mod tests {
                 &WorkflowStepStatus::Running
             ),
             Some(WorkflowSidebarState::Running)
+        );
+    }
+
+    #[test]
+    fn structured_reviewer_transcript_has_a_deduplication_key() {
+        let step_id = Uuid::new_v4();
+        let entry = WorkflowTranscriptEntry {
+            id: Uuid::new_v4(),
+            execution_id: Uuid::new_v4(),
+            round_id: Some(Uuid::new_v4()),
+            workflow_agent_session_id: Some(Uuid::new_v4()),
+            step_id: Some(step_id),
+            step_key: Some("review".to_string()),
+            sender_type: "agent".to_string(),
+            entry_type: "review".to_string(),
+            content: "approved".to_string(),
+            meta_json: Some(
+                serde_json::json!({
+                    "reviewer_type": "reviewer",
+                    "review_round": 2,
+                })
+                .to_string(),
+            ),
+            created_at: Utc::now().to_rfc3339(),
+            agent_name: Some("Reviewer member".to_string()),
+        };
+
+        assert_eq!(
+            workflow_transcript_review_key(&entry),
+            Some((step_id, "reviewer".to_string(), 2))
         );
     }
 }

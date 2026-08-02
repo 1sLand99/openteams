@@ -50,6 +50,72 @@ fn skipped_retry_keep_effect(retryable_step_ids: &[Uuid]) -> &'static str {
     }
 }
 
+async fn fail_loop_if_retry_budget_exhausted_in_transaction(
+    transaction: &mut SqliteConnection,
+    execution: &WorkflowExecution,
+    workflow_loop: &WorkflowLoop,
+    review_step: &WorkflowStep,
+    feedback: &str,
+    decision_reason: &str,
+) -> Result<Option<(WorkflowStep, WorkflowLoop)>, OrchestratorError> {
+    let reason = format!(
+        "Loop \"{}\" cannot apply user-requested rework because its retry budget is exhausted ({}/{}): {}",
+        workflow_loop.loop_key, workflow_loop.retry_count, workflow_loop.max_retry, feedback
+    );
+    let Some(failed_loop) = WorkflowLoop::fail_if_retry_budget_exhausted_in_transaction(
+        transaction,
+        workflow_loop.id,
+        WorkflowLoopStatus::WaitingUser,
+        Some(reason),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let failed_step = super::reducer::transition_step_in_transaction(
+        transaction,
+        execution,
+        review_step,
+        WorkflowStepStatus::Failed,
+        Some(serde_json::json!({
+            "reason": "loop_retry_budget_exhausted",
+            "decision_reason": decision_reason,
+            "feedback": feedback,
+            "retry_count": failed_loop.retry_count,
+            "max_retry": failed_loop.max_retry,
+        })),
+    )
+    .await?
+    .entity;
+    WorkflowEvent::create_in_transaction(
+        transaction,
+        &CreateWorkflowEvent {
+            execution_id: execution.id,
+            round_id: Some(failed_loop.round_id),
+            step_id: Some(failed_step.id),
+            agent_session_id: failed_step.assigned_workflow_agent_session_id,
+            event_type: WorkflowEventType::LoopFailed,
+            status_before: Some(to_workflow_wire_value(&WorkflowLoopStatus::WaitingUser)),
+            status_after: Some(to_workflow_wire_value(&WorkflowLoopStatus::Failed)),
+            detail_json: Some(
+                serde_json::json!({
+                    "reason": "retry_budget_exhausted",
+                    "decision_reason": decision_reason,
+                    "feedback": feedback,
+                    "retry_count": failed_loop.retry_count,
+                    "max_retry": failed_loop.max_retry,
+                    "review_attempt": failed_loop.retry_count.saturating_add(1),
+                    "max_review_attempts": failed_loop.max_retry.max(0).saturating_add(1),
+                })
+                .to_string(),
+            ),
+        },
+        Uuid::new_v4(),
+    )
+    .await?;
+    Ok(Some((failed_step, failed_loop)))
+}
+
 impl WorkflowOrchestrator {
     pub async fn handle_iteration_feedback(
         db: &DBService,
@@ -825,7 +891,6 @@ impl WorkflowOrchestrator {
         )
         .await?;
 
-        let retry_budget_exhausted = workflow_loop.retry_count >= workflow_loop.max_retry;
         let (final_step, final_loop, decision_transcript, projection_reason) = if is_approved
             || all_rejected_targets_waived
         {
@@ -896,53 +961,23 @@ impl WorkflowOrchestrator {
                     "loop_user_review_passed"
                 },
             )
-        } else if retry_budget_exhausted {
-            let failed = super::reducer::transition_step_in_transaction(
+        } else if let Some((failed_step, failed_loop)) =
+            fail_loop_if_retry_budget_exhausted_in_transaction(
                 &mut transaction,
                 execution,
+                &workflow_loop,
                 step,
-                WorkflowStepStatus::Failed,
-                Some(serde_json::json!({ "reason": "loop_retry_budget_exhausted" })),
+                &decision_feedback,
+                "loop_user_rejected",
             )
             .await?
-            .entity;
-            let failed_loop = WorkflowLoop::update_status_if_current_in_transaction(
-                &mut transaction,
-                workflow_loop.id,
-                WorkflowLoopStatus::WaitingUser,
-                WorkflowLoopStatus::Failed,
-                Some(decision_feedback.clone()),
+        {
+            (
+                failed_step,
+                failed_loop,
+                None,
+                "loop_retry_budget_exhausted",
             )
-            .await?
-            .ok_or_else(|| {
-                OrchestratorError::IllegalTransition(format!(
-                    "loop {} changed before retry-budget failure",
-                    workflow_loop.id
-                ))
-            })?;
-            WorkflowEvent::create_in_transaction(
-                &mut transaction,
-                &CreateWorkflowEvent {
-                    execution_id: execution.id,
-                    round_id: Some(failed_loop.round_id),
-                    step_id: Some(failed.id),
-                    agent_session_id: failed.assigned_workflow_agent_session_id,
-                    event_type: WorkflowEventType::LoopFailed,
-                    status_before: Some(to_workflow_wire_value(&WorkflowLoopStatus::WaitingUser)),
-                    status_after: Some(to_workflow_wire_value(&WorkflowLoopStatus::Failed)),
-                    detail_json: Some(
-                        serde_json::json!({
-                            "reason": "retry_budget_exhausted",
-                            "retry_count": failed_loop.retry_count,
-                            "max_retry": failed_loop.max_retry,
-                        })
-                        .to_string(),
-                    ),
-                },
-                Uuid::new_v4(),
-            )
-            .await?;
-            (failed, failed_loop, None, "loop_retry_budget_exhausted")
         } else {
             let eligible_feedbacks = eligible_member_steps
                 .iter()
@@ -998,6 +1033,9 @@ impl WorkflowOrchestrator {
                             serde_json::json!({
                                 "feedback": decision_feedback,
                                 "retry_count": retry_loop.retry_count,
+                                "max_retry": retry_loop.max_retry,
+                                "review_attempt": retry_loop.retry_count,
+                                "max_review_attempts": retry_loop.max_retry.max(0).saturating_add(1),
                             })
                             .to_string(),
                         ),
@@ -1301,55 +1339,41 @@ impl WorkflowOrchestrator {
         .await?;
         let action_requires_retry = resolved_action == "restart_skipped"
             || (resolved_action == "keep_skipped" && !retryable_step_ids.is_empty());
-        let (resolved_review_step, resolved_loop, projection_reason) = if action_requires_retry
-            && workflow_loop.retry_count >= workflow_loop.max_retry
-        {
-            let failed = super::reducer::transition_step_in_transaction(
+        if resolved_action == "keep_skipped" {
+            for (skipped_step, issue_scope_id, feedback) in &skipped_steps {
+                LoopExecutor::record_user_skip_waiver_in_transaction(
+                    &mut transaction,
+                    workflow_loop,
+                    skipped_step,
+                    issue_scope_id,
+                    feedback,
+                )
+                .await?;
+            }
+        }
+        let exhausted_terminal = if action_requires_retry {
+            fail_loop_if_retry_budget_exhausted_in_transaction(
                 &mut transaction,
                 execution,
+                workflow_loop,
                 review_step,
-                WorkflowStepStatus::Failed,
-                Some(serde_json::json!({ "reason": "loop_retry_budget_exhausted" })),
+                &loop_feedback,
+                resolved_action,
             )
             .await?
-            .entity;
-            let failed_loop = WorkflowLoop::update_status_if_current_in_transaction(
-                &mut transaction,
-                workflow_loop.id,
-                WorkflowLoopStatus::WaitingUser,
-                WorkflowLoopStatus::Failed,
-                Some(loop_feedback.clone()),
+        } else {
+            None
+        };
+        let (resolved_review_step, resolved_loop, projection_reason) = if let Some((
+            failed_step,
+            failed_loop,
+        )) = exhausted_terminal
+        {
+            (
+                failed_step,
+                failed_loop,
+                "loop_skipped_retry_budget_exhausted",
             )
-            .await?
-            .ok_or_else(|| {
-                OrchestratorError::IllegalTransition(format!(
-                    "loop {} changed before retry-budget failure",
-                    workflow_loop.id
-                ))
-            })?;
-            WorkflowEvent::create_in_transaction(
-                &mut transaction,
-                &CreateWorkflowEvent {
-                    execution_id: execution.id,
-                    round_id: Some(failed_loop.round_id),
-                    step_id: Some(failed.id),
-                    agent_session_id: failed.assigned_workflow_agent_session_id,
-                    event_type: WorkflowEventType::LoopFailed,
-                    status_before: Some(to_workflow_wire_value(&WorkflowLoopStatus::WaitingUser)),
-                    status_after: Some(to_workflow_wire_value(&WorkflowLoopStatus::Failed)),
-                    detail_json: Some(
-                        serde_json::json!({
-                            "reason": "retry_budget_exhausted",
-                            "retry_count": failed_loop.retry_count,
-                            "max_retry": failed_loop.max_retry,
-                        })
-                        .to_string(),
-                    ),
-                },
-                Uuid::new_v4(),
-            )
-            .await?;
-            (failed, failed_loop, "loop_retry_budget_exhausted")
         } else {
             match resolved_action {
                 "restart_skipped" => {
@@ -1408,6 +1432,9 @@ impl WorkflowOrchestrator {
                                     "reason": "skipped_steps_restarted_by_user",
                                     "step_ids": changed_step_ids,
                                     "retry_count": retry_loop.retry_count,
+                                    "max_retry": retry_loop.max_retry,
+                                    "review_attempt": retry_loop.retry_count,
+                                    "max_review_attempts": retry_loop.max_retry.max(0).saturating_add(1),
                                 })
                                 .to_string(),
                             ),
@@ -1418,16 +1445,6 @@ impl WorkflowOrchestrator {
                     (ready, retry_loop, "loop_skipped_steps_restarted")
                 }
                 "keep_skipped" => {
-                    for (skipped_step, issue_scope_id, feedback) in &skipped_steps {
-                        LoopExecutor::record_user_skip_waiver_in_transaction(
-                            &mut transaction,
-                            workflow_loop,
-                            skipped_step,
-                            issue_scope_id,
-                            feedback,
-                        )
-                        .await?;
-                    }
                     if retryable_step_ids.is_empty() {
                         let precompleted = super::reducer::transition_step_in_transaction(
                             &mut transaction,
@@ -1538,6 +1555,9 @@ impl WorkflowOrchestrator {
                                         "waived_step_ids": changed_step_ids,
                                         "retryable_step_ids": retryable_step_ids,
                                         "retry_count": retry_loop.retry_count,
+                                        "max_retry": retry_loop.max_retry,
+                                        "review_attempt": retry_loop.retry_count,
+                                        "max_review_attempts": retry_loop.max_retry.max(0).saturating_add(1),
                                     })
                                     .to_string(),
                                 ),
@@ -2130,6 +2150,20 @@ mod tests {
             cleaned_reason: None,
             created_at: now,
             updated_at: now,
+        }
+    }
+
+    fn sample_reviewer_session(execution: &WorkflowExecution) -> WorkflowAgentSession {
+        WorkflowAgentSession {
+            id: Uuid::new_v4(),
+            workflow_execution_id: execution.id,
+            session_agent_id: Uuid::new_v4(),
+            role: WorkflowAgentSessionRole::Reviewer,
+            agent_session_id: None,
+            agent_message_id: None,
+            state: WorkflowAgentSessionState::Idle,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         }
     }
 
@@ -2892,6 +2926,317 @@ mod tests {
                 .iter()
                 .any(|event| event.event_type == WorkflowEventType::LoopRetrying)
         );
+    }
+
+    #[tokio::test]
+    async fn exhausted_budget_user_loop_rejection_fails_without_rework() {
+        let pool = setup_skipped_decision_pool().await;
+        let round_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let execution = sample_waiting_execution(round_id);
+        persist_waiting_execution(&pool, &execution).await;
+        let completed_step =
+            insert_completed_step(&pool, execution.id, round_id, loop_id, "completed-task").await;
+        let review_step = insert_review_step(&pool, execution.id, round_id, loop_id).await;
+        let workflow_loop = WorkflowLoop {
+            id: loop_id,
+            execution_id: execution.id,
+            round_id,
+            loop_key: "loop-a".to_string(),
+            review_step_id: review_step.id,
+            member_step_ids_json: serde_json::to_string(&vec![completed_step.id])
+                .expect("member JSON"),
+            status: WorkflowLoopStatus::WaitingUser,
+            retry_count: 1,
+            max_retry: 1,
+            user_review_required: true,
+            rejection_reason: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        persist_waiting_loop(&pool, &workflow_loop).await;
+        let transcript = WorkflowTranscript::create(
+            &pool,
+            &CreateWorkflowTranscript {
+                execution_id: execution.id,
+                round_id: Some(round_id),
+                workflow_agent_session_id: None,
+                step_id: Some(review_step.id),
+                sender_type: "control".to_string(),
+                entry_type: "loop_review".to_string(),
+                content: "review loop".to_string(),
+                meta_json: Some(
+                    serde_json::json!({
+                        "resolved": false,
+                        "review_kind": "loop_user_review",
+                        "loop_id": loop_id,
+                    })
+                    .to_string(),
+                ),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create loop review transcript");
+        let workflow_session = WorkflowAgentSession {
+            id: Uuid::new_v4(),
+            workflow_execution_id: execution.id,
+            session_agent_id: Uuid::new_v4(),
+            role: WorkflowAgentSessionRole::Reviewer,
+            agent_session_id: None,
+            agent_message_id: None,
+            state: WorkflowAgentSessionState::Idle,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let chat_runner = ChatRunner::new(DBService { pool: pool.clone() });
+
+        WorkflowOrchestrator::resolve_loop_review_action(
+            &pool,
+            &chat_runner,
+            &transcript,
+            &execution,
+            &review_step,
+            &workflow_session,
+            "reject",
+            Some("budget exhausted feedback"),
+        )
+        .await
+        .expect("record exhausted rejection");
+
+        let persisted_loop = WorkflowLoop::find_by_id(&pool, loop_id)
+            .await
+            .expect("find loop")
+            .expect("loop exists");
+        assert_eq!(persisted_loop.status, WorkflowLoopStatus::Failed);
+        assert_eq!(persisted_loop.retry_count, 1);
+        assert_eq!(
+            WorkflowStep::find_by_id(&pool, review_step.id)
+                .await
+                .expect("find review step")
+                .expect("review step exists")
+                .status,
+            WorkflowStepStatus::Failed
+        );
+        assert!(
+            WorkflowStep::find_by_id(&pool, completed_step.id)
+                .await
+                .expect("find completed step")
+                .expect("completed step exists")
+                .revision_context
+                .is_none()
+        );
+        let events = WorkflowEvent::find_by_execution(&pool, execution.id)
+            .await
+            .expect("find events");
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == WorkflowEventType::LoopFailed)
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.event_type != WorkflowEventType::LoopRetrying)
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_budget_restart_skipped_fails_without_reopening_step() {
+        let pool = setup_skipped_decision_pool().await;
+        let round_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let execution = sample_waiting_execution(round_id);
+        persist_waiting_execution(&pool, &execution).await;
+        let skipped_step = insert_skipped_step(&pool, execution.id, round_id, loop_id).await;
+        let review_step = insert_review_step(&pool, execution.id, round_id, loop_id).await;
+        let workflow_loop = WorkflowLoop {
+            id: loop_id,
+            execution_id: execution.id,
+            round_id,
+            loop_key: "loop-a".to_string(),
+            review_step_id: review_step.id,
+            member_step_ids_json: serde_json::to_string(&vec![skipped_step.id])
+                .expect("member JSON"),
+            status: WorkflowLoopStatus::WaitingUser,
+            retry_count: 1,
+            max_retry: 1,
+            user_review_required: false,
+            rejection_reason: Some("new issue".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        persist_waiting_loop(&pool, &workflow_loop).await;
+        let transcript_meta = serde_json::json!({
+            "resolved": false,
+            "review_kind": "loop_skipped_retry_decision",
+            "loop_id": loop_id,
+            "feedback": "new issue",
+            "skipped_steps": [{
+                "step_id": skipped_step.id,
+                "issue_scope_id": loop_skip_issue_scope_id_for_feedback(
+                    &workflow_loop,
+                    &skipped_step,
+                    "new issue",
+                ),
+                "feedback": "new issue",
+            }],
+            "retryable_step_ids": [],
+        });
+        let transcript = WorkflowTranscript::create(
+            &pool,
+            &CreateWorkflowTranscript {
+                execution_id: execution.id,
+                round_id: Some(round_id),
+                workflow_agent_session_id: None,
+                step_id: Some(review_step.id),
+                sender_type: "control".to_string(),
+                entry_type: "loop_review".to_string(),
+                content: "workflow.loop_skipped_retry_decision.request".to_string(),
+                meta_json: Some(transcript_meta.to_string()),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create decision transcript");
+
+        WorkflowOrchestrator::resolve_loop_skipped_retry_decision(
+            &pool,
+            &ChatRunner::new(DBService { pool: pool.clone() }),
+            &transcript,
+            &execution,
+            &review_step,
+            &sample_reviewer_session(&execution),
+            &workflow_loop,
+            &transcript_meta,
+            "restart_skipped",
+        )
+        .await
+        .expect("record exhausted restart decision");
+
+        assert_eq!(
+            WorkflowLoop::find_by_id(&pool, loop_id)
+                .await
+                .expect("find loop")
+                .expect("loop exists")
+                .status,
+            WorkflowLoopStatus::Failed
+        );
+        let persisted_skipped = WorkflowStep::find_by_id(&pool, skipped_step.id)
+            .await
+            .expect("find skipped step")
+            .expect("skipped step exists");
+        assert_eq!(persisted_skipped.status, WorkflowStepStatus::Skipped);
+        assert_eq!(persisted_skipped.retry_count, 0);
+        assert_eq!(
+            WorkflowStep::find_by_id(&pool, review_step.id)
+                .await
+                .expect("find review step")
+                .expect("review step exists")
+                .status,
+            WorkflowStepStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_budget_keep_skipped_fails_without_retrying_remaining_scope() {
+        let pool = setup_skipped_decision_pool().await;
+        let round_id = Uuid::new_v4();
+        let loop_id = Uuid::new_v4();
+        let execution = sample_waiting_execution(round_id);
+        persist_waiting_execution(&pool, &execution).await;
+        let skipped_step = insert_skipped_step(&pool, execution.id, round_id, loop_id).await;
+        let completed_step =
+            insert_completed_step(&pool, execution.id, round_id, loop_id, "completed-task").await;
+        let review_step = insert_review_step(&pool, execution.id, round_id, loop_id).await;
+        let workflow_loop = WorkflowLoop {
+            id: loop_id,
+            execution_id: execution.id,
+            round_id,
+            loop_key: "loop-a".to_string(),
+            review_step_id: review_step.id,
+            member_step_ids_json: serde_json::to_string(&vec![skipped_step.id, completed_step.id])
+                .expect("member JSON"),
+            status: WorkflowLoopStatus::WaitingUser,
+            retry_count: 1,
+            max_retry: 1,
+            user_review_required: false,
+            rejection_reason: Some("mixed feedback".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        persist_waiting_loop(&pool, &workflow_loop).await;
+        let transcript_meta = serde_json::json!({
+            "resolved": false,
+            "review_kind": "loop_skipped_retry_decision",
+            "loop_id": loop_id,
+            "feedback": "mixed feedback",
+            "skipped_steps": [{
+                "step_id": skipped_step.id,
+                "issue_scope_id": loop_skip_issue_scope_id_for_feedback(
+                    &workflow_loop,
+                    &skipped_step,
+                    "mixed feedback",
+                ),
+                "feedback": "mixed feedback",
+            }],
+            "retryable_step_ids": [completed_step.id],
+        });
+        let transcript = WorkflowTranscript::create(
+            &pool,
+            &CreateWorkflowTranscript {
+                execution_id: execution.id,
+                round_id: Some(round_id),
+                workflow_agent_session_id: None,
+                step_id: Some(review_step.id),
+                sender_type: "control".to_string(),
+                entry_type: "loop_review".to_string(),
+                content: "workflow.loop_skipped_retry_decision.request".to_string(),
+                meta_json: Some(transcript_meta.to_string()),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create decision transcript");
+
+        WorkflowOrchestrator::resolve_loop_skipped_retry_decision(
+            &pool,
+            &ChatRunner::new(DBService { pool: pool.clone() }),
+            &transcript,
+            &execution,
+            &review_step,
+            &sample_reviewer_session(&execution),
+            &workflow_loop,
+            &transcript_meta,
+            "keep_skipped",
+        )
+        .await
+        .expect("record exhausted keep decision");
+
+        assert_eq!(
+            WorkflowLoop::find_by_id(&pool, loop_id)
+                .await
+                .expect("find loop")
+                .expect("loop exists")
+                .status,
+            WorkflowLoopStatus::Failed
+        );
+        let persisted_skipped = WorkflowStep::find_by_id(&pool, skipped_step.id)
+            .await
+            .expect("find skipped step")
+            .expect("skipped step exists");
+        assert_eq!(persisted_skipped.status, WorkflowStepStatus::Skipped);
+        assert!(has_matching_active_skip_waiver(
+            &persisted_skipped,
+            &workflow_loop,
+            "mixed feedback"
+        ));
+        let persisted_completed = WorkflowStep::find_by_id(&pool, completed_step.id)
+            .await
+            .expect("find completed step")
+            .expect("completed step exists");
+        assert_eq!(persisted_completed.status, WorkflowStepStatus::Completed);
+        assert!(persisted_completed.revision_context.is_none());
     }
 
     #[test]

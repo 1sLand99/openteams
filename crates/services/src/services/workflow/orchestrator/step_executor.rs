@@ -220,17 +220,78 @@ pub(super) struct PersistedWorkerAttempt {
     pub(super) result: WorkflowStepRunResult,
 }
 
-fn workflow_step_run_result_from_agent_output(
-    agent_output: &WorkflowAgentRunOutput,
+#[allow(clippy::too_many_arguments)]
+fn workflow_step_run_result_from_task_report(
+    run_id: Uuid,
+    status: workflow_runtime::WorkflowTaskCompletionStatus,
     summary: String,
     content: String,
+    verification: Vec<workflow_runtime::WorkflowVerificationResult>,
+    files_changed: Vec<String>,
+    self_review: Vec<String>,
+    issues: Vec<String>,
+    evidence: Vec<String>,
     outputs: Vec<String>,
 ) -> WorkflowStepRunResult {
+    let structured_report = serde_json::json!({
+        "type": "final_result",
+        "status": status,
+        "summary": summary,
+        "content": content,
+        "verification": verification,
+        "files_changed": files_changed,
+        "self_review": self_review,
+        "issues": issues,
+        "evidence": evidence,
+        "outputs": outputs,
+    })
+    .to_string();
     WorkflowStepRunResult {
-        run_id: agent_output.run_id.unwrap_or_else(Uuid::new_v4),
+        run_id,
         summary,
         content,
         outputs,
+        structured_report: Some(structured_report),
+    }
+}
+
+#[cfg(test)]
+mod structured_task_report_tests {
+    use super::*;
+
+    #[test]
+    fn task_review_handoff_preserves_all_structured_completion_fields() {
+        let result = workflow_step_run_result_from_task_report(
+            Uuid::new_v4(),
+            workflow_runtime::WorkflowTaskCompletionStatus::DoneWithConcerns,
+            "implemented".to_string(),
+            "details".to_string(),
+            vec![workflow_runtime::WorkflowVerificationResult {
+                name: "cargo test".to_string(),
+                command: Some("cargo test -p services".to_string()),
+                status: workflow_runtime::WorkflowVerificationStatus::Passed,
+                evidence: "all tests passed".to_string(),
+            }],
+            vec!["src/lib.rs".to_string()],
+            vec!["reviewed error handling".to_string()],
+            vec!["known compatibility concern".to_string()],
+            vec!["test log".to_string()],
+            vec!["src/lib.rs".to_string()],
+        );
+        let report: serde_json::Value = serde_json::from_str(
+            result
+                .structured_report
+                .as_deref()
+                .expect("structured report must be retained"),
+        )
+        .expect("structured report JSON");
+
+        assert_eq!(report["verification"][0]["name"], "cargo test");
+        assert_eq!(report["files_changed"][0], "src/lib.rs");
+        assert_eq!(report["self_review"][0], "reviewed error handling");
+        assert_eq!(report["issues"][0], "known compatibility concern");
+        assert_eq!(report["evidence"][0], "test log");
+        assert_eq!(report["outputs"][0], "src/lib.rs");
     }
 }
 
@@ -878,6 +939,11 @@ Read this file before writing the final result. Do not rely on the workflow plan
         workflow_session: &WorkflowAgentSession,
         result: WorkflowStepRunResult,
     ) -> Result<PersistedWorkerAttempt, OrchestratorError> {
+        let persisted_content = result
+            .structured_report
+            .as_deref()
+            .unwrap_or(&result.content)
+            .to_string();
         let recorded_step = WorkflowStep::record_execution_result(
             pool,
             step.id,
@@ -885,12 +951,12 @@ Read this file before writing the final result. Do not rely on the workflow plan
             Some(
                 serde_json::to_string(&SummaryPayload {
                     summary: result.summary.clone(),
-                    content: Some(result.content.clone()),
+                    content: Some(persisted_content.clone()),
                     outputs: result.outputs.clone(),
                 })
                 .unwrap_or_else(|_| result.summary.clone()),
             ),
-            Some(result.content.clone()),
+            Some(persisted_content.clone()),
         )
         .await?;
         let _ = Self::write_transcript(
@@ -907,6 +973,10 @@ Read this file before writing the final result. Do not rely on the workflow plan
                     "summary": result.summary.clone(),
                     "outputs": result.outputs.clone(),
                     "source": "workflow_protocol_final_result",
+                    "structured_result": result
+                        .structured_report
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
                 })
                 .to_string(),
             ),
@@ -954,6 +1024,10 @@ Read this file before writing the final result. Do not rely on the workflow plan
                 "summary": result.summary,
                 "outputs": result.outputs,
                 "review_kind": "step_user_review",
+                "structured_result": result
+                    .structured_report
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
             })),
         )
         .await?;
@@ -1098,6 +1172,7 @@ Read this file before writing the final result. Do not rely on the workflow plan
                     Some(
                         &serde_json::json!({
                             "reason": "review_limit_reached",
+                            "max_retry": waiting_review_step.max_retry,
                             "max_review_attempts": max_review_attempts,
                         })
                         .to_string(),
@@ -1116,6 +1191,8 @@ Read this file before writing the final result. Do not rely on the workflow plan
                     "step_key": waiting_review_step.step_key,
                     "summary": persisted.result.summary,
                     "review_round": review_attempt,
+                    "max_retry": waiting_review_step.max_retry,
+                    "max_review_attempts": max_review_attempts,
                 })),
             )
             .await?;
@@ -1234,6 +1311,8 @@ Read this file before writing the final result. Do not rely on the workflow plan
                         "verdict": verdict,
                         "reviewer_type": "lead",
                         "review_round": review_attempt,
+                        "max_retry": waiting_review_step.max_retry,
+                        "max_review_attempts": max_review_attempts,
                         "acceptance_results": acceptance_results,
                         "evidence": evidence,
                         "risks": risks,
@@ -1254,6 +1333,8 @@ Read this file before writing the final result. Do not rely on the workflow plan
                         Some(serde_json::json!({
                             "feedback": feedback,
                             "review_round": review_attempt,
+                            "max_retry": waiting_review_step.max_retry,
+                            "max_review_attempts": max_review_attempts,
                         })),
                     )
                     .await?;
@@ -1417,18 +1498,29 @@ Read this file before writing the final result. Do not rely on the workflow plan
                                 match protocol_message {
                                     WorkflowStepProtocolMessage::FinalResult {
                                         status:
-                                            workflow_runtime::WorkflowTaskCompletionStatus::Done
-                                            | workflow_runtime::WorkflowTaskCompletionStatus::DoneWithConcerns,
+                                            status @ (workflow_runtime::WorkflowTaskCompletionStatus::Done
+                                            | workflow_runtime::WorkflowTaskCompletionStatus::DoneWithConcerns),
                                         summary,
                                         content,
+                                        verification,
+                                        files_changed,
+                                        self_review,
+                                        issues,
+                                        evidence,
                                         outputs,
                                         ..
                                     } => {
                                         active_step = running_revision_step;
-                                        current_result = workflow_step_run_result_from_agent_output(
-                                            &agent_output,
+                                        current_result = workflow_step_run_result_from_task_report(
+                                            agent_output.run_id.unwrap_or_else(Uuid::new_v4),
+                                            status,
                                             summary,
                                             content,
+                                            verification,
+                                            files_changed,
+                                            self_review,
+                                            issues,
+                                            evidence,
                                             outputs,
                                         );
                                         skip_lead_review_for_current_attempt = true;
@@ -1472,6 +1564,8 @@ Read this file before writing the final result. Do not rely on the workflow plan
                         Some(serde_json::json!({
                             "feedback": feedback,
                             "review_round": review_attempt,
+                            "max_retry": waiting_review_step.max_retry,
+                            "max_review_attempts": max_review_attempts,
                         })),
                     )
                     .await?;
@@ -1506,6 +1600,7 @@ Read this file before writing the final result. Do not rely on the workflow plan
                                 &serde_json::json!({
                                     "reason": "review_limit_reached",
                                     "review_attempt": review_attempt,
+                                    "max_retry": waiting_review_step.max_retry,
                                     "max_review_attempts": max_review_attempts,
                                 })
                                 .to_string(),
@@ -1622,18 +1717,29 @@ Read this file before writing the final result. Do not rely on the workflow plan
                     match protocol_message {
                         WorkflowStepProtocolMessage::FinalResult {
                             status:
-                                workflow_runtime::WorkflowTaskCompletionStatus::Done
-                                | workflow_runtime::WorkflowTaskCompletionStatus::DoneWithConcerns,
+                                status @ (workflow_runtime::WorkflowTaskCompletionStatus::Done
+                                | workflow_runtime::WorkflowTaskCompletionStatus::DoneWithConcerns),
                             summary,
                             content,
+                            verification,
+                            files_changed,
+                            self_review,
+                            issues,
+                            evidence,
                             outputs,
                             ..
                         } => {
                             active_step = running_revision_step;
-                            current_result = workflow_step_run_result_from_agent_output(
-                                &agent_output,
+                            current_result = workflow_step_run_result_from_task_report(
+                                agent_output.run_id.unwrap_or_else(Uuid::new_v4),
+                                status,
                                 summary,
                                 content,
+                                verification,
+                                files_changed,
+                                self_review,
+                                issues,
+                                evidence,
                                 outputs,
                             );
                             skip_lead_review_for_current_attempt = false;
@@ -1827,25 +1933,22 @@ Read this file before writing the final result. Do not rely on the workflow plan
                         )),
                     ));
                 }
-                let structured_content = serde_json::json!({
-                    "type": "final_result",
-                    "status": status,
-                    "summary": summary,
-                    "content": content,
-                    "verification": verification,
-                    "files_changed": files_changed,
-                    "self_review": self_review,
-                    "issues": issues,
-                    "evidence": evidence,
-                    "outputs": outputs,
-                })
-                .to_string();
-                let execution_result = WorkflowStepRunResult {
-                    run_id: run_id_hint.unwrap_or_else(Uuid::new_v4),
-                    summary: summary.clone(),
-                    content: content.clone(),
-                    outputs: outputs.clone(),
-                };
+                let execution_result = workflow_step_run_result_from_task_report(
+                    run_id_hint.unwrap_or_else(Uuid::new_v4),
+                    status,
+                    summary.clone(),
+                    content,
+                    verification,
+                    files_changed,
+                    self_review,
+                    issues.clone(),
+                    evidence,
+                    outputs,
+                );
+                let structured_content = execution_result
+                    .structured_report
+                    .clone()
+                    .expect("task report helper always returns structured content");
                 let recorded_step = WorkflowStep::record_execution_result(
                     pool,
                     running_step.id,
@@ -1977,7 +2080,7 @@ Read this file before writing the final result. Do not rely on the workflow plan
                     Some(structured_content.clone()),
                 )
                 .await?;
-                Self::save_step_review(
+                let persisted_review = Self::save_step_review(
                     pool,
                     &recorded_step,
                     reviewer_type.clone(),
@@ -1999,6 +2102,8 @@ Read this file before writing the final result. Do not rely on the workflow plan
                         &serde_json::json!({
                             "source": "workflow_structured_review_result",
                             "reviewer_type": to_workflow_wire_value(&reviewer_type),
+                            "reviewer_id": workflow_session.session_agent_id,
+                            "review_round": persisted_review.review_round,
                             "verdict": verdict,
                             "structured_result": serde_json::from_str::<serde_json::Value>(&structured_content)
                                 .unwrap_or(serde_json::Value::Null),
@@ -2708,10 +2813,15 @@ Before modifying files, create an isolated Git worktree for this step when Git i
         match protocol_message {
             WorkflowStepProtocolMessage::FinalResult {
                 status:
-                    workflow_runtime::WorkflowTaskCompletionStatus::Done
-                    | workflow_runtime::WorkflowTaskCompletionStatus::DoneWithConcerns,
+                    status @ (workflow_runtime::WorkflowTaskCompletionStatus::Done
+                    | workflow_runtime::WorkflowTaskCompletionStatus::DoneWithConcerns),
                 summary,
                 content,
+                verification,
+                files_changed,
+                self_review,
+                issues,
+                evidence,
                 outputs,
                 ..
             } if latest_running_step.step_type == WorkflowStepType::Task
@@ -2734,10 +2844,16 @@ Before modifying files, create an isolated Git worktree for this step when Git i
                     plan,
                     current_steps,
                     edges,
-                    workflow_step_run_result_from_agent_output(
-                        &agent_output,
+                    workflow_step_run_result_from_task_report(
+                        agent_output.run_id.unwrap_or_else(Uuid::new_v4),
+                        status,
                         summary,
                         content,
+                        verification,
+                        files_changed,
+                        self_review,
+                        issues,
+                        evidence,
                         outputs,
                     ),
                     skip_initial_lead_review,

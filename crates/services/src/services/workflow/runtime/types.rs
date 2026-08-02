@@ -233,6 +233,10 @@ pub struct WorkflowStepRunResult {
     pub summary: String,
     pub content: String,
     pub outputs: Vec<String>,
+    /// Complete structured task report. This must survive the Task -> Lead/User
+    /// review handoff so reviewers can inspect verification, changed files,
+    /// self-review notes, issues, and evidence rather than only free text.
+    pub structured_report: Option<String>,
 }
 
 #[derive(Debug, Clone)]

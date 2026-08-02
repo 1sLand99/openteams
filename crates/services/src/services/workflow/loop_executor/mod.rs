@@ -33,10 +33,11 @@ use super::{
     workflow_review::{
         LoopReviewPromptContext, LoopReviewPromptStepInput, LoopReviewProtocolMessage,
         build_loop_review_prompt, loop_review_protocol_json_schema, parse_loop_review_output,
+        validate_loop_review_acceptance_coverage,
     },
     workflow_runtime::{
         SummaryPayload, WORKFLOW_PROTOCOL_PARSE_MAX_RETRIES, WorkflowRevisionFeedbackSource,
-        WorkflowRuntimeError, build_workflow_protocol_retry_prompt, parse_summary_payload,
+        build_workflow_protocol_retry_prompt, parse_summary_payload,
         resolve_workflow_response_language_instruction, run_workflow_step_agent_follow_up,
         run_workflow_step_agent_prompt, should_retry_workflow_protocol_parse_failure,
     },

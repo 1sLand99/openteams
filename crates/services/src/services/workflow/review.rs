@@ -672,6 +672,39 @@ pub fn parse_loop_review_output(
     Ok(message)
 }
 
+pub fn validate_loop_review_acceptance_coverage(
+    message: &LoopReviewProtocolMessage,
+    declared_acceptance: &[(String, String)],
+) -> Result<(), WorkflowRuntimeError> {
+    let normalize = |value: &str| value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let expected = declared_acceptance
+        .iter()
+        .map(|(step_key, criterion)| (step_key.as_str(), normalize(criterion)))
+        .filter(|(_, criterion)| !criterion.is_empty())
+        .collect::<std::collections::HashSet<_>>();
+    let LoopReviewProtocolMessage::LoopReviewResult {
+        acceptance_results, ..
+    } = message;
+    let actual = acceptance_results
+        .iter()
+        .map(|result| (result.step_key.as_str(), normalize(&result.criterion)))
+        .collect::<Vec<_>>();
+    if actual.len() != expected.len()
+        || actual
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != actual.len()
+        || actual.iter().any(|item| !expected.contains(item))
+    {
+        return Err(WorkflowRuntimeError::Validation(
+            "loop review acceptance_results must cover every declared criterion exactly once"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use db::models::workflow_types::WorkflowStepType;
@@ -892,6 +925,47 @@ mod tests {
                 step_feedbacks: vec![],
             }
         );
+        validate_loop_review_acceptance_coverage(
+            &parsed,
+            &[("draft".to_string(), "范围".to_string())],
+        )
+        .expect("declared criterion is covered exactly once");
+    }
+
+    #[test]
+    fn loop_review_acceptance_coverage_rejects_missing_duplicate_and_extra_criteria() {
+        let message = LoopReviewProtocolMessage::LoopReviewResult {
+            loop_key: "loop-a".to_string(),
+            execution_id: Uuid::new_v4().to_string(),
+            verdict: ReviewVerdict::Approved,
+            feedback: "通过".to_string(),
+            acceptance_results: vec![
+                LoopReviewAcceptanceResult {
+                    step_key: "draft".to_string(),
+                    criterion: "范围".to_string(),
+                    verdict: WorkflowAcceptanceVerdict::Passed,
+                    evidence: "evidence-a".to_string(),
+                },
+                LoopReviewAcceptanceResult {
+                    step_key: "draft".to_string(),
+                    criterion: "范围".to_string(),
+                    verdict: WorkflowAcceptanceVerdict::Passed,
+                    evidence: "evidence-b".to_string(),
+                },
+            ],
+            evidence: vec!["inspected".to_string()],
+            issue_id: None,
+            step_feedbacks: Vec::new(),
+        };
+        let error = validate_loop_review_acceptance_coverage(
+            &message,
+            &[
+                ("draft".to_string(), "范围".to_string()),
+                ("draft".to_string(), "格式".to_string()),
+            ],
+        )
+        .expect_err("duplicate criterion must not replace a missing declared criterion");
+        assert!(error.to_string().contains("exactly once"));
     }
 
     #[test]

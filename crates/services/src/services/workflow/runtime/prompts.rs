@@ -978,6 +978,7 @@ pub fn build_lead_review_prompt(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let structured_report = result.structured_report.as_deref().unwrap_or("None");
 
     let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
         .add("step_title", &step.title, 1)
@@ -988,6 +989,7 @@ pub fn build_lead_review_prompt(
         .add("predecessor_summaries", &dependency_text, 1)
         .add("acceptance_criteria", &acceptance_text, 1)
         .add("worker_outputs", &outputs_text, 1)
+        .add("worker_structured_report", structured_report, 2)
         .build();
 
     let mut prompt = String::with_capacity(4096);
@@ -1004,6 +1006,8 @@ pub fn build_lead_review_prompt(
 
 {summary}
 {content}
+- Structured completion report (verification, changed files, self-review, issues, and evidence):
+{structured_report}
 - Output files:
 {outputs}
 
@@ -1026,6 +1030,7 @@ Based on your independent verification of the actual code, verdict: approved or 
         acceptance = data.get("acceptance_criteria"),
         summary = data.get("worker_summary"),
         content = data.get("worker_content"),
+        structured_report = data.get("worker_structured_report"),
         outputs = data.get("worker_outputs"),
         goal = data.get("workflow_goal"),
         review_attempt = review_attempt,

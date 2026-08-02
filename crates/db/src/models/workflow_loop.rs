@@ -258,4 +258,29 @@ impl WorkflowLoop {
         .fetch_optional(connection)
         .await
     }
+
+    pub async fn fail_if_retry_budget_exhausted_in_transaction(
+        connection: &mut SqliteConnection,
+        id: Uuid,
+        expected_status: WorkflowLoopStatus,
+        rejection_reason: Option<String>,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_loops
+            SET status = 'failed',
+                rejection_reason = ?3,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1 AND status = ?2 AND retry_count >= max_retry
+            RETURNING id, execution_id, round_id, loop_key, review_step_id,
+                      member_step_ids_json, status, retry_count, max_retry,
+                      user_review_required, rejection_reason, created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(expected_status)
+        .bind(rejection_reason)
+        .fetch_optional(connection)
+        .await
+    }
 }

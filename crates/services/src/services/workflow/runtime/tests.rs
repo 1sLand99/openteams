@@ -672,6 +672,7 @@ mod tests {
             summary: "Implemented the requested fix".to_string(),
             content: "Updated the handler and added validation.".to_string(),
             outputs: vec!["src/handler.rs".to_string(), "tests/handler.rs".to_string()],
+            structured_report: None,
         }
     }
 
@@ -1325,7 +1326,18 @@ mod tests {
     #[test]
     fn build_lead_review_prompt_includes_required_sections() {
         let step = sample_step(WorkflowStepStatus::Running);
-        let result = sample_step_run_result();
+        let mut result = sample_step_run_result();
+        result.structured_report = Some(
+            serde_json::json!({
+                "type": "final_result",
+                "verification": [{"name": "cargo test", "status": "passed", "evidence": "ok"}],
+                "files_changed": ["src/handler.rs"],
+                "self_review": ["Reviewed error paths"],
+                "issues": [],
+                "evidence": ["test output"],
+            })
+            .to_string(),
+        );
 
         let prompt = build_lead_review_prompt(
             "Ship a stable workflow review loop.",
@@ -1351,6 +1363,8 @@ mod tests {
         assert!(prompt.contains(&result.summary));
         assert!(prompt.contains(&result.content));
         assert!(prompt.contains("src/handler.rs"));
+        assert!(prompt.contains("Reviewed error paths"));
+        assert!(prompt.contains("cargo test"));
         assert!(prompt.contains("Dependency A done"));
         assert!(prompt.contains("\"type\": \"review_result\""));
         assert!(prompt.contains(&step.step_key));
