@@ -98,6 +98,27 @@ impl WorkflowAgentSession {
         .await
     }
 
+    pub async fn update_role(
+        pool: &SqlitePool,
+        id: Uuid,
+        role: WorkflowAgentSessionRole,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            UPDATE chat_workflow_agent_sessions
+            SET role = ?2, updated_at = datetime('now', 'subsec')
+            WHERE id = ?1
+            RETURNING id, workflow_execution_id, session_agent_id, role,
+                      agent_session_id, agent_message_id, state,
+                      created_at, updated_at
+            "#,
+        )
+        .bind(id)
+        .bind(role)
+        .fetch_one(pool)
+        .await
+    }
+
     pub async fn update_agent_session_id(
         pool: &SqlitePool,
         id: Uuid,

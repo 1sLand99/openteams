@@ -677,7 +677,13 @@ async fn build_plan_workflow_card_projection(
             lead_review_required: true,
             user_review_required: true,
             retry_count: 0,
-            max_retry: node.data.max_retry.unwrap_or(1) as i32,
+            max_retry: node.data.max_retry.unwrap_or_else(|| {
+                parsed_plan
+                    .globals
+                    .as_ref()
+                    .map(|globals| globals.default_retry)
+                    .unwrap_or(1)
+            }) as i32,
             loop_key: node.data.loop_key.clone(),
             latest_review: None,
             agent_name: node

@@ -682,10 +682,42 @@ impl<'a> LoopExecutor<'a> {
             feedback,
             issue_id,
             step_feedbacks,
-            acceptance_results: _,
+            acceptance_results,
             evidence: _,
             ..
         } = review_message;
+        let normalize = |value: &str| value.split_whitespace().collect::<Vec<_>>().join(" ");
+        let expected_acceptance = review_inputs
+            .iter()
+            .flat_map(|input| {
+                input
+                    .acceptance
+                    .iter()
+                    .map(|criterion| (input.step_key.as_str(), normalize(criterion)))
+            })
+            .filter(|(_, criterion)| !criterion.is_empty())
+            .collect::<std::collections::HashSet<_>>();
+        let actual_acceptance = acceptance_results
+            .iter()
+            .map(|result| (result.step_key.as_str(), normalize(&result.criterion)))
+            .collect::<Vec<_>>();
+        if actual_acceptance.len() != expected_acceptance.len()
+            || actual_acceptance
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != actual_acceptance.len()
+            || actual_acceptance
+                .iter()
+                .any(|item| !expected_acceptance.contains(item))
+        {
+            return Err(OrchestratorError::Runtime(
+                WorkflowRuntimeError::Validation(
+                    "loop review acceptance_results must cover every declared criterion exactly once"
+                        .to_string(),
+                ),
+            ));
+        }
 
         let result_summary = SummaryPayload {
             summary: feedback.clone(),
@@ -704,7 +736,7 @@ impl<'a> LoopExecutor<'a> {
             self.pool,
             &recorded_review_step,
             reviewer_type,
-            Some(agent.id.to_string()),
+            Some(workflow_session.session_agent_id.to_string()),
             verdict.clone(),
             &feedback,
         )
@@ -1852,6 +1884,7 @@ fn loop_feedback_by_step_id(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_loop_revision_context(
     existing_revision_context: Option<&str>,
     source: WorkflowRevisionFeedbackSource,

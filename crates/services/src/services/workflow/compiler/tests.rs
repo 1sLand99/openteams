@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn test_compile_inherits_default_retry_and_honors_node_override() {
-        let mut plan: serde_json::Value = serde_json::from_str(sample_plan_json()).unwrap();
+        let mut plan: serde_json::Value = serde_json::from_str(&sample_plan_json()).unwrap();
         plan["globals"] = serde_json::json!({ "default_retry": 3 });
         plan["nodes"][0]["data"]["maxRetry"] = serde_json::json!(0);
 
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn test_compile_rejects_dead_fields() {
-        let mut plan: serde_json::Value = serde_json::from_str(sample_plan_json()).unwrap();
+        let mut plan: serde_json::Value = serde_json::from_str(&sample_plan_json()).unwrap();
         plan["policies"] = serde_json::json!({ "on_failure": "continue" });
         plan["loops"] = serde_json::json!([{
             "loopKey": "legacy",
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn test_compile_rejects_soft_edges() {
-        let mut plan: serde_json::Value = serde_json::from_str(sample_plan_json()).unwrap();
+        let mut plan: serde_json::Value = serde_json::from_str(&sample_plan_json()).unwrap();
         plan["edges"][0]["data"] = serde_json::json!({ "kind": "soft" });
 
         let error = WorkflowCompiler::compile_from_json(&plan.to_string(), &agents())

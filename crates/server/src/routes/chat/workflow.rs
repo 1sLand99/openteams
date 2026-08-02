@@ -1445,9 +1445,17 @@ async fn list_transcript_response(
             ReviewerType::Reviewer => "agent",
             ReviewerType::User => "user",
         };
+        let resolved_reviewer_name = review.reviewer_id.as_deref().and_then(|reviewer_id| {
+            session_agents
+                .iter()
+                .find(|session_agent| session_agent.id.to_string() == reviewer_id)
+                .map(|session_agent| session_agent.member_name.clone())
+        });
         let agent_name = match &review.reviewer_type {
-            ReviewerType::Lead => Some("Lead".to_string()),
-            ReviewerType::Reviewer => Some("Reviewer".to_string()),
+            ReviewerType::Lead => resolved_reviewer_name.or_else(|| Some("Lead".to_string())),
+            ReviewerType::Reviewer => {
+                resolved_reviewer_name.or_else(|| Some("Reviewer".to_string()))
+            }
             ReviewerType::User => Some("User".to_string()),
         };
         entries.push(WorkflowTranscriptEntry {

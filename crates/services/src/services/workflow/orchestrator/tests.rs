@@ -895,7 +895,7 @@ fn simulate_step_feedback_trace(
                 return trace;
             }
             SimulatedLeadVerdict::Rejected => {
-                if workflow_review_attempt_limit_reached(review_attempt) {
+                if workflow_review_attempt_limit_reached(review_attempt, 5) {
                     trace.push(WorkflowStepStatus::Failed);
                     return trace;
                 }

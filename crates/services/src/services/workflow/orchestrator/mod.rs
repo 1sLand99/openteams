@@ -2075,7 +2075,7 @@ fn step_transition_duration_ms(step: &WorkflowStep, to_status: &str) -> Option<i
     })
 }
 
-fn workflow_agent_session_role_for_assignment(
+pub(super) fn workflow_agent_session_role_for_assignment(
     compiled_steps: &[CompiledStep],
     lead_session_agent_id: Option<Uuid>,
     session_agent_id: Uuid,

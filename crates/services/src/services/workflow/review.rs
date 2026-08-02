@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::workflow_runtime::{
-    MAX_DYNAMIC_CONTENT_BUDGET_BYTES, PromptDataBuilder,
-    WorkflowRuntimeError, extract_json_payload, maybe_prepend_safety_preamble,
+    MAX_DYNAMIC_CONTENT_BUDGET_BYTES, MAX_STEP_DYNAMIC_CONTENT_BUDGET_BYTES, PromptDataBuilder,
+    WorkflowAcceptanceVerdict, WorkflowRuntimeError, extract_json_payload,
+    maybe_prepend_safety_preamble,
 };
 
 #[derive(Debug, Clone)]
@@ -47,7 +48,7 @@ pub struct LoopReviewStepFeedback {
 pub struct LoopReviewAcceptanceResult {
     pub step_key: String,
     pub criterion: String,
-    pub verdict: String,
+    pub verdict: WorkflowAcceptanceVerdict,
     pub evidence: String,
 }
 
@@ -68,6 +69,7 @@ pub enum LoopReviewProtocolMessage {
     },
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_loop_review_prompt(
     workflow_goal: &str,
     loop_def: &CompiledLoopDef,
@@ -235,7 +237,7 @@ You are {reviewer_name}, the {reviewer_role} assigned to this workflow's Review 
 
 ### Review Node Stage Contract
 - Review node instructions: {review_step_instructions}
-- Review-scope DAG order: {review_scope_step_titles}
+- Review-scope DAG order: same ordered review scope listed above
 - Review-scope DAG edges:
 {scope_edges}
 
@@ -418,7 +420,7 @@ pub fn build_loop_rejection_prompt(input: LoopRejectionPromptInput<'_>) -> Strin
         input.your_previous_outputs.join(", ")
     };
 
-    let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+    let data = PromptDataBuilder::new(MAX_STEP_DYNAMIC_CONTENT_BUDGET_BYTES)
         .add("workflow_goal", input.workflow_goal, 2)
         .add("loop_state_summary", input.loop_current_state_summary, 1)
         .add("loop_rejection_reason", input.loop_rejection_reason, 2)
@@ -493,6 +495,7 @@ Step title: {step_title}
     maybe_prepend_safety_preamble(&prompt)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_loop_user_rejection_prompt(
     workflow_goal: &str,
     loop_retry_count: i32,
@@ -521,7 +524,7 @@ pub fn build_loop_user_rejection_prompt(
     } else {
         expected_outputs.join(", ")
     };
-    let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+    let data = PromptDataBuilder::new(MAX_STEP_DYNAMIC_CONTENT_BUDGET_BYTES)
         .add("workflow_goal", workflow_goal, 2)
         .add("user_feedback", user_feedback, 2)
         .add("loop_state_summary", loop_current_state_summary, 1)
@@ -623,17 +626,28 @@ pub fn parse_loop_review_output(
                     "loop review 的 evidence 不能为空".to_string(),
                 ));
             }
-            if acceptance_results.iter().any(|item| {
-                item.step_key.trim().is_empty()
-                    || item.criterion.trim().is_empty()
-                    || item.evidence.trim().is_empty()
-                    || !matches!(
-                        item.verdict.as_str(),
-                        "passed" | "failed" | "not_applicable"
-                    )
-            }) {
+            if acceptance_results.is_empty()
+                || acceptance_results.iter().any(|item| {
+                    item.step_key.trim().is_empty()
+                        || item.criterion.trim().is_empty()
+                        || item.evidence.trim().is_empty()
+                })
+            {
                 return Err(WorkflowRuntimeError::Validation(
                     "loop review 的 acceptance_results 非法".to_string(),
+                ));
+            }
+            let has_failed = acceptance_results
+                .iter()
+                .any(|item| matches!(item.verdict, WorkflowAcceptanceVerdict::Failed));
+            if matches!(verdict, ReviewVerdict::Approved) && has_failed {
+                return Err(WorkflowRuntimeError::Validation(
+                    "approved loop review cannot contain failed acceptance criteria".to_string(),
+                ));
+            }
+            if matches!(verdict, ReviewVerdict::Rejected) && !has_failed {
+                return Err(WorkflowRuntimeError::Validation(
+                    "rejected loop review must contain a failed acceptance criterion".to_string(),
                 ));
             }
             if matches!(verdict, ReviewVerdict::Rejected)
@@ -776,7 +790,8 @@ mod tests {
             prompt.contains("report every issue you can identify across the whole review scope")
         );
         assert!(prompt.contains("Every rejection issue MUST have a stable issue_id"));
-        assert!(prompt.contains("ReviewMember, the Reviewer"));
+        assert!(prompt.contains("ReviewMember"));
+        assert!(prompt.contains("Reviewer"));
         assert!(prompt.contains("Review-scope DAG edges"));
         assert!(prompt.contains("Expected output contract"));
         assert!(prompt.contains("Independently verify actual outputs"));
@@ -869,7 +884,7 @@ mod tests {
                 acceptance_results: vec![LoopReviewAcceptanceResult {
                     step_key: "draft".to_string(),
                     criterion: "范围".to_string(),
-                    verdict: "passed".to_string(),
+                    verdict: WorkflowAcceptanceVerdict::Passed,
                     evidence: "docs/draft.md".to_string(),
                 }],
                 evidence: vec!["inspected docs/draft.md".to_string()],

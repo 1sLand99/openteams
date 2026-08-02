@@ -228,14 +228,28 @@ impl<'a> IterationManager<'a> {
             let Some(session_agent_id) = agent_id_map.get(agent_id).copied() else {
                 continue;
             };
-            if workflow_session_by_session_agent_id.contains_key(&session_agent_id) {
+            let role = workflow_agent_session_role_for_assignment(
+                &compiled.steps,
+                execution.lead_session_agent_id,
+                session_agent_id,
+                agent_id,
+            );
+            if let Some(existing_id) = workflow_session_by_session_agent_id.get(&session_agent_id)
+            {
+                if let Some(index) = workflow_agent_sessions
+                    .iter()
+                    .position(|session| session.id == *existing_id && session.role != role)
+                {
+                    let updated = WorkflowAgentSession::update_role(
+                        self.pool,
+                        *existing_id,
+                        role,
+                    )
+                    .await?;
+                    workflow_agent_sessions[index] = updated;
+                }
                 continue;
             }
-            let role = if Some(session_agent_id) == execution.lead_session_agent_id {
-                WorkflowAgentSessionRole::Lead
-            } else {
-                WorkflowAgentSessionRole::Worker
-            };
             let workflow_session = WorkflowAgentSession::create(
                 self.pool,
                 &CreateWorkflowAgentSession {

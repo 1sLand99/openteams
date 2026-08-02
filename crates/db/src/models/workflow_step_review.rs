@@ -153,3 +153,48 @@ impl WorkflowStepReview {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::run_migrations;
+
+    #[tokio::test]
+    async fn migrations_allow_reviewer_type() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("create sqlite database");
+        run_migrations(&pool).await.expect("run migrations");
+        let mut connection = pool.acquire().await.expect("acquire connection");
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&mut *connection)
+            .await
+            .expect("disable foreign keys for isolated constraint test");
+
+        let reviewer_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            r#"
+            INSERT INTO chat_workflow_step_reviews (
+                id, step_id, execution_id, reviewer_type, reviewer_id, verdict, feedback,
+                review_round
+            ) VALUES (?1, ?2, ?3, 'reviewer', ?4, 'approved', 'verified', 1)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(&reviewer_id)
+        .execute(&mut *connection)
+        .await
+        .expect("reviewer must satisfy the migrated CHECK constraint");
+
+        let stored: String =
+            sqlx::query_scalar("SELECT reviewer_type FROM chat_workflow_step_reviews LIMIT 1")
+                .fetch_one(&mut *connection)
+                .await
+                .expect("read reviewer type");
+        assert_eq!(stored, "reviewer");
+    }
+}

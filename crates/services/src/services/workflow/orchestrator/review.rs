@@ -825,6 +825,7 @@ impl WorkflowOrchestrator {
         )
         .await?;
 
+        let retry_budget_exhausted = workflow_loop.retry_count >= workflow_loop.max_retry;
         let (final_step, final_loop, decision_transcript, projection_reason) = if is_approved
             || all_rejected_targets_waived
         {
@@ -895,6 +896,53 @@ impl WorkflowOrchestrator {
                     "loop_user_review_passed"
                 },
             )
+        } else if retry_budget_exhausted {
+            let failed = super::reducer::transition_step_in_transaction(
+                &mut transaction,
+                execution,
+                step,
+                WorkflowStepStatus::Failed,
+                Some(serde_json::json!({ "reason": "loop_retry_budget_exhausted" })),
+            )
+            .await?
+            .entity;
+            let failed_loop = WorkflowLoop::update_status_if_current_in_transaction(
+                &mut transaction,
+                workflow_loop.id,
+                WorkflowLoopStatus::WaitingUser,
+                WorkflowLoopStatus::Failed,
+                Some(decision_feedback.clone()),
+            )
+            .await?
+            .ok_or_else(|| {
+                OrchestratorError::IllegalTransition(format!(
+                    "loop {} changed before retry-budget failure",
+                    workflow_loop.id
+                ))
+            })?;
+            WorkflowEvent::create_in_transaction(
+                &mut transaction,
+                &CreateWorkflowEvent {
+                    execution_id: execution.id,
+                    round_id: Some(failed_loop.round_id),
+                    step_id: Some(failed.id),
+                    agent_session_id: failed.assigned_workflow_agent_session_id,
+                    event_type: WorkflowEventType::LoopFailed,
+                    status_before: Some(to_workflow_wire_value(&WorkflowLoopStatus::WaitingUser)),
+                    status_after: Some(to_workflow_wire_value(&WorkflowLoopStatus::Failed)),
+                    detail_json: Some(
+                        serde_json::json!({
+                            "reason": "retry_budget_exhausted",
+                            "retry_count": failed_loop.retry_count,
+                            "max_retry": failed_loop.max_retry,
+                        })
+                        .to_string(),
+                    ),
+                },
+                Uuid::new_v4(),
+            )
+            .await?;
+            (failed, failed_loop, None, "loop_retry_budget_exhausted")
         } else {
             let eligible_feedbacks = eligible_member_steps
                 .iter()
@@ -1251,152 +1299,79 @@ impl WorkflowOrchestrator {
             &updated_meta_json,
         )
         .await?;
-        let (resolved_review_step, resolved_loop, projection_reason) = match resolved_action {
-            "restart_skipped" => {
-                for (skipped_step, _, _) in &skipped_steps {
-                    super::reducer::reopen_skipped_step_by_user(
-                        &mut transaction,
-                        execution,
-                        workflow_loop,
-                        skipped_step,
-                        transcript,
-                        superseded_contexts.get(&skipped_step.id).cloned().flatten(),
-                    )
-                    .await?;
-                }
-                let ready = super::reducer::transition_step_in_transaction(
-                    &mut transaction,
-                    execution,
-                    review_step,
-                    WorkflowStepStatus::Ready,
-                    Some(serde_json::json!({
-                        "reason": "loop_skipped_retry_review_prepared",
-                    })),
-                )
-                .await?
-                .entity;
-                let retry_loop = WorkflowLoop::increment_retry_if_current_in_transaction(
-                    &mut transaction,
-                    workflow_loop.id,
-                    WorkflowLoopStatus::WaitingUser,
-                    WorkflowLoopStatus::Running,
-                    Some(loop_feedback.clone()),
-                )
-                .await?
-                .ok_or_else(|| {
-                    OrchestratorError::IllegalTransition(format!(
-                        "loop {} changed before restart decision",
-                        workflow_loop.id
-                    ))
-                })?;
-                WorkflowEvent::create_in_transaction(
-                    &mut transaction,
-                    &CreateWorkflowEvent {
-                        execution_id: execution.id,
-                        round_id: Some(retry_loop.round_id),
-                        step_id: Some(ready.id),
-                        agent_session_id: ready.assigned_workflow_agent_session_id,
-                        event_type: WorkflowEventType::LoopRetrying,
-                        status_before: Some(to_workflow_wire_value(
-                            &WorkflowLoopStatus::WaitingUser,
-                        )),
-                        status_after: Some(to_workflow_wire_value(&WorkflowLoopStatus::Running)),
-                        detail_json: Some(
-                            serde_json::json!({
-                                "reason": "skipped_steps_restarted_by_user",
-                                "step_ids": changed_step_ids,
-                                "retry_count": retry_loop.retry_count,
-                            })
-                            .to_string(),
-                        ),
-                    },
-                    Uuid::new_v4(),
-                )
-                .await?;
-                (ready, retry_loop, "loop_skipped_steps_restarted")
-            }
-            "keep_skipped" => {
-                for (skipped_step, issue_scope_id, feedback) in &skipped_steps {
-                    LoopExecutor::record_user_skip_waiver_in_transaction(
-                        &mut transaction,
-                        workflow_loop,
-                        skipped_step,
-                        issue_scope_id,
-                        feedback,
-                    )
-                    .await?;
-                }
-                if retryable_step_ids.is_empty() {
-                    let precompleted = super::reducer::transition_step_in_transaction(
-                        &mut transaction,
-                        execution,
-                        review_step,
-                        WorkflowStepStatus::PreCompleted,
-                        Some(serde_json::json!({ "reason": "loop_skipped_waiver_precompleted" })),
-                    )
-                    .await?
-                    .entity;
-                    let completed = super::reducer::transition_step_in_transaction(
-                        &mut transaction,
-                        execution,
-                        &precompleted,
-                        WorkflowStepStatus::Completed,
-                        Some(serde_json::json!({ "reason": "loop_skipped_waiver_completed" })),
-                    )
-                    .await?
-                    .entity;
-                    let completed_loop = WorkflowLoop::update_status_if_current_in_transaction(
-                        &mut transaction,
-                        workflow_loop.id,
-                        WorkflowLoopStatus::WaitingUser,
-                        WorkflowLoopStatus::Completed,
-                        None,
-                    )
-                    .await?
-                    .ok_or_else(|| {
-                        OrchestratorError::IllegalTransition(format!(
-                            "loop {} changed before keep decision",
-                            workflow_loop.id
-                        ))
-                    })?;
-                    WorkflowEvent::create_in_transaction(
-                        &mut transaction,
-                        &CreateWorkflowEvent {
-                            execution_id: execution.id,
-                            round_id: Some(completed_loop.round_id),
-                            step_id: Some(completed.id),
-                            agent_session_id: completed.assigned_workflow_agent_session_id,
-                            event_type: WorkflowEventType::LoopPassed,
-                            status_before: Some(to_workflow_wire_value(
-                                &WorkflowLoopStatus::WaitingUser,
-                            )),
-                            status_after: Some(to_workflow_wire_value(
-                                &WorkflowLoopStatus::Completed,
-                            )),
-                            detail_json: Some(
-                                serde_json::json!({
-                                    "reason": "all_rejected_skipped_steps_kept_by_user",
-                                    "waived_step_ids": changed_step_ids,
-                                    "forced": true,
-                                })
-                                .to_string(),
-                            ),
-                        },
-                        Uuid::new_v4(),
-                    )
-                    .await?;
-                    (
-                        completed,
-                        completed_loop,
-                        "loop_skipped_steps_kept_completed",
-                    )
-                } else {
+        let action_requires_retry = resolved_action == "restart_skipped"
+            || (resolved_action == "keep_skipped" && !retryable_step_ids.is_empty());
+        let (resolved_review_step, resolved_loop, projection_reason) = if action_requires_retry
+            && workflow_loop.retry_count >= workflow_loop.max_retry
+        {
+            let failed = super::reducer::transition_step_in_transaction(
+                &mut transaction,
+                execution,
+                review_step,
+                WorkflowStepStatus::Failed,
+                Some(serde_json::json!({ "reason": "loop_retry_budget_exhausted" })),
+            )
+            .await?
+            .entity;
+            let failed_loop = WorkflowLoop::update_status_if_current_in_transaction(
+                &mut transaction,
+                workflow_loop.id,
+                WorkflowLoopStatus::WaitingUser,
+                WorkflowLoopStatus::Failed,
+                Some(loop_feedback.clone()),
+            )
+            .await?
+            .ok_or_else(|| {
+                OrchestratorError::IllegalTransition(format!(
+                    "loop {} changed before retry-budget failure",
+                    workflow_loop.id
+                ))
+            })?;
+            WorkflowEvent::create_in_transaction(
+                &mut transaction,
+                &CreateWorkflowEvent {
+                    execution_id: execution.id,
+                    round_id: Some(failed_loop.round_id),
+                    step_id: Some(failed.id),
+                    agent_session_id: failed.assigned_workflow_agent_session_id,
+                    event_type: WorkflowEventType::LoopFailed,
+                    status_before: Some(to_workflow_wire_value(&WorkflowLoopStatus::WaitingUser)),
+                    status_after: Some(to_workflow_wire_value(&WorkflowLoopStatus::Failed)),
+                    detail_json: Some(
+                        serde_json::json!({
+                            "reason": "retry_budget_exhausted",
+                            "retry_count": failed_loop.retry_count,
+                            "max_retry": failed_loop.max_retry,
+                        })
+                        .to_string(),
+                    ),
+                },
+                Uuid::new_v4(),
+            )
+            .await?;
+            (failed, failed_loop, "loop_retry_budget_exhausted")
+        } else {
+            match resolved_action {
+                "restart_skipped" => {
+                    for (skipped_step, _, _) in &skipped_steps {
+                        super::reducer::reopen_skipped_step_by_user(
+                            &mut transaction,
+                            execution,
+                            workflow_loop,
+                            skipped_step,
+                            transcript,
+                            superseded_contexts.get(&skipped_step.id).cloned().flatten(),
+                        )
+                        .await?;
+                    }
                     let ready = super::reducer::transition_step_in_transaction(
                         &mut transaction,
                         execution,
                         review_step,
                         WorkflowStepStatus::Ready,
-                        Some(serde_json::json!({ "reason": "loop_kept_skipped_review_prepared" })),
+                        Some(serde_json::json!({
+                            "reason": "loop_skipped_retry_review_prepared",
+                        })),
                     )
                     .await?
                     .entity;
@@ -1410,7 +1385,7 @@ impl WorkflowOrchestrator {
                     .await?
                     .ok_or_else(|| {
                         OrchestratorError::IllegalTransition(format!(
-                            "loop {} changed before keep-and-retry decision",
+                            "loop {} changed before restart decision",
                             workflow_loop.id
                         ))
                     })?;
@@ -1430,9 +1405,8 @@ impl WorkflowOrchestrator {
                             )),
                             detail_json: Some(
                                 serde_json::json!({
-                                    "reason": "skipped_steps_kept_by_user",
-                                    "waived_step_ids": changed_step_ids,
-                                    "retryable_step_ids": retryable_step_ids,
+                                    "reason": "skipped_steps_restarted_by_user",
+                                    "step_ids": changed_step_ids,
                                     "retry_count": retry_loop.retry_count,
                                 })
                                 .to_string(),
@@ -1441,10 +1415,141 @@ impl WorkflowOrchestrator {
                         Uuid::new_v4(),
                     )
                     .await?;
-                    (ready, retry_loop, "loop_skipped_steps_kept_retrying_others")
+                    (ready, retry_loop, "loop_skipped_steps_restarted")
                 }
+                "keep_skipped" => {
+                    for (skipped_step, issue_scope_id, feedback) in &skipped_steps {
+                        LoopExecutor::record_user_skip_waiver_in_transaction(
+                            &mut transaction,
+                            workflow_loop,
+                            skipped_step,
+                            issue_scope_id,
+                            feedback,
+                        )
+                        .await?;
+                    }
+                    if retryable_step_ids.is_empty() {
+                        let precompleted = super::reducer::transition_step_in_transaction(
+                            &mut transaction,
+                            execution,
+                            review_step,
+                            WorkflowStepStatus::PreCompleted,
+                            Some(
+                                serde_json::json!({ "reason": "loop_skipped_waiver_precompleted" }),
+                            ),
+                        )
+                        .await?
+                        .entity;
+                        let completed = super::reducer::transition_step_in_transaction(
+                            &mut transaction,
+                            execution,
+                            &precompleted,
+                            WorkflowStepStatus::Completed,
+                            Some(serde_json::json!({ "reason": "loop_skipped_waiver_completed" })),
+                        )
+                        .await?
+                        .entity;
+                        let completed_loop = WorkflowLoop::update_status_if_current_in_transaction(
+                            &mut transaction,
+                            workflow_loop.id,
+                            WorkflowLoopStatus::WaitingUser,
+                            WorkflowLoopStatus::Completed,
+                            None,
+                        )
+                        .await?
+                        .ok_or_else(|| {
+                            OrchestratorError::IllegalTransition(format!(
+                                "loop {} changed before keep decision",
+                                workflow_loop.id
+                            ))
+                        })?;
+                        WorkflowEvent::create_in_transaction(
+                            &mut transaction,
+                            &CreateWorkflowEvent {
+                                execution_id: execution.id,
+                                round_id: Some(completed_loop.round_id),
+                                step_id: Some(completed.id),
+                                agent_session_id: completed.assigned_workflow_agent_session_id,
+                                event_type: WorkflowEventType::LoopPassed,
+                                status_before: Some(to_workflow_wire_value(
+                                    &WorkflowLoopStatus::WaitingUser,
+                                )),
+                                status_after: Some(to_workflow_wire_value(
+                                    &WorkflowLoopStatus::Completed,
+                                )),
+                                detail_json: Some(
+                                    serde_json::json!({
+                                        "reason": "all_rejected_skipped_steps_kept_by_user",
+                                        "waived_step_ids": changed_step_ids,
+                                        "forced": true,
+                                    })
+                                    .to_string(),
+                                ),
+                            },
+                            Uuid::new_v4(),
+                        )
+                        .await?;
+                        (
+                            completed,
+                            completed_loop,
+                            "loop_skipped_steps_kept_completed",
+                        )
+                    } else {
+                        let ready = super::reducer::transition_step_in_transaction(
+                        &mut transaction,
+                        execution,
+                        review_step,
+                        WorkflowStepStatus::Ready,
+                        Some(serde_json::json!({ "reason": "loop_kept_skipped_review_prepared" })),
+                    )
+                    .await?
+                    .entity;
+                        let retry_loop = WorkflowLoop::increment_retry_if_current_in_transaction(
+                            &mut transaction,
+                            workflow_loop.id,
+                            WorkflowLoopStatus::WaitingUser,
+                            WorkflowLoopStatus::Running,
+                            Some(loop_feedback.clone()),
+                        )
+                        .await?
+                        .ok_or_else(|| {
+                            OrchestratorError::IllegalTransition(format!(
+                                "loop {} changed before keep-and-retry decision",
+                                workflow_loop.id
+                            ))
+                        })?;
+                        WorkflowEvent::create_in_transaction(
+                            &mut transaction,
+                            &CreateWorkflowEvent {
+                                execution_id: execution.id,
+                                round_id: Some(retry_loop.round_id),
+                                step_id: Some(ready.id),
+                                agent_session_id: ready.assigned_workflow_agent_session_id,
+                                event_type: WorkflowEventType::LoopRetrying,
+                                status_before: Some(to_workflow_wire_value(
+                                    &WorkflowLoopStatus::WaitingUser,
+                                )),
+                                status_after: Some(to_workflow_wire_value(
+                                    &WorkflowLoopStatus::Running,
+                                )),
+                                detail_json: Some(
+                                    serde_json::json!({
+                                        "reason": "skipped_steps_kept_by_user",
+                                        "waived_step_ids": changed_step_ids,
+                                        "retryable_step_ids": retryable_step_ids,
+                                        "retry_count": retry_loop.retry_count,
+                                    })
+                                    .to_string(),
+                                ),
+                            },
+                            Uuid::new_v4(),
+                        )
+                        .await?;
+                        (ready, retry_loop, "loop_skipped_steps_kept_retrying_others")
+                    }
+                }
+                _ => unreachable!("skipped loop retry action validated before claiming transcript"),
             }
-            _ => unreachable!("skipped loop retry action validated before claiming transcript"),
         };
 
         WorkflowEvent::create_in_transaction(

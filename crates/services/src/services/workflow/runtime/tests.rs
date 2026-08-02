@@ -1356,30 +1356,64 @@ mod tests {
         assert!(prompt.contains(&step.step_key));
         assert!(prompt.contains(&step.execution_id.to_string()));
         assert!(prompt.contains("Language Requirement"));
-        assert!(prompt.contains("Review attempt: 2 of at most 5"));
+        assert!(prompt.contains(&format!(
+            "Review attempt: 2 of at most {}",
+            step.max_retry + 1
+        )));
         assert!(prompt.contains("report every issue you can identify in this single response"));
         assert!(prompt.contains("acceptance_results"));
         assert!(prompt.contains("independent verification evidence"));
     }
 
     #[test]
-    fn workflow_review_attempt_limit_is_five() {
-        assert!(!workflow_review_attempt_limit_reached(4));
-        assert!(workflow_review_attempt_limit_reached(5));
-        assert!(workflow_review_attempt_limit_reached(6));
+    fn workflow_review_attempt_limit_uses_persisted_budget() {
+        assert!(!workflow_review_attempt_limit_reached(4, 5));
+        assert!(workflow_review_attempt_limit_reached(5, 5));
+        assert!(workflow_review_attempt_limit_reached(6, 5));
     }
 
     #[test]
-    fn build_step_execution_prompt_requires_code_guidelines_for_task_steps() {
+    fn build_step_execution_prompt_does_not_invent_skills_or_tdd_claims() {
         let execution = sample_execution(WorkflowExecutionStatus::Running);
         let step = sample_step(WorkflowStepStatus::Running);
 
         let prompt =
             build_step_execution_prompt(&execution, "Update API validation", &step, &[], None);
 
-        assert!(prompt.contains("Coding Task Skill Requirement"));
-        assert!(prompt.contains("`code-guidelines` skill"));
-        assert!(prompt.contains("before editing code"));
+        assert!(!prompt.contains("Coding Task Skill Requirement"));
+        assert!(!prompt.contains("`code-guidelines` skill"));
+        assert!(!prompt.contains("what tests were written first"));
+        assert!(!prompt.contains("Always include test files"));
+        assert!(prompt.contains("structured `status`"));
+    }
+
+    #[test]
+    fn build_step_execution_prompt_threads_the_full_task_contract() {
+        let execution = sample_execution(WorkflowExecutionStatus::Running);
+        let step = sample_step(WorkflowStepStatus::Running);
+        let prompt = build_step_execution_prompt_with_contract(
+            &execution,
+            "Update API validation",
+            &step,
+            &[],
+            None,
+            &WorkflowStepExecutionContract {
+                acceptance: vec!["Reject malformed input".into()],
+                expected_outputs: vec!["src/handler.rs".into()],
+                checklist: vec!["Preserve existing API".into()],
+                verification_commands: vec!["cargo test handler".into()],
+                completion_evidence: vec!["Passing test output".into()],
+            },
+        );
+        for expected in [
+            "Reject malformed input",
+            "src/handler.rs",
+            "Preserve existing API",
+            "cargo test handler",
+            "Passing test output",
+        ] {
+            assert!(prompt.contains(expected), "missing contract item: {expected}");
+        }
     }
 
     #[test]
@@ -1393,7 +1427,7 @@ mod tests {
 
         assert!(!prompt.contains("Coding Task Skill Requirement"));
         assert!(!prompt.contains("`code-guidelines` skill"));
-        assert!(prompt.contains("Workflow review is capped at five attempts"));
+        assert!(!prompt.contains("capped at five attempts"));
         assert!(prompt.contains("cite every issue you can identify in this single response"));
         assert!(prompt.contains("Return `review_result`, not `final_result`"));
     }
@@ -1690,7 +1724,7 @@ mod tests {
             step.step_key, step.execution_id
         );
 
-        let message = parse_review_protocol_output(step.execution_id, &step.step_key, &raw_output)
+        let message = parse_review_protocol_output(step.execution_id, &step.step_key, &[], &raw_output)
             .expect("parse");
 
         assert_eq!(
@@ -1702,7 +1736,7 @@ mod tests {
                 feedback: "结果满足验收标准。".to_string(),
                 acceptance_results: vec![WorkflowAcceptanceResult {
                     criterion: "验收标准".to_string(),
-                    verdict: "passed".to_string(),
+                    verdict: WorkflowAcceptanceVerdict::Passed,
                     evidence: "cargo test passed".to_string(),
                 }],
                 evidence: vec!["cargo test passed".to_string()],
@@ -1730,7 +1764,7 @@ mod tests {
             step.step_key, step.execution_id
         );
 
-        let message = parse_review_protocol_output(step.execution_id, &step.step_key, &raw_output)
+        let message = parse_review_protocol_output(step.execution_id, &step.step_key, &[], &raw_output)
             .expect("parse");
 
         assert_eq!(
@@ -1742,7 +1776,7 @@ mod tests {
                 feedback: "还缺少回归测试。".to_string(),
                 acceptance_results: vec![WorkflowAcceptanceResult {
                     criterion: "回归测试".to_string(),
-                    verdict: "failed".to_string(),
+                    verdict: WorkflowAcceptanceVerdict::Failed,
                     evidence: "no test output".to_string(),
                 }],
                 evidence: vec!["no test output".to_string()],
@@ -1768,7 +1802,7 @@ mod tests {
             step.step_key, step.execution_id
         );
 
-        let err = parse_review_protocol_output(step.execution_id, &step.step_key, &raw_output)
+        let err = parse_review_protocol_output(step.execution_id, &step.step_key, &[], &raw_output)
             .expect_err("invalid");
 
         assert!(matches!(err, WorkflowRuntimeError::Validation(_)));
@@ -1818,6 +1852,60 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn task_protocol_requires_structured_status_and_evidence() {
+        let execution_id = Uuid::new_v4();
+        let raw = format!(
+            r#"{{"type":"final_result","step_key":"task","execution_id":"{execution_id}","summary":"done","content":"done","outputs":[]}}"#
+        );
+        assert!(parse_step_protocol_output_for_step(
+            execution_id,
+            "task",
+            &WorkflowStepType::Task,
+            &["criterion".to_string()],
+            &raw,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn task_protocol_preserves_blocked_as_a_typed_status() {
+        let execution_id = Uuid::new_v4();
+        let raw = format!(
+            r#"{{"type":"final_result","step_key":"task","execution_id":"{execution_id}","status":"blocked","summary":"blocked","content":"cannot continue","verification":[{{"name":"dependency check","command":null,"status":"not_run","evidence":"credential missing"}}],"files_changed":[],"self_review":["scope checked"],"issues":["credential missing"],"evidence":["dependency check"],"outputs":[]}}"#
+        );
+        assert!(matches!(
+            parse_step_protocol_output_for_step(
+                execution_id,
+                "task",
+                &WorkflowStepType::Task,
+                &[],
+                &raw,
+            )
+            .expect("blocked task result"),
+            WorkflowStepProtocolMessage::FinalResult {
+                status: WorkflowTaskCompletionStatus::Blocked,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn review_protocol_rejects_extra_acceptance_criteria() {
+        let execution_id = Uuid::new_v4();
+        let raw = format!(
+            r#"{{"type":"review_result","step_key":"review","execution_id":"{execution_id}","verdict":"approved","summary":"reviewed","content":"ok","acceptance_results":[{{"criterion":"declared","verdict":"passed","evidence":"checked"}},{{"criterion":"invented","verdict":"passed","evidence":"checked"}}],"evidence":["checked"]}}"#
+        );
+        assert!(parse_step_protocol_output_for_step(
+            execution_id,
+            "review",
+            &WorkflowStepType::Review,
+            &["declared".to_string()],
+            &raw,
+        )
+        .is_err());
     }
 
     #[test]

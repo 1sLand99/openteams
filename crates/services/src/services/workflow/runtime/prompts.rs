@@ -506,21 +506,6 @@ pub async fn build_workflow_planning_agents(
     Ok(planning_agents)
 }
 
-/// Appends the shared lead/available-agents dynamic section to a plan
-/// generation prompt.
-pub(crate) fn push_plan_agent_context(
-    prompt: &mut String,
-    lead_agent_id: &str,
-    available_agents: &[WorkflowPlanningAgent],
-) {
-    let available_agents_json =
-        serde_json::to_string_pretty(available_agents).unwrap_or_else(|_| "[]".to_string());
-    prompt.push_str("Lead agent id:\n");
-    prompt.push_str(lead_agent_id);
-    prompt.push_str("\n\nAvailable agents JSON:\n");
-    prompt.push_str(&available_agents_json);
-}
-
 pub fn build_plan_generation_prompt(
     plan_goal: &str,
     lead_agent_id: &str,
@@ -607,14 +592,9 @@ The output source of truth is React Flow compatible workflow JSON. Do not output
     prompt
 }
 
-static STEP_EXECUTION_PROMPT_PREFIX: &str = r#"## Output Format
+static STEP_EXECUTION_PROMPT_PREFIX: &str = r#"## Output Protocol
 
 Return exactly one JSON object — no Markdown, no comments, no prose outside the JSON.
-
-### final_result
-```json
-{"type": "final_result", "step_key": "...", "execution_id": "...", "summary": "one-line summary", "content": "full result", "outputs": ["relative/path"]}
-```
 
 ### error
 ```json
@@ -644,13 +624,13 @@ Return exactly one JSON object — no Markdown, no comments, no prose outside th
 ### Constraints
 1. `step_key` and `execution_id` must be filled with the values provided below.
 2. Task steps use `final_result`; Review steps MUST use `review_result`; Result steps MUST use `result_review_result`. `error`, `approval_request`, `permission_request`, `continue_confirmation`, and `input_request` remain available when applicable.
-3. `outputs` contains workspace-relative paths only.
+3. When present, `outputs` and `files_changed` contain workspace-relative paths only.
 4. Use interactive requests sparingly — only when genuinely blocked without user action.
 5. Follow existing codebase patterns. Improve code you touch, but do not restructure outside your task.
 6. If a file grows beyond the plan's intent, report DONE_WITH_CONCERNS rather than splitting on your own.
 7. Stop and report BLOCKED or NEEDS_CONTEXT when: multiple valid architectures exist, you cannot gain clarity after reading files, or the plan did not anticipate the restructuring needed.
 8. Self-review before reporting: check completeness, naming clarity, YAGNI, and test quality. Fix issues before submitting.
-9. Always include test files in `outputs` alongside implementation files.
+9. Use the success message type required by this step's JSON Schema. Do not invent tests, commands, files, or evidence for non-coding work.
 
 ## Language Requirement
 You MUST respond in the same language as the Instructions field below.
@@ -658,24 +638,26 @@ The `summary`, `content`, and `message` fields in your JSON output must use the 
 
 "#;
 
-static STEP_EXECUTION_CODE_GUIDELINES_PROMPT: &str = r#"## Coding Task Skill Requirement
+#[derive(Debug, Clone, Default)]
+pub struct WorkflowStepExecutionContract {
+    pub acceptance: Vec<String>,
+    pub expected_outputs: Vec<String>,
+    pub checklist: Vec<String>,
+    pub verification_commands: Vec<String>,
+    pub completion_evidence: Vec<String>,
+}
 
-If this task involves writing, modifying, reviewing, or refactoring code, you MUST use the `code-guidelines` skill before editing code.
-
-"#;
-
-// static STEP_EXECUTION_TDD_WORKFLOW_FOR_TASK_TYPE: &str = r#"
-
-// ### TDD Workflow
-
-// If it is a coding task, follow Test-Driven Development for every implementation step:
-// 1. **Red** — Write failing tests first that define the expected behavior. Run them to confirm they fail.
-// 2. **Green** — Write the minimum implementation to make all tests pass. No extra features.
-// 3. **Refactor** — Clean up code while keeping tests green. Improve naming, remove duplication, simplify logic.
-// 4. If no test framework exists in the project, create minimal verification scripts that assert expected behavior before implementing.
-
-// For non-coding tasks, it's not necessary to strictly follow the TDD pattern.
-// "#;
+#[derive(Debug, Clone, Default)]
+pub struct WorkflowStepRevisionContext {
+    pub workflow_goal: String,
+    pub acceptance: Vec<String>,
+    pub expected_outputs: Vec<String>,
+    pub checklist: Vec<String>,
+    pub verification_commands: Vec<String>,
+    pub completion_evidence: Vec<String>,
+    pub dependency_summaries: Vec<String>,
+    pub loop_state: Option<String>,
+}
 
 static STEP_EXECUTION_TDD_WORKFLOW_FOR_REVIEW_TYPE: &str = r#"
 
@@ -688,8 +670,7 @@ Check:
 - Reject missing requirements, unrequested scope, obvious bugs, edge-case gaps, or broken shared contracts.
 - Ensure the result fits the workflow goal and predecessor outputs.
 
-Workflow review is capped at five attempts. Complete the entire review now. If
-rejecting, cite every issue you can identify in this single response, with
+Complete the entire review now. If rejecting, cite every issue you can identify in this single response, with
 file/line evidence and concrete revision guidance when available. Do not hold
 back, defer, or drip-feed issues into later review attempts.
 "#;
@@ -713,8 +694,8 @@ Follow this review method in order:
    stale assumption, unreviewed rejection, or incomplete retry may be hidden in
    the final result.
 5. If any required step is missing, blocked, failed, rejected without a
-   successful retry, or not supported by evidence, report BLOCKED or
-   DONE_WITH_CONCERNS instead of DONE.
+   successful retry, or not supported by evidence, use `blocked` or
+   `completed_with_concerns` instead of `completed`.
 6. Produce a concise final result that explains what was completed, what was
    verified, what deliverables exist, and any remaining risks or follow-up work.
 
@@ -729,23 +710,52 @@ pub fn build_step_execution_prompt(
     completed_dependency_summaries: &[String],
     _step_transcript_context: Option<&str>,
 ) -> String {
+    build_step_execution_prompt_with_contract(
+        execution,
+        workflow_goal,
+        step,
+        completed_dependency_summaries,
+        _step_transcript_context,
+        &WorkflowStepExecutionContract::default(),
+    )
+}
+
+pub fn build_step_execution_prompt_with_contract(
+    execution: &WorkflowExecution,
+    workflow_goal: &str,
+    step: &WorkflowStep,
+    completed_dependency_summaries: &[String],
+    _step_transcript_context: Option<&str>,
+    contract: &WorkflowStepExecutionContract,
+) -> String {
     let dependency_text = if completed_dependency_summaries.is_empty() {
         "None".to_string()
     } else {
         completed_dependency_summaries.join("\n\n")
     };
 
-    let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+    let list = |items: &[String]| {
+        if items.is_empty() {
+            "None".to_string()
+        } else {
+            items.iter().map(|item| format!("- {}", item.trim())).collect::<Vec<_>>().join("\n")
+        }
+    };
+    let data = PromptDataBuilder::new(MAX_STEP_DYNAMIC_CONTENT_BUDGET_BYTES)
         .add("step_title", &step.title, 1)
         .add("step_instructions", &step.instructions, 2)
         .add("workflow_goal", workflow_goal, 1)
         .add("predecessor_summaries", &dependency_text, 1)
+        .add("acceptance", list(&contract.acceptance), 1)
+        .add("expected_outputs", list(&contract.expected_outputs), 1)
+        .add("checklist", list(&contract.checklist), 1)
+        .add("verification_commands", list(&contract.verification_commands), 1)
+        .add("completion_evidence", list(&contract.completion_evidence), 1)
         .build();
 
     let mut prompt = String::with_capacity(4096);
     if step.step_type == WorkflowStepType::Task {
         prompt.push_str("You are implementing a task in an workflow step.\n\n");
-        prompt.push_str(STEP_EXECUTION_CODE_GUIDELINES_PROMPT);
     } else if step.step_type == WorkflowStepType::Review {
         prompt.push_str("You are reviewing the output of the workers' implementation.\n\n");
     } else if step.step_type == WorkflowStepType::Result {
@@ -772,6 +782,23 @@ pub fn build_step_execution_prompt(
 Step: {step_title}
 Type: {step_type}
 {instructions}
+## Task Contract
+
+Acceptance criteria:
+{acceptance}
+
+Expected outputs:
+{expected_outputs}
+
+Checklist:
+{checklist}
+
+Verification commands or methods:
+{verification_commands}
+
+Required completion evidence:
+{completion_evidence}
+
 ## Context
 
 {goal}
@@ -779,8 +806,7 @@ Type: {step_type}
 ## Report
 
 Return one JSON object. Fill `step_key` with `{step_key}`, `execution_id` with `{execution_id}`.
-Status: DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT.
-Report must include: what tests were written first, what was implemented, test results (pass/fail), files changed, self-review findings, issues.
+For task steps, return `final_result` with structured `status`, `verification`, `files_changed`, `self_review`, `issues`, `evidence`, and `outputs`. Verification may be a test, build, manual check, or content inspection appropriate to the task. Report only checks actually performed and evidence actually observed.
 "#,
         step_key = step.step_key,
         execution_id = execution.id,
@@ -789,6 +815,11 @@ Report must include: what tests were written first, what was implemented, test r
         instructions = data.get("step_instructions"),
         goal = data.get("workflow_goal"),
         deps = data.get("predecessor_summaries"),
+        acceptance = data.get("acceptance"),
+        expected_outputs = data.get("expected_outputs"),
+        checklist = data.get("checklist"),
+        verification_commands = data.get("verification_commands"),
+        completion_evidence = data.get("completion_evidence"),
     ));
     prompt = maybe_prepend_safety_preamble(&prompt);
     prompt
@@ -802,12 +833,33 @@ pub fn build_step_execution_prompt_with_schema(
     step_transcript_context: Option<&str>,
     agent_skill_names: &[String],
 ) -> String {
-    let mut prompt = build_step_execution_prompt(
+    build_step_execution_prompt_with_schema_and_contract(
         execution,
         workflow_goal,
         step,
         completed_dependency_summaries,
         step_transcript_context,
+        agent_skill_names,
+        &WorkflowStepExecutionContract::default(),
+    )
+}
+
+pub fn build_step_execution_prompt_with_schema_and_contract(
+    execution: &WorkflowExecution,
+    workflow_goal: &str,
+    step: &WorkflowStep,
+    completed_dependency_summaries: &[String],
+    step_transcript_context: Option<&str>,
+    agent_skill_names: &[String],
+    contract: &WorkflowStepExecutionContract,
+) -> String {
+    let mut prompt = build_step_execution_prompt_with_contract(
+        execution,
+        workflow_goal,
+        step,
+        completed_dependency_summaries,
+        step_transcript_context,
+        contract,
     );
     if let Some(section) =
         crate::services::agent_skill_policy::format_skills_prompt_section(agent_skill_names)
@@ -889,10 +941,8 @@ You MUST respond in the same language as the step Instructions below.
 The `feedback` field in your JSON output must use the same language as the step instructions.
 "#;
 
-pub const MAX_WORKFLOW_REVIEW_ATTEMPTS: i32 = 5;
-
-pub fn workflow_review_attempt_limit_reached(review_attempt: i32) -> bool {
-    review_attempt >= MAX_WORKFLOW_REVIEW_ATTEMPTS
+pub fn workflow_review_attempt_limit_reached(review_attempt: i32, max_attempts: i32) -> bool {
+    review_attempt >= max_attempts
 }
 
 pub fn build_lead_review_prompt(
@@ -903,6 +953,7 @@ pub fn build_lead_review_prompt(
     acceptance_criteria: &[String],
     review_attempt: i32,
 ) -> String {
+    let max_review_attempts = step.max_retry.saturating_add(1);
     let dependency_text = if dependency_summaries.is_empty() {
         "None".to_string()
     } else {
@@ -978,7 +1029,7 @@ Based on your independent verification of the actual code, verdict: approved or 
         outputs = data.get("worker_outputs"),
         goal = data.get("workflow_goal"),
         review_attempt = review_attempt,
-        max_review_attempts = MAX_WORKFLOW_REVIEW_ATTEMPTS,
+        max_review_attempts = max_review_attempts,
         deps = data.get("predecessor_summaries"),
     ));
     prompt = maybe_prepend_safety_preamble(&prompt);
@@ -1018,7 +1069,7 @@ static STEP_REVISION_PROMPT_PREFIX: &str = r#"You are revising a step in an work
 
 Return exactly one JSON object — no Markdown, no comments, no prose outside the JSON.
 
-Use the same `final_result` / `error` / `approval_request` / `permission_request` / `continue_confirmation` / `input_request` types as the original step execution.
+Use the success message type required by the step-specific JSON Schema. Interaction and error messages remain available only as permitted by that schema.
 
 ## Revision Guidelines
 
@@ -1039,8 +1090,29 @@ pub fn build_step_revision_prompt(
     previous_content: Option<&str>,
     retry_count: i32,
 ) -> String {
+    build_step_revision_prompt_with_context(
+        step,
+        feedback_source,
+        feedback_content,
+        previous_summary,
+        previous_content,
+        retry_count,
+        &WorkflowStepRevisionContext::default(),
+    )
+}
+
+pub fn build_step_revision_prompt_with_context(
+    step: &WorkflowStep,
+    feedback_source: WorkflowRevisionFeedbackSource,
+    feedback_content: &str,
+    previous_summary: &str,
+    previous_content: Option<&str>,
+    retry_count: i32,
+    context: &WorkflowStepRevisionContext,
+) -> String {
     let feedback_label = match feedback_source {
         WorkflowRevisionFeedbackSource::Lead => "review_feedback",
+        WorkflowRevisionFeedbackSource::Reviewer => "reviewer_feedback",
         WorkflowRevisionFeedbackSource::User => "user_feedback",
     };
 
@@ -1048,11 +1120,27 @@ pub fn build_step_revision_prompt(
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != previous_summary.trim());
 
-    let mut builder = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+    let list = |items: &[String]| {
+        if items.is_empty() {
+            "None".to_string()
+        } else {
+            items.iter().map(|item| format!("- {}", item.trim())).collect::<Vec<_>>().join("\n")
+        }
+    };
+    let mut builder = PromptDataBuilder::new(MAX_STEP_DYNAMIC_CONTENT_BUDGET_BYTES)
         .add(feedback_label, feedback_content.trim(), 2)
         .add("previous_result_summary", previous_summary.trim(), 1)
-        .add("step_instructions", &step.instructions, 2);
+        .add("step_title", &step.title, 1)
+        .add("step_instructions", &step.instructions, 2)
+        .add("workflow_goal", &context.workflow_goal, 1)
+        .add("acceptance", list(&context.acceptance), 1)
+        .add("expected_outputs", list(&context.expected_outputs), 1)
+        .add("checklist", list(&context.checklist), 1)
+        .add("verification_commands", list(&context.verification_commands), 1)
+        .add("completion_evidence", list(&context.completion_evidence), 1)
+        .add("dependency_summaries", list(&context.dependency_summaries), 1);
     builder = builder.add_optional("previous_full_result", prev_content_trimmed, 2);
+    builder = builder.add_optional("loop_state", context.loop_state.as_deref(), 1);
     let data = builder.build();
 
     let mut prompt = String::with_capacity(4096);
@@ -1079,11 +1167,8 @@ pub fn build_step_revision_prompt(
             prompt.push_str(
                 "Your previous execution did not pass Reviewer review. Revise your work based on the feedback below.\n\n",
             );
-            prompt.push_str("### Reviewer Feedback\n");
-            prompt.push_str(feedback_content.trim());
-            prompt.push_str("\n\n### Your Previous Result Summary\n");
-            prompt.push_str(previous_summary.trim());
-            prompt.push('\n');
+            prompt.push_str(data.get(feedback_label));
+            prompt.push_str(data.get("previous_result_summary"));
         }
         WorkflowRevisionFeedbackSource::User => {
             prompt.push_str(&format!(
@@ -1108,9 +1193,28 @@ pub fn build_step_revision_prompt(
     // Original task context
     prompt.push_str("\n### Original Task Instructions\n");
     prompt.push_str("- Title: ");
-    prompt.push_str(&step.title);
+    prompt.push_str(data.get("step_title"));
     prompt.push_str(data.get("step_instructions"));
     prompt.push('\n');
+
+    prompt.push_str("\n### Workflow and Contract Context\n");
+    prompt.push_str(data.get("workflow_goal"));
+    prompt.push_str("\nAcceptance criteria:\n");
+    prompt.push_str(data.get("acceptance"));
+    prompt.push_str("\nExpected outputs:\n");
+    prompt.push_str(data.get("expected_outputs"));
+    prompt.push_str("\nChecklist:\n");
+    prompt.push_str(data.get("checklist"));
+    prompt.push_str("\nVerification commands or methods:\n");
+    prompt.push_str(data.get("verification_commands"));
+    prompt.push_str("\nRequired completion evidence:\n");
+    prompt.push_str(data.get("completion_evidence"));
+    prompt.push_str("\nDependency summaries:\n");
+    prompt.push_str(data.get("dependency_summaries"));
+    if !data.get("loop_state").is_empty() {
+        prompt.push_str("\nCurrent loop state:\n");
+        prompt.push_str(data.get("loop_state"));
+    }
 
     prompt = maybe_prepend_safety_preamble(&prompt);
     prompt
@@ -1125,13 +1229,36 @@ pub fn build_step_revision_prompt_with_schema(
     retry_count: i32,
     agent_skill_names: &[String],
 ) -> String {
-    let mut prompt = build_step_revision_prompt(
+    build_step_revision_prompt_with_schema_and_context(
         step,
         feedback_source,
         feedback_content,
         previous_summary,
         previous_content,
         retry_count,
+        agent_skill_names,
+        &WorkflowStepRevisionContext::default(),
+    )
+}
+
+pub fn build_step_revision_prompt_with_schema_and_context(
+    step: &WorkflowStep,
+    feedback_source: WorkflowRevisionFeedbackSource,
+    feedback_content: &str,
+    previous_summary: &str,
+    previous_content: Option<&str>,
+    retry_count: i32,
+    agent_skill_names: &[String],
+    context: &WorkflowStepRevisionContext,
+) -> String {
+    let mut prompt = build_step_revision_prompt_with_context(
+        step,
+        feedback_source,
+        feedback_content,
+        previous_summary,
+        previous_content,
+        retry_count,
+        context,
     );
     if let Some(section) =
         crate::services::agent_skill_policy::format_skills_prompt_section(agent_skill_names)
@@ -1139,10 +1266,11 @@ pub fn build_step_revision_prompt_with_schema(
         prompt.push_str(&section);
     }
     prompt.push_str("\n\nRequired JSON Schema:\n```json\n");
-    prompt.push_str(&workflow_step_protocol_json_schema(
+    prompt.push_str(&workflow_step_protocol_json_schema_for_step(
         step.execution_id,
         &step.step_key,
         true,
+        &step.step_type,
     ));
     prompt.push_str("\n```\n");
     prompt.push_str("Return ONLY one JSON object matching this schema.\n");

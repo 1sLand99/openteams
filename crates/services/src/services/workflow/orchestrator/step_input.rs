@@ -5,7 +5,8 @@ use db::{
     models::{
         chat_session::ChatSession, chat_session_agent::ChatSessionAgent,
         workflow_agent_session::WorkflowAgentSession, workflow_execution::WorkflowExecution,
-        workflow_step::WorkflowStep, workflow_transcript::WorkflowTranscript, workflow_types::*,
+        workflow_plan::WorkflowPlan, workflow_step::WorkflowStep,
+        workflow_transcript::WorkflowTranscript, workflow_types::*,
     },
 };
 use sqlx::SqlitePool;
@@ -290,6 +291,16 @@ impl WorkflowOrchestrator {
                 follow_up_prompt = follow_up_prompt,
                 "submit step input for following up prompt"
             );
+            let active_plan = WorkflowPlan::find_by_id(pool, active_execution.plan_id)
+                .await?
+                .ok_or_else(|| {
+                    OrchestratorError::NotFound(format!(
+                        "workflow plan {} 未找到",
+                        active_execution.plan_id
+                    ))
+                })?;
+            let declared_acceptance =
+                Self::acceptance_criteria_for_step(&active_plan, &running_step);
 
             let protocol_message = match Self::run_step_agent_protocol_with_retry(
                 db,
@@ -301,6 +312,7 @@ impl WorkflowOrchestrator {
                 workflow_session,
                 &follow_up_prompt,
                 &running_step,
+                &declared_acceptance,
                 true,
             )
             .await
@@ -605,14 +617,10 @@ impl WorkflowOrchestrator {
         mode: StepFollowUpMode,
     ) -> String {
         let opening = match mode {
-            StepFollowUpMode::Paused => format!(
-                "The user has replied while workflow step \"{}\" is paused.",
-                step.title
-            ),
-            StepFollowUpMode::Failed => format!(
-                "The previous attempt for workflow step \"{}\" failed. The user has now provided follow-up input to restart the same agent session and continue execution.",
-                step.title
-            ),
+            StepFollowUpMode::Paused => "The user has replied while this workflow step is paused.",
+            StepFollowUpMode::Failed => {
+                "The previous attempt for this workflow step failed. The user has now provided follow-up input to restart the same agent session and continue execution."
+            }
         };
         let resume_rule = match mode {
             StepFollowUpMode::Paused => {
@@ -629,6 +637,7 @@ impl WorkflowOrchestrator {
             &step.step_type,
         );
         let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+            .add("step_title", &step.title, 1)
             .add("previous_agent_message", previous_message_content.trim(), 1)
             .add("user_input", input_text, 1)
             .add("step_instructions", &step.instructions, 2)
@@ -649,25 +658,6 @@ Workflow step context:
 - step_type: {step_type}
 - step_title: {step_title}
 {step_instructions}
-Workflow step protocol JSON schema:
-{{
-  "type": "final_result | error | approval_request | permission_request | continue_confirmation | input_request",
-  "step_key": "{step_key}",
-  "execution_id": "{execution_id}",
-
-  "summary": "required when type=final_result",
-  "content": "required when type=final_result, optional when type=error",
-  "outputs": ["optional relative workspace paths when type=final_result"],
-
-  "message": "required when type=error or type=continue_confirmation",
-
-  "title": "required when type=approval_request or type=permission_request",
-  "description": "optional when type=approval_request | permission_request | continue_confirmation | input_request",
-
-  "prompt": "required when type=input_request",
-  "placeholder": "optional when type=input_request"
-}}
-
 Required JSON Schema:
 ```json
 {json_schema}
@@ -678,10 +668,10 @@ Rules:
 - execution_id must stay exactly "{execution_id}".
 - Return exactly one JSON object and no extra Markdown or explanation.
 - outputs must contain only relative workspace paths.
-- If the user input fully resolves the pause, continue and return final_result or the next appropriate protocol message.
+- If the user input fully resolves the pause, continue and return the success message required by the JSON Schema or the next appropriate interaction/error message.
 "#,
             opening = opening,
-            step_title = step.title,
+            step_title = data.get("step_title"),
             prev_msg = data.get("previous_agent_message"),
             user_input = data.get("user_input"),
             resume_rule = resume_rule,

@@ -19,9 +19,8 @@ use db::{
         workflow_step::{CreateWorkflowStep, WorkflowStep},
         workflow_step_edge::{CreateWorkflowStepEdge, WorkflowStepEdge},
         workflow_types::{
-            WorkflowAgentSessionRole, WorkflowEventType, WorkflowPlanJson, WorkflowRevisionEditor,
-            WorkflowRoundStatus, WorkflowStepStatus, WorkflowStepType, WorkflowValidationStatus,
-            to_workflow_wire_value,
+            WorkflowEventType, WorkflowPlanJson, WorkflowRevisionEditor, WorkflowRoundStatus,
+            WorkflowStepStatus, WorkflowStepType, WorkflowValidationStatus, to_workflow_wire_value,
         },
     },
 };
@@ -37,15 +36,15 @@ use super::{
     workflow_compiler::WorkflowCompiler,
     workflow_orchestrator::{
         OrchestratorError, WorkflowOrchestrator, reducer, workflow_agent_id_map,
-        workflow_plan_agent_id, workflow_valid_agent_ids,
+        workflow_agent_session_role_for_assignment, workflow_plan_agent_id,
+        workflow_valid_agent_ids,
     },
     workflow_runtime::{
-        PLAN_SCHEMA_DEFINITION, PLAN_SKILLS_GUIDANCE, PLAN_STABLE_OUTPUT_CONTRACT,
-        PLAN_STATIC_CONSTRAINTS, MAX_DYNAMIC_CONTENT_BUDGET_BYTES, PromptDataBuilder,
-        SummaryPayload, WorkflowPlanningAgent,
-        build_workflow_planning_agents, extract_json_payload, parse_summary_payload,
-        maybe_prepend_safety_preamble, resolve_workflow_response_language_instruction,
-        run_workflow_agent_prompt,
+        MAX_DYNAMIC_CONTENT_BUDGET_BYTES, PLAN_SCHEMA_DEFINITION, PLAN_SKILLS_GUIDANCE,
+        PLAN_STABLE_OUTPUT_CONTRACT, PLAN_STATIC_CONSTRAINTS, PromptDataBuilder, SummaryPayload,
+        WorkflowPlanningAgent, build_workflow_planning_agents, extract_json_payload,
+        maybe_prepend_safety_preamble, parse_summary_payload,
+        resolve_workflow_response_language_instruction, run_workflow_agent_prompt,
     },
 };
 
