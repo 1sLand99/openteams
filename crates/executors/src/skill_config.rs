@@ -18,6 +18,7 @@ pub enum NativeSkillConfigBackend {
     Codex,
     Gemini,
     Opencode,
+    Qoder,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,7 @@ pub async fn list_native_skills(
             NativeSkillConfigBackend::Codex => codex_skill_enabled(&config, &skill.path),
             NativeSkillConfigBackend::Gemini => gemini_skill_enabled(&config, &skill.slug),
             NativeSkillConfigBackend::Opencode => opencode_skill_enabled(&config, &skill.slug),
+            NativeSkillConfigBackend::Qoder => qoder_skill_enabled(&config, &skill.slug),
         };
         skill.can_toggle = config_backend != NativeSkillConfigBackend::Unsupported;
         skill.config_path = Some(config_path_ref.clone());
@@ -85,6 +87,9 @@ pub async fn set_native_skill_enabled(
         }
         NativeSkillConfigBackend::Opencode => {
             update_opencode_skill_entry(&mut config, skill_name, enabled);
+        }
+        NativeSkillConfigBackend::Qoder => {
+            update_qoder_skill_entry(&mut config, skill_name, enabled);
         }
     }
 
@@ -321,6 +326,20 @@ fn opencode_skill_enabled(config: &Value, skill_slug: &str) -> bool {
     !matches!(best_match, Some((_, "deny")))
 }
 
+fn qoder_skill_enabled(config: &Value, skill_slug: &str) -> bool {
+    !config
+        .get("skillOverrides")
+        .and_then(Value::as_object)
+        .and_then(|overrides| {
+            overrides.iter().find_map(|(name, value)| {
+                name.eq_ignore_ascii_case(skill_slug)
+                    .then(|| value.as_str())
+                    .flatten()
+            })
+        })
+        .is_some_and(|value| value.eq_ignore_ascii_case("off"))
+}
+
 fn wildcard_match(pattern: &str, candidate: &str) -> bool {
     if pattern == "*" {
         return true;
@@ -442,8 +461,65 @@ fn update_opencode_skill_entry(config: &mut Value, skill_name: &str, enabled: bo
     );
 }
 
+fn update_qoder_skill_entry(config: &mut Value, skill_name: &str, enabled: bool) {
+    ensure_object(config);
+    let Some(root) = config.as_object_mut() else {
+        return;
+    };
+    let overrides = root
+        .entry("skillOverrides".to_string())
+        .or_insert_with(|| Value::Object(Default::default()));
+    ensure_object(overrides);
+    if let Some(overrides) = overrides.as_object_mut() {
+        overrides.insert(
+            slugify_skill_name(skill_name),
+            Value::String(if enabled { "on" } else { "off" }.to_string()),
+        );
+    }
+}
+
 fn ensure_object(value: &mut Value) {
     if !value.is_object() {
         *value = Value::Object(Default::default());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qoder_skill_overrides_default_on_and_honor_off_case_insensitively() {
+        let config = json!({
+            "skillOverrides": {
+                "review-code": "OFF"
+            }
+        });
+
+        assert!(!qoder_skill_enabled(&config, "Review-Code"));
+        assert!(qoder_skill_enabled(&config, "write-tests"));
+    }
+
+    #[test]
+    fn qoder_skill_updates_preserve_unrelated_settings() {
+        let mut config = json!({
+            "theme": "dark",
+            "skillOverrides": {
+                "existing": "off"
+            }
+        });
+
+        update_qoder_skill_entry(&mut config, "Review Code", false);
+
+        assert_eq!(config.pointer("/theme"), Some(&json!("dark")));
+        assert_eq!(
+            config.pointer("/skillOverrides/existing"),
+            Some(&json!("off"))
+        );
+        assert_eq!(
+            config.pointer("/skillOverrides/review-code"),
+            Some(&json!("off"))
+        );
+        assert!(!qoder_skill_enabled(&config, "review-code"));
     }
 }

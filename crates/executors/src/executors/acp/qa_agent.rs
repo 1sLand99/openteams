@@ -16,11 +16,12 @@ use agent_client_protocol::{
         ProtocolVersion,
         v1::{
             AgentCapabilities, AuthMethod, AuthMethodAgent, AuthenticateRequest,
-            AuthenticateResponse, ContentBlock, ContentChunk, InitializeRequest,
-            InitializeResponse, LoadSessionRequest, LoadSessionResponse, McpServer,
-            NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionKind,
-            PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
-            ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionConfigOption,
+            AuthenticateResponse, CancelNotification, ContentBlock, ContentChunk,
+            InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+            McpServer, NewSessionRequest, NewSessionResponse, PermissionOption,
+            PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
+            RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionRequest,
+            ResumeSessionResponse, SessionCapabilities, SessionConfigOption,
             SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigSelectOption,
             SessionNotification, SessionResumeCapabilities, SessionUpdate,
             SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason, TextContent,
@@ -28,7 +29,7 @@ use agent_client_protocol::{
         },
     },
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 #[derive(Clone)]
 struct QaSession {
@@ -102,10 +103,13 @@ fn session_key(session_id: &agent_client_protocol::schema::v1::SessionId) -> Str
 pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
     let disable_follow_up = std::env::var_os("ACP_QA_DISABLE_FOLLOW_UP").is_some();
     let require_auth = std::env::var_os("ACP_QA_REQUIRE_AUTH").is_some();
+    let expire_auth = std::env::var_os("ACP_QA_EXPIRE_AUTH").is_some();
     let advertise_config = std::env::var_os("ACP_QA_CONFIG_OPTIONS").is_some();
     let advertise_mode = std::env::var_os("ACP_QA_MODE_OPTIONS").is_some();
     let refuse_mode_set = std::env::var_os("ACP_QA_REFUSE_MODE_SET").is_some();
     let authenticated = Arc::new(AtomicBool::new(false));
+    let cancel_requested = Arc::new(AtomicBool::new(false));
+    let cancel_notify = Arc::new(Notify::new());
     let sessions = Arc::new(Mutex::new(HashMap::<String, QaSession>::new()));
 
     let authenticated_for_initialize = authenticated.clone();
@@ -118,6 +122,10 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
     let sessions_for_load = sessions.clone();
     let sessions_for_config = sessions.clone();
     let sessions_for_prompt = sessions.clone();
+    let cancel_requested_for_notification = cancel_requested.clone();
+    let cancel_notify_for_notification = cancel_notify.clone();
+    let cancel_requested_for_prompt = cancel_requested.clone();
+    let cancel_notify_for_prompt = cancel_notify.clone();
 
     Agent
         .builder()
@@ -132,6 +140,7 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     AgentCapabilities::new()
                 } else {
                     AgentCapabilities::new()
+                        .prompt_capabilities(PromptCapabilities::new().image(true))
                         .load_session(true)
                         .session_capabilities(
                             SessionCapabilities::new().resume(SessionResumeCapabilities::new()),
@@ -150,9 +159,17 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
             },
             agent_client_protocol::on_receive_request!(),
         )
+        .on_receive_notification(
+            async move |_notification: CancelNotification, _connection| {
+                cancel_requested_for_notification.store(true, Ordering::SeqCst);
+                cancel_notify_for_notification.notify_waiters();
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
         .on_receive_request(
             async move |request: AuthenticateRequest, responder, _connection| {
-                if request.method_id.0.as_ref() != "qa-auth" {
+                if request.method_id.0.as_ref() != "qa-auth" || expire_auth {
                     return responder
                         .respond_with_error(agent_client_protocol::Error::auth_required());
                 }
@@ -286,6 +303,8 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
             async move |request: PromptRequest, responder, connection: ConnectionTo<Client>| {
                 let task_connection = connection.clone();
                 let sessions_for_prompt = sessions_for_prompt.clone();
+                let cancel_requested_for_prompt = cancel_requested_for_prompt.clone();
+                let cancel_notify_for_prompt = cancel_notify_for_prompt.clone();
                 connection.spawn(async move {
                     let connection = task_connection;
                     let text = request
@@ -304,7 +323,15 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                         std::process::exit(17);
                     }
                     if text.contains("[qa:sleep]") {
-                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        if !cancel_requested_for_prompt.load(Ordering::SeqCst) {
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+                                _ = cancel_notify_for_prompt.notified() => {}
+                            }
+                        }
+                        if cancel_requested_for_prompt.load(Ordering::SeqCst) {
+                            return responder.respond(PromptResponse::new(StopReason::Cancelled));
+                        }
                     }
 
                     let session = sessions_for_prompt

@@ -257,6 +257,14 @@ export function AgentInstallGuide({
                 })}
               </p>
             )}
+            {step.kind === "auth" &&
+              (guide.entry.authEnvVars?.length ?? 0) > 0 && (
+                <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--ink-tertiary)]">
+                  {t("agents.setup.authEnvHint", {
+                    vars: (guide.entry.authEnvVars ?? []).join(", "),
+                  })}
+                </p>
+              )}
           </div>
         ))}
       </div>

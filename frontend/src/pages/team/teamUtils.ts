@@ -59,6 +59,7 @@ export const normalizeRunnerType = (
     "COPILOT",
     "DROID",
     "KIMI_CODE",
+    "QODER_CLI",
   ];
   return known.includes(normalized as BaseCodingAgent)
     ? (normalized as BaseCodingAgent)

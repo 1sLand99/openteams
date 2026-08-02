@@ -151,6 +151,7 @@ fn supports_model(config: &CodingAgent) -> bool {
             | CodingAgent::Copilot(_)
             | CodingAgent::Droid(_)
             | CodingAgent::KimiCode(_)
+            | CodingAgent::QoderCli(_)
             | CodingAgent::OpenTeamsCli(_)
     )
 }
@@ -202,6 +203,11 @@ pub fn with_model(config: &CodingAgent, model: &str) -> Option<CodingAgent> {
             let mut next = base.clone();
             next.model = Some(model);
             Some(CodingAgent::KimiCode(next))
+        }
+        CodingAgent::QoderCli(base) => {
+            let mut next = base.clone();
+            next.model = Some(model);
+            Some(CodingAgent::QoderCli(next))
         }
         CodingAgent::OpenTeamsCli(base) => {
             let mut next = base.clone();
@@ -291,6 +297,7 @@ fn with_thinking_or_variant(
             next.thinking_effort = Some(effort.to_string());
             Some(CodingAgent::KimiCode(next))
         }
+        CodingAgent::QoderCli(_) => None,
         _ => None,
     }
 }

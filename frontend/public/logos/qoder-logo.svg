@@ -1,0 +1,13 @@
+<svg height="1em" style="flex:none;line-height:1" viewBox="0 0 24 24" width="1em" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .qoder-fill { fill: #111827; }
+    .qoder-stroke { stroke: #111827; }
+    @media (prefers-color-scheme: dark) {
+      .qoder-fill { fill: #ffffff; }
+      .qoder-stroke { stroke: #ffffff; }
+    }
+  </style>
+  <title>Qoder</title>
+  <path class="qoder-fill" fill-rule="evenodd" d="M12 3a9 9 0 1 1 0 18 9 9 0 0 1 0-18Zm0 5a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z"/>
+  <path class="qoder-stroke" d="M15.4 15.4 20.4 20.4" fill="none" stroke-linecap="round" stroke-width="2.6"/>
+</svg>

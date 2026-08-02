@@ -25,7 +25,7 @@ use crate::{
     executors::{
         amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::CursorAgent,
         droid::Droid, gemini::Gemini, kimi::KimiCode, opencode::Opencode,
-        openteams_cli::OpenTeamsCli, qwen::QwenCode,
+        openteams_cli::OpenTeamsCli, qoder::QoderCli, qwen::QwenCode,
     },
     logs::utils::patch,
     mcp_config::McpConfig,
@@ -48,6 +48,7 @@ pub mod opencode;
 pub mod openteams_cli;
 #[cfg(feature = "qa-mode")]
 pub mod qa_mock;
+pub mod qoder;
 pub mod qwen;
 pub mod utils;
 
@@ -57,6 +58,31 @@ pub struct SlashCommandDescription {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// Provider-neutral structured user prompt. Executors that support rich
+/// content can forward image blocks; text-only executors retain the exact
+/// markdown prompt through the default trait methods.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutorPrompt {
+    pub text: String,
+    pub images: Vec<ExecutorPromptImage>,
+}
+
+impl ExecutorPrompt {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutorPromptImage {
+    pub data: String,
+    pub mime_type: String,
+    pub uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -128,6 +154,7 @@ pub enum CodingAgent {
     Copilot,
     Droid,
     KimiCode,
+    QoderCli,
     #[cfg(feature = "qa-mode")]
     QaMock(QaMockExecutor),
     #[cfg(feature = "qa-mode")]
@@ -140,6 +167,7 @@ impl CodingAgent {
             Self::Gemini(config) => config.acp_mcp_policy = policy,
             Self::QwenCode(config) => config.acp_mcp_policy = policy,
             Self::KimiCode(config) => config.acp_mcp_policy = policy,
+            Self::QoderCli(config) => config.acp_mcp_policy = policy,
             #[cfg(feature = "qa-mode")]
             Self::AcpQa(config) => config.acp_mcp_policy = policy,
             _ => {}
@@ -224,7 +252,7 @@ impl CodingAgent {
             }
             Self::CursorAgent(_) => vec![BaseAgentCapability::SetupHelper],
             Self::Copilot(_) => vec![],
-            Self::KimiCode(_) => vec![
+            Self::KimiCode(_) | Self::QoderCli(_) => vec![
                 BaseAgentCapability::SessionFork,
                 BaseAgentCapability::SetupHelper,
             ],
@@ -324,6 +352,15 @@ pub trait StandardCodingAgentExecutor {
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError>;
 
+    async fn spawn_structured(
+        &self,
+        current_dir: &Path,
+        prompt: &ExecutorPrompt,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        self.spawn(current_dir, &prompt.text, env).await
+    }
+
     /// Continue a session, optionally resetting to a specific message.
     async fn spawn_follow_up(
         &self,
@@ -333,6 +370,24 @@ pub trait StandardCodingAgentExecutor {
         reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError>;
+
+    async fn spawn_follow_up_structured(
+        &self,
+        current_dir: &Path,
+        prompt: &ExecutorPrompt,
+        session_id: &str,
+        reset_to_message_id: Option<&str>,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        self.spawn_follow_up(
+            current_dir,
+            &prompt.text,
+            session_id,
+            reset_to_message_id,
+            env,
+        )
+        .await
+    }
 
     async fn spawn_review(
         &self,

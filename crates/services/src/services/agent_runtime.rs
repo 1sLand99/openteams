@@ -555,9 +555,10 @@ pub async fn runtime_diagnostics(
             "override".to_string()
         } else {
             match &runtime_executor {
-                CodingAgent::Gemini(_) | CodingAgent::QwenCode(_) | CodingAgent::KimiCode(_) => {
-                    "native"
-                }
+                CodingAgent::Gemini(_)
+                | CodingAgent::QwenCode(_)
+                | CodingAgent::KimiCode(_)
+                | CodingAgent::QoderCli(_) => "native",
                 _ => "default",
             }
             .to_string()
@@ -852,6 +853,7 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
         CodingAgent::Copilot(_) => "copilot".to_string(),
         CodingAgent::Droid(_) => "droid".to_string(),
         CodingAgent::KimiCode(_) => "kimi".to_string(),
+        CodingAgent::QoderCli(_) => "qodercli".to_string(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => return None,
         #[cfg(feature = "qa-mode")]
@@ -872,6 +874,7 @@ fn cmd_overrides_for_executor(executor: &CodingAgent) -> Option<&CmdOverrides> {
         CodingAgent::Copilot(config) => Some(&config.cmd),
         CodingAgent::Droid(config) => Some(&config.cmd),
         CodingAgent::KimiCode(config) => Some(&config.cmd),
+        CodingAgent::QoderCli(config) => Some(&config.cmd),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => None,
         #[cfg(feature = "qa-mode")]
@@ -1194,6 +1197,7 @@ fn reasoning_capability_for_runner(
         BaseCodingAgent::KimiCode => Some(AgentRuntimeReasoningCapability::Effort {
             options: strings(["low", "high", "max"]),
         }),
+        BaseCodingAgent::QoderCli => None,
         BaseCodingAgent::Amp | BaseCodingAgent::CursorAgent | BaseCodingAgent::Copilot => None,
         #[cfg(feature = "qa-mode")]
         BaseCodingAgent::QaMock | BaseCodingAgent::AcpQa => None,
@@ -1264,6 +1268,7 @@ fn model_name(config: &CodingAgent) -> Option<&str> {
         CodingAgent::Copilot(config) => config.model.as_deref(),
         CodingAgent::Droid(config) => config.model.as_deref(),
         CodingAgent::KimiCode(config) => config.model.as_deref(),
+        CodingAgent::QoderCli(config) => config.model.as_deref(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => None,
         _ => None,

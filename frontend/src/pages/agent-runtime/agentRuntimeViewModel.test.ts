@@ -7,6 +7,7 @@ import {
   buildLocalMachineSummary,
   envSummaryToText,
   filterRuntimeRunners,
+  getRunnerLabel,
   getRuntimeDisplayState,
   parseEnvText,
   parseRuntimeErrorDetails,
@@ -184,6 +185,15 @@ check(
   "empty runtime error yields no detail rows",
   same(parseRuntimeErrorDetails(null), []) &&
     same(parseRuntimeErrorDetails("  \n "), []),
+);
+
+check(
+  "getRunnerLabel keeps the Qoder CLI acronym uppercase",
+  getRunnerLabel("QODER_CLI") === "Qoder CLI",
+);
+check(
+  "getRunnerLabel title-cases other runners",
+  getRunnerLabel("KIMI_CODE") === "Kimi Code",
 );
 
 if (failures > 0) {

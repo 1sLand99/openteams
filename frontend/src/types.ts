@@ -1146,7 +1146,8 @@ export type BaseCodingAgent =
   | 'QWEN_CODE'
   | 'COPILOT'
   | 'DROID'
-  | 'KIMI_CODE';
+  | 'KIMI_CODE'
+  | 'QODER_CLI';
 
 export type AvailabilityInfo =
   | { type: 'LOGIN_DETECTED'; last_auth_timestamp: bigint }

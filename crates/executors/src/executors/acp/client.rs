@@ -69,6 +69,14 @@ impl AcpClient {
         services: AcpClientServicePolicy,
         terminal_env: HashMap<String, String>,
     ) -> Self {
+        let mut safe_terminal_env = std::env::vars()
+            .filter(|(name, _)| !is_sensitive_env_name(name))
+            .collect::<HashMap<_, _>>();
+        safe_terminal_env.extend(
+            terminal_env
+                .into_iter()
+                .filter(|(name, _)| !is_sensitive_env_name(name)),
+        );
         Self {
             output,
             approvals,
@@ -77,10 +85,7 @@ impl AcpClient {
             cwd,
             additional_directories,
             services,
-            terminal_env: terminal_env
-                .into_iter()
-                .filter(|(name, _)| !is_sensitive_env_name(name))
-                .collect(),
+            terminal_env: safe_terminal_env,
             terminals: Arc::new(Mutex::new(HashMap::new())),
             tool_calls: Arc::new(Mutex::new(HashMap::new())),
             token_usage: Arc::new(Mutex::new(AcpTokenUsageAccumulator::default())),
@@ -370,6 +375,7 @@ impl AcpClient {
             .args(&request.args)
             .current_dir(cwd)
             .kill_on_drop(true)
+            .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -808,9 +814,18 @@ fn terminal_exit_status(status: ExitStatus) -> TerminalExitStatus {
 
 fn is_sensitive_env_name(name: &str) -> bool {
     let normalized = name.to_ascii_uppercase();
-    ["TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY"]
-        .iter()
-        .any(|fragment| normalized.contains(fragment))
+    [
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "API_KEY",
+        "PRIVATE_KEY",
+        "CREDENTIAL",
+        "AUTHORIZATION",
+    ]
+    .iter()
+    .any(|fragment| normalized.contains(fragment))
 }
 
 fn select_option(
@@ -1268,6 +1283,69 @@ mod tests {
             .await
             .expect("output task")
             .expect("output flush");
+        tokio::fs::remove_dir_all(root).await.expect("remove root");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_process_does_not_receive_agent_credentials() {
+        let root = std::env::temp_dir().join(format!(
+            "openteams-acp-terminal-env-{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&root).await.expect("root");
+        let (output, output_task) = AcpOutput::start(tokio::io::sink());
+        let client = AcpClient::new(
+            output.clone(),
+            None,
+            AcpApprovalPolicy::AutoReject,
+            CancellationToken::new(),
+            root.clone(),
+            Vec::new(),
+            AcpClientServicePolicy {
+                terminal: true,
+                ..AcpClientServicePolicy::default()
+            },
+            HashMap::from([
+                (
+                    "QODER_PERSONAL_ACCESS_TOKEN".to_string(),
+                    "must-not-leak".to_string(),
+                ),
+                ("SAFE_MARKER".to_string(), "visible".to_string()),
+            ]),
+        );
+        let session_id = SessionId::new("session");
+        let created = client
+            .create_terminal(
+                CreateTerminalRequest::new(session_id.clone(), "/bin/sh").args(vec![
+                    "-c".to_string(),
+                    "printf '%s|%s' \"$QODER_PERSONAL_ACCESS_TOKEN\" \"$SAFE_MARKER\"".to_string(),
+                ]),
+            )
+            .await
+            .expect("create terminal");
+        client
+            .wait_for_terminal_exit(WaitForTerminalExitRequest::new(
+                session_id.clone(),
+                created.terminal_id.clone(),
+            ))
+            .await
+            .expect("wait terminal");
+        let terminal_output = client
+            .terminal_output(TerminalOutputRequest::new(
+                session_id.clone(),
+                created.terminal_id.clone(),
+            ))
+            .await
+            .expect("terminal output");
+        assert_eq!(terminal_output.output, "|visible");
+        client
+            .release_terminal(ReleaseTerminalRequest::new(session_id, created.terminal_id))
+            .await
+            .expect("release terminal");
+        drop(client);
+        drop(output);
+        output_task.await.expect("output task").expect("flush");
         tokio::fs::remove_dir_all(root).await.expect("remove root");
     }
 }

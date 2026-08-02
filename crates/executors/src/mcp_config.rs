@@ -436,7 +436,7 @@ impl CodingAgent {
             CodingAgent::Codex(_) => Codex,
             CodingAgent::Opencode(_) | CodingAgent::OpenTeamsCli(_) => Opencode,
             CodingAgent::Copilot(..) => Copilot,
-            CodingAgent::KimiCode(_) => Passthrough,
+            CodingAgent::KimiCode(_) | CodingAgent::QoderCli(_) => Passthrough,
             #[cfg(feature = "qa-mode")]
             CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => Passthrough,
         };

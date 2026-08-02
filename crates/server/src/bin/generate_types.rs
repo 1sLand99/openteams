@@ -501,6 +501,7 @@ fn generate_types_content() -> String {
         executors::executors::opencode::Opencode::decl(),
         executors::executors::openteams_cli::OpenTeamsCli::decl(),
         executors::executors::qwen::QwenCode::decl(),
+        executors::executors::qoder::QoderCli::decl(),
         executors::executors::droid::Droid::decl(),
         executors::executors::kimi::KimiCode::decl(),
         executors::executors::droid::Autonomy::decl(),
@@ -610,6 +611,10 @@ fn generate_schemas() -> Result<HashMap<&'static str, String>, serde_json::Error
         (
             "qwen_code",
             generate_json_schema::<executors::executors::qwen::QwenCode>()?,
+        ),
+        (
+            "qoder_cli",
+            generate_json_schema::<executors::executors::qoder::QoderCli>()?,
         ),
         (
             "copilot",

@@ -56,6 +56,7 @@ import geminiSchema from "../../../shared/schemas/gemini.json";
 import kimiCodeSchema from "../../../shared/schemas/kimi_code.json";
 import openTeamsCliSchema from "../../../shared/schemas/open_teams_cli.json";
 import opencodeSchema from "../../../shared/schemas/opencode.json";
+import qoderCliSchema from "../../../shared/schemas/qoder_cli.json";
 import qwenCodeSchema from "../../../shared/schemas/qwen_code.json";
 
 type TranslateFn = (
@@ -130,6 +131,12 @@ const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
     title: "OpenTeams CLI",
     logoSrc: "/logos/openteams-logo.svg",
   },
+  QODER_CLI: {
+    title: "Qoder",
+    logoSrc: "/logos/qoder-logo.svg",
+    logoMode: "mask",
+    logoClassName: "h-[20px] w-[20px]",
+  },
   QWEN_CODE: {
     title: "Qwen",
     logoSrc: "/logos/qwen-dark.svg",
@@ -163,6 +170,7 @@ const agentConfigSchemas: Record<BaseCodingAgent, AgentJsonSchema> = {
   KIMI_CODE: kimiCodeSchema,
   OPENCODE: opencodeSchema,
   OPEN_TEAMS_CLI: openTeamsCliSchema,
+  QODER_CLI: qoderCliSchema,
   QWEN_CODE: qwenCodeSchema,
 };
 
@@ -194,7 +202,8 @@ const isHiddenConfigField = (
 const isAcpRunner = (runner: BaseCodingAgent): boolean =>
   runner === "GEMINI" ||
   runner === "QWEN_CODE" ||
-  runner === "KIMI_CODE";
+  runner === "KIMI_CODE" ||
+  runner === "QODER_CLI";
 
 const formatRunnerKey = (runner: BaseCodingAgent): string =>
   runner.toLowerCase().replaceAll("_", " ");

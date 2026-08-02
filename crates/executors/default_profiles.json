@@ -497,6 +497,36 @@
         }
       }
     },
+    "QODER_CLI": {
+      "DEFAULT": {
+        "QODER_CLI": {}
+      },
+      "LITE": {
+        "QODER_CLI": {
+          "model": "lite"
+        }
+      },
+      "EFFICIENT": {
+        "QODER_CLI": {
+          "model": "efficient"
+        }
+      },
+      "AUTO": {
+        "QODER_CLI": {
+          "model": "auto"
+        }
+      },
+      "PERFORMANCE": {
+        "QODER_CLI": {
+          "model": "performance"
+        }
+      },
+      "ULTIMATE": {
+        "QODER_CLI": {
+          "model": "ultimate"
+        }
+      }
+    },
     "KIMI_CODE": {
       "DEFAULT": {
         "KIMI_CODE": {}
