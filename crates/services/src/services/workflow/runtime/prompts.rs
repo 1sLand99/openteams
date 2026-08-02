@@ -530,6 +530,8 @@ pub fn build_plan_generation_prompt(
     response_language_instruction: &str,
     design_doc_paths: Option<&[String]>,
 ) -> String {
+    let available_agents_json =
+        serde_json::to_string_pretty(available_agents).unwrap_or_else(|_| "[]".to_string());
     let mut prompt = String::new();
     prompt.push_str(
         r#"# Workflow Plan Generation
@@ -554,10 +556,22 @@ The output source of truth is React Flow compatible workflow JSON. Do not output
         .map(str::trim)
         .filter(|p| !p.is_empty());
 
+    let doc_paths_text = design_doc_paths
+        .filter(|paths| !paths.is_empty())
+        .map(|paths| {
+            paths
+                .iter()
+                .map(|p| format!("- {}", p.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+
     let mut builder = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
-        .add("plan_goal", plan_goal.trim(), 2);
+        .add("plan_goal", plan_goal.trim(), 2)
+        .add("available_agents_json", &available_agents_json, 1);
     builder = builder.add_optional("previous_failure_reason", prev_failure, 1);
     builder = builder.add_optional("previous_plan_json", prev_plan, 3);
+    builder = builder.add_optional("design_doc_paths", doc_paths_text.as_deref(), 1);
     let data = builder.build();
 
     if !data.get("previous_failure_reason").is_empty() {
@@ -577,17 +591,15 @@ The output source of truth is React Flow compatible workflow JSON. Do not output
             "\nUse this existing plan as the baseline. Apply the requested changes from the plan goal brief, preserve correct unchanged work, and return the complete revised workflow plan JSON.",
         );
     }
-    prompt.push_str("\n\n");
-    push_plan_agent_context(&mut prompt, lead_agent_id, available_agents);
-    if let Some(doc_paths) = design_doc_paths.filter(|paths| !paths.is_empty()) {
+    prompt.push_str("\n\nLead agent id:\n");
+    prompt.push_str(lead_agent_id);
+    prompt.push_str("\n\nAvailable agents JSON:\n");
+    prompt.push_str(data.get("available_agents_json"));
+    if !data.get("design_doc_paths").is_empty() {
         prompt.push_str("\n\nDesign document paths:\n");
-        for path in doc_paths {
-            prompt.push_str("- ");
-            prompt.push_str(path.trim());
-            prompt.push('\n');
-        }
+        prompt.push_str(data.get("design_doc_paths"));
         prompt.push_str(
-            "MUST read these design documents for full context when generating the plan.",
+            "\nMUST read these design documents for full context when generating the plan.",
         );
     }
     prompt.push_str("\n\nFinal instruction: return the workflow plan JSON object only.");
@@ -724,6 +736,7 @@ pub fn build_step_execution_prompt(
     };
 
     let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+        .add("step_title", &step.title, 1)
         .add("step_instructions", &step.instructions, 2)
         .add("workflow_goal", workflow_goal, 1)
         .add("predecessor_summaries", &dependency_text, 1)
@@ -772,7 +785,7 @@ Report must include: what tests were written first, what was implemented, test r
         step_key = step.step_key,
         execution_id = execution.id,
         step_type = to_workflow_wire_value(&step.step_type),
-        step_title = step.title,
+        step_title = data.get("step_title"),
         instructions = data.get("step_instructions"),
         goal = data.get("workflow_goal"),
         deps = data.get("predecessor_summaries"),
@@ -916,6 +929,7 @@ pub fn build_lead_review_prompt(
     };
 
     let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
+        .add("step_title", &step.title, 1)
         .add("step_instructions", &step.instructions, 2)
         .add("workflow_goal", workflow_goal, 1)
         .add("worker_content", &result.content, 2)
@@ -956,7 +970,7 @@ Return one JSON object. Fill `step_key` with `{step_key}`, `execution_id` with `
 Based on your independent verification of the actual code, verdict: approved or rejected."#,
         step_key = step.step_key,
         execution_id = step.execution_id,
-        step_title = step.title,
+        step_title = data.get("step_title"),
         instructions = data.get("step_instructions"),
         acceptance = data.get("acceptance_criteria"),
         summary = data.get("worker_summary"),
