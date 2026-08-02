@@ -101,11 +101,12 @@ impl<'a> IterationManager<'a> {
         )?;
         let available_agents = build_workflow_planning_agents(
             self.pool,
+            self.session,
             self.session_agents,
             self.agents,
             lead_session_agent.id,
         )
-        .await;
+        .await?;
         let history = WorkflowIterationFeedback::find_by_execution(self.pool, execution.id).await?;
         let original_plan: WorkflowPlanJson = serde_json::from_str(&active_revision.plan_json)?;
         let ui_config = config::load_config_from_file(&config_path()).await;

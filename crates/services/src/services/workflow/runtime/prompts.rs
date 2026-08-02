@@ -215,7 +215,8 @@ pub(crate) static PLAN_STATIC_CONSTRAINTS: &str = r#"## Additional Static Constr
 /// in the Available agents JSON may be referenced.
 pub(crate) static PLAN_SKILLS_GUIDANCE: &str = r#"## Agent Skills
 
-- Each entry in the Available agents JSON lists the skills actually enabled for that session member in its `skills` field, along with its runner, tools, and responsibility boundary.
+- Each entry in the Available agents JSON lists the skills actually enabled for that session member in its `skills` field, along with its effective runner, model, tools, and responsibility boundary.
+- Each entry's `member_role` and `capability_profile` describe the member's declared expertise (sourced from its linked project member role and the agent system prompt); use them — never the member name — when deciding which member fits a step.
 - When a task benefits from a skill, assign the step to a member whose `skills` include it and name that skill explicitly in the step instructions. Never reference or recommend skills that are not listed for the assigned member.
 - In case of any discrepancy with a skill's format, the specified JSON schema shall prevail.
 - Store the generated plan details in the nodes[].data.instructions field of the workflow plan JSON, using Markdown format.
@@ -260,127 +261,210 @@ fn extract_enabled_tools(tools_enabled: &serde_json::Value) -> Vec<String> {
     tools
 }
 
+/// Maximum length (in chars) of the capability profile embedded in a
+/// planning agent descriptor.
+pub(crate) const CAPABILITY_PROFILE_MAX_CHARS: usize = 600;
+
+/// Builds a whitespace-normalized, length-capped capability profile from the
+/// underlying agent's system prompt. Returns `None` when the prompt is blank.
+pub(crate) fn capability_profile_from_system_prompt(system_prompt: &str) -> Option<String> {
+    let normalized = system_prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.chars().count() <= CAPABILITY_PROFILE_MAX_CHARS {
+        return Some(normalized);
+    }
+    let truncated: String = normalized.chars().take(CAPABILITY_PROFILE_MAX_CHARS).collect();
+    Some(format!("{}…", truncated.trim_end()))
+}
+
+/// Composes one planning agent descriptor from already-resolved facts.
+///
+/// `effective` must come from `resolve_effective_member_execution_config` so
+/// runner/model match the real execution semantics; `enabled_runner_skills`
+/// lists `(skill_id, skill_name)` pairs enabled for the effective runner and
+/// is intersected with the member's `allowed_skill_ids`.
+pub(crate) fn compose_workflow_planning_agent(
+    session_agent: &ChatSessionAgent,
+    agent: &ChatAgent,
+    effective: &crate::services::member_execution::EffectiveMemberExecutionConfig,
+    is_lead: bool,
+    member_role: Option<String>,
+    enabled_runner_skills: &[(String, String)],
+) -> WorkflowPlanningAgent {
+    use crate::services::workflow::workflow_orchestrator::workflow_plan_agent_id;
+
+    let allowed_skill_ids: HashSet<&str> = session_agent
+        .allowed_skill_ids
+        .0
+        .iter()
+        .map(|skill_id| skill_id.trim())
+        .filter(|skill_id| !skill_id.is_empty())
+        .collect();
+    let mut skills: Vec<String> = enabled_runner_skills
+        .iter()
+        .filter(|(skill_id, _)| allowed_skill_ids.contains(skill_id.as_str()))
+        .map(|(_, name)| name.clone())
+        .collect();
+    skills.sort();
+
+    let (workflow_role, responsibilities) = if is_lead {
+        (
+            "lead",
+            "Owns the workflow plan, reviews worker outputs, and produces the final result. Plan generation and final acceptance support stay with the lead; do not assign them to workers.",
+        )
+    } else {
+        (
+            "worker",
+            "Executes only the steps assigned via nodes[].data.agentId. Must not redefine the plan, reassign work, or take over lead duties.",
+        )
+    };
+
+    WorkflowPlanningAgent {
+        agent_id: workflow_plan_agent_id(session_agent),
+        session_agent_id: session_agent.id.to_string(),
+        underlying_agent_id: session_agent.agent_id.to_string(),
+        name: session_agent.member_name.clone(),
+        workflow_role: workflow_role.to_string(),
+        member_role,
+        runner_type: effective.runner_type.to_string(),
+        model_name: effective.model_name.clone(),
+        tools_enabled: extract_enabled_tools(&agent.tools_enabled.0),
+        skills,
+        capability_profile: capability_profile_from_system_prompt(&agent.system_prompt),
+        responsibilities: responsibilities.to_string(),
+    }
+}
+
+/// Resolves the declared professional role (`ProjectMember.role`) for each
+/// session member, following the same linking rules as execution config
+/// refresh: explicit `project_member_id` first, then project-level match by
+/// underlying agent. Returns a map keyed by session agent id.
+async fn resolve_planning_member_roles(
+    pool: &SqlitePool,
+    session: &ChatSession,
+    session_agents: &[ChatSessionAgent],
+) -> Result<HashMap<Uuid, String>, WorkflowRuntimeError> {
+    use db::models::project_member::{ProjectMember, ProjectMemberType};
+
+    let mut roles = HashMap::new();
+    let mut project_members: Option<Vec<ProjectMember>> = None;
+    for session_agent in session_agents {
+        let mut member = if let Some(project_member_id) = session_agent.project_member_id {
+            ProjectMember::find_by_id(pool, project_member_id).await?
+        } else {
+            None
+        };
+        if member.as_ref().is_some_and(|member| {
+            member.member_type != ProjectMemberType::Agent
+                || member.agent_id != Some(session_agent.agent_id)
+        }) {
+            member = None;
+        }
+        if member.is_none()
+            && let Some(project_id) = session.project_id
+        {
+            if project_members.is_none() {
+                project_members = Some(ProjectMember::find_by_project(pool, project_id).await?);
+            }
+            member = project_members.as_ref().and_then(|members| {
+                members
+                    .iter()
+                    .find(|member| {
+                        member.member_type == ProjectMemberType::Agent
+                            && member.agent_id == Some(session_agent.agent_id)
+                    })
+                    .cloned()
+            });
+        }
+        if let Some(role) = member
+            .and_then(|member| member.role)
+            .map(|role| role.trim().to_string())
+            .filter(|role| !role.is_empty())
+        {
+            roles.insert(session_agent.id, role);
+        }
+    }
+    Ok(roles)
+}
+
 /// Builds plan-generation agent descriptors for every session member.
 ///
-/// Capabilities are taken from the real configuration: `ChatAgent`
-/// (runner, tools, model), `ChatSessionAgent.execution_config` (member
-/// overrides), `ChatSessionAgent.allowed_skill_ids`, and the resolved enabled
-/// native skills — never inferred from member names. The planning `agent_id`
-/// is `workflow_plan_agent_id(session_agent)`, so members backed by the same
-/// underlying agent remain individually assignable.
+/// Capabilities are taken from the real configuration: the effective
+/// execution config from `resolve_effective_member_execution_config`
+/// (member runner/model overrides applied), `ChatAgent.tools_enabled` and
+/// system prompt, `ProjectMember.role`, and the native skills enabled for the
+/// effective runner intersected with `allowed_skill_ids` — never inferred
+/// from member names. Resolution failures are returned as errors instead of
+/// being silently disguised as empty capability lists.
 pub async fn build_workflow_planning_agents(
     pool: &SqlitePool,
+    session: &ChatSession,
     session_agents: &[ChatSessionAgent],
     agents: &[ChatAgent],
     lead_session_agent_id: Uuid,
-) -> Vec<WorkflowPlanningAgent> {
+) -> Result<Vec<WorkflowPlanningAgent>, WorkflowRuntimeError> {
     use crate::services::{
-        member_execution::parse_runner_type, native_skills::list_native_skills_for_runner,
-        workflow::workflow_orchestrator::workflow_plan_agent_id,
+        member_execution::resolve_effective_member_execution_config,
+        native_skills::list_native_skills_for_runner,
     };
 
-    // runner -> [(skill_id, skill_name)] for enabled native skills
+    let member_roles = resolve_planning_member_roles(pool, session, session_agents).await?;
+    // effective runner (Display string) -> [(skill_id, skill_name)] enabled
     let mut enabled_skills_by_runner: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut planning_agents = Vec::with_capacity(session_agents.len());
 
     for session_agent in session_agents {
         let agent = agents
             .iter()
-            .find(|agent| agent.id == session_agent.agent_id);
-        let is_lead = session_agent.id == lead_session_agent_id;
-
-        let runner_type = agent
-            .map(|agent| agent.runner_type.trim().to_string())
-            .unwrap_or_default();
-        let model_name = session_agent
-            .execution_config
-            .0
-            .model_name
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| agent.and_then(|agent| agent.model_name.clone()));
-        let tools_enabled = agent
-            .map(|agent| extract_enabled_tools(&agent.tools_enabled.0))
-            .unwrap_or_default();
-
-        let mut skills: Vec<String> = Vec::new();
-        if let Some(agent) = agent {
-            match parse_runner_type(&agent.runner_type) {
-                Ok(runner) => {
-                    let cache_key = format!("{runner:?}");
-                    if !enabled_skills_by_runner.contains_key(&cache_key) {
-                        let enabled = list_native_skills_for_runner(pool, runner)
-                            .await
-                            .map(|installed| {
-                                installed
-                                    .into_iter()
-                                    .filter(|item| item.enabled)
-                                    .map(|item| (item.skill.id.to_string(), item.skill.name))
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_else(|err| {
-                                tracing::debug!(
-                                    runner = %cache_key,
-                                    error = %err,
-                                    "[plan_generation] failed to resolve native skills for runner"
-                                );
-                                Vec::new()
-                            });
-                        enabled_skills_by_runner.insert(cache_key.clone(), enabled);
-                    }
-                    if let Some(enabled) = enabled_skills_by_runner.get(&cache_key) {
-                        let allowed_skill_ids: HashSet<&str> = session_agent
-                            .allowed_skill_ids
-                            .0
-                            .iter()
-                            .map(|skill_id| skill_id.trim())
-                            .filter(|skill_id| !skill_id.is_empty())
-                            .collect();
-                        skills = enabled
-                            .iter()
-                            .filter(|(skill_id, _)| allowed_skill_ids.contains(skill_id.as_str()))
-                            .map(|(_, name)| name.clone())
-                            .collect();
-                        skills.sort();
-                    }
-                }
-                Err(err) => {
-                    tracing::debug!(
-                        runner_type = %agent.runner_type,
-                        error = %err,
-                        "[plan_generation] unknown runner type while resolving member skills"
-                    );
-                }
-            }
+            .find(|agent| agent.id == session_agent.agent_id)
+            .ok_or_else(|| {
+                WorkflowRuntimeError::PlanningAgentResolution(format!(
+                    "agent {} for session member '{}' not found",
+                    session_agent.agent_id, session_agent.member_name
+                ))
+            })?;
+        let effective = resolve_effective_member_execution_config(agent, session_agent).map_err(
+            |err| {
+                WorkflowRuntimeError::PlanningAgentResolution(format!(
+                    "member '{}': {err}",
+                    session_agent.member_name
+                ))
+            },
+        )?;
+        let runner_key = effective.runner_type.to_string();
+        if !enabled_skills_by_runner.contains_key(&runner_key) {
+            let enabled = list_native_skills_for_runner(pool, effective.runner_type)
+                .await
+                .map_err(|err| {
+                    WorkflowRuntimeError::PlanningAgentResolution(format!(
+                        "member '{}': failed to resolve native skills for runner {runner_key}: {err}",
+                        session_agent.member_name
+                    ))
+                })?
+                .into_iter()
+                .filter(|item| item.enabled)
+                .map(|item| (item.skill.id.to_string(), item.skill.name))
+                .collect::<Vec<_>>();
+            enabled_skills_by_runner.insert(runner_key.clone(), enabled);
         }
+        let enabled_runner_skills = enabled_skills_by_runner
+            .get(&runner_key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
 
-        let (role, responsibilities) = if is_lead {
-            (
-                "lead",
-                "Owns the workflow plan, reviews worker outputs, and produces the final result. Plan generation and final acceptance support stay with the lead; do not assign them to workers.",
-            )
-        } else {
-            (
-                "worker",
-                "Executes only the steps assigned via nodes[].data.agentId. Must not redefine the plan, reassign work, or take over lead duties.",
-            )
-        };
-
-        planning_agents.push(WorkflowPlanningAgent {
-            agent_id: workflow_plan_agent_id(session_agent),
-            session_agent_id: session_agent.id.to_string(),
-            underlying_agent_id: session_agent.agent_id.to_string(),
-            name: session_agent.member_name.clone(),
-            role: role.to_string(),
-            runner_type,
-            model_name,
-            tools_enabled,
-            skills,
-            responsibilities: responsibilities.to_string(),
-        });
+        planning_agents.push(compose_workflow_planning_agent(
+            session_agent,
+            agent,
+            &effective,
+            session_agent.id == lead_session_agent_id,
+            member_roles.get(&session_agent.id).cloned(),
+            enabled_runner_skills,
+        ));
     }
 
-    planning_agents
+    Ok(planning_agents)
 }
 
 /// Appends the shared lead/available-agents dynamic section to a plan

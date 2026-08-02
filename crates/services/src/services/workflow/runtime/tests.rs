@@ -756,6 +756,134 @@ mod tests {
     }
 
     #[test]
+    fn planning_agent_descriptors_distinguish_members_sharing_one_underlying_agent() {
+        use executors::executors::BaseCodingAgent;
+
+        let shared_agent_id = Uuid::new_v4();
+        let agent = ChatAgent {
+            id: shared_agent_id,
+            name: "shared-agent".to_string(),
+            runner_type: "codex".to_string(),
+            system_prompt: "You are a polyglot engineer.\n\n  You own delivery quality.".to_string(),
+            tools_enabled: Json(serde_json::json!({
+                "mcpServers": { "filesystem": true, "browser": { "enabled": false } }
+            })),
+            model_name: Some("gpt-5-codex".to_string()),
+            owner_project_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let session_id = Uuid::new_v4();
+        let make_member = |name: &str, config: MemberExecutionConfig, skills: Vec<String>| {
+            ChatSessionAgent {
+                id: Uuid::new_v4(),
+                session_id,
+                agent_id: shared_agent_id,
+                state: ChatSessionAgentState::Idle,
+                workspace_path: None,
+                pty_session_key: None,
+                agent_session_id: None,
+                agent_message_id: None,
+                project_member_id: None,
+                member_name: name.to_string(),
+                execution_config: Json(config),
+                allowed_skill_ids: Json(skills),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        };
+
+        // Two session members backed by the same underlying agent, with
+        // different member roles, runner/model overrides, and allowed skills.
+        let lead_member = make_member(
+            "Planner",
+            MemberExecutionConfig {
+                runner_type: Some(BaseCodingAgent::ClaudeCode),
+                model_name: Some("claude-sonnet-4".to_string()),
+                ..Default::default()
+            },
+            vec!["skill-plan".to_string()],
+        );
+        let worker_member = make_member(
+            "Implementer",
+            MemberExecutionConfig::default(),
+            vec!["skill-code".to_string()],
+        );
+
+        let lead_effective = crate::services::member_execution::resolve_effective_member_execution_config(&agent, &lead_member)
+            .expect("resolve lead effective config");
+        let worker_effective = crate::services::member_execution::resolve_effective_member_execution_config(&agent, &worker_member)
+            .expect("resolve worker effective config");
+
+        // Enabled native skills differ per effective runner.
+        let lead_runner_skills = vec![
+            ("skill-plan".to_string(), "writing-plans".to_string()),
+            ("skill-code".to_string(), "code-guidelines".to_string()),
+        ];
+        let worker_runner_skills = vec![("skill-code".to_string(), "code-guidelines".to_string())];
+
+        let lead = compose_workflow_planning_agent(
+            &lead_member,
+            &agent,
+            &lead_effective,
+            true,
+            Some("技术负责人".to_string()),
+            &lead_runner_skills,
+        );
+        let worker = compose_workflow_planning_agent(
+            &worker_member,
+            &agent,
+            &worker_effective,
+            false,
+            Some("后端工程师".to_string()),
+            &worker_runner_skills,
+        );
+
+        // Session-member planning ids stay unique and never collapse onto the
+        // shared underlying agent id.
+        assert_eq!(lead.agent_id, lead_member.id.to_string());
+        assert_eq!(worker.agent_id, worker_member.id.to_string());
+        assert_ne!(lead.agent_id, worker.agent_id);
+        assert_eq!(lead.underlying_agent_id, shared_agent_id.to_string());
+        assert_eq!(worker.underlying_agent_id, shared_agent_id.to_string());
+
+        // Workflow duty and declared member role stay separate.
+        assert_eq!(lead.workflow_role, "lead");
+        assert_eq!(worker.workflow_role, "worker");
+        assert_eq!(lead.member_role.as_deref(), Some("技术负责人"));
+        assert_eq!(worker.member_role.as_deref(), Some("后端工程师"));
+
+        // Effective runner/model honor the member execution config override.
+        assert_eq!(lead.runner_type, BaseCodingAgent::ClaudeCode.to_string());
+        assert_eq!(lead.model_name.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(worker.runner_type, BaseCodingAgent::Codex.to_string());
+        assert_eq!(worker.model_name.as_deref(), Some("gpt-5-codex"));
+
+        // Skills come from the effective runner's enabled set intersected
+        // with the member's allowed skill ids — no cross-member leakage.
+        assert_eq!(lead.skills, vec!["writing-plans".to_string()]);
+        assert_eq!(worker.skills, vec!["code-guidelines".to_string()]);
+
+        // Capability profile is sourced from the shared system prompt
+        // (whitespace-normalized); tools reflect actual enablement.
+        let capability = lead.capability_profile.expect("capability profile");
+        assert!(capability.contains("polyglot engineer"));
+        assert!(!capability.contains('\n'));
+        assert_eq!(lead.tools_enabled, vec!["mcp:filesystem".to_string()]);
+        assert_eq!(worker.tools_enabled, vec!["mcp:filesystem".to_string()]);
+    }
+
+    #[test]
+    fn capability_profile_from_system_prompt_is_length_capped() {
+        let long_prompt = "word ".repeat(1000);
+        let profile = capability_profile_from_system_prompt(&long_prompt).expect("profile");
+        assert!(profile.chars().count() <= CAPABILITY_PROFILE_MAX_CHARS + 1);
+        assert!(profile.ends_with('…'));
+        assert!(capability_profile_from_system_prompt("  \n\t  ").is_none());
+    }
+
+    #[test]
     fn workflow_response_language_instruction_follows_ui_language() {
         assert_eq!(
             resolve_workflow_response_language_instruction(&UiLanguage::ZhHans),

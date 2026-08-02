@@ -1502,9 +1502,14 @@ impl ChatRunner {
         {
             entry.allowed_skill_ids = lead_session_agent.allowed_skill_ids.clone();
         }
-        let planning_agents =
-            build_workflow_planning_agents(pool, &planning_members, &agents, lead_session_agent.id)
-                .await;
+        let planning_agents = build_workflow_planning_agents(
+            pool,
+            &session,
+            &planning_members,
+            &agents,
+            lead_session_agent.id,
+        )
+        .await?;
         let available_agents: Vec<WorkflowCardAgent> = session_agents
             .iter()
             .map(|session_agent| {
