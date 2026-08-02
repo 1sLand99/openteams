@@ -1277,6 +1277,7 @@ fn workflow_review_verdict_label(verdict: &ReviewVerdict) -> &'static str {
 fn workflow_reviewer_type_label(reviewer_type: &ReviewerType) -> &'static str {
     match reviewer_type {
         ReviewerType::Lead => "lead",
+        ReviewerType::Reviewer => "reviewer",
         ReviewerType::User => "user",
     }
 }
@@ -1436,14 +1437,17 @@ async fn list_transcript_response(
 
         let entry_type = match &review.reviewer_type {
             ReviewerType::Lead => "lead_review",
+            ReviewerType::Reviewer => "review",
             ReviewerType::User => "step_review",
         };
         let sender_type = match &review.reviewer_type {
             ReviewerType::Lead => "agent",
+            ReviewerType::Reviewer => "agent",
             ReviewerType::User => "user",
         };
         let agent_name = match &review.reviewer_type {
             ReviewerType::Lead => Some("Lead".to_string()),
+            ReviewerType::Reviewer => Some("Reviewer".to_string()),
             ReviewerType::User => Some("User".to_string()),
         };
         entries.push(WorkflowTranscriptEntry {

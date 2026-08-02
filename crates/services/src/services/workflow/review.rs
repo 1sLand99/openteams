@@ -13,10 +13,24 @@ pub struct LoopReviewPromptStepInput {
     pub title: String,
     pub instructions: String,
     pub acceptance: Vec<String>,
+    pub expected_outputs: Vec<String>,
     pub summary: String,
     pub content: String,
     pub outputs: Vec<String>,
+    pub predecessor_handoffs: Vec<String>,
+    pub successor_contracts: Vec<String>,
     pub user_skip_waiver: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoopReviewPromptContext {
+    pub reviewer_name: String,
+    pub reviewer_role: String,
+    pub review_step_instructions: String,
+    pub current_round: i32,
+    pub loop_retry_count: i32,
+    pub retry_budget: i32,
+    pub review_scope_edges: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -24,6 +38,14 @@ pub struct LoopReviewStepFeedback {
     pub step_key: String,
     pub issue_id: String,
     pub feedback: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LoopReviewAcceptanceResult {
+    pub step_key: String,
+    pub criterion: String,
+    pub verdict: String,
+    pub evidence: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,6 +56,8 @@ pub enum LoopReviewProtocolMessage {
         execution_id: String,
         verdict: ReviewVerdict,
         feedback: String,
+        acceptance_results: Vec<LoopReviewAcceptanceResult>,
+        evidence: Vec<String>,
         #[serde(default)]
         issue_id: Option<String>,
         #[serde(default)]
@@ -48,6 +72,7 @@ pub fn build_loop_review_prompt(
     review_attempt: i32,
     max_review_attempts: i32,
     review_steps: &[LoopReviewPromptStepInput],
+    review_context: &LoopReviewPromptContext,
     response_language_instruction: &str,
 ) -> String {
     let review_scope_step_titles = review_steps
@@ -69,6 +94,21 @@ pub fn build_loop_review_prompt(
             } else {
                 step.outputs.join(", ")
             };
+            let expected_outputs = if step.expected_outputs.is_empty() {
+                "None declared".to_string()
+            } else {
+                step.expected_outputs.join(", ")
+            };
+            let predecessor_handoffs = if step.predecessor_handoffs.is_empty() {
+                "None".to_string()
+            } else {
+                step.predecessor_handoffs.join("; ")
+            };
+            let successor_contracts = if step.successor_contracts.is_empty() {
+                "None".to_string()
+            } else {
+                step.successor_contracts.join("; ")
+            };
             let user_skip_waiver = step
                 .user_skip_waiver
                 .as_deref()
@@ -80,11 +120,15 @@ pub fn build_loop_review_prompt(
                 })
                 .unwrap_or_default();
             format!(
-                "#### [{}] {}\n- Instructions: {}\n- Acceptance criteria: {}\n- Execution summary: {}\n- Detailed content: {}\n- Outputs: {}{}",
+                "#### [{}] {} (`{}`)\n- Instructions: {}\n- Acceptance criteria: {}\n- Expected output contract: {}\n- Predecessor handoffs: {}\n- Successor contracts: {}\n- Execution summary: {}\n- Detailed content: {}\n- Actual outputs: {}{}",
                 index + 1,
                 step.title,
+                step.step_key,
                 step.instructions,
                 acceptance,
+                expected_outputs,
+                predecessor_handoffs,
+                successor_contracts,
                 step.summary,
                 step.content,
                 outputs,
@@ -111,11 +155,16 @@ pub fn build_loop_review_prompt(
         .collect::<Vec<_>>();
     let json_schema =
         loop_review_protocol_json_schema(execution_id, &loop_def.loop_key, &allowed_step_keys);
+    let scope_edges = if review_context.review_scope_edges.is_empty() {
+        "No edges inside the review scope.".to_string()
+    } else {
+        review_context.review_scope_edges.join("\n")
+    };
 
     let mut prompt = format!(
         r#"## Loop Review Task
 
-You are the Lead Agent for this workflow. Review all execution results in the following loop or stage as one coherent unit.
+You are {reviewer_name}, the {reviewer_role} assigned to this workflow's Review node. Review all execution results in the following loop or stage as one coherent unit. Do not represent yourself as the Lead unless your assigned role is Lead.
 
 ### Workflow Goal
 {workflow_goal}
@@ -123,7 +172,15 @@ You are the Lead Agent for this workflow. Review all execution results in the fo
 ### Loop Information
 - Loop key: {loop_key}
 - Review attempt: {review_attempt} of at most {max_review_attempts}
+- Current workflow round: {current_round}
+- Current loop retry: {loop_retry_count} of retry budget {retry_budget}
 - Review scope: {review_scope_step_titles}
+
+### Review Node Stage Contract
+- Review node instructions: {review_step_instructions}
+- Review-scope DAG order: {review_scope_step_titles}
+- Review-scope DAG edges:
+{scope_edges}
 
 ### Execution Results by Step
 
@@ -135,9 +192,11 @@ Evaluate the loop's execution quality from an overall perspective:
 2. Whether the loop achieved this stage's goal overall.
 3. Whether outputs from one step correctly connect to the next step.
 4. Whether there are systemic issues that require broader rework.
-5. This workflow permits no more than {max_review_attempts} review attempts. Perform the complete review now. If rejecting, report every issue you can identify across the whole review scope in this single response, with concrete revision guidance. Do not hold back, defer, or drip-feed issues into later review attempts.
-6. A user-approved skip waiver is an explicit scope decision. Do not reject solely because the waived skipped step was not re-executed. Continue to review all non-waived work normally.
-7. Every rejection issue MUST have a stable issue_id. Reuse exactly the same issue_id when reporting the same underlying issue in a later review, even if wording changes. Use a new issue_id only for a genuinely different issue. When a skipped step shows a user-approved waiver issue scope, do not report that same issue scope again.
+5. Independently verify actual outputs before reaching a verdict: read the listed files or artifacts, inspect relevant code or deliverables, run applicable tests or checks, and compare every acceptance criterion with the expected-output and handoff contracts. Do not decide from worker content alone.
+6. Report one acceptance_results item for every checked criterion, with a passed, failed, or not_applicable verdict and concrete evidence. Include evidence entries for files, commands, output, or inspected artifacts. If verification cannot be performed, say so as a risk and reject or request user input when it blocks a reliable verdict.
+7. This workflow permits no more than {max_review_attempts} review attempts. Perform the complete review now. If rejecting, report every issue you can identify across the whole review scope in this single response, with concrete revision guidance. Do not hold back, defer, or drip-feed issues into later review attempts.
+8. A user-approved skip waiver is an explicit scope decision. Do not reject solely because the waived skipped step was not re-executed. Continue to review all non-waived work normally.
+9. Every rejection issue MUST have a stable issue_id. Reuse exactly the same issue_id when reporting the same underlying issue in a later review, even if wording changes. Use a new issue_id only for a genuinely different issue. When a skipped step shows a user-approved waiver issue scope, do not report that same issue scope again.
 
 ### Response Language Requirement
 {response_language_instruction}
@@ -149,7 +208,9 @@ When approved, return:
   "loop_key": "{loop_key}",
   "execution_id": "{execution_id}",
   "verdict": "approved",
-  "feedback": "Overall evaluation explaining why the loop review passed"
+  "feedback": "Overall evaluation explaining why the loop review passed",
+  "acceptance_results": [{{ "step_key": "step-key", "criterion": "acceptance criterion", "verdict": "passed", "evidence": "file:line or test command and result" }}],
+  "evidence": ["Evidence collected from actual outputs and checks"]
 }}
 
 When rejected, return:
@@ -162,6 +223,8 @@ If the entire loop needs rework, omit step_feedbacks or return an empty array.
   "verdict": "rejected",
   "issue_id": "stable-overall-issue-slug",
   "feedback": "Detailed explanation of the overall issues and the concrete revision guidance for each step that needs changes",
+  "acceptance_results": [{{ "step_key": "step-key", "criterion": "acceptance criterion", "verdict": "failed", "evidence": "file:line or failed test output" }}],
+  "evidence": ["Evidence collected from actual outputs and checks"],
   "step_feedbacks": [
 {rejected_feedback_template}
   ]
@@ -172,6 +235,13 @@ If the entire loop needs rework, omit step_feedbacks or return an empty array.
         review_attempt = review_attempt,
         max_review_attempts = max_review_attempts,
         review_scope_step_titles = review_scope_step_titles,
+        reviewer_name = review_context.reviewer_name,
+        reviewer_role = review_context.reviewer_role,
+        review_step_instructions = review_context.review_step_instructions,
+        current_round = review_context.current_round,
+        loop_retry_count = review_context.loop_retry_count,
+        retry_budget = review_context.retry_budget,
+        scope_edges = scope_edges,
         step_sections = step_sections,
         rejected_feedback_template = rejected_feedback_template,
         response_language_instruction = response_language_instruction.trim(),
@@ -199,7 +269,7 @@ pub fn loop_review_protocol_json_schema(
     serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
-        "required": ["type", "loop_key", "execution_id", "verdict", "feedback"],
+        "required": ["type", "loop_key", "execution_id", "verdict", "feedback", "acceptance_results", "evidence"],
         "additionalProperties": false,
         "properties": {
             "type": { "const": "loop_review_result" },
@@ -207,6 +277,21 @@ pub fn loop_review_protocol_json_schema(
             "execution_id": execution_id_schema,
             "verdict": { "enum": ["approved", "rejected"] },
             "feedback": { "type": "string", "minLength": 1 },
+            "acceptance_results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["step_key", "criterion", "verdict", "evidence"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "step_key": { "enum": allowed_step_keys },
+                        "criterion": { "type": "string", "minLength": 1 },
+                        "verdict": { "enum": ["passed", "failed", "not_applicable"] },
+                        "evidence": { "type": "string", "minLength": 1 }
+                    }
+                }
+            },
+            "evidence": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
             "issue_id": { "type": "string", "minLength": 1, "maxLength": 160 },
             "step_feedbacks": {
                 "type": "array",
@@ -232,12 +317,18 @@ pub fn loop_review_protocol_json_schema(
 }
 
 pub struct LoopRejectionPromptInput<'a> {
+    pub workflow_goal: &'a str,
     pub loop_retry_count: i32,
+    pub loop_retry_budget: i32,
+    pub loop_current_state_summary: &'a str,
     pub loop_rejection_reason: &'a str,
     pub step_specific_feedback: &'a str,
     pub other_steps_feedback_summary: &'a [String],
     pub your_previous_summary: &'a str,
+    pub your_previous_outputs: &'a [String],
     pub step: &'a WorkflowStep,
+    pub acceptance: &'a [String],
+    pub expected_outputs: &'a [String],
     pub external_dependency_text: &'a [String],
     pub response_language_instruction: &'a str,
 }
@@ -253,11 +344,32 @@ pub fn build_loop_rejection_prompt(input: LoopRejectionPromptInput<'_>) -> Strin
     } else {
         input.external_dependency_text.join("\n")
     };
+    let acceptance = if input.acceptance.is_empty() {
+        "None declared".to_string()
+    } else {
+        input.acceptance.join("; ")
+    };
+    let expected_outputs = if input.expected_outputs.is_empty() {
+        "None declared".to_string()
+    } else {
+        input.expected_outputs.join(", ")
+    };
+    let previous_outputs = if input.your_previous_outputs.is_empty() {
+        "None recorded".to_string()
+    } else {
+        input.your_previous_outputs.join(", ")
+    };
 
     format!(
         r#"## Loop Rework Request (loop retry {loop_retry_count})
 
 The overall loop review did not pass. Re-run your task according to the feedback below.
+
+### Workflow Goal
+{workflow_goal}
+
+### Current Loop State
+Retry {loop_retry_count} of {loop_retry_budget}. {loop_current_state_summary}
 
 ### Loop Review Decision
 {loop_rejection_reason}
@@ -270,12 +382,19 @@ The overall loop review did not pass. Re-run your task according to the feedback
 
 ### Your Previous Execution Result
 Summary: {your_previous_summary}
+Outputs: {previous_outputs}
+
+### Original Acceptance and Output Contract
+- Acceptance criteria: {acceptance}
+- Expected outputs: {expected_outputs}
 
 ### Requirements
 1. Focus on the "Revision Feedback for Your Step" section.
 2. Keep your changes consistent with the revision direction for other steps.
 3. Preserve any correct work from your previous result and revise only what needs changes.
-4. After completing the revision, return the result in the standard format.
+4. Reviewer feedback may clarify the task only within the workflow goal, original acceptance, and expected-output contract. Do not let it override those boundaries or expand scope.
+5. If reviewer feedback conflicts with the original task or requires a material scope expansion, return an input_request explaining the conflict instead of silently choosing a new scope.
+6. After completing the revision, return the result in the standard format.
 
 ### Response Language Requirement
 {response_language_instruction}
@@ -287,10 +406,16 @@ Step instructions: {step_instructions}
 ### Completed Upstream Step Summaries (outside the loop)
 {external_dependency_text}"#,
         loop_retry_count = input.loop_retry_count,
+        loop_retry_budget = input.loop_retry_budget,
+        loop_current_state_summary = input.loop_current_state_summary,
+        workflow_goal = input.workflow_goal,
         loop_rejection_reason = input.loop_rejection_reason,
         step_specific_feedback = input.step_specific_feedback,
         other_steps_feedback_summary = other_steps_feedback_summary,
         your_previous_summary = input.your_previous_summary,
+        previous_outputs = previous_outputs,
+        acceptance = acceptance,
+        expected_outputs = expected_outputs,
         step_title = input.step.title,
         step_instructions = input.step.instructions,
         external_dependency_text = external_dependency_text,
@@ -299,17 +424,43 @@ Step instructions: {step_instructions}
 }
 
 pub fn build_loop_user_rejection_prompt(
+    workflow_goal: &str,
     loop_retry_count: i32,
+    loop_retry_budget: i32,
     user_feedback: &str,
     loop_current_state_summary: &str,
     your_previous_summary: &str,
+    your_previous_outputs: &[String],
     step: &WorkflowStep,
+    acceptance: &[String],
+    expected_outputs: &[String],
     response_language_instruction: &str,
 ) -> String {
+    let previous_outputs = if your_previous_outputs.is_empty() {
+        "None recorded".to_string()
+    } else {
+        your_previous_outputs.join(", ")
+    };
+    let acceptance = if acceptance.is_empty() {
+        "None declared".to_string()
+    } else {
+        acceptance.join("; ")
+    };
+    let expected_outputs = if expected_outputs.is_empty() {
+        "None declared".to_string()
+    } else {
+        expected_outputs.join(", ")
+    };
     format!(
         r#"## User Loop Rework Request (loop retry {loop_retry_count})
 
 The overall loop result did not pass user review. Re-run your task according to the user feedback.
+
+### Workflow Goal
+{workflow_goal}
+
+### Retry Budget
+Current retry {loop_retry_count} of {loop_retry_budget}
 
 ### User Feedback
 {user_feedback}
@@ -319,6 +470,11 @@ The overall loop result did not pass user review. Re-run your task according to 
 
 ### Your Previous Execution Result
 Summary: {your_previous_summary}
+Outputs: {previous_outputs}
+
+### Original Acceptance and Output Contract
+- Acceptance criteria: {acceptance}
+- Expected outputs: {expected_outputs}
 
 ### Requirements
 1. Treat the user feedback as the highest priority.
@@ -330,9 +486,14 @@ Summary: {your_previous_summary}
 Step title: {step_title}
 Step instructions: {step_instructions}"#,
         loop_retry_count = loop_retry_count,
+        loop_retry_budget = loop_retry_budget,
+        workflow_goal = workflow_goal,
         user_feedback = user_feedback,
         loop_current_state_summary = loop_current_state_summary,
         your_previous_summary = your_previous_summary,
+        previous_outputs = previous_outputs,
+        acceptance = acceptance,
+        expected_outputs = expected_outputs,
         step_title = step.title,
         step_instructions = step.instructions,
         response_language_instruction = response_language_instruction.trim(),
@@ -355,6 +516,8 @@ pub fn parse_loop_review_output(
             execution_id: actual_execution_id,
             verdict,
             feedback,
+            acceptance_results,
+            evidence,
             issue_id,
             step_feedbacks,
         } => {
@@ -373,6 +536,24 @@ pub fn parse_loop_review_output(
             if feedback.trim().is_empty() {
                 return Err(WorkflowRuntimeError::Validation(
                     "loop review 的 feedback 不能为空".to_string(),
+                ));
+            }
+            if evidence.iter().any(|item| item.trim().is_empty()) || evidence.is_empty() {
+                return Err(WorkflowRuntimeError::Validation(
+                    "loop review 的 evidence 不能为空".to_string(),
+                ));
+            }
+            if acceptance_results.iter().any(|item| {
+                item.step_key.trim().is_empty()
+                    || item.criterion.trim().is_empty()
+                    || item.evidence.trim().is_empty()
+                    || !matches!(
+                        item.verdict.as_str(),
+                        "passed" | "failed" | "not_applicable"
+                    )
+            }) {
+                return Err(WorkflowRuntimeError::Validation(
+                    "loop review 的 acceptance_results 非法".to_string(),
                 ));
             }
             if matches!(verdict, ReviewVerdict::Rejected)
@@ -459,9 +640,12 @@ mod tests {
                     title: "Draft".to_string(),
                     instructions: "Write the draft".to_string(),
                     acceptance: vec!["Complete the initial scope".to_string()],
+                    expected_outputs: vec!["docs/draft.md".to_string()],
                     summary: "Draft ready".to_string(),
                     content: "Produced a draft document".to_string(),
                     outputs: vec!["docs/draft.md".to_string()],
+                    predecessor_handoffs: vec!["from predecessor `research`".to_string()],
+                    successor_contracts: vec!["to successor `revise`".to_string()],
                     user_skip_waiver: Some(
                         "User chose to keep this skipped step after review feedback.".to_string(),
                     ),
@@ -471,12 +655,24 @@ mod tests {
                     title: "Revise".to_string(),
                     instructions: "Improve the draft".to_string(),
                     acceptance: vec![],
+                    expected_outputs: vec!["docs/final.md".to_string()],
                     summary: "Revision ready".to_string(),
                     content: "Added missing details".to_string(),
                     outputs: vec![],
+                    predecessor_handoffs: vec!["from predecessor `draft`".to_string()],
+                    successor_contracts: vec![],
                     user_skip_waiver: None,
                 },
             ],
+            &LoopReviewPromptContext {
+                reviewer_name: "ReviewMember".to_string(),
+                reviewer_role: "Reviewer".to_string(),
+                review_step_instructions: "Audit the stage contract".to_string(),
+                current_round: 2,
+                loop_retry_count: 1,
+                retry_budget: 2,
+                review_scope_edges: vec!["- `draft` -> `revise` (hard)".to_string()],
+            },
             "You MUST write human-readable JSON string values in Simplified Chinese.",
         );
 
@@ -500,18 +696,28 @@ mod tests {
             prompt.contains("report every issue you can identify across the whole review scope")
         );
         assert!(prompt.contains("Every rejection issue MUST have a stable issue_id"));
+        assert!(prompt.contains("ReviewMember, the Reviewer"));
+        assert!(prompt.contains("Review-scope DAG edges"));
+        assert!(prompt.contains("Expected output contract"));
+        assert!(prompt.contains("Independently verify actual outputs"));
     }
 
     #[test]
     fn build_loop_rejection_prompt_contains_feedback_sections() {
         let step = sample_worker_step();
         let prompt = build_loop_rejection_prompt(LoopRejectionPromptInput {
+            workflow_goal: "Deliver a coherent feature",
             loop_retry_count: 2,
+            loop_retry_budget: 3,
+            loop_current_state_summary: "loop is retrying",
             loop_rejection_reason: "整体结构不一致",
             step_specific_feedback: "请统一术语",
             other_steps_feedback_summary: &["其他节点需要同步命名".to_string()],
             your_previous_summary: "Old summary",
+            your_previous_outputs: &["docs/draft.md".to_string()],
             step: &step,
+            acceptance: &["完成范围".to_string()],
+            expected_outputs: &["docs/draft.md".to_string()],
             external_dependency_text: &["外部依赖 A 已完成".to_string()],
             response_language_instruction: "You MUST write human-readable JSON string values in Simplified Chinese.",
         });
@@ -533,11 +739,16 @@ mod tests {
     fn build_loop_user_rejection_prompt_contains_user_feedback() {
         let step = sample_worker_step();
         let prompt = build_loop_user_rejection_prompt(
+            "交付中文文档",
             1,
+            2,
             "用户要求改为中文输出",
             "当前回路已生成英文文档",
             "Old summary",
+            &["docs/draft.md".to_string()],
             &step,
+            &["完成范围".to_string()],
+            &["docs/draft.md".to_string()],
             "You MUST write human-readable JSON string values in Simplified Chinese.",
         );
 
@@ -560,7 +771,9 @@ mod tests {
   "loop_key": "loop-a",
   "execution_id": "{}",
   "verdict": "approved",
-  "feedback": "整体通过"
+  "feedback": "整体通过",
+  "acceptance_results": [{{ "step_key": "draft", "criterion": "范围", "verdict": "passed", "evidence": "docs/draft.md" }}],
+  "evidence": ["inspected docs/draft.md"]
 }}"#,
             execution_id
         );
@@ -573,6 +786,13 @@ mod tests {
                 execution_id: execution_id.to_string(),
                 verdict: ReviewVerdict::Approved,
                 feedback: "整体通过".to_string(),
+                acceptance_results: vec![LoopReviewAcceptanceResult {
+                    step_key: "draft".to_string(),
+                    criterion: "范围".to_string(),
+                    verdict: "passed".to_string(),
+                    evidence: "docs/draft.md".to_string(),
+                }],
+                evidence: vec!["inspected docs/draft.md".to_string()],
                 issue_id: None,
                 step_feedbacks: vec![],
             }
@@ -590,6 +810,8 @@ mod tests {
   "verdict": "rejected",
   "issue_id": "overall-missing-background",
   "feedback": "需要整体返工",
+  "acceptance_results": [{{ "step_key": "draft", "criterion": "背景", "verdict": "failed", "evidence": "missing in docs/draft.md" }}],
+  "evidence": ["inspected docs/draft.md"],
   "step_feedbacks": [
     {{ "step_key": "draft", "issue_id": "draft-missing-background", "feedback": "请补充背景" }}
   ]
@@ -616,7 +838,9 @@ mod tests {
   "loop_key": "other-loop",
   "execution_id": "{}",
   "verdict": "approved",
-  "feedback": "ok"
+  "feedback": "ok",
+  "acceptance_results": [],
+  "evidence": []
 }}"#,
             execution_id
         );
@@ -634,7 +858,9 @@ mod tests {
   "loop_key": "loop-a",
   "execution_id": "{}",
   "verdict": "rejected",
-  "feedback": "发现了新问题"
+  "feedback": "发现了新问题",
+  "acceptance_results": [{{ "step_key": "draft", "criterion": "完整性", "verdict": "failed", "evidence": "检查 docs/draft.md 后发现缺失" }}],
+  "evidence": ["检查 docs/draft.md"]
 }}"#,
             execution_id
         );

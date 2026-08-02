@@ -657,7 +657,7 @@ Return exactly one JSON object — no Markdown, no comments, no prose outside th
 
 ### Constraints
 1. `step_key` and `execution_id` must be filled with the values provided below.
-2. Only `final_result`, `error`, `approval_request`, `permission_request`, `continue_confirmation`, or `input_request` are allowed.
+2. Task steps use `final_result`; Review steps MUST use `review_result`; Result steps MUST use `result_review_result`. `error`, `approval_request`, `permission_request`, `continue_confirmation`, and `input_request` remain available when applicable.
 3. `outputs` contains workspace-relative paths only.
 4. Use interactive requests sparingly — only when genuinely blocked without user action.
 5. Follow existing codebase patterns. Improve code you touch, but do not restructure outside your task.
@@ -769,8 +769,14 @@ pub fn build_step_execution_prompt(
     // } else
     if step.step_type == WorkflowStepType::Review {
         prompt.push_str(STEP_EXECUTION_TDD_WORKFLOW_FOR_REVIEW_TYPE);
+        prompt.push_str(
+            "\n## Structured Review Response\nReturn `review_result`, not `final_result`. Include a verdict, a result for every acceptance criterion, evidence from actual artifacts or checks, risks, and unfinished items.\n",
+        );
     } else if step.step_type == WorkflowStepType::Result {
         prompt.push_str(STEP_EXECUTION_RESULT_REVIEW_WORKFLOW);
+        prompt.push_str(
+            "\n## Structured Final Result Response\nReturn `result_review_result`, not `final_result`. `overall_status` must be `completed`, `completed_with_concerns`, or `blocked`; include every acceptance conclusion, evidence, risks, and unfinished items.\n",
+        );
     }
 
     prompt.push_str(STEP_EXECUTION_PROMPT_PREFIX);
@@ -831,10 +837,11 @@ pub fn build_step_execution_prompt_with_schema(
         prompt.push_str(&section);
     }
     prompt.push_str("\n\nRequired JSON Schema:\n```json\n");
-    prompt.push_str(&workflow_step_protocol_json_schema(
+    prompt.push_str(&workflow_step_protocol_json_schema_for_step(
         execution.id,
         &step.step_key,
         true,
+        &step.step_type,
     ));
     prompt.push_str("\n```\n");
     prompt.push_str("Return ONLY one JSON object matching this schema.\n");
@@ -891,12 +898,12 @@ Return exactly one JSON object — no Markdown, no comments, no prose outside th
 
 Approved:
 ```json
-{"type": "review_result", "step_key": "...", "execution_id": "...", "verdict": "approved", "feedback": "brief approval note"}
+{"type": "review_result", "step_key": "...", "execution_id": "...", "verdict": "approved", "feedback": "brief approval note", "acceptance_results": [{"criterion": "criterion", "verdict": "passed", "evidence": "file:line or test output"}], "evidence": ["independent verification evidence"], "risks": [], "unfinished_items": []}
 ```
 
 Rejected:
 ```json
-{"type": "review_result", "step_key": "...", "execution_id": "...", "verdict": "rejected", "feedback": "specific issues: missing X, extra Y at file:line, wrong Z"}
+{"type": "review_result", "step_key": "...", "execution_id": "...", "verdict": "rejected", "feedback": "specific issues: missing X, extra Y at file:line, wrong Z", "acceptance_results": [{"criterion": "criterion", "verdict": "failed", "evidence": "file:line or failed test output"}], "evidence": ["independent verification evidence"], "risks": ["risk"], "unfinished_items": ["missing work"]}
 ```
 
 ## Language Requirement
@@ -1030,9 +1037,10 @@ Use the same `final_result` / `error` / `approval_request` / `permission_request
 
 1. Read the review feedback carefully and understand the issues raised.
 2. Fix only the issues identified in the feedback — preserve correct parts from your previous result.
-3. If the feedback conflicts with the original step instructions, follow the feedback.
-4. Self-review before submitting: verify completeness, correctness, and that all feedback points are addressed.
-5. Respond in the same language as the step instructions below.
+3. Priority order is: user goal and explicit user feedback, then the original task scope and acceptance contract, then Lead or Reviewer feedback. Lead or Reviewer feedback may refine implementation only within the original task; it must not override the user goal or expand scope.
+4. If Lead or Reviewer feedback conflicts with the original task or requires material scope expansion, return an `input_request` that explains the conflict instead of silently replacing the task.
+5. Self-review before submitting: verify completeness, correctness, and that all feedback points are addressed.
+6. Respond in the same language as the step instructions below.
 
 "#;
 
@@ -1072,6 +1080,19 @@ pub fn build_step_revision_prompt(
                 "Your previous execution did not pass review. Revise your work based on the feedback below.\n\n",
             );
             prompt.push_str("### Review Feedback\n");
+            prompt.push_str(feedback_content.trim());
+            prompt.push_str("\n\n### Your Previous Result Summary\n");
+            prompt.push_str(previous_summary.trim());
+            prompt.push('\n');
+        }
+        WorkflowRevisionFeedbackSource::Reviewer => {
+            prompt.push_str(&format!(
+                "## Reviewer Revision Required (attempt #{retry_count})\n\n"
+            ));
+            prompt.push_str(
+                "Your previous execution did not pass Reviewer review. Revise your work based on the feedback below.\n\n",
+            );
+            prompt.push_str("### Reviewer Feedback\n");
             prompt.push_str(feedback_content.trim());
             prompt.push_str("\n\n### Your Previous Result Summary\n");
             prompt.push_str(previous_summary.trim());

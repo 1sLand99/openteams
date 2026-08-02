@@ -279,6 +279,7 @@ impl<'a> LoopExecutor<'a> {
             LoopReviewDecision::Rejected {
                 feedback,
                 feedback_targets,
+                feedback_source,
             } => {
                 let skipped_targets = feedback_targets
                     .iter()
@@ -291,13 +292,14 @@ impl<'a> LoopExecutor<'a> {
                         &feedback,
                         &feedback_targets,
                         &skipped_targets,
+                        feedback_source,
                     )
                     .await?;
                     return Ok(LoopOutcome::Parked);
                 }
                 self.inject_feedback_to_steps(
                     &active_loop,
-                    WorkflowRevisionFeedbackSource::Lead,
+                    feedback_source,
                     &feedback,
                     &feedback_map_from_targets(&feedback_targets),
                 )
@@ -591,6 +593,20 @@ impl<'a> LoopExecutor<'a> {
             .ok_or_else(|| {
                 OrchestratorError::NotFound(format!("agent {} not found", session_agent.agent_id))
             })?;
+        let reviewer_type = if workflow_session.role == WorkflowAgentSessionRole::Lead {
+            ReviewerType::Lead
+        } else {
+            ReviewerType::Reviewer
+        };
+        let reviewer_type_label = match &reviewer_type {
+            ReviewerType::Lead => "lead",
+            ReviewerType::Reviewer => "reviewer",
+            ReviewerType::User => "user",
+        };
+        let feedback_source = match &reviewer_type {
+            ReviewerType::Lead => WorkflowRevisionFeedbackSource::Lead,
+            ReviewerType::Reviewer | ReviewerType::User => WorkflowRevisionFeedbackSource::Reviewer,
+        };
 
         let workflow_goal = self
             .plan
@@ -598,9 +614,12 @@ impl<'a> LoopExecutor<'a> {
             .clone()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| self.plan.title.clone());
-        let review_attempt =
-            WorkflowOrchestrator::next_lead_review_attempt(self.pool, running_review_step.id)
-                .await?;
+        let review_attempt = WorkflowOrchestrator::next_review_attempt(
+            self.pool,
+            running_review_step.id,
+            reviewer_type.clone(),
+        )
+        .await?;
         let max_review_attempts = max_loop_review_attempts(workflow_loop);
         if review_attempt > max_review_attempts {
             let feedback = format!(
@@ -621,7 +640,15 @@ impl<'a> LoopExecutor<'a> {
                 review_attempt: max_review_attempts,
             });
         }
-        let review_inputs = self.review_prompt_inputs(loop_def).await?;
+        let (review_inputs, review_context) = self
+            .review_prompt_inputs(
+                loop_def,
+                &running_review_step,
+                workflow_loop,
+                agent,
+                &reviewer_type,
+            )
+            .await?;
         let ui_config = config::load_config_from_file(&config_path()).await;
         let response_language_instruction =
             resolve_workflow_response_language_instruction(&ui_config.language);
@@ -632,6 +659,7 @@ impl<'a> LoopExecutor<'a> {
             review_attempt,
             max_review_attempts,
             &review_inputs,
+            &review_context,
             response_language_instruction,
         );
         let allowed_step_keys = review_inputs
@@ -654,6 +682,8 @@ impl<'a> LoopExecutor<'a> {
             feedback,
             issue_id,
             step_feedbacks,
+            acceptance_results: _,
+            evidence: _,
             ..
         } = review_message;
 
@@ -673,7 +703,7 @@ impl<'a> LoopExecutor<'a> {
         WorkflowOrchestrator::save_step_review(
             self.pool,
             &recorded_review_step,
-            ReviewerType::Lead,
+            reviewer_type,
             Some(agent.id.to_string()),
             verdict.clone(),
             &feedback,
@@ -703,9 +733,10 @@ impl<'a> LoopExecutor<'a> {
                 Ok(LoopReviewDecision::Passed)
             }
             ReviewVerdict::Rejected => {
-                let event = loop_lead_review_rejected_analytics_parts(
+                let event = loop_reviewer_review_rejected_analytics_parts(
                     self.execution,
                     recorded_review_step.id,
+                    reviewer_type_label,
                 );
                 if let Some(analytics) = self.chat_runner.analytics_service() {
                     analytics.record_event(event);
@@ -744,6 +775,7 @@ impl<'a> LoopExecutor<'a> {
                         return Ok(LoopReviewDecision::Rejected {
                             feedback,
                             feedback_targets,
+                            feedback_source,
                         });
                     }
                     RejectedLoopReviewDisposition::LimitReached
@@ -784,6 +816,7 @@ impl<'a> LoopExecutor<'a> {
                 Ok(LoopReviewDecision::Rejected {
                     feedback,
                     feedback_targets,
+                    feedback_source,
                 })
             }
         }
@@ -873,6 +906,7 @@ impl<'a> LoopExecutor<'a> {
         loop_feedback: &str,
         feedback_targets: &[LoopFeedbackTarget],
         skipped_targets: &[LoopFeedbackTarget],
+        feedback_source: WorkflowRevisionFeedbackSource,
     ) -> Result<(), OrchestratorError> {
         let review_step = WorkflowStep::find_by_id(self.pool, workflow_loop.review_step_id)
             .await?
@@ -937,7 +971,7 @@ impl<'a> LoopExecutor<'a> {
         inject_feedback_to_steps_in_transaction(
             &mut transaction,
             workflow_loop,
-            WorkflowRevisionFeedbackSource::Lead,
+            feedback_source,
             loop_feedback,
             &feedback_map_from_targets(feedback_targets),
         )
@@ -1146,7 +1180,11 @@ impl<'a> LoopExecutor<'a> {
     async fn review_prompt_inputs(
         &self,
         loop_def: &CompiledLoopDef,
-    ) -> Result<Vec<LoopReviewPromptStepInput>, OrchestratorError> {
+        review_step: &WorkflowStep,
+        workflow_loop: &WorkflowLoop,
+        reviewer: &ChatAgent,
+        reviewer_type: &ReviewerType,
+    ) -> Result<(Vec<LoopReviewPromptStepInput>, LoopReviewPromptContext), OrchestratorError> {
         let steps = WorkflowStep::find_by_execution(self.pool, self.execution.id).await?;
         let step_by_key = steps
             .iter()
@@ -1155,19 +1193,22 @@ impl<'a> LoopExecutor<'a> {
         let plan_json: db::models::workflow_types::WorkflowPlanJson =
             serde_json::from_str(&self.plan.plan_json)?;
 
-        let acceptance_by_key = plan_json
+        let node_by_key = plan_json
             .nodes
             .iter()
-            .map(|node| {
-                (
-                    node.id.as_str(),
-                    node.data.acceptance.clone().unwrap_or_default(),
-                )
-            })
+            .map(|node| (node.id.as_str(), node))
             .collect::<HashMap<_, _>>();
-
-        loop_def
+        let review_scope = loop_def
             .review_scope_step_keys
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let ordered_review_scope_step_keys = review_scope_step_keys_in_dag_order(
+            &loop_def.review_scope_step_keys,
+            &plan_json.edges,
+        );
+
+        let inputs = ordered_review_scope_step_keys
             .iter()
             .map(|step_key| {
                 let step = step_by_key.get(step_key.as_str()).ok_or_else(|| {
@@ -1179,24 +1220,93 @@ impl<'a> LoopExecutor<'a> {
                         content: step.content.clone(),
                         outputs: Vec::new(),
                     });
+                let node = node_by_key.get(step.step_key.as_str()).ok_or_else(|| {
+                    OrchestratorError::NotFound(format!("plan node {} not found", step.step_key))
+                })?;
+                let handoff_for = |edge: &db::models::workflow_types::WorkflowPlanEdge,
+                                   other_key: &str,
+                                   direction: &str| {
+                    let other_node = node_by_key.get(other_key).copied();
+                    let expected_outputs = other_node
+                        .and_then(|node| node.data.outputs.as_ref())
+                        .filter(|outputs| !outputs.is_empty())
+                        .map(|outputs| outputs.join(", "))
+                        .unwrap_or_else(|| "no declared outputs".to_string());
+                    let latest_summary = step_by_key
+                        .get(other_key)
+                        .and_then(|other_step| {
+                            parse_summary_payload(other_step.summary_text.as_deref())
+                                .map(|payload| payload.summary)
+                                .or_else(|| other_step.summary_text.clone())
+                        })
+                        .unwrap_or_else(|| "no execution summary available".to_string());
+                    format!(
+                        "{direction} `{other_key}` via {} edge; expected outputs: {expected_outputs}; latest summary: {latest_summary}",
+                        edge.data.as_ref().map(|data| data.kind.as_str()).unwrap_or("hard"),
+                    )
+                };
+                let predecessor_handoffs = plan_json
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.target == step.step_key)
+                    .map(|edge| handoff_for(edge, &edge.source, "from predecessor"))
+                    .collect::<Vec<_>>();
+                let successor_contracts = plan_json
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.source == step.step_key)
+                    .map(|edge| handoff_for(edge, &edge.target, "to successor"))
+                    .collect::<Vec<_>>();
                 Ok(LoopReviewPromptStepInput {
                     step_key: step.step_key.clone(),
                     title: step.title.clone(),
                     instructions: step.instructions.clone(),
-                    acceptance: acceptance_by_key
-                        .get(step.step_key.as_str())
-                        .cloned()
-                        .unwrap_or_default(),
+                    acceptance: node.data.acceptance.clone().unwrap_or_default(),
+                    expected_outputs: node.data.outputs.clone().unwrap_or_default(),
                     summary: payload.summary,
                     content: payload
                         .content
                         .or_else(|| step.content.clone())
                         .unwrap_or_default(),
                     outputs: payload.outputs,
+                    predecessor_handoffs,
+                    successor_contracts,
                     user_skip_waiver: loop_skip_waiver(step, &loop_def.loop_key),
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, OrchestratorError>>()?;
+        let review_scope_edges = plan_json
+            .edges
+            .iter()
+            .filter(|edge| {
+                review_scope.contains(edge.source.as_str()) && review_scope.contains(edge.target.as_str())
+            })
+            .map(|edge| {
+                format!(
+                    "- `{}` -> `{}` ({})",
+                    edge.source,
+                    edge.target,
+                    edge.data.as_ref().map(|data| data.kind.as_str()).unwrap_or("hard")
+                )
+            })
+            .collect::<Vec<_>>();
+
+        Ok((
+            inputs,
+            LoopReviewPromptContext {
+                reviewer_name: reviewer.name.clone(),
+                reviewer_role: match reviewer_type {
+                    ReviewerType::Lead => "Lead".to_string(),
+                    ReviewerType::Reviewer => "Reviewer".to_string(),
+                    ReviewerType::User => "User".to_string(),
+                },
+                review_step_instructions: review_step.instructions.clone(),
+                current_round: review_step.round_index,
+                loop_retry_count: workflow_loop.retry_count,
+                retry_budget: workflow_loop.max_retry,
+                review_scope_edges,
+            },
+        ))
     }
 }
 
@@ -1265,6 +1375,66 @@ fn feedback_map_from_targets(
         .iter()
         .map(|target| (target.step.step_key.clone(), target.feedback.clone()))
         .collect()
+}
+
+fn review_scope_step_keys_in_dag_order(
+    review_scope_step_keys: &[String],
+    edges: &[db::models::workflow_types::WorkflowPlanEdge],
+) -> Vec<String> {
+    let scope_keys = review_scope_step_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let original_position = review_scope_step_keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| (key.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    let mut indegree = review_scope_step_keys
+        .iter()
+        .map(|key| (key.as_str(), 0_usize))
+        .collect::<HashMap<_, _>>();
+    let mut outgoing = HashMap::<&str, Vec<&str>>::new();
+
+    for edge in edges.iter().filter(|edge| {
+        scope_keys.contains(edge.source.as_str()) && scope_keys.contains(edge.target.as_str())
+    }) {
+        outgoing
+            .entry(edge.source.as_str())
+            .or_default()
+            .push(edge.target.as_str());
+        *indegree.entry(edge.target.as_str()).or_default() += 1;
+    }
+
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(key, degree)| (*degree == 0).then_some(*key))
+        .collect::<Vec<_>>();
+    ready.sort_by_key(|key| original_position.get(key).copied().unwrap_or(usize::MAX));
+
+    let mut ordered = Vec::with_capacity(review_scope_step_keys.len());
+    while !ready.is_empty() {
+        let step_key = ready.remove(0);
+        ordered.push(step_key.to_string());
+        for successor in outgoing.remove(step_key).unwrap_or_default() {
+            let degree = indegree
+                .get_mut(successor)
+                .expect("review scope successor must have indegree");
+            *degree -= 1;
+            if *degree == 0 {
+                ready.push(successor);
+            }
+        }
+        ready.sort_by_key(|key| original_position.get(key).copied().unwrap_or(usize::MAX));
+    }
+
+    if ordered.len() == review_scope_step_keys.len() {
+        ordered
+    } else {
+        // The compiler rejects cycles. Preserve the declared order defensively
+        // if an invalid historical plan reaches runtime.
+        review_scope_step_keys.to_vec()
+    }
 }
 
 fn requires_user_acceptance_checkpoint(workflow_loop: &WorkflowLoop) -> bool {
@@ -1588,6 +1758,8 @@ async fn inject_feedback_to_steps(
             &previous_payload.outputs,
             workflow_loop.retry_count + 1,
             &workflow_loop.loop_key,
+            loop_feedback,
+            &other_loop_feedback_summary(step.id, &all_steps, &feedback_by_step_id),
         );
         WorkflowStep::update_revision_context(pool, step.id, Some(context)).await?;
     }
@@ -1645,6 +1817,8 @@ pub(crate) async fn inject_feedback_to_steps_in_transaction(
             &previous_payload.outputs,
             workflow_loop.retry_count + 1,
             &workflow_loop.loop_key,
+            loop_feedback,
+            &other_loop_feedback_summary(step.id, &all_steps, &feedback_by_step_id),
         );
         WorkflowStep::update_revision_context_in_transaction(
             &mut *connection,
@@ -1686,6 +1860,8 @@ fn merge_loop_revision_context(
     previous_outputs: &[String],
     review_round: i32,
     loop_key: &str,
+    loop_rejection_reason: &str,
+    other_steps_feedback_summary: &[String],
 ) -> String {
     let mut context = existing_revision_context
         .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
@@ -1694,8 +1870,9 @@ fn merge_loop_revision_context(
         context = serde_json::json!({});
     }
     let source = match source {
-        WorkflowRevisionFeedbackSource::Lead => "lead",
-        WorkflowRevisionFeedbackSource::User => "user",
+            WorkflowRevisionFeedbackSource::Lead => "lead",
+            WorkflowRevisionFeedbackSource::Reviewer => "reviewer",
+            WorkflowRevisionFeedbackSource::User => "user",
     };
     let entry = serde_json::json!({
         "round": review_round,
@@ -1734,7 +1911,25 @@ fn merge_loop_revision_context(
             "review_round": review_round,
             "scope": "loop",
             "loop_key": loop_key,
+            "loop_rejection_reason": loop_rejection_reason.trim(),
+            "other_steps_feedback_summary": other_steps_feedback_summary,
         }),
     );
     context.to_string()
+}
+
+fn other_loop_feedback_summary(
+    current_step_id: Uuid,
+    all_steps: &[WorkflowStep],
+    feedback_by_step_id: &HashMap<Uuid, String>,
+) -> Vec<String> {
+    all_steps
+        .iter()
+        .filter(|step| step.id != current_step_id)
+        .filter_map(|step| {
+            feedback_by_step_id
+                .get(&step.id)
+                .map(|feedback| format!("{}: {}", step.title, feedback))
+        })
+        .collect()
 }

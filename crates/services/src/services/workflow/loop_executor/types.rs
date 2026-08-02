@@ -27,6 +27,7 @@ enum LoopReviewDecision {
     Rejected {
         feedback: String,
         feedback_targets: Vec<LoopFeedbackTarget>,
+        feedback_source: WorkflowRevisionFeedbackSource,
     },
     LimitReached {
         feedback: String,

@@ -84,6 +84,36 @@ fn workflow_agent_identity_helpers_keep_shared_execution_profiles_distinct() {
     assert!(!names.contains_key(&shared_agent_id.to_string()));
 }
 
+#[test]
+fn review_node_assignment_projects_non_lead_member_as_reviewer() {
+    let reviewer_session_agent_id = Uuid::new_v4();
+    let review_assignment = reviewer_session_agent_id.to_string();
+    let compiled_steps = vec![CompiledStep {
+        step_key: "review".to_string(),
+        step_type: WorkflowStepType::Review,
+        title: "Review".to_string(),
+        instructions: "Independently verify outputs".to_string(),
+        assigned_agent_id: Some(review_assignment.clone()),
+        acceptance: None,
+        outputs: None,
+        interruptible: true,
+        max_retry: 1,
+        display_order: 0,
+        loop_key: Some("loop-a".to_string()),
+        review_scope: Some(vec!["task".to_string()]),
+    }];
+
+    assert_eq!(
+        workflow_agent_session_role_for_assignment(
+            &compiled_steps,
+            Some(Uuid::new_v4()),
+            reviewer_session_agent_id,
+            &review_assignment,
+        ),
+        WorkflowAgentSessionRole::Reviewer
+    );
+}
+
 #[tokio::test]
 async fn scheduler_recovery_retries_transient_failure_then_succeeds() {
     use std::sync::{

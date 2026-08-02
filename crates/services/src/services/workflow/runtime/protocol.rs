@@ -46,6 +46,47 @@ pub enum WorkflowStepProtocolMessage {
         #[serde(default)]
         placeholder: Option<String>,
     },
+    ReviewResult {
+        step_key: String,
+        execution_id: String,
+        verdict: ReviewVerdict,
+        summary: String,
+        content: String,
+        acceptance_results: Vec<WorkflowAcceptanceResult>,
+        evidence: Vec<String>,
+        #[serde(default)]
+        risks: Vec<String>,
+        #[serde(default)]
+        unfinished_items: Vec<String>,
+    },
+    ResultReviewResult {
+        step_key: String,
+        execution_id: String,
+        overall_status: WorkflowResultOverallStatus,
+        summary: String,
+        content: String,
+        acceptance_results: Vec<WorkflowAcceptanceResult>,
+        evidence: Vec<String>,
+        #[serde(default)]
+        risks: Vec<String>,
+        #[serde(default)]
+        unfinished_items: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowAcceptanceResult {
+    pub criterion: String,
+    pub verdict: String,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowResultOverallStatus {
+    Completed,
+    CompletedWithConcerns,
+    Blocked,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -56,6 +97,12 @@ pub enum WorkflowReviewProtocolMessage {
         execution_id: String,
         verdict: ReviewVerdict,
         feedback: String,
+        acceptance_results: Vec<WorkflowAcceptanceResult>,
+        evidence: Vec<String>,
+        #[serde(default)]
+        risks: Vec<String>,
+        #[serde(default)]
+        unfinished_items: Vec<String>,
     },
 }
 
@@ -107,6 +154,40 @@ pub fn workflow_step_protocol_json_schema(
                     "items": { "type": "string" },
                     "default": []
                 }
+            }
+        }),
+        serde_json::json!({
+            "type": "object",
+            "required": ["type", "step_key", "execution_id", "verdict", "summary", "content", "acceptance_results", "evidence"],
+            "additionalProperties": false,
+            "properties": {
+                "type": { "const": "review_result" },
+                "step_key": { "const": step_key },
+                "execution_id": { "const": execution_id.to_string() },
+                "verdict": { "enum": ["approved", "rejected"] },
+                "summary": { "type": "string", "minLength": 1 },
+                "content": { "type": "string" },
+                "acceptance_results": { "$ref": "#/$defs/acceptance_results" },
+                "evidence": { "$ref": "#/$defs/evidence" },
+                "risks": { "type": "array", "items": { "type": "string" }, "default": [] },
+                "unfinished_items": { "type": "array", "items": { "type": "string" }, "default": [] }
+            }
+        }),
+        serde_json::json!({
+            "type": "object",
+            "required": ["type", "step_key", "execution_id", "overall_status", "summary", "content", "acceptance_results", "evidence"],
+            "additionalProperties": false,
+            "properties": {
+                "type": { "const": "result_review_result" },
+                "step_key": { "const": step_key },
+                "execution_id": { "const": execution_id.to_string() },
+                "overall_status": { "enum": ["completed", "completed_with_concerns", "blocked"] },
+                "summary": { "type": "string", "minLength": 1 },
+                "content": { "type": "string" },
+                "acceptance_results": { "$ref": "#/$defs/acceptance_results" },
+                "evidence": { "$ref": "#/$defs/evidence" },
+                "risks": { "type": "array", "items": { "type": "string" }, "default": [] },
+                "unfinished_items": { "type": "array", "items": { "type": "string" }, "default": [] }
             }
         }),
         serde_json::json!({
@@ -167,23 +248,117 @@ pub fn workflow_step_protocol_json_schema(
 
     serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+            "acceptance_results": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "required": ["criterion", "verdict", "evidence"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "criterion": { "type": "string", "minLength": 1 },
+                        "verdict": { "enum": ["passed", "failed", "not_applicable"] },
+                        "evidence": { "type": "string", "minLength": 1 }
+                    }
+                }
+            },
+            "evidence": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+            }
+        },
         "oneOf": variants
     }))
     .unwrap_or_else(|_| "{}".to_string())
+}
+
+pub fn workflow_step_protocol_json_schema_for_step(
+    execution_id: Uuid,
+    step_key: &str,
+    allow_interaction_requests: bool,
+    step_type: &WorkflowStepType,
+) -> String {
+    let base = workflow_step_protocol_json_schema(
+        execution_id,
+        step_key,
+        allow_interaction_requests,
+    );
+    let Ok(mut schema) = serde_json::from_str::<serde_json::Value>(&base) else {
+        return base;
+    };
+    let required_type = match step_type {
+        WorkflowStepType::Review => Some("review_result"),
+        WorkflowStepType::Result => Some("result_review_result"),
+        WorkflowStepType::Task => None,
+    };
+    let Some(required_type) = required_type else {
+        return base;
+    };
+    let Some(variants) = schema.get_mut("oneOf").and_then(|value| value.as_array_mut()) else {
+        return base;
+    };
+    variants.retain(|variant| {
+        let type_property = variant
+            .get("properties")
+            .and_then(|properties| properties.get("type"));
+        let const_type = type_property
+            .and_then(|value| value.get("const"))
+            .and_then(|value| value.as_str());
+        matches!(
+            const_type,
+            Some(value)
+                if value == required_type
+                    || matches!(
+                        value,
+                        "error" | "approval_request" | "permission_request"
+                            | "continue_confirmation" | "input_request"
+                    )
+        ) || type_property
+            .and_then(|value| value.get("enum"))
+            .is_some()
+    });
+    serde_json::to_string_pretty(&schema).unwrap_or(base)
 }
 
 pub fn workflow_review_protocol_json_schema(execution_id: Uuid, step_key: &str) -> String {
     serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
-        "required": ["type", "step_key", "execution_id", "verdict", "feedback"],
+        "required": ["type", "step_key", "execution_id", "verdict", "feedback", "acceptance_results", "evidence"],
         "additionalProperties": false,
         "properties": {
             "type": { "const": "review_result" },
             "step_key": { "const": step_key },
             "execution_id": { "const": execution_id.to_string() },
             "verdict": { "enum": ["approved", "rejected"] },
-            "feedback": { "type": "string", "minLength": 1 }
+            "feedback": { "type": "string", "minLength": 1 },
+            "acceptance_results": { "$ref": "#/$defs/acceptance_results" },
+            "evidence": { "$ref": "#/$defs/evidence" },
+            "risks": { "type": "array", "items": { "type": "string" }, "default": [] },
+            "unfinished_items": { "type": "array", "items": { "type": "string" }, "default": [] }
+        },
+        "$defs": {
+            "acceptance_results": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "required": ["criterion", "verdict", "evidence"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "criterion": { "type": "string", "minLength": 1 },
+                        "verdict": { "enum": ["passed", "failed", "not_applicable"] },
+                        "evidence": { "type": "string", "minLength": 1 }
+                    }
+                }
+            },
+            "evidence": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+            }
         }
     }))
     .unwrap_or_else(|_| "{}".to_string())
@@ -263,6 +438,16 @@ pub fn parse_step_protocol_output(
             step_key: actual_step_key,
             execution_id: actual_execution_id,
             ..
+        }
+        | WorkflowStepProtocolMessage::ReviewResult {
+            step_key: actual_step_key,
+            execution_id: actual_execution_id,
+            ..
+        }
+        | WorkflowStepProtocolMessage::ResultReviewResult {
+            step_key: actual_step_key,
+            execution_id: actual_execution_id,
+            ..
         } => {
             if actual_step_key != step_key {
                 return Err(WorkflowRuntimeError::Validation(format!(
@@ -279,7 +464,52 @@ pub fn parse_step_protocol_output(
         }
     }
 
+    match &message {
+        WorkflowStepProtocolMessage::ReviewResult {
+            summary,
+            acceptance_results,
+            evidence,
+            ..
+        }
+        | WorkflowStepProtocolMessage::ResultReviewResult {
+            summary,
+            acceptance_results,
+            evidence,
+            ..
+        } => validate_structured_review_fields(summary, acceptance_results, evidence)?,
+        _ => {}
+    }
+
     Ok(message)
+}
+
+fn validate_structured_review_fields(
+    summary: &str,
+    acceptance_results: &[WorkflowAcceptanceResult],
+    evidence: &[String],
+) -> Result<(), WorkflowRuntimeError> {
+    if summary.trim().is_empty() {
+        return Err(WorkflowRuntimeError::Validation(
+            "structured review summary 不能为空".to_string(),
+        ));
+    }
+    if acceptance_results.is_empty()
+        || acceptance_results.iter().any(|item| {
+            item.criterion.trim().is_empty()
+                || item.evidence.trim().is_empty()
+                || !matches!(item.verdict.as_str(), "passed" | "failed" | "not_applicable")
+        })
+    {
+        return Err(WorkflowRuntimeError::Validation(
+            "structured review acceptance_results 非法".to_string(),
+        ));
+    }
+    if evidence.is_empty() || evidence.iter().any(|item| item.trim().is_empty()) {
+        return Err(WorkflowRuntimeError::Validation(
+            "structured review evidence 不能为空".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn parse_review_protocol_output(
@@ -304,6 +534,8 @@ pub fn parse_review_protocol_output(
             step_key: actual_step_key,
             execution_id: actual_execution_id,
             feedback,
+            acceptance_results,
+            evidence,
             ..
         } => {
             if actual_step_key != step_key {
@@ -323,6 +555,7 @@ pub fn parse_review_protocol_output(
                     "review protocol 的 feedback 不能为空".to_string(),
                 ));
             }
+            validate_structured_review_fields(feedback, acceptance_results, evidence)?;
         }
     }
 

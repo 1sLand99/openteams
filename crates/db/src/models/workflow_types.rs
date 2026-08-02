@@ -192,6 +192,7 @@ pub enum ReviewVerdict {
 #[ts(use_ts_enum)]
 pub enum ReviewerType {
     Lead,
+    Reviewer,
     User,
 }
 

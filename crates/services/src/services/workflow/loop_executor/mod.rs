@@ -14,8 +14,8 @@ use db::{
         workflow_step::WorkflowStep,
         workflow_transcript::{CreateWorkflowTranscript, WorkflowTranscript},
         workflow_types::{
-            CompiledLoopDef, ReviewVerdict, ReviewerType, WorkflowEventType, WorkflowLoopStatus,
-            WorkflowStepStatus, to_workflow_wire_value,
+            CompiledLoopDef, ReviewVerdict, ReviewerType, WorkflowAgentSessionRole,
+            WorkflowEventType, WorkflowLoopStatus, WorkflowStepStatus, to_workflow_wire_value,
         },
     },
 };
@@ -31,8 +31,8 @@ use super::{
         OrchestratorError, WorkflowOrchestrator, reducer, resolve_step_workflow_session,
     },
     workflow_review::{
-        LoopReviewPromptStepInput, LoopReviewProtocolMessage, build_loop_review_prompt,
-        loop_review_protocol_json_schema, parse_loop_review_output,
+        LoopReviewPromptContext, LoopReviewPromptStepInput, LoopReviewProtocolMessage,
+        build_loop_review_prompt, loop_review_protocol_json_schema, parse_loop_review_output,
     },
     workflow_runtime::{
         SummaryPayload, WORKFLOW_PROTOCOL_PARSE_MAX_RETRIES, WorkflowRevisionFeedbackSource,

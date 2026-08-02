@@ -254,5 +254,6 @@ pub struct SummaryPayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowRevisionFeedbackSource {
     Lead,
+    Reviewer,
     User,
 }

@@ -477,7 +477,7 @@ export enum WorkflowLoopStatus { pending = "pending", running = "running", waiti
 
 export enum ReviewVerdict { approved = "approved", rejected = "rejected" }
 
-export enum ReviewerType { lead = "lead", user = "user" }
+export enum ReviewerType { lead = "lead", reviewer = "reviewer", user = "user" }
 
 export enum WorkflowEdgeKind { hard = "hard", soft = "soft" }
 

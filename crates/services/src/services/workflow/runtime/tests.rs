@@ -1358,6 +1358,8 @@ mod tests {
         assert!(prompt.contains("Language Requirement"));
         assert!(prompt.contains("Review attempt: 2 of at most 5"));
         assert!(prompt.contains("report every issue you can identify in this single response"));
+        assert!(prompt.contains("acceptance_results"));
+        assert!(prompt.contains("independent verification evidence"));
     }
 
     #[test]
@@ -1393,6 +1395,30 @@ mod tests {
         assert!(!prompt.contains("`code-guidelines` skill"));
         assert!(prompt.contains("Workflow review is capped at five attempts"));
         assert!(prompt.contains("cite every issue you can identify in this single response"));
+        assert!(prompt.contains("Return `review_result`, not `final_result`"));
+    }
+
+    #[test]
+    fn review_and_result_steps_use_structured_protocol_schemas() {
+        let execution_id = Uuid::new_v4();
+        let review_schema = workflow_step_protocol_json_schema_for_step(
+            execution_id,
+            "review",
+            true,
+            &WorkflowStepType::Review,
+        );
+        let result_schema = workflow_step_protocol_json_schema_for_step(
+            execution_id,
+            "result",
+            true,
+            &WorkflowStepType::Result,
+        );
+
+        assert!(review_schema.contains("review_result"));
+        assert!(!review_schema.contains("final_result"));
+        assert!(result_schema.contains("result_review_result"));
+        assert!(!result_schema.contains("final_result"));
+        assert!(result_schema.contains("completed_with_concerns"));
     }
 
     #[test]
@@ -1500,6 +1526,8 @@ mod tests {
         assert!(prompt.contains("已经完成主流程，但漏掉异常分支。"));
         assert!(prompt.contains(&step.title));
         assert!(prompt.contains(&step.instructions));
+        assert!(prompt.contains("Priority order is: user goal and explicit user feedback"));
+        assert!(prompt.contains("return an `input_request`"));
         // retry_count == 2, PUA should NOT be active
         assert!(!prompt.contains("Performance Improvement Plan"));
     }
@@ -1557,7 +1585,9 @@ mod tests {
   "step_key": "{}",
   "execution_id": "{}",
   "verdict": "approved",
-  "feedback": "结果满足验收标准。"
+  "feedback": "结果满足验收标准。",
+  "acceptance_results": [{{ "criterion": "验收标准", "verdict": "passed", "evidence": "cargo test passed" }}],
+  "evidence": ["cargo test passed"]
 }}"#,
             step.step_key, step.execution_id
         );
@@ -1572,6 +1602,14 @@ mod tests {
                 execution_id: step.execution_id.to_string(),
                 verdict: ReviewVerdict::Approved,
                 feedback: "结果满足验收标准。".to_string(),
+                acceptance_results: vec![WorkflowAcceptanceResult {
+                    criterion: "验收标准".to_string(),
+                    verdict: "passed".to_string(),
+                    evidence: "cargo test passed".to_string(),
+                }],
+                evidence: vec!["cargo test passed".to_string()],
+                risks: vec![],
+                unfinished_items: vec![],
             }
         );
     }
@@ -1585,7 +1623,11 @@ mod tests {
   "step_key": "{}",
   "execution_id": "{}",
   "verdict": "rejected",
-  "feedback": "还缺少回归测试。"
+  "feedback": "还缺少回归测试。",
+  "acceptance_results": [{{ "criterion": "回归测试", "verdict": "failed", "evidence": "no test output" }}],
+  "evidence": ["no test output"],
+  "risks": ["regression"],
+  "unfinished_items": ["add tests"]
 }}"#,
             step.step_key, step.execution_id
         );
@@ -1600,6 +1642,14 @@ mod tests {
                 execution_id: step.execution_id.to_string(),
                 verdict: ReviewVerdict::Rejected,
                 feedback: "还缺少回归测试。".to_string(),
+                acceptance_results: vec![WorkflowAcceptanceResult {
+                    criterion: "回归测试".to_string(),
+                    verdict: "failed".to_string(),
+                    evidence: "no test output".to_string(),
+                }],
+                evidence: vec!["no test output".to_string()],
+                risks: vec!["regression".to_string()],
+                unfinished_items: vec!["add tests".to_string()],
             }
         );
     }
@@ -1613,7 +1663,9 @@ mod tests {
   "step_key": "{}",
   "execution_id": "{}",
   "verdict": "approved",
-  "feedback": "   "
+  "feedback": "   ",
+  "acceptance_results": [{{ "criterion": "验收标准", "verdict": "passed", "evidence": "cargo test passed" }}],
+  "evidence": ["cargo test passed"]
 }}"#,
             step.step_key, step.execution_id
         );
@@ -1622,6 +1674,52 @@ mod tests {
             .expect_err("invalid");
 
         assert!(matches!(err, WorkflowRuntimeError::Validation(_)));
+    }
+
+    #[test]
+    fn parse_step_protocol_output_accepts_structured_review_and_result_messages() {
+        let execution_id = Uuid::new_v4();
+        let review = format!(
+            r#"{{
+  "type": "review_result",
+  "step_key": "review",
+  "execution_id": "{execution_id}",
+  "verdict": "approved",
+  "summary": "Reviewed",
+  "content": "All criteria were checked.",
+  "acceptance_results": [{{ "criterion": "coverage", "verdict": "passed", "evidence": "cargo test" }}],
+  "evidence": ["cargo test"]
+}}"#
+        );
+        let result = format!(
+            r#"{{
+  "type": "result_review_result",
+  "step_key": "result",
+  "execution_id": "{execution_id}",
+  "overall_status": "completed_with_concerns",
+  "summary": "Delivered with a known risk",
+  "content": "The workflow is complete; monitor follow-up.",
+  "acceptance_results": [{{ "criterion": "delivery", "verdict": "passed", "evidence": "artifact exists" }}],
+  "evidence": ["artifact exists"],
+  "risks": ["follow-up"],
+  "unfinished_items": ["monitor"]
+}}"#
+        );
+
+        assert!(matches!(
+            parse_step_protocol_output(execution_id, "review", &review).expect("review parse"),
+            WorkflowStepProtocolMessage::ReviewResult {
+                verdict: ReviewVerdict::Approved,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_step_protocol_output(execution_id, "result", &result).expect("result parse"),
+            WorkflowStepProtocolMessage::ResultReviewResult {
+                overall_status: WorkflowResultOverallStatus::CompletedWithConcerns,
+                ..
+            }
+        ));
     }
 
     #[test]

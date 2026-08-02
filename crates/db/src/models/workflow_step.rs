@@ -452,7 +452,7 @@ impl WorkflowStep {
                 lead_review_attempt_offset = (
                     SELECT COUNT(*)
                     FROM chat_workflow_step_reviews
-                    WHERE step_id = ?1 AND reviewer_type = 'lead'
+                    WHERE step_id = ?1 AND reviewer_type IN ('lead', 'reviewer')
                 ),
                 latest_run_id = NULL,
                 summary_text = NULL,
@@ -625,7 +625,7 @@ impl WorkflowStep {
                 lead_review_attempt_offset = (
                     SELECT COUNT(*)
                     FROM chat_workflow_step_reviews
-                    WHERE step_id = ?1 AND reviewer_type = 'lead'
+                    WHERE step_id = ?1 AND reviewer_type IN ('lead', 'reviewer')
                 ),
                 completed_at = NULL,
                 updated_at = datetime('now', 'subsec')

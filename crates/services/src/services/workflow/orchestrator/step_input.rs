@@ -17,7 +17,7 @@ use super::{
         workflow_analytics,
         workflow_runtime::{
             SummaryPayload, WorkflowRuntimeError, parse_summary_payload,
-            workflow_step_protocol_json_schema,
+            workflow_step_protocol_json_schema_for_step,
         },
     },
     OrchestratorError, ResolvedTranscriptAction, WorkflowOrchestrator, load_agents_for_session,
@@ -404,6 +404,7 @@ impl WorkflowOrchestrator {
                 &active_execution,
                 &running_step,
                 workflow_session,
+                Some(agent.id.to_string()),
                 protocol_message,
                 None,
             )
@@ -620,8 +621,12 @@ impl WorkflowOrchestrator {
                 "Do not restart the whole task from scratch unless required. Resume from the failed point and fix the issue that caused the failure."
             }
         };
-        let json_schema =
-            workflow_step_protocol_json_schema(step.execution_id, &step.step_key, true);
+        let json_schema = workflow_step_protocol_json_schema_for_step(
+            step.execution_id,
+            &step.step_key,
+            true,
+            &step.step_type,
+        );
         format!(
             r#"{opening}
 
