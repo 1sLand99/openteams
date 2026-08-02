@@ -2281,10 +2281,9 @@ The active workflow frontier has multiple members running in parallel in the sam
 
 Before modifying files, create an isolated Git worktree for this step when Git is available. Do all edits and verification inside it. Before returning `final_result`, merge or synchronize the completed changes back into the original workflow workspace, clean up the temporary worktree, and include the merge result in your structured evidence. If Git worktrees are unavailable, report the blocker instead of inventing a skill or isolation mechanism.
 "#,
-            isolation_context = workflow_runtime::budget_and_sanitize(
+            isolation_context = workflow_runtime::sanitize_dynamic_content(
                 "workspace_isolation_context",
                 &isolation_context,
-                4096,
             ),
         ))
     }

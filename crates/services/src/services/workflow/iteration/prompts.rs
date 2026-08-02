@@ -28,13 +28,13 @@ pub fn build_iteration_plan_prompt(
         .unwrap_or_else(|_| "{}".to_string());
     let available_agents_json =
         serde_json::to_string_pretty(available_agents).unwrap_or_else(|_| "[]".to_string());
-    let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
-        .add("original_goal", original_goal.trim(), 2)
-        .add("current_state_summary", current_state_summary.trim(), 1)
-        .add("user_feedback", &feedback_text, 2)
-        .add("iteration_history", &history_text, 1)
-        .add("available_agents_json", &available_agents_json, 1)
-        .add("previous_plan_json", &previous_plan_json, 3)
+    let data = PromptDataBuilder::new()
+        .add("original_goal", original_goal.trim())
+        .add("current_state_summary", current_state_summary.trim())
+        .add("user_feedback", &feedback_text)
+        .add("iteration_history", &history_text)
+        .add("available_agents_json", &available_agents_json)
+        .add("previous_plan_json", &previous_plan_json)
         .build();
 
     let next_round = iteration_round + 1;

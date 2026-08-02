@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::workflow_runtime::{
-    MAX_DYNAMIC_CONTENT_BUDGET_BYTES, MAX_STEP_DYNAMIC_CONTENT_BUDGET_BYTES, PromptDataBuilder,
-    WorkflowAcceptanceVerdict, WorkflowRuntimeError, extract_json_payload,
+    PromptDataBuilder, WorkflowAcceptanceVerdict, WorkflowRuntimeError, extract_json_payload,
     maybe_prepend_safety_preamble,
 };
 
@@ -91,29 +90,25 @@ pub fn build_loop_review_prompt(
         review_context.review_scope_edges.join("\n")
     };
 
-    let mut budget_items = vec![
-        ("workflow_goal".to_string(), workflow_goal.to_string(), 2),
+    let mut data_items = vec![
+        ("workflow_goal".to_string(), workflow_goal.to_string()),
         (
             "review_scope_step_titles".to_string(),
             review_scope_step_titles.clone(),
-            1,
         ),
         (
             "reviewer_name".to_string(),
             review_context.reviewer_name.clone(),
-            1,
         ),
         (
             "reviewer_role".to_string(),
             review_context.reviewer_role.clone(),
-            1,
         ),
         (
             "review_step_instructions".to_string(),
             review_context.review_step_instructions.clone(),
-            2,
         ),
-        ("review_scope_edges".to_string(), scope_edges.clone(), 1),
+        ("review_scope_edges".to_string(), scope_edges.clone()),
     ];
 
     let prepared_steps: Vec<_> = review_steps
@@ -147,29 +142,29 @@ pub fn build_loop_review_prompt(
                 step.outputs.join(", ")
             };
             let fields = [
-                ("title", step.title.clone(), 1),
-                ("instructions", step.instructions.clone(), 2),
-                ("acceptance", acceptance, 1),
-                ("expected_outputs", expected_outputs, 1),
-                ("predecessor_handoffs", predecessor_handoffs, 1),
-                ("successor_contracts", successor_contracts, 1),
-                ("summary", step.summary.clone(), 1),
-                ("content", step.content.clone(), 2),
-                ("outputs", outputs, 1),
+                ("title", step.title.clone()),
+                ("instructions", step.instructions.clone()),
+                ("acceptance", acceptance),
+                ("expected_outputs", expected_outputs),
+                ("predecessor_handoffs", predecessor_handoffs),
+                ("successor_contracts", successor_contracts),
+                ("summary", step.summary.clone()),
+                ("content", step.content.clone()),
+                ("outputs", outputs),
             ];
-            for (field, content, weight) in fields {
-                budget_items.push((format!("step_{lbl}_{field}"), content, weight));
+            for (field, content) in fields {
+                data_items.push((format!("step_{lbl}_{field}"), content));
             }
             if let Some(waiver) = step.user_skip_waiver.as_deref() {
-                budget_items.push((format!("step_{lbl}_skip_waiver"), waiver.to_string(), 1));
+                data_items.push((format!("step_{lbl}_skip_waiver"), waiver.to_string()));
             }
             (index, step, lbl)
         })
         .collect();
 
-    let mut builder = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES);
-    for (label, content, weight) in budget_items {
-        builder = builder.add(label, content, weight);
+    let mut builder = PromptDataBuilder::new();
+    for (label, content) in data_items {
+        builder = builder.add(label, content);
     }
     let data = builder.build();
 
@@ -420,19 +415,19 @@ pub fn build_loop_rejection_prompt(input: LoopRejectionPromptInput<'_>) -> Strin
         input.your_previous_outputs.join(", ")
     };
 
-    let data = PromptDataBuilder::new(MAX_STEP_DYNAMIC_CONTENT_BUDGET_BYTES)
-        .add("workflow_goal", input.workflow_goal, 2)
-        .add("loop_state_summary", input.loop_current_state_summary, 1)
-        .add("loop_rejection_reason", input.loop_rejection_reason, 2)
-        .add("step_specific_feedback", input.step_specific_feedback, 2)
-        .add("other_steps_feedback", &other_steps_feedback_summary, 1)
-        .add("your_previous_summary", input.your_previous_summary, 1)
-        .add("previous_outputs", &previous_outputs, 1)
-        .add("acceptance", &acceptance, 1)
-        .add("expected_outputs", &expected_outputs, 1)
-        .add("step_title", &input.step.title, 1)
-        .add("step_instructions", &input.step.instructions, 2)
-        .add("external_dependencies", &external_dependency_text, 1)
+    let data = PromptDataBuilder::new()
+        .add("workflow_goal", input.workflow_goal)
+        .add("loop_state_summary", input.loop_current_state_summary)
+        .add("loop_rejection_reason", input.loop_rejection_reason)
+        .add("step_specific_feedback", input.step_specific_feedback)
+        .add("other_steps_feedback", &other_steps_feedback_summary)
+        .add("your_previous_summary", input.your_previous_summary)
+        .add("previous_outputs", &previous_outputs)
+        .add("acceptance", &acceptance)
+        .add("expected_outputs", &expected_outputs)
+        .add("step_title", &input.step.title)
+        .add("step_instructions", &input.step.instructions)
+        .add("external_dependencies", &external_dependency_text)
         .build();
 
     let prompt = format!(
@@ -524,16 +519,16 @@ pub fn build_loop_user_rejection_prompt(
     } else {
         expected_outputs.join(", ")
     };
-    let data = PromptDataBuilder::new(MAX_STEP_DYNAMIC_CONTENT_BUDGET_BYTES)
-        .add("workflow_goal", workflow_goal, 2)
-        .add("user_feedback", user_feedback, 2)
-        .add("loop_state_summary", loop_current_state_summary, 1)
-        .add("your_previous_summary", your_previous_summary, 1)
-        .add("previous_outputs", &previous_outputs, 1)
-        .add("acceptance", &acceptance, 1)
-        .add("expected_outputs", &expected_outputs, 1)
-        .add("step_title", &step.title, 1)
-        .add("step_instructions", &step.instructions, 2)
+    let data = PromptDataBuilder::new()
+        .add("workflow_goal", workflow_goal)
+        .add("user_feedback", user_feedback)
+        .add("loop_state_summary", loop_current_state_summary)
+        .add("your_previous_summary", your_previous_summary)
+        .add("previous_outputs", &previous_outputs)
+        .add("acceptance", &acceptance)
+        .add("expected_outputs", &expected_outputs)
+        .add("step_title", &step.title)
+        .add("step_instructions", &step.instructions)
         .build();
     let prompt = format!(
         r#"## User Loop Rework Request (loop retry {loop_retry_count})

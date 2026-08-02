@@ -551,12 +551,12 @@ The output source of truth is React Flow compatible workflow JSON. Do not output
                 .join("\n")
         });
 
-    let mut builder = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
-        .add("plan_goal", plan_goal.trim(), 2)
-        .add("available_agents_json", &available_agents_json, 1);
-    builder = builder.add_optional("previous_failure_reason", prev_failure, 1);
-    builder = builder.add_optional("previous_plan_json", prev_plan, 3);
-    builder = builder.add_optional("design_doc_paths", doc_paths_text.as_deref(), 1);
+    let mut builder = PromptDataBuilder::new()
+        .add("plan_goal", plan_goal.trim())
+        .add("available_agents_json", &available_agents_json);
+    builder = builder.add_optional("previous_failure_reason", prev_failure);
+    builder = builder.add_optional("previous_plan_json", prev_plan);
+    builder = builder.add_optional("design_doc_paths", doc_paths_text.as_deref());
     let data = builder.build();
 
     if !data.get("previous_failure_reason").is_empty() {
@@ -741,16 +741,16 @@ pub fn build_step_execution_prompt_with_contract(
             items.iter().map(|item| format!("- {}", item.trim())).collect::<Vec<_>>().join("\n")
         }
     };
-    let data = PromptDataBuilder::new(MAX_STEP_DYNAMIC_CONTENT_BUDGET_BYTES)
-        .add("step_title", &step.title, 1)
-        .add("step_instructions", &step.instructions, 2)
-        .add("workflow_goal", workflow_goal, 1)
-        .add("predecessor_summaries", &dependency_text, 1)
-        .add("acceptance", list(&contract.acceptance), 1)
-        .add("expected_outputs", list(&contract.expected_outputs), 1)
-        .add("checklist", list(&contract.checklist), 1)
-        .add("verification_commands", list(&contract.verification_commands), 1)
-        .add("completion_evidence", list(&contract.completion_evidence), 1)
+    let data = PromptDataBuilder::new()
+        .add("step_title", &step.title)
+        .add("step_instructions", &step.instructions)
+        .add("workflow_goal", workflow_goal)
+        .add("predecessor_summaries", &dependency_text)
+        .add("acceptance", list(&contract.acceptance))
+        .add("expected_outputs", list(&contract.expected_outputs))
+        .add("checklist", list(&contract.checklist))
+        .add("verification_commands", list(&contract.verification_commands))
+        .add("completion_evidence", list(&contract.completion_evidence))
         .build();
 
     let mut prompt = String::with_capacity(4096);
@@ -980,16 +980,16 @@ pub fn build_lead_review_prompt(
     };
     let structured_report = result.structured_report.as_deref().unwrap_or("None");
 
-    let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
-        .add("step_title", &step.title, 1)
-        .add("step_instructions", &step.instructions, 2)
-        .add("workflow_goal", workflow_goal, 1)
-        .add("worker_content", &result.content, 2)
-        .add("worker_summary", &result.summary, 1)
-        .add("predecessor_summaries", &dependency_text, 1)
-        .add("acceptance_criteria", &acceptance_text, 1)
-        .add("worker_outputs", &outputs_text, 1)
-        .add("worker_structured_report", structured_report, 2)
+    let data = PromptDataBuilder::new()
+        .add("step_title", &step.title)
+        .add("step_instructions", &step.instructions)
+        .add("workflow_goal", workflow_goal)
+        .add("worker_content", &result.content)
+        .add("worker_summary", &result.summary)
+        .add("predecessor_summaries", &dependency_text)
+        .add("acceptance_criteria", &acceptance_text)
+        .add("worker_outputs", &outputs_text)
+        .add("worker_structured_report", structured_report)
         .build();
 
     let mut prompt = String::with_capacity(4096);
@@ -1132,20 +1132,20 @@ pub fn build_step_revision_prompt_with_context(
             items.iter().map(|item| format!("- {}", item.trim())).collect::<Vec<_>>().join("\n")
         }
     };
-    let mut builder = PromptDataBuilder::new(MAX_STEP_DYNAMIC_CONTENT_BUDGET_BYTES)
-        .add(feedback_label, feedback_content.trim(), 2)
-        .add("previous_result_summary", previous_summary.trim(), 1)
-        .add("step_title", &step.title, 1)
-        .add("step_instructions", &step.instructions, 2)
-        .add("workflow_goal", &context.workflow_goal, 1)
-        .add("acceptance", list(&context.acceptance), 1)
-        .add("expected_outputs", list(&context.expected_outputs), 1)
-        .add("checklist", list(&context.checklist), 1)
-        .add("verification_commands", list(&context.verification_commands), 1)
-        .add("completion_evidence", list(&context.completion_evidence), 1)
-        .add("dependency_summaries", list(&context.dependency_summaries), 1);
-    builder = builder.add_optional("previous_full_result", prev_content_trimmed, 2);
-    builder = builder.add_optional("loop_state", context.loop_state.as_deref(), 1);
+    let mut builder = PromptDataBuilder::new()
+        .add(feedback_label, feedback_content.trim())
+        .add("previous_result_summary", previous_summary.trim())
+        .add("step_title", &step.title)
+        .add("step_instructions", &step.instructions)
+        .add("workflow_goal", &context.workflow_goal)
+        .add("acceptance", list(&context.acceptance))
+        .add("expected_outputs", list(&context.expected_outputs))
+        .add("checklist", list(&context.checklist))
+        .add("verification_commands", list(&context.verification_commands))
+        .add("completion_evidence", list(&context.completion_evidence))
+        .add("dependency_summaries", list(&context.dependency_summaries));
+    builder = builder.add_optional("previous_full_result", prev_content_trimmed);
+    builder = builder.add_optional("loop_state", context.loop_state.as_deref());
     let data = builder.build();
 
     let mut prompt = String::with_capacity(4096);

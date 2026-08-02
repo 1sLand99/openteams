@@ -1690,7 +1690,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_budget_truncates_long_content() {
+    fn prompt_preserves_complete_long_content_without_a_hard_budget() {
         let long_content = "X".repeat(100_000);
         let step = sample_step(WorkflowStepStatus::Revising);
         let prompt = build_step_revision_prompt(
@@ -1702,9 +1702,9 @@ mod tests {
             1,
         );
 
-        assert!(prompt.contains("content_hash="));
-        assert!(prompt.contains("truncated"));
-        assert!(prompt.len() < long_content.len());
+        assert!(prompt.contains(&long_content));
+        assert!(!prompt.contains("content_hash="));
+        assert!(!prompt.contains("truncated"));
     }
 
     #[test]

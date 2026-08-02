@@ -430,10 +430,10 @@ pub fn build_workflow_protocol_retry_prompt(
     previous_input: &str,
     previous_output: &str,
 ) -> String {
-    let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
-        .add("protocol_parse_error", error, 1)
-        .add("previous_workflow_request", previous_input, 1)
-        .add("previous_invalid_response", previous_output, 1)
+    let data = PromptDataBuilder::new()
+        .add("protocol_parse_error", error)
+        .add("previous_workflow_request", previous_input)
+        .add("previous_invalid_response", previous_output)
         .build();
 
     let prompt = format!(

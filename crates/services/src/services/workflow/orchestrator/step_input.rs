@@ -17,9 +17,8 @@ use super::{
         chat_runner::ChatRunner,
         workflow_analytics,
         workflow_runtime::{
-            MAX_DYNAMIC_CONTENT_BUDGET_BYTES, PromptDataBuilder, SummaryPayload,
-            WorkflowRuntimeError, maybe_prepend_safety_preamble, parse_summary_payload,
-            workflow_step_protocol_json_schema_for_step,
+            PromptDataBuilder, SummaryPayload, WorkflowRuntimeError, maybe_prepend_safety_preamble,
+            parse_summary_payload, workflow_step_protocol_json_schema_for_step,
         },
     },
     OrchestratorError, ResolvedTranscriptAction, WorkflowOrchestrator, load_agents_for_session,
@@ -636,11 +635,11 @@ impl WorkflowOrchestrator {
             true,
             &step.step_type,
         );
-        let data = PromptDataBuilder::new(MAX_DYNAMIC_CONTENT_BUDGET_BYTES)
-            .add("step_title", &step.title, 1)
-            .add("previous_agent_message", previous_message_content.trim(), 1)
-            .add("user_input", input_text, 1)
-            .add("step_instructions", &step.instructions, 2)
+        let data = PromptDataBuilder::new()
+            .add("step_title", &step.title)
+            .add("previous_agent_message", previous_message_content.trim())
+            .add("user_input", input_text)
+            .add("step_instructions", &step.instructions)
             .build();
         let prompt = format!(
             r#"{opening}
