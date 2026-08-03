@@ -1,20 +1,22 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    future::Future,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
         Arc, LazyLock, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use dashmap::DashMap;
 use executors::{
     command::{CmdOverrides, CommandBuilder, redacted_command},
     env::ExecutionEnv,
     executors::{
-        AvailabilityInfo, BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor,
+        AvailabilityInfo, BaseCodingAgent, CodingAgent, ExecutorError, StandardCodingAgentExecutor,
         acp::AcpCapabilityProbe, opencode::Opencode,
     },
     profile::{ExecutorConfig, ExecutorConfigs, ProfileError},
@@ -22,6 +24,7 @@ use executors::{
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{process::Command, time::timeout};
 use ts_rs::TS;
@@ -29,11 +32,36 @@ use ts_rs::TS;
 const STORE_FILE_NAME: &str = "agent_runtime_config.json";
 const DISCOVERY_TTL: ChronoDuration = ChronoDuration::hours(24);
 const RUNTIME_DISCOVERY_CONCURRENCY: usize = 4;
+const ACP_PROBE_CACHE_TTL: Duration = Duration::from_secs(30);
 
 static BACKGROUND_RUNTIME_REFRESH_RUNNING: AtomicBool = AtomicBool::new(false);
 static RUNTIME_REFRESH_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 static RUNTIME_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static ACP_PROBE_GATES: LazyLock<DashMap<BaseCodingAgent, Arc<tokio::sync::Mutex<()>>>> =
+    LazyLock::new(DashMap::new);
+static ACP_PROBE_CACHE: LazyLock<DashMap<AcpProbeCacheKey, CachedAcpProbe>> =
+    LazyLock::new(DashMap::new);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcpProbeCachePolicy {
+    Reuse,
+    Refresh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AcpProbeCacheKey {
+    runner: BaseCodingAgent,
+    current_dir: PathBuf,
+    auth_method_id: Option<String>,
+    execution_fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone)]
+struct CachedAcpProbe {
+    completed_at: Instant,
+    probe: Option<AcpCapabilityProbe>,
+}
 
 #[derive(Debug, Error)]
 pub enum AgentRuntimeError {
@@ -430,7 +458,7 @@ async fn discover_runner_runtime(
 
     let (version_result, discovered_models) = tokio::join!(
         detect_cli_version(&base, &env),
-        discover_models_for_executor(&base, current_dir, &env)
+        discover_models_for_executor(runner, &base, current_dir, &env)
     );
     let (detected_version, version_error) = split_probe_result(version_result);
 
@@ -545,8 +573,9 @@ pub async fn runtime_diagnostics(
         Ok(None)
     };
     let (detected_version, version_error) = split_probe_result(version_result);
-    let (resolved_runtime_command, command_error) =
-        split_probe_result(resolve_runtime_command(&runtime_executor).await);
+    let (resolved_runtime_command, command_error) = split_probe_result(
+        resolve_runtime_command_for_diagnostics(status.installed, &runtime_executor).await,
+    );
     let command_source = resolved_runtime_command.as_ref().map(|_| {
         if cmd_overrides_for_executor(&runtime_executor)
             .and_then(|cmd| cmd.base_command_override.as_deref())
@@ -568,16 +597,34 @@ pub async fn runtime_diagnostics(
         .as_ref()
         .map(|command| command.executable_path.clone());
     let resolved_command = resolved_runtime_command.map(|command| command.rendered);
-    let (acp_probe, acp_probe_error) = match runtime_executor
-        .probe_acp(probe_dir, &env, auth_method_id)
+    let (acp_probe, acp_probe_error, acp_probe_succeeded) = if status.installed {
+        match coordinated_probe_acp(
+            runner,
+            &runtime_executor,
+            probe_dir,
+            &env,
+            auth_method_id,
+            AcpProbeCachePolicy::Reuse,
+        )
         .await
-    {
-        Ok(probe) => (probe, None),
-        Err(error) => (None, Some(error.to_string())),
+        {
+            Ok(probe) => {
+                let succeeded = probe.is_some();
+                (probe, None, succeeded)
+            }
+            Err(error) => (None, Some(error.to_string()), false),
+        }
+    } else {
+        (None, None, false)
     };
-    let latest_store = if let Some(version) = detected_version.as_deref() {
+    let latest_store = if detected_version.is_some() || acp_probe_succeeded {
         update_store(&path, |latest| {
-            cache_runner_version(latest, runner, version.to_string());
+            if let Some(version) = detected_version.as_deref() {
+                cache_runner_version(latest, runner, version.to_string());
+            }
+            if acp_probe_succeeded {
+                clear_cached_authentication_required_error(latest, runner);
+            }
             Ok(())
         })?
         .0
@@ -624,6 +671,16 @@ pub async fn runtime_diagnostics(
 struct ResolvedRuntimeCommand {
     executable_path: String,
     rendered: String,
+}
+
+async fn resolve_runtime_command_for_diagnostics(
+    installed: bool,
+    executor: &CodingAgent,
+) -> Result<Option<ResolvedRuntimeCommand>, String> {
+    if !installed {
+        return Ok(None);
+    }
+    resolve_runtime_command(executor).await
 }
 
 async fn resolve_runtime_command(
@@ -1008,15 +1065,117 @@ fn version_for_discovery_update(
     })
 }
 
+fn acp_probe_cache_key(
+    runner: BaseCodingAgent,
+    executor: &CodingAgent,
+    current_dir: &Path,
+    env: &ExecutionEnv,
+    auth_method_id: Option<&str>,
+) -> Result<AcpProbeCacheKey, ExecutorError> {
+    let mut hasher = Sha256::new();
+    let executor_json = serde_json::to_vec(executor)?;
+    hasher.update((executor_json.len() as u64).to_le_bytes());
+    hasher.update(executor_json);
+
+    let mut env_vars = env.vars.iter().collect::<Vec<_>>();
+    env_vars.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    for (key, value) in env_vars {
+        hasher.update((key.len() as u64).to_le_bytes());
+        hasher.update(key.as_bytes());
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+
+    Ok(AcpProbeCacheKey {
+        runner,
+        current_dir: current_dir.to_path_buf(),
+        auth_method_id: auth_method_id.map(str::to_string),
+        execution_fingerprint: hasher.finalize().into(),
+    })
+}
+
+fn reusable_cached_acp_probe(
+    key: &AcpProbeCacheKey,
+    policy: AcpProbeCachePolicy,
+    requested_at: Instant,
+) -> Option<Option<AcpCapabilityProbe>> {
+    let cached = ACP_PROBE_CACHE.get(key)?;
+    let completed_during_request = cached.completed_at >= requested_at;
+    let within_ttl = cached.completed_at.elapsed() <= ACP_PROBE_CACHE_TTL;
+    (completed_during_request || (policy == AcpProbeCachePolicy::Reuse && within_ttl))
+        .then(|| cached.probe.clone())
+}
+
+async fn run_coordinated_acp_probe<F, Fut>(
+    key: AcpProbeCacheKey,
+    policy: AcpProbeCachePolicy,
+    probe: F,
+) -> Result<Option<AcpCapabilityProbe>, ExecutorError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Option<AcpCapabilityProbe>, ExecutorError>>,
+{
+    let requested_at = Instant::now();
+    if let Some(cached) = reusable_cached_acp_probe(&key, policy, requested_at) {
+        return Ok(cached);
+    }
+
+    // Gemini and other ACP runners share user-level state. Serialize all probes
+    // for one runner, then let identical waiters reuse the result produced while
+    // they were waiting instead of starting another CLI process.
+    let gate = ACP_PROBE_GATES
+        .entry(key.runner)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _guard = gate.lock().await;
+
+    if let Some(cached) = reusable_cached_acp_probe(&key, policy, requested_at) {
+        return Ok(cached);
+    }
+
+    let result = probe().await?;
+    ACP_PROBE_CACHE.retain(|_, cached| cached.completed_at.elapsed() <= ACP_PROBE_CACHE_TTL);
+    ACP_PROBE_CACHE.insert(
+        key,
+        CachedAcpProbe {
+            completed_at: Instant::now(),
+            probe: result.clone(),
+        },
+    );
+    Ok(result)
+}
+
+async fn coordinated_probe_acp(
+    runner: BaseCodingAgent,
+    executor: &CodingAgent,
+    current_dir: &Path,
+    env: &ExecutionEnv,
+    auth_method_id: Option<&str>,
+    policy: AcpProbeCachePolicy,
+) -> Result<Option<AcpCapabilityProbe>, ExecutorError> {
+    let key = acp_probe_cache_key(runner, executor, current_dir, env, auth_method_id)?;
+    run_coordinated_acp_probe(key, policy, || {
+        executor.probe_acp(current_dir, env, auth_method_id)
+    })
+    .await
+}
+
 async fn discover_models_for_executor(
+    runner: BaseCodingAgent,
     executor: &CodingAgent,
     current_dir: &Path,
     env: &ExecutionEnv,
 ) -> Result<Option<Vec<String>>, String> {
-    if let Some(probe) = executor
-        .probe_acp(current_dir, env, None)
-        .await
-        .map_err(|err| err.to_string())?
+    if let Some(probe) = coordinated_probe_acp(
+        runner,
+        executor,
+        current_dir,
+        env,
+        None,
+        AcpProbeCachePolicy::Refresh,
+    )
+    .await
+    .map_err(|err| err.to_string())?
         && let Some(models) = probe.model_ids()
     {
         return Ok(Some(models));
@@ -1154,6 +1313,28 @@ fn remove_status_error_stage(error: Option<&str>, stage: &str) -> Option<String>
             .flat_map(str::lines)
             .map(|line| (!line.trim_start().starts_with(&prefix)).then(|| line.to_string())),
     )
+}
+
+fn clear_cached_authentication_required_error(
+    store: &mut AgentRuntimeStore,
+    runner: BaseCodingAgent,
+) {
+    let Some(discovery) = store.discoveries.get_mut(&runner) else {
+        return;
+    };
+    discovery.last_error = merge_status_error_details(
+        discovery
+            .last_error
+            .as_deref()
+            .into_iter()
+            .flat_map(str::lines)
+            .map(|line| {
+                (!line
+                    .to_ascii_lowercase()
+                    .contains("authentication required"))
+                .then(|| line.to_string())
+            }),
+    );
 }
 
 fn split_probe_result<T>(result: Result<Option<T>, String>) -> (Option<T>, Option<String>) {
@@ -1364,7 +1545,7 @@ fn update_store<T>(
 
 #[cfg(test)]
 mod tests {
-    use executors::executors::{AppendPrompt, kimi::KimiCode};
+    use executors::executors::{AppendPrompt, kimi::KimiCode, qoder::QoderCli};
 
     use super::*;
 
@@ -1378,6 +1559,89 @@ mod tests {
             acp_mcp_policy: Default::default(),
             approvals: None,
         })
+    }
+
+    fn test_probe_key(runner: BaseCodingAgent, salt: u8) -> AcpProbeCacheKey {
+        let mut fingerprint = [0; 32];
+        fingerprint[0] = salt;
+        AcpProbeCacheKey {
+            runner,
+            current_dir: PathBuf::from(format!("/openteams-probe-test-{salt}")),
+            auth_method_id: None,
+            execution_fingerprint: fingerprint,
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_identical_acp_probes_share_one_execution() {
+        let key = test_probe_key(BaseCodingAgent::Gemini, 201);
+        ACP_PROBE_CACHE.remove(&key);
+        let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let first_starts = Arc::clone(&starts);
+        let first = run_coordinated_acp_probe(
+            key.clone(),
+            AcpProbeCachePolicy::Reuse,
+            move || async move {
+                first_starts.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                Ok::<Option<AcpCapabilityProbe>, ExecutorError>(None)
+            },
+        );
+        let second_starts = Arc::clone(&starts);
+        let second = run_coordinated_acp_probe(
+            key.clone(),
+            AcpProbeCachePolicy::Refresh,
+            move || async move {
+                second_starts.fetch_add(1, Ordering::SeqCst);
+                Ok::<Option<AcpCapabilityProbe>, ExecutorError>(None)
+            },
+        );
+
+        let (first_result, second_result) = tokio::join!(first, second);
+
+        assert!(first_result.unwrap().is_none());
+        assert!(second_result.unwrap().is_none());
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        ACP_PROBE_CACHE.remove(&key);
+    }
+
+    #[tokio::test]
+    async fn different_acp_probe_keys_for_one_runner_are_serialized() {
+        let first_key = test_probe_key(BaseCodingAgent::Gemini, 202);
+        let second_key = test_probe_key(BaseCodingAgent::Gemini, 203);
+        ACP_PROBE_CACHE.remove(&first_key);
+        ACP_PROBE_CACHE.remove(&second_key);
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let maximum_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let make_probe =
+            |active: Arc<std::sync::atomic::AtomicUsize>,
+             maximum_active: Arc<std::sync::atomic::AtomicUsize>| async move {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                maximum_active.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                Ok::<Option<AcpCapabilityProbe>, ExecutorError>(None)
+            };
+        let first = run_coordinated_acp_probe(first_key.clone(), AcpProbeCachePolicy::Refresh, {
+            let active = Arc::clone(&active);
+            let maximum_active = Arc::clone(&maximum_active);
+            move || make_probe(active, maximum_active)
+        });
+        let second = run_coordinated_acp_probe(second_key.clone(), AcpProbeCachePolicy::Refresh, {
+            let active = Arc::clone(&active);
+            let maximum_active = Arc::clone(&maximum_active);
+            move || make_probe(active, maximum_active)
+        });
+
+        let (first_result, second_result) = tokio::join!(first, second);
+
+        assert!(first_result.is_ok());
+        assert!(second_result.is_ok());
+        assert_eq!(maximum_active.load(Ordering::SeqCst), 1);
+        ACP_PROBE_CACHE.remove(&first_key);
+        ACP_PROBE_CACHE.remove(&second_key);
     }
 
     #[test]
@@ -1557,6 +1821,31 @@ mod tests {
     }
 
     #[test]
+    fn successful_acp_probe_clears_cached_authentication_required_error() {
+        let runner = BaseCodingAgent::QoderCli;
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: Vec::new(),
+                version: Some("qodercli 1.2.3".to_string()),
+                last_checked_at: Utc::now(),
+                last_error: Some(
+                    "[model_discovery] I/O error: Authentication required: Authentication is required\n[version_check] temporary warning"
+                        .to_string(),
+                ),
+            },
+        );
+
+        clear_cached_authentication_required_error(&mut store, runner);
+
+        assert_eq!(
+            store.discoveries[&runner].last_error.as_deref(),
+            Some("[version_check] temporary warning")
+        );
+    }
+
+    #[test]
     fn status_error_details_preserve_each_failed_stage() {
         let merged = merge_status_error_details([
             Some(status_error_detail(
@@ -1588,6 +1877,22 @@ mod tests {
             detail,
             "command=`/Users/test/.local/bin/copilot --version`; operation=execute version command; result=process failed with exit code 1: authentication required"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_runner_skips_runtime_command_resolution() {
+        let mut executor = model_agent(None);
+        let CodingAgent::KimiCode(config) = &mut executor else {
+            panic!("expected KimiCode executor");
+        };
+        config.cmd.base_command_override =
+            Some("openteams-test-command-that-must-not-exist-8dd8c9e9".to_string());
+
+        let result = resolve_runtime_command_for_diagnostics(false, &executor)
+            .await
+            .expect("uninstalled runner should not resolve its command");
+
+        assert!(result.is_none());
     }
 
     #[test]
@@ -1673,6 +1978,38 @@ mod tests {
         );
         assert_eq!(statuses[0].env_summary[0].value, "secret");
         assert_eq!(statuses[0].auth_state, AgentRuntimeAuthState::Authenticated);
+    }
+
+    #[test]
+    fn qoder_runtime_status_recognizes_local_auth_state_file() {
+        let temp = tempfile::tempdir().expect("temporary Qoder home");
+        let auth_dir = temp.path().join(".auth");
+        std::fs::create_dir(&auth_dir).expect("create auth directory");
+        std::fs::write(auth_dir.join("user"), "encrypted-login-state")
+            .expect("write Qoder auth state");
+
+        let runner = BaseCodingAgent::QoderCli;
+        let executor = CodingAgent::QoderCli(QoderCli {
+            append_prompt: AppendPrompt::default(),
+            model: Some("auto".to_string()),
+            acp: None,
+            cmd: CmdOverrides::default(),
+            acp_mcp_policy: Default::default(),
+            approvals: None,
+        });
+        let executor_config = ExecutorConfig::new_with_default(executor);
+        let mut runtime = default_config(runner);
+        runtime.env_json.insert(
+            "QODER_CONFIG_DIR".to_string(),
+            temp.path().to_string_lossy().into_owned(),
+        );
+        let mut store = AgentRuntimeStore::default();
+        store.configs.insert(runner, runtime);
+        let base = executor_config.get_default().expect("Qoder default config");
+
+        let status = build_status(runner, &executor_config, base, &store, true);
+
+        assert_eq!(status.auth_state, AgentRuntimeAuthState::Authenticated);
     }
 
     #[test]

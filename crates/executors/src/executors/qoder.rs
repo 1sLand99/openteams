@@ -43,6 +43,19 @@ const CONFLICTING_FLAGS: &[&str] = &[
     "-w",
 ];
 
+fn qoder_login_state_detected(qoder_home: &Path) -> bool {
+    std::fs::metadata(qoder_home.join(".auth").join("user"))
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+}
+
+fn qoder_config_dir(env: &ExecutionEnv) -> Option<std::path::PathBuf> {
+    env.get("QODER_CONFIG_DIR")
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("QODER_CONFIG_DIR").map(std::path::PathBuf::from))
+        .or_else(|| dirs::home_dir().map(|home| home.join(".qoder")))
+}
+
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
 pub struct QoderCli {
@@ -151,7 +164,7 @@ impl QoderCli {
                 full_access,
                 ..AcpClientServicePolicy::default()
             });
-        if let Some(AcpAuthSelection::MethodId { method_id }) = options.auth {
+        if let Some(method_id) = Self::acp_auth_method_id(&options) {
             harness = harness.with_auth_method_id(method_id);
         }
         let config_overrides = options.config_overrides.as_deref().unwrap_or_default();
@@ -201,13 +214,13 @@ impl QoderCli {
         Ok((harness.with_mcp_servers(effective.servers), allowed_names))
     }
 
-    fn configured_auth_detected(&self) -> bool {
-        let Some(home) = dirs::home_dir() else {
+    fn configured_auth_detected(&self, env: &ExecutionEnv) -> bool {
+        let Some(qoder_home) = qoder_config_dir(env) else {
             return false;
         };
-        let qoder_home = std::env::var_os("QODER_CONFIG_DIR")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| home.join(".qoder"));
+        if qoder_login_state_detected(&qoder_home) {
+            return true;
+        }
         ["credentials.json", "oauth_creds.json", "auth.json"]
             .iter()
             .filter_map(|name| read_json_file(&qoder_home.join(name)))
@@ -223,6 +236,22 @@ impl QoderCli {
                     ],
                 )
             })
+    }
+
+    fn acp_auth_method_id(options: &AcpExecutionOptions) -> Option<&str> {
+        match &options.auth {
+            Some(AcpAuthSelection::MethodId { method_id }) => Some(method_id),
+            Some(AcpAuthSelection::Auto) | None => None,
+        }
+    }
+
+    fn probe_auth_method_id(&self, requested_method_id: Option<&str>) -> Option<String> {
+        requested_method_id.map(str::to_string).or_else(|| {
+            self.acp
+                .as_ref()
+                .and_then(Self::acp_auth_method_id)
+                .map(str::to_string)
+        })
     }
 }
 
@@ -251,7 +280,11 @@ impl StandardCodingAgentExecutor for QoderCli {
 
     fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
         let env = env.clone().with_profile(&self.cmd);
-        self.authentication_detected(&env, QODER_AUTH_ENV_VARS, self.configured_auth_detected())
+        self.authentication_detected(
+            &env,
+            QODER_AUTH_ENV_VARS,
+            self.configured_auth_detected(&env),
+        )
     }
 
     fn use_approvals(&mut self, approvals: Arc<dyn ExecutorApprovalService>) {
@@ -293,10 +326,7 @@ impl StandardCodingAgentExecutor for QoderCli {
         env: &ExecutionEnv,
         auth_method_id: Option<&str>,
     ) -> Result<Option<AcpCapabilityProbe>, ExecutorError> {
-        let configured_auth_method_id = self.acp.as_ref().and_then(|options| match &options.auth {
-            Some(AcpAuthSelection::MethodId { method_id }) => Some(method_id.clone()),
-            _ => None,
-        });
+        let auth_method_id = self.probe_auth_method_id(auth_method_id);
         let allowed = BTreeSet::new();
         Ok(Some(
             super::acp::runtime::probe_acp_command(
@@ -304,9 +334,7 @@ impl StandardCodingAgentExecutor for QoderCli {
                 current_dir,
                 env,
                 &self.cmd,
-                auth_method_id
-                    .map(str::to_string)
-                    .or(configured_auth_method_id),
+                auth_method_id,
             )
             .await?,
         ))
@@ -522,6 +550,72 @@ mod tests {
         assert!(qoder().is_authenticated(&env));
     }
 
+    #[test]
+    fn qoder_acp_auto_and_missing_auth_do_not_request_authentication() {
+        assert_eq!(
+            QoderCli::acp_auth_method_id(&AcpExecutionOptions::default()),
+            None
+        );
+        let options = AcpExecutionOptions {
+            auth: Some(AcpAuthSelection::Auto),
+            ..AcpExecutionOptions::default()
+        };
+        assert_eq!(QoderCli::acp_auth_method_id(&options), None);
+    }
+
+    #[test]
+    fn qoder_acp_preserves_explicit_auth_method() {
+        let options = AcpExecutionOptions {
+            auth: Some(AcpAuthSelection::MethodId {
+                method_id: "enterprise-login".to_string(),
+            }),
+            ..AcpExecutionOptions::default()
+        };
+        assert_eq!(
+            QoderCli::acp_auth_method_id(&options),
+            Some("enterprise-login")
+        );
+        let mut executor = qoder();
+        executor.acp = Some(options);
+        assert_eq!(
+            executor.probe_auth_method_id(None).as_deref(),
+            Some("enterprise-login")
+        );
+        assert_eq!(
+            executor
+                .probe_auth_method_id(Some("diagnostics-login"))
+                .as_deref(),
+            Some("diagnostics-login")
+        );
+    }
+
+    #[test]
+    fn consecutive_auto_probes_do_not_request_authentication() {
+        let executor = qoder();
+
+        for _ in 0..3 {
+            assert_eq!(executor.probe_auth_method_id(None), None);
+        }
+    }
+
+    #[test]
+    fn qoder_login_state_file_marks_configured_auth() {
+        let temp = tempfile::tempdir().expect("temporary Qoder home");
+        let auth_dir = temp.path().join(".auth");
+        std::fs::create_dir(&auth_dir).expect("create auth directory");
+        assert!(!qoder_login_state_detected(temp.path()));
+
+        std::fs::write(auth_dir.join("user"), "encrypted-login-state").expect("write login state");
+        assert!(qoder_login_state_detected(temp.path()));
+
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert(
+            "QODER_CONFIG_DIR",
+            temp.path().to_string_lossy().into_owned(),
+        );
+        assert!(qoder().is_authenticated(&env));
+    }
+
     #[tokio::test]
     async fn model_discovery_contains_all_documented_tiers() {
         let env = ExecutionEnv::new(Default::default(), false, String::new());
@@ -533,5 +627,96 @@ mod tests {
         for tier in ["lite", "efficient", "auto", "performance", "ultimate"] {
             assert!(models.iter().any(|model| model == tier), "{tier}");
         }
+    }
+
+    /// Real ACP probe against the installed `qodercli`.
+    /// Gated behind `QODER_E2E_PROBE=1` so it never runs in CI.
+    #[tokio::test]
+    async fn real_qoder_cli_acp_probe_does_not_request_authentication() {
+        if std::env::var_os("QODER_E2E_PROBE").is_none() {
+            eprintln!("skipping real Qoder CLI probe (set QODER_E2E_PROBE=1 to enable)");
+            return;
+        }
+        let executor = qoder();
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        assert!(
+            executor.is_authenticated(&env),
+            "Qoder must be authenticated via local login state"
+        );
+
+        for i in 1..=3 {
+            let probe = executor
+                .probe_acp(Path::new("."), &env, None)
+                .await
+                .unwrap_or_else(|error| panic!("ACP probe iteration {i} should succeed: {error}"))
+                .expect("probe should return a result");
+
+            assert_eq!(
+                probe.protocol_version, "1",
+                "iteration {i}: protocol version must be v1"
+            );
+            assert!(
+                probe.agent_name.is_some(),
+                "iteration {i}: agent name should be present"
+            );
+            assert!(
+                probe.agent_version.is_some(),
+                "iteration {i}: agent version should be present"
+            );
+
+            let model_ids = probe.model_ids().unwrap_or_else(Vec::new);
+            for tier in ["lite", "efficient", "auto", "performance", "ultimate"] {
+                assert!(
+                    model_ids.iter().any(|m| m == tier),
+                    "iteration {i}: model tier `{tier}` should be advertised"
+                );
+            }
+
+            eprintln!(
+                "probe {i}: agent={:?} version={:?} models={:?} auth_methods={}",
+                probe.agent_name,
+                probe.agent_version,
+                model_ids,
+                probe.auth_methods.len()
+            );
+        }
+    }
+
+    /// Real ACP session new + close against the installed `qodercli`.
+    /// Gated behind `QODER_E2E_PROBE=1`.
+    #[tokio::test]
+    async fn real_qoder_cli_acp_session_new_with_empty_mcp_allowlist() {
+        if std::env::var_os("QODER_E2E_PROBE").is_none() {
+            eprintln!("skipping real Qoder CLI session test (set QODER_E2E_PROBE=1 to enable)");
+            return;
+        }
+        let executor = qoder();
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+        let allowed = BTreeSet::new();
+
+        let builder = executor
+            .build_command_builder(&allowed)
+            .expect("build command with empty MCP allowlist");
+        let command = builder.build_initial().expect("build initial command");
+        let (program, args) = command.clone().into_parts_for_test();
+
+        assert_eq!(program, "qodercli");
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--allowed-mcp-server-names" && pair[1].is_empty()),
+            "empty MCP allowlist must be pinned on the process"
+        );
+
+        let probe = executor
+            .probe_acp(Path::new("."), &env, None)
+            .await
+            .expect("ACP probe should succeed with empty allowlist")
+            .expect("probe should return a result");
+
+        assert!(
+            probe.supports_session_resume || probe.supports_session_load,
+            "agent must support resume or load for follow-up sessions"
+        );
     }
 }

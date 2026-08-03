@@ -522,6 +522,39 @@ export const systemApi = {
   },
 };
 
+const AGENT_RUNTIME_DIAGNOSTICS_CACHE_TTL_MS = 30_000;
+const agentRuntimeDiagnosticsInFlight = new Map<
+  string,
+  Promise<AgentRuntimeDiagnostics>
+>();
+const agentRuntimeDiagnosticsCache = new Map<
+  string,
+  { expiresAt: number; value: AgentRuntimeDiagnostics }
+>();
+let agentRuntimeDiagnosticsCacheGeneration = 0;
+
+const agentRuntimeDiagnosticsKey = (
+  runner: BaseCodingAgent,
+  workspacePath?: string,
+  authMethodId?: string,
+) =>
+  `${runner}\u0000${workspacePath ?? ""}\u0000${authMethodId ?? ""}`;
+
+const invalidateAgentRuntimeDiagnostics = (runner?: BaseCodingAgent) => {
+  agentRuntimeDiagnosticsCacheGeneration += 1;
+  const prefix = runner ? `${runner}\u0000` : null;
+  for (const key of agentRuntimeDiagnosticsCache.keys()) {
+    if (prefix === null || key.startsWith(prefix)) {
+      agentRuntimeDiagnosticsCache.delete(key);
+    }
+  }
+  for (const key of agentRuntimeDiagnosticsInFlight.keys()) {
+    if (prefix === null || key.startsWith(prefix)) {
+      agentRuntimeDiagnosticsInFlight.delete(key);
+    }
+  }
+};
+
 export const agentRuntimeApi = {
   list: async (): Promise<AgentRuntimeListResponse> => {
     const r = await makeRequest("/api/agents/runtime", { cache: "no-store" });
@@ -531,7 +564,9 @@ export const agentRuntimeApi = {
     const r = await makeRequest("/api/agents/runtime/refresh", {
       method: "POST",
     });
-    return handleApiResponse<AgentRuntimeRefreshResponse>(r);
+    const result = await handleApiResponse<AgentRuntimeRefreshResponse>(r);
+    invalidateAgentRuntimeDiagnostics();
+    return result;
   },
   updateConfig: async (
     runner: BaseCodingAgent,
@@ -541,15 +576,35 @@ export const agentRuntimeApi = {
       `/api/agents/runtime/${encodeURIComponent(runner)}`,
       { method: "PATCH", body: jsonBody(data) },
     );
-    return handleApiResponse<AgentRuntimeStatus>(r);
+    const result = await handleApiResponse<AgentRuntimeStatus>(r);
+    invalidateAgentRuntimeDiagnostics(runner);
+    return result;
   },
-  getDiagnostics: async (
+  getDiagnostics: (
     runner: BaseCodingAgent,
     options?: {
       workspacePath?: string;
       authMethodId?: string;
     },
   ): Promise<AgentRuntimeDiagnostics> => {
+    const requestKey = agentRuntimeDiagnosticsKey(
+      runner,
+      options?.workspacePath,
+      options?.authMethodId,
+    );
+    const now = Date.now();
+    for (const [key, entry] of agentRuntimeDiagnosticsCache) {
+      if (entry.expiresAt <= now) {
+        agentRuntimeDiagnosticsCache.delete(key);
+      }
+    }
+    const cached = agentRuntimeDiagnosticsCache.get(requestKey);
+    if (cached) {
+      return Promise.resolve(cached.value);
+    }
+    const existing = agentRuntimeDiagnosticsInFlight.get(requestKey);
+    if (existing) return existing;
+
     const query = new URLSearchParams();
     if (options?.workspacePath) {
       query.set("workspace_path", options.workspacePath);
@@ -558,11 +613,33 @@ export const agentRuntimeApi = {
       query.set("auth_method_id", options.authMethodId);
     }
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
-    const r = await makeRequest(
+    const generation = agentRuntimeDiagnosticsCacheGeneration;
+    const request = makeRequest(
       `/api/agents/runtime/${encodeURIComponent(runner)}/diagnostics${suffix}`,
       { cache: "no-store" },
+    ).then((response) =>
+      handleApiResponse<AgentRuntimeDiagnostics>(response),
     );
-    return handleApiResponse<AgentRuntimeDiagnostics>(r);
+    agentRuntimeDiagnosticsInFlight.set(requestKey, request);
+    void request.then(
+      (value) => {
+        if (generation === agentRuntimeDiagnosticsCacheGeneration) {
+          agentRuntimeDiagnosticsCache.set(requestKey, {
+            expiresAt: Date.now() + AGENT_RUNTIME_DIAGNOSTICS_CACHE_TTL_MS,
+            value,
+          });
+        }
+        if (agentRuntimeDiagnosticsInFlight.get(requestKey) === request) {
+          agentRuntimeDiagnosticsInFlight.delete(requestKey);
+        }
+      },
+      () => {
+        if (agentRuntimeDiagnosticsInFlight.get(requestKey) === request) {
+          agentRuntimeDiagnosticsInFlight.delete(requestKey);
+        }
+      },
+    );
+    return request;
   },
 };
 
