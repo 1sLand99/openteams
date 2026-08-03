@@ -703,6 +703,8 @@ mod tests {
         assert!(!prompt.contains("\"leadReview\": \"optional boolean"));
         assert!(prompt.contains("Do not output or infer `leadReview` or `userReview`."));
         assert!(prompt.contains("`globals.default_retry` and optional node `maxRetry`"));
+        assert!(prompt.contains("Use `3` as the default"));
+        assert!(prompt.contains("defaults to 3"));
         assert!(prompt.contains("`0` means one initial attempt and no rework"));
         assert!(prompt.contains("Every edge must use `data.kind: \"hard\"`"));
         assert!(prompt.contains("Do not output top-level `policies` or `loops`"));

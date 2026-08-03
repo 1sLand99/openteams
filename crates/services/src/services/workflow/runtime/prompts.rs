@@ -131,7 +131,7 @@ pub(crate) static PLAN_SCHEMA_DEFINITION: &str = r#"{
   },
   "globals": {
     "interrupt_mode": "cooperative",
-    "default_retry": 1,
+    "default_retry": 3,
     "global_pause_supported": true
   },
   "nodes": [
@@ -149,7 +149,7 @@ pub(crate) static PLAN_SCHEMA_DEFINITION: &str = r#"{
         "verificationCommands": ["string, required non-empty for task nodes"],
         "completionEvidence": ["string, required non-empty for task nodes"],
         "interruptible": true,
-        "maxRetry": 1,
+        "maxRetry": 3,
         "status": "optional string",
         "reviewScope": ["optional node_id list, review nodes only"]
       }
@@ -188,7 +188,7 @@ Hard requirements:
 12. A `review` node without a non-empty `reviewScope` is one independent review step. It does not create a structured rejection-to-rework loop.
 13. Only a review node with a non-empty `reviewScope` creates a retry loop. `reviewScope` is the list of **task** node ids to re-run on rejection. All listed tasks must be upstream predecessors; include any intermediate tasks between a scoped task and the review. Each task may appear in at most one `reviewScope`. Never include result/review/unknown ids or downstream nodes.
 14. Do not output or infer `leadReview` or `userReview`. The system writes those fields from frontend card selections.
-15. Retry budgets are controlled by `globals.default_retry` and optional node `maxRetry`. Both must be integers from 0 through 10. `maxRetry` overrides the global value for that node. A retry budget counts rework after the initial execution/review: `0` means one initial attempt and no rework. For a loop review node, this gives one initial review plus at most `maxRetry` rework attempts.
+15. Retry budgets are controlled by `globals.default_retry` and optional node `maxRetry`. Both must be integers from 0 through 10. Use `3` as the default unless the task has a concrete reason to use another value. `maxRetry` overrides the global value for that node. A retry budget counts rework after the initial execution/review: `0` means one initial attempt and no rework. For a loop review node, this gives one initial review plus at most `maxRetry` rework attempts.
 16. Every edge must use `data.kind: "hard"` or omit `data`; soft dependencies are not supported by the scheduler.
 17. Do not output top-level `policies` or `loops`; they are legacy compatibility fields with no runtime consumer. Your output is validated, compiled, and may start execution directly.
 18. Every `task` node MUST define a verifiable contract in `nodes[].data`: non-empty `acceptance` (acceptance criteria), `outputs` (expected deliverable paths), `checklist` (verifiable work items), `verificationCommands` (commands or methods that prove the work, e.g. test/build commands), and `completionEvidence` (evidence the executor must produce, e.g. test output summaries). `review` and `result` nodes are exempt from these field requirements.
@@ -200,7 +200,7 @@ pub(crate) static PLAN_STATIC_CONSTRAINTS: &str = r#"## Additional Static Constr
 
 - `version` must be string `"1"`.
 - `agents.available` and `nodes[].data.agentId` may only use the `agent_id` values from the provided Available agents JSON.
-- `globals` and optional node/edge fields may be omitted when unnecessary. Omitted retry values inherit `globals.default_retry`, which defaults to 1.
+- `globals` and optional node/edge fields may be omitted when unnecessary. Omitted retry values inherit `globals.default_retry`, which defaults to 3.
 - Do not emit top-level `policies` or `loops`.
 - Edge dependency kind is hard-only; omit `data` or use `{ "kind": "hard" }`.
 - Required `task` contract fields may not be omitted.

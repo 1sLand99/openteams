@@ -99,6 +99,28 @@ mod tests {
     }
 
     #[test]
+    fn test_compile_uses_default_retry_when_plan_omits_it() {
+        let plan_json = sample_plan_json();
+        let graph = WorkflowCompiler::compile_from_json(&plan_json, &agents()).unwrap();
+        assert!(
+            graph
+                .steps
+                .iter()
+                .all(|step| step.max_retry == DEFAULT_WORKFLOW_RETRY)
+        );
+
+        let mut plan: serde_json::Value = serde_json::from_str(&plan_json).unwrap();
+        plan["globals"] = serde_json::json!({});
+        let graph = WorkflowCompiler::compile_from_json(&plan.to_string(), &agents()).unwrap();
+        assert!(
+            graph
+                .steps
+                .iter()
+                .all(|step| step.max_retry == DEFAULT_WORKFLOW_RETRY)
+        );
+    }
+
+    #[test]
     fn test_compile_inherits_default_retry_and_honors_node_override() {
         let mut plan: serde_json::Value = serde_json::from_str(&sample_plan_json()).unwrap();
         plan["globals"] = serde_json::json!({ "default_retry": 3 });

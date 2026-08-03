@@ -341,11 +341,12 @@ fn default_interrupt_mode() -> String {
 }
 
 fn default_retry() -> u32 {
-    1
+    DEFAULT_WORKFLOW_RETRY
 }
 
 /// Retry budgets count rework attempts after the initial execution/review.
 /// Zero therefore means one initial attempt and no automatic rework.
+pub const DEFAULT_WORKFLOW_RETRY: u32 = 3;
 pub const MAX_WORKFLOW_RETRY: u32 = 10;
 
 fn default_true() -> bool {

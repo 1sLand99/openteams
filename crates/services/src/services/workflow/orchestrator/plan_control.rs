@@ -160,7 +160,7 @@ impl WorkflowOrchestrator {
                     max_retry: max_retry_by_step_key
                         .get(n.id.as_str())
                         .copied()
-                        .unwrap_or(1),
+                        .unwrap_or(DEFAULT_WORKFLOW_RETRY as i32),
                     loop_key: loop_key_by_step_key
                         .get(&n.id)
                         .cloned()

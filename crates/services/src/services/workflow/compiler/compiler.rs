@@ -26,7 +26,11 @@ impl WorkflowCompiler {
             return Err(CompileError::ValidationFailed(error_messages.join("; ")));
         }
         // 2. Compile nodes into CompiledStep.
-        let default_retry = plan.globals.as_ref().map(|g| g.default_retry).unwrap_or(1);
+        let default_retry = plan
+            .globals
+            .as_ref()
+            .map(|globals| globals.default_retry)
+            .unwrap_or(DEFAULT_WORKFLOW_RETRY);
 
         let mut steps: Vec<CompiledStep> = Vec::with_capacity(plan.nodes.len());
         let topo_order = Self::topological_sort(plan);

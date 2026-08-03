@@ -189,6 +189,8 @@ mod tests {
         assert!(prompt.contains("code-guidelines"));
         assert!(prompt.contains("Return exactly one workflow plan JSON object"));
         assert!(prompt.contains("`globals.default_retry` and optional node `maxRetry`"));
+        assert!(prompt.contains("Use `3` as the default"));
+        assert!(prompt.contains("defaults to 3"));
         assert!(prompt.contains("Do not output top-level `policies` or `loops`"));
         assert!(prompt.contains("without a non-empty `reviewScope` is one independent review step"));
         assert!(!prompt.contains("\"kind\": \"hard | soft\""));
