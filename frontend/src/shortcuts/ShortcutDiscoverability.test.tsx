@@ -70,6 +70,12 @@ assert.ok(palette.includes('executeCommand(command.id'));
 assert.ok(palette.includes('flex h-fit max-h-[70vh]'));
 assert.ok(palette.includes('bg-[var(--surface-1)]'));
 assert.equal(palette.includes('bg-white'), false);
+assert.ok(
+  palette.includes('onMouseDown') &&
+    palette.includes('dialogRef.current') &&
+    palette.includes('!dialogRef.current.contains(target)'),
+  'command palette dismisses when clicking outside the dialog',
+);
 assert.ok(help.includes('data-shortcut-help'));
 assert.ok(help.includes('data-command-id={command.id}'));
 assert.ok(help.includes('groupCommandsByCategory(definitions)'));
