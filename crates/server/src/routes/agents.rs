@@ -11,7 +11,8 @@ use serde::Deserialize;
 use services::services::agent_runtime::{
     AgentRuntimeDiagnostics, AgentRuntimeError, AgentRuntimeListResponse,
     AgentRuntimeRefreshResponse, AgentRuntimeStatus, UpdateAgentRuntimeConfig,
-    list_runtime_statuses, refresh_runtime_discovery, runtime_diagnostics, update_runtime_config,
+    list_runtime_statuses, refresh_runtime_discovery, refresh_runtime_statuses,
+    runtime_diagnostics, update_runtime_config,
 };
 use utils::response::ApiResponse;
 
@@ -20,7 +21,9 @@ use crate::{DeploymentImpl, error::ApiError};
 pub fn router() -> Router<DeploymentImpl> {
     Router::new()
         .route("/agents/runtime", get(get_runtime))
-        .route("/agents/runtime/refresh", post(refresh_runtime))
+        .route("/agents/runtime/refresh", post(refresh_runtime_heavy))
+        .route("/agents/runtime/refresh/heavy", post(refresh_runtime_heavy))
+        .route("/agents/runtime/refresh/light", post(refresh_runtime_light))
         .route("/agents/runtime/{runner}", patch(patch_runtime_config))
         .route(
             "/agents/runtime/{runner}/diagnostics",
@@ -39,10 +42,18 @@ async fn get_runtime() -> Result<ResponseJson<ApiResponse<AgentRuntimeListRespon
     Ok(ResponseJson(ApiResponse::success(response)))
 }
 
-async fn refresh_runtime()
+async fn refresh_runtime_heavy()
 -> Result<ResponseJson<ApiResponse<AgentRuntimeRefreshResponse>>, ApiError> {
     let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let response = refresh_runtime_discovery(&current_dir)
+        .await
+        .map_err(api_error_from_runtime)?;
+    Ok(ResponseJson(ApiResponse::success(response)))
+}
+
+async fn refresh_runtime_light()
+-> Result<ResponseJson<ApiResponse<AgentRuntimeRefreshResponse>>, ApiError> {
+    let response = refresh_runtime_statuses()
         .await
         .map_err(api_error_from_runtime)?;
     Ok(ResponseJson(ApiResponse::success(response)))

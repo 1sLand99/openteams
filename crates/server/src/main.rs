@@ -4,7 +4,6 @@ use anyhow::{self, Error as AnyhowError};
 use deployment::{Deployment, DeploymentError};
 use server::{DeploymentImpl, npx_browser_lifecycle, routes};
 use services::services::{
-    agent_runtime::refresh_runtime_discovery,
     build_stats::model_pricing_sync::ModelPricingSyncService,
     config::{TeamTemplateCatalogService, TeamTemplateCatalogSyncResult, load_config_from_file},
     container::ContainerService,
@@ -173,16 +172,6 @@ async fn main() -> Result<(), OpenTeamsError> {
     } else {
         tracing::info!("Automatic legacy project migration disabled by configuration");
     }
-
-    let runtime_discovery_dir = std::env::current_dir().unwrap_or_else(|err| {
-        tracing::warn!("Failed to resolve current directory for runtime discovery: {err}");
-        asset_dir()
-    });
-    tokio::spawn(async move {
-        if let Err(err) = refresh_runtime_discovery(&runtime_discovery_dir).await {
-            tracing::warn!("Failed to refresh executor models at startup: {err}");
-        }
-    });
 
     // Keep model pricing sourced from external registries instead of local defaults.
     let pricing_pool = deployment.db().pool.clone();

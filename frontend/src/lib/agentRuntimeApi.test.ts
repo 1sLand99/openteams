@@ -54,6 +54,12 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   if (init?.method === 'PATCH') {
     return successResponse({ runner_type: 'GEMINI' });
   }
+  if (init?.method === 'POST' && url.includes('/agents/runtime/refresh/light')) {
+    return successResponse({ runners: [], errors: [] });
+  }
+  if (init?.method === 'POST' && url.includes('/agents/runtime/refresh')) {
+    return successResponse({ runners: [], errors: [] });
+  }
   throw new Error(`Unexpected request: ${url}`);
 }) as typeof fetch;
 
@@ -108,6 +114,35 @@ await agentRuntimeApi.getDiagnostics('GEMINI', {
 check(
   'saving runtime config invalidates cached diagnostics',
   diagnosticsFetches === 3,
+  diagnosticsFetches,
+);
+
+await agentRuntimeApi.getDiagnostics('GEMINI', {
+  workspacePath: '/workspace/b',
+});
+check(
+  'diagnostics are cached again before a light refresh',
+  diagnosticsFetches === 4,
+  diagnosticsFetches,
+);
+
+await agentRuntimeApi.refreshLight();
+await agentRuntimeApi.getDiagnostics('GEMINI', {
+  workspacePath: '/workspace/b',
+});
+check(
+  'light refresh reuses cached diagnostics without a new probe',
+  diagnosticsFetches === 4,
+  diagnosticsFetches,
+);
+
+await agentRuntimeApi.refresh();
+await agentRuntimeApi.getDiagnostics('GEMINI', {
+  workspacePath: '/workspace/b',
+});
+check(
+  'explicit heavy refresh invalidates cached diagnostics',
+  diagnosticsFetches === 5,
   diagnosticsFetches,
 );
 

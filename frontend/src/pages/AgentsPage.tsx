@@ -1055,6 +1055,23 @@ function ModelConfigField({
 
 /* ---------- Embedded agent configuration sidebar ---------- */
 
+// Sidebar diagnostics are probed once per runner and then reused for the rest
+// of the session; only an explicit refresh or a config save invalidates the
+// stored snapshot and allows a new probe. Applies uniformly to every CLI
+// runner, independent of protocol.
+const sidebarDiagnosticsStore = new Map<
+  BaseCodingAgent,
+  AgentRuntimeDiagnostics
+>();
+
+const invalidateSidebarDiagnostics = (runner?: BaseCodingAgent) => {
+  if (runner) {
+    sidebarDiagnosticsStore.delete(runner);
+  } else {
+    sidebarDiagnosticsStore.clear();
+  }
+};
+
 function AgentConfigSidebar({
   runner,
   saveError,
@@ -1327,6 +1344,13 @@ function AgentConfigSidebar({
   }, [formData, envText, envDirty, isDirty, runAutoSave]);
 
   useEffect(() => {
+    const cached = sidebarDiagnosticsStore.get(runner.runner_type);
+    if (cached) {
+      setDiagnostics(cached);
+      setDiagnosticsError(null);
+      setDiagnosticsLoading(false);
+      return;
+    }
     let active = true;
     setDiagnostics(null);
     setDiagnosticsError(null);
@@ -1335,6 +1359,7 @@ function AgentConfigSidebar({
     agentRuntimeApi
       .getDiagnostics(runner.runner_type)
       .then((result) => {
+        sidebarDiagnosticsStore.set(runner.runner_type, result);
         if (active) {
           setDiagnostics(result);
           onDiagnosticsLoadedRef.current(result);
@@ -1793,8 +1818,9 @@ export function AgentsPage() {
     void loadRuntime();
   }, [loadRuntime]);
 
-  // Re-detect agents when the app regains focus, so installs or sign-ins
-  // finished in an external terminal are picked up without a manual refresh.
+  // Re-check cached agent runtime status when the app regains focus. This
+  // lightweight refresh never spawns CLI processes and must not bump
+  // refreshRevision, so an open sidebar keeps its cached diagnostics.
   useEffect(() => {
     const handleWindowFocus = () => {
       const now = Date.now();
@@ -1808,9 +1834,8 @@ export function AgentsPage() {
       lastFocusRecheckRef.current = now;
       void (async () => {
         try {
-          const response = await agentRuntimeApi.refresh();
+          const response = await agentRuntimeApi.refreshLight();
           updateRuntimeRunners(response.runners);
-          setRefreshRevision((current) => current + 1);
         } catch {
           // Silent background recheck; explicit refresh surfaces errors.
         }
@@ -1849,6 +1874,7 @@ export function AgentsPage() {
       updateRuntimeRunners(response.runners, { notifyErrors: true });
       setRuntimeLoaded(true);
       setLoadError(null);
+      invalidateSidebarDiagnostics();
       setRefreshRevision((current) => current + 1);
       setNotice(
         response.errors.length > 0
@@ -1908,6 +1934,7 @@ export function AgentsPage() {
         env_json: envJson,
         executor_options: formData as JsonValue,
       });
+      invalidateSidebarDiagnostics(runner);
       replaceRuntimeRunner(updated);
       setSelectedRunner((current) =>
         current?.runner_type === updated.runner_type ? updated : current,

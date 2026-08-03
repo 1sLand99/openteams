@@ -117,6 +117,28 @@ assert.match(
   source,
   /const handleRefreshConfig = async \(\) => \{[\s\S]*?await agentRuntimeApi\.refresh\(\)[\s\S]*?setRefreshRevision/u,
 );
+const focusEffect = source.slice(
+  source.indexOf('const handleWindowFocus'),
+  source.indexOf('window.addEventListener("focus"'),
+);
+assert.match(focusEffect, /agentRuntimeApi\.refreshLight\(\)/u);
+assert.doesNotMatch(focusEffect, /agentRuntimeApi\.refresh\(\)/u);
+assert.doesNotMatch(focusEffect, /setRefreshRevision/u);
+assert.match(source, /sidebarDiagnosticsStore\.get\(runner\.runner_type\)/u);
+assert.match(
+  source,
+  /sidebarDiagnosticsStore\.set\(runner\.runner_type, result\)/u,
+);
+const explicitRefreshHandler = source.slice(
+  source.indexOf('const handleRefreshConfig'),
+  source.indexOf('const handleDiagnosticsLoaded'),
+);
+assert.match(explicitRefreshHandler, /invalidateSidebarDiagnostics\(\)/u);
+const saveHandler = source.slice(
+  source.indexOf('const handleSave'),
+  source.indexOf('const handleOpenConfig'),
+);
+assert.match(saveHandler, /invalidateSidebarDiagnostics\(runner\)/u);
 const headerRefreshButton = source.slice(
   source.indexOf('onClick={() => void handleRefreshConfig()}'),
   source.indexOf('</button>', source.indexOf('onClick={() => void handleRefreshConfig()}')),
