@@ -568,6 +568,12 @@ export const agentRuntimeApi = {
     invalidateAgentRuntimeDiagnostics();
     return result;
   },
+  refreshLight: async (): Promise<AgentRuntimeRefreshResponse> => {
+    const r = await makeRequest("/api/agents/runtime/refresh/light", {
+      method: "POST",
+    });
+    return handleApiResponse<AgentRuntimeRefreshResponse>(r);
+  },
   updateConfig: async (
     runner: BaseCodingAgent,
     data: UpdateAgentRuntimeConfig,
