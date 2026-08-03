@@ -20,6 +20,40 @@ struct MessageAttachmentContext {
     attachments: Vec<ReferenceAttachment>,
 }
 
+impl MessageAttachmentContext {
+    async fn executor_images(&self) -> Vec<ExecutorPromptImage> {
+        const MAX_ACP_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+        let mut images = Vec::new();
+        for attachment in &self.attachments {
+            let Some(mime_type) = attachment
+                .mime_type
+                .as_deref()
+                .filter(|mime| mime.starts_with("image/"))
+            else {
+                continue;
+            };
+            let path = PathBuf::from(&attachment.local_path);
+            let Ok(metadata) = fs::metadata(&path).await else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.len() > MAX_ACP_IMAGE_BYTES {
+                continue;
+            }
+            let Ok(data) = fs::read(&path).await else {
+                continue;
+            };
+            images.push(ExecutorPromptImage {
+                data: base64::engine::general_purpose::STANDARD.encode(data),
+                mime_type: mime_type.to_string(),
+                // The inline data is authoritative; do not expose the host's
+                // absolute attachment path to the Agent process.
+                uri: None,
+            });
+        }
+        images
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct WorkspaceObservedPathEntry {
     path: String,

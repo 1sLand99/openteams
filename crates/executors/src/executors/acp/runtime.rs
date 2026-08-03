@@ -11,9 +11,9 @@ use agent_client_protocol::{
         ProtocolVersion,
         v1::{
             AuthenticateRequest, BooleanConfigOptionCapabilities, CancelNotification,
-            ClientCapabilities, ClientSessionCapabilities, CloseSessionRequest,
-            CreateTerminalRequest, DeleteSessionRequest, FileSystemCapabilities, Implementation,
-            InitializeRequest, KillTerminalRequest, LoadSessionRequest, McpServer,
+            ClientCapabilities, ClientSessionCapabilities, CloseSessionRequest, ContentBlock,
+            CreateTerminalRequest, DeleteSessionRequest, FileSystemCapabilities, ImageContent,
+            Implementation, InitializeRequest, KillTerminalRequest, LoadSessionRequest, McpServer,
             NewSessionRequest, PromptRequest, ReadTextFileRequest, ReleaseTerminalRequest,
             RequestPermissionRequest, ResumeSessionRequest, SessionConfigKind, SessionConfigOption,
             SessionConfigOptionCategory, SessionConfigOptionValue,
@@ -39,7 +39,7 @@ use crate::{
     approvals::ExecutorApprovalService,
     command::{CmdOverrides, CommandParts},
     env::ExecutionEnv,
-    executors::{ExecutorError, ExecutorExitResult, SpawnedChild},
+    executors::{ExecutorError, ExecutorExitResult, ExecutorPrompt, SpawnedChild},
     model_identity::model_id_match_score,
 };
 
@@ -183,9 +183,34 @@ impl AcpAgentHarness {
         cmd_overrides: &CmdOverrides,
         approvals: Option<Arc<dyn ExecutorApprovalService>>,
     ) -> Result<SpawnedChild, ExecutorError> {
+        let display_text = prompt.clone();
         self.spawn_internal(
             current_dir,
-            prompt,
+            vec![ContentBlock::Text(TextContent::new(prompt))],
+            display_text,
+            None,
+            command_parts,
+            env,
+            cmd_overrides,
+            approvals,
+        )
+        .await
+    }
+
+    pub async fn spawn_structured_with_command(
+        &self,
+        current_dir: &Path,
+        prompt: ExecutorPrompt,
+        command_parts: CommandParts,
+        env: &ExecutionEnv,
+        cmd_overrides: &CmdOverrides,
+        approvals: Option<Arc<dyn ExecutorApprovalService>>,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        let (blocks, display_text) = structured_prompt_blocks(prompt);
+        self.spawn_internal(
+            current_dir,
+            blocks,
+            display_text,
             None,
             command_parts,
             env,
@@ -206,9 +231,36 @@ impl AcpAgentHarness {
         cmd_overrides: &CmdOverrides,
         approvals: Option<Arc<dyn ExecutorApprovalService>>,
     ) -> Result<SpawnedChild, ExecutorError> {
+        let display_text = prompt.clone();
         self.spawn_internal(
             current_dir,
-            prompt,
+            vec![ContentBlock::Text(TextContent::new(prompt))],
+            display_text,
+            Some(session_id.to_string()),
+            command_parts,
+            env,
+            cmd_overrides,
+            approvals,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn_follow_up_structured_with_command(
+        &self,
+        current_dir: &Path,
+        prompt: ExecutorPrompt,
+        session_id: &str,
+        command_parts: CommandParts,
+        env: &ExecutionEnv,
+        cmd_overrides: &CmdOverrides,
+        approvals: Option<Arc<dyn ExecutorApprovalService>>,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        let (blocks, display_text) = structured_prompt_blocks(prompt);
+        self.spawn_internal(
+            current_dir,
+            blocks,
+            display_text,
             Some(session_id.to_string()),
             command_parts,
             env,
@@ -222,7 +274,8 @@ impl AcpAgentHarness {
     async fn spawn_internal(
         &self,
         current_dir: &Path,
-        prompt: String,
+        prompt: Vec<ContentBlock>,
+        prompt_text: String,
         existing_session: Option<String>,
         command_parts: CommandParts,
         env: &ExecutionEnv,
@@ -252,6 +305,7 @@ impl AcpAgentHarness {
             current_dir.to_path_buf(),
             existing_session,
             prompt,
+            prompt_text,
             exit_tx,
             approvals,
             env.vars.clone(),
@@ -272,7 +326,8 @@ impl AcpAgentHarness {
         child: &mut AsyncGroupChild,
         cwd: PathBuf,
         existing_session: Option<String>,
-        prompt: String,
+        prompt: Vec<ContentBlock>,
+        prompt_text: String,
         exit_signal: tokio::sync::oneshot::Sender<ExecutorExitResult>,
         approvals: Option<Arc<dyn ExecutorApprovalService>>,
         terminal_env: std::collections::HashMap<String, String>,
@@ -414,6 +469,7 @@ impl AcpAgentHarness {
                             &cwd,
                             existing_session,
                             prompt,
+                            prompt_text,
                             config_for_connection,
                             startup_for_connection,
                             output_for_connection,
@@ -672,6 +728,7 @@ async fn probe_acp_command_inner(
                             .collect(),
                         supports_session_list: session.list.is_some(),
                         supports_session_resume: session.resume.is_some(),
+                        supports_session_load: initialize.agent_capabilities.load_session,
                         supports_session_close: supports_close,
                         supports_session_delete: supports_delete,
                         supports_additional_directories: session.additional_directories.is_some(),
@@ -897,7 +954,8 @@ async fn run_connection(
     client: &AcpClient,
     cwd: &Path,
     existing_session: Option<String>,
-    prompt: String,
+    prompt: Vec<ContentBlock>,
+    prompt_text: String,
     config: AcpRunConfig,
     startup_tx: StartupSender,
     output: AcpOutput,
@@ -925,6 +983,14 @@ async fn run_connection(
         );
     }
     let negotiated = super::session::AcpNegotiatedState::from_initialize(&initialize);
+    if prompt
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image(_)))
+        && !negotiated.agent_capabilities.prompt_capabilities.image
+    {
+        return Err(agent_client_protocol::Error::invalid_params()
+            .data("ACP Agent does not advertise image prompt support"));
+    }
     if let Some(agent_info) = &negotiated.agent_info {
         tracing::debug!(
             agent_name = %agent_info.name,
@@ -1042,16 +1108,11 @@ async fn run_connection(
             .map_err(|_| agent_client_protocol::Error::internal_error())?;
     }
     client.begin_token_usage_turn().await;
-    client.record_user_prompt_event(&prompt).await;
+    client.record_user_prompt_event(&prompt_text).await;
     send_startup(&startup_tx, Ok(()));
 
     let request = connection
-        .send_request(PromptRequest::new(
-            session_id.clone(),
-            vec![agent_client_protocol::schema::v1::ContentBlock::Text(
-                TextContent::new(prompt),
-            )],
-        ))
+        .send_request(PromptRequest::new(session_id.clone(), prompt))
         .block_task();
     tokio::pin!(request);
     let response = tokio::select! {
@@ -1079,6 +1140,16 @@ async fn run_connection(
         .await
         .map_err(|_| agent_client_protocol::Error::internal_error())?;
     Ok(())
+}
+
+fn structured_prompt_blocks(prompt: ExecutorPrompt) -> (Vec<ContentBlock>, String) {
+    let display_text = prompt.text.clone();
+    let mut blocks = Vec::with_capacity(1 + prompt.images.len());
+    blocks.push(ContentBlock::Text(TextContent::new(prompt.text)));
+    blocks.extend(prompt.images.into_iter().map(|image| {
+        ContentBlock::Image(ImageContent::new(image.data, image.mime_type).uri(image.uri))
+    }));
+    (blocks, display_text)
 }
 
 async fn apply_session_preferences(
@@ -1510,6 +1581,23 @@ mod tests {
     use agent_client_protocol::schema::v1::SessionConfigSelectOption;
 
     use super::*;
+    use crate::executors::ExecutorPromptImage;
+
+    #[test]
+    fn structured_prompt_preserves_text_and_image_blocks() {
+        let (blocks, display) = structured_prompt_blocks(ExecutorPrompt {
+            text: "inspect this".to_string(),
+            images: vec![ExecutorPromptImage {
+                data: "aGVsbG8=".to_string(),
+                mime_type: "image/png".to_string(),
+                uri: Some("attachment.png".to_string()),
+            }],
+        });
+        assert_eq!(display, "inspect this");
+        assert!(matches!(&blocks[0], ContentBlock::Text(text) if text.text == "inspect this"));
+        assert!(matches!(&blocks[1], ContentBlock::Image(image)
+            if image.mime_type == "image/png" && image.uri.as_deref() == Some("attachment.png")));
+    }
 
     #[test]
     fn config_value_must_be_advertised_by_select() {

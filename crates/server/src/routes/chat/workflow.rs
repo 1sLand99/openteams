@@ -15,14 +15,12 @@ use db::models::{
     chat_session_agent::ChatSessionAgent,
     workflow_execution::WorkflowExecution,
     workflow_loop::WorkflowLoop,
-    workflow_plan::{CreateWorkflowPlan, WorkflowPlan},
-    workflow_plan_revision::{CreateWorkflowPlanRevision, WorkflowPlanRevision},
+    workflow_plan::WorkflowPlan,
     workflow_step::WorkflowStep,
     workflow_step_review::WorkflowStepReview,
     workflow_transcript::WorkflowTranscript,
     workflow_types::{
-        ReviewVerdict, ReviewerType, WorkflowExecutionStatus, WorkflowPlanJson, WorkflowPlanStatus,
-        WorkflowRevisionEditor, WorkflowStepStatus, WorkflowValidationStatus,
+        ReviewVerdict, ReviewerType, WorkflowExecutionStatus, WorkflowPlanJson, WorkflowStepStatus,
         to_workflow_wire_value,
     },
 };
@@ -30,25 +28,14 @@ use deployment::Deployment;
 use serde::{Deserialize, Serialize};
 use services::services::{
     build_stats::token_cost_stats::TokenCostStatsService,
-    config,
     workflow::{
-        workflow_analytics,
-        workflow_compiler::WorkflowCompiler,
-        workflow_orchestrator::{
-            WorkflowOrchestrator, workflow_agent_id_map, workflow_plan_agent_id,
-            workflow_valid_agent_ids,
-        },
-        workflow_runtime::{
-            WorkflowCardAgent, WorkflowCardProjection, build_plan_generation_prompt,
-            extract_json_payload, resolve_lead_agent, resolve_workflow_goal,
-            resolve_workflow_response_language_instruction, run_workflow_agent_prompt,
-        },
-        workflow_validator,
+        workflow_analytics, workflow_orchestrator::WorkflowOrchestrator,
+        workflow_runtime::WorkflowCardProjection,
     },
 };
 use sqlx::SqlitePool;
 use ts_rs::TS;
-use utils::{assets::config_path, response::ApiResponse};
+use utils::response::ApiResponse;
 use uuid::Uuid;
 
 use crate::{
@@ -56,17 +43,6 @@ use crate::{
     error::ApiError,
     routes::build_stats::{WorkflowStepTokenEntry, WorkflowStepTokenUsageResponse},
 };
-
-#[derive(Debug, Deserialize, TS)]
-pub struct GeneratePlanAndRunRequest {
-    pub user_goal: Option<String>,
-}
-
-#[derive(Debug, Serialize, TS)]
-pub struct GeneratePlanAndRunResponse {
-    pub execution_id: Uuid,
-    pub workflow_card_message: db::models::chat_message::ChatMessage,
-}
 
 #[derive(Debug, Serialize, TS)]
 pub struct RetryPlanGenerationResponse {
@@ -329,231 +305,6 @@ pub async fn get_workflow_status(
             pending_workflow_review_id,
         },
     )))
-}
-
-pub async fn generate_plan_and_run(
-    Extension(session): Extension<ChatSession>,
-    State(deployment): State<DeploymentImpl>,
-    Json(payload): Json<GeneratePlanAndRunRequest>,
-) -> Result<Response, ApiError> {
-    let pool = &deployment.db().pool;
-
-    if !WorkflowExecution::find_generation_blocking_by_session(pool, session.id)
-        .await?
-        .is_empty()
-    {
-        return Ok((
-            StatusCode::CONFLICT,
-            ResponseJson(ApiResponse::<GeneratePlanAndRunResponse>::error(
-                "A workflow execution is already active in this session.",
-            )),
-        )
-            .into_response());
-    }
-
-    let messages = ChatMessage::find_by_session_id(pool, session.id, None).await?;
-    let user_goal =
-        resolve_workflow_goal(payload.user_goal.as_deref(), &messages).ok_or_else(|| {
-            ApiError::BadRequest(
-                "Workflow goal is required. Add a user message first or provide user_goal."
-                    .to_string(),
-            )
-        })?;
-    let source_message_id = messages
-        .iter()
-        .rev()
-        .find(|message| message.sender_type == db::models::chat_message::ChatSenderType::User)
-        .map(|message| message.id);
-
-    let session_agents = ChatSessionAgent::find_all_for_session(pool, session.id).await?;
-    if session_agents.is_empty() {
-        return Err(ApiError::BadRequest(
-            "At least one session agent is required before running a workflow.".to_string(),
-        ));
-    }
-
-    let agents = load_effective_agents_for_route(pool, session.id, &session_agents).await?;
-
-    let (lead_agent, lead_session_agent) = resolve_lead_agent(&session, &session_agents, &agents)
-        .map_err(|err| ApiError::BadRequest(err.to_string()))?;
-
-    let available_agents = session_agents
-        .iter()
-        .map(|session_agent| WorkflowCardAgent {
-            session_agent_id: session_agent.id.to_string(),
-            workflow_agent_session_id: None,
-            agent_id: workflow_plan_agent_id(session_agent),
-            name: session_agent.member_name.clone(),
-        })
-        .collect::<Vec<_>>();
-
-    let ui_config = config::load_config_from_file(&config_path()).await;
-    let response_language_instruction =
-        resolve_workflow_response_language_instruction(&ui_config.language);
-    let prompt = build_plan_generation_prompt(
-        &user_goal,
-        &workflow_plan_agent_id(lead_session_agent),
-        &available_agents,
-        None,
-        None,
-        response_language_instruction,
-        None,
-    );
-
-    tracing::debug!("Plan generation prompt for lead agent:\n{}", prompt);
-
-    let track_plan_generation_failure = || {
-        workflow_analytics::track_plan_generated(
-            workflow_analytics::analytics_if_enabled(
-                deployment.analytics().as_ref(),
-                deployment.analytics_enabled(),
-            ),
-            session.id,
-            None,
-            false,
-        );
-    };
-
-    let raw_plan_output = run_workflow_agent_prompt(
-        deployment.db(),
-        &session,
-        lead_agent,
-        lead_session_agent,
-        None,
-        &prompt,
-        uuid::Uuid::nil(),
-    )
-    .await
-    .map_err(|err| {
-        track_plan_generation_failure();
-        ApiError::BadRequest(err.to_string())
-    })?;
-
-    tracing::debug!("Raw plan output from lead agent: {}", raw_plan_output);
-
-    let plan_json = extract_json_payload(&raw_plan_output).ok_or_else(|| {
-        track_plan_generation_failure();
-        ApiError::BadRequest("Lead agent did not return a workflow JSON object.".to_string())
-    })?;
-
-    let parsed_plan: db::models::workflow_types::WorkflowPlanJson =
-        serde_json::from_str(&plan_json).map_err(|err| {
-            track_plan_generation_failure();
-            ApiError::BadRequest(format!("Lead agent returned invalid workflow JSON: {err}"))
-        })?;
-    let valid_agent_ids = workflow_valid_agent_ids(&session_agents);
-    let validation = workflow_validator::validate_plan(&parsed_plan, &valid_agent_ids);
-    if !validation.is_valid {
-        track_plan_generation_failure();
-        persist_invalid_plan(
-            pool,
-            session.id,
-            source_message_id,
-            lead_session_agent.id,
-            &parsed_plan,
-            &plan_json,
-            &validation.errors,
-        )
-        .await?;
-
-        let validation_message = validation
-            .errors
-            .iter()
-            .map(|error| format!("{}: {}", error.field, error.message))
-            .collect::<Vec<_>>()
-            .join("; ");
-
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            ResponseJson(ApiResponse::<GeneratePlanAndRunResponse>::error(
-                &validation_message,
-            )),
-        )
-            .into_response());
-    }
-
-    let (plan, revision, workflow_card_message) =
-        WorkflowOrchestrator::create_workflow_plan_and_card(
-            pool,
-            deployment.chat_runner(),
-            &session,
-            source_message_id,
-            lead_session_agent,
-            &plan_json,
-        )
-        .await
-        .map_err(|err| {
-            track_plan_generation_failure();
-            ApiError::BadRequest(err.to_string())
-        })?;
-
-    let agent_id_map = workflow_agent_id_map(&session_agents);
-    let bootstrap = WorkflowOrchestrator::bootstrap_execution(
-        pool,
-        &plan,
-        &revision,
-        Some(lead_session_agent.id),
-        &valid_agent_ids,
-        &agent_id_map,
-    )
-    .await
-    .map_err(|err| ApiError::BadRequest(err.to_string()))?;
-
-    let execution = WorkflowExecution::update_workflow_card_message_id(
-        pool,
-        bootstrap.execution.id,
-        workflow_card_message.id,
-    )
-    .await?;
-
-    workflow_analytics::track_plan_executed(
-        workflow_analytics::analytics_if_enabled(
-            deployment.analytics().as_ref(),
-            deployment.analytics_enabled(),
-        ),
-        session.id,
-        plan.id,
-        execution.id,
-    );
-
-    WorkflowOrchestrator::refresh_workflow_card(
-        pool,
-        deployment.chat_runner(),
-        &execution,
-        &plan,
-        &revision,
-        &session_agents,
-        &agents,
-        bootstrap.failure_reason.clone(),
-    )
-    .await
-    .map_err(|err| ApiError::BadRequest(err.to_string()))?;
-
-    let workflow_card_message = ChatMessage::find_by_id(pool, workflow_card_message.id)
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("Workflow card message was not found.".to_string()))?;
-
-    let deployment_clone = deployment.clone();
-    let execution_id = execution.id;
-    tokio::spawn(async move {
-        WorkflowOrchestrator::wake_scheduler_with_recovery(
-            deployment_clone.db(),
-            deployment_clone.chat_runner(),
-            execution_id,
-        )
-        .await;
-    });
-
-    Ok((
-        StatusCode::OK,
-        ResponseJson(ApiResponse::<GeneratePlanAndRunResponse>::success(
-            GeneratePlanAndRunResponse {
-                execution_id: execution.id,
-                workflow_card_message,
-            },
-        )),
-    )
-        .into_response())
 }
 
 pub async fn retry_plan_generation(
@@ -1466,62 +1217,6 @@ pub async fn resolve_step_permission(
         .into_response())
 }
 
-async fn persist_invalid_plan(
-    pool: &sqlx::SqlitePool,
-    session_id: Uuid,
-    source_message_id: Option<Uuid>,
-    lead_session_agent_id: Uuid,
-    parsed_plan: &db::models::workflow_types::WorkflowPlanJson,
-    plan_json: &str,
-    errors: &[workflow_validator::ValidationError],
-) -> Result<(WorkflowPlan, WorkflowPlanRevision), ApiError> {
-    let validation_errors_json = serde_json::to_string(errors).map_err(|err| {
-        ApiError::BadRequest(format!("Failed to serialize validation errors: {err}"))
-    })?;
-    let plan_hash = WorkflowCompiler::compute_hash(parsed_plan);
-    let plan_schema_version = parsed_plan
-        .plan_schema_version()
-        .map_err(ApiError::BadRequest)?;
-
-    let plan = WorkflowPlan::create(
-        pool,
-        &CreateWorkflowPlan {
-            session_id,
-            source_message_id,
-            created_by_session_agent_id: Some(lead_session_agent_id),
-            title: parsed_plan.title.clone(),
-            summary_text: Some(parsed_plan.goal.clone()),
-            plan_json: plan_json.to_string(),
-            plan_schema_version,
-            plan_hash: plan_hash.clone(),
-            validation_status: WorkflowValidationStatus::Invalid,
-            validation_errors_json: Some(validation_errors_json.clone()),
-        },
-        Uuid::new_v4(),
-    )
-    .await?;
-    let plan = WorkflowPlan::update_status(pool, plan.id, WorkflowPlanStatus::Draft).await?;
-
-    let revision = WorkflowPlanRevision::create(
-        pool,
-        &CreateWorkflowPlanRevision {
-            plan_id: plan.id,
-            revision_no: 1,
-            edited_by: WorkflowRevisionEditor::Lead,
-            editor_session_agent_id: Some(lead_session_agent_id),
-            reason: Some("generate-plan-and-run-invalid".to_string()),
-            plan_json: plan_json.to_string(),
-            plan_hash,
-            validation_status: WorkflowValidationStatus::Invalid,
-            validation_errors_json: Some(validation_errors_json),
-        },
-        Uuid::new_v4(),
-    )
-    .await?;
-
-    Ok((plan, revision))
-}
-
 // -----------------------------------------------------------------------
 // Get Workflow Transcripts
 // -----------------------------------------------------------------------
@@ -1582,6 +1277,7 @@ fn workflow_review_verdict_label(verdict: &ReviewVerdict) -> &'static str {
 fn workflow_reviewer_type_label(reviewer_type: &ReviewerType) -> &'static str {
     match reviewer_type {
         ReviewerType::Lead => "lead",
+        ReviewerType::Reviewer => "reviewer",
         ReviewerType::User => "user",
     }
 }
@@ -1589,7 +1285,7 @@ fn workflow_reviewer_type_label(reviewer_type: &ReviewerType) -> &'static str {
 fn workflow_transcript_review_key(entry: &WorkflowTranscriptEntry) -> Option<(Uuid, String, i32)> {
     if !matches!(
         entry.entry_type.as_str(),
-        "lead_review" | "step_review" | "loop_review"
+        "lead_review" | "review" | "step_review" | "loop_review"
     ) {
         return None;
     }
@@ -1604,6 +1300,10 @@ fn workflow_transcript_review_key(entry: &WorkflowTranscriptEntry) -> Option<(Uu
         .unwrap_or_else(|| {
             if entry.entry_type == "lead_review" {
                 "lead"
+            } else if entry.entry_type == "review"
+                || (entry.entry_type == "loop_review" && entry.sender_type == "agent")
+            {
+                "reviewer"
             } else {
                 "user"
             }
@@ -1674,16 +1374,28 @@ async fn list_transcript_response(
     let mut entries: Vec<WorkflowTranscriptEntry> = transcripts
         .into_iter()
         .map(|t| {
-            let agent_name = t
+            let session_agent = t
                 .workflow_agent_session_id
                 .and_then(|was_id| workflow_agent_sessions.iter().find(|was| was.id == was_id))
                 .and_then(|was| {
                     session_agents
                         .iter()
                         .find(|sa| sa.id == was.session_agent_id)
-                })
-                .and_then(|sa| agents.iter().find(|a| a.id == sa.agent_id))
-                .map(|a| a.name.clone());
+                });
+            let is_review_entry = matches!(
+                t.entry_type.as_str(),
+                "lead_review" | "review" | "result_review" | "loop_review"
+            );
+            let agent_name = session_agent.and_then(|sa| {
+                if is_review_entry {
+                    Some(sa.member_name.clone())
+                } else {
+                    agents
+                        .iter()
+                        .find(|agent| agent.id == sa.agent_id)
+                        .map(|agent| agent.name.clone())
+                }
+            });
             WorkflowTranscriptEntry {
                 id: t.id,
                 execution_id: t.execution_id,
@@ -1741,21 +1453,39 @@ async fn list_transcript_response(
 
         let entry_type = match &review.reviewer_type {
             ReviewerType::Lead => "lead_review",
+            ReviewerType::Reviewer => "review",
             ReviewerType::User => "step_review",
         };
         let sender_type = match &review.reviewer_type {
             ReviewerType::Lead => "agent",
+            ReviewerType::Reviewer => "agent",
             ReviewerType::User => "user",
         };
+        let resolved_reviewer_name = review.reviewer_id.as_deref().and_then(|reviewer_id| {
+            session_agents
+                .iter()
+                .find(|session_agent| session_agent.id.to_string() == reviewer_id)
+                .map(|session_agent| session_agent.member_name.clone())
+        });
         let agent_name = match &review.reviewer_type {
-            ReviewerType::Lead => Some("Lead".to_string()),
+            ReviewerType::Lead => resolved_reviewer_name.or_else(|| Some("Lead".to_string())),
+            ReviewerType::Reviewer => {
+                resolved_reviewer_name.or_else(|| Some("Reviewer".to_string()))
+            }
             ReviewerType::User => Some("User".to_string()),
         };
         entries.push(WorkflowTranscriptEntry {
             id: review.id,
             execution_id: review.execution_id,
             round_id: Some(step.round_id),
-            workflow_agent_session_id: None,
+            workflow_agent_session_id: review.reviewer_id.as_deref().and_then(|reviewer_id| {
+                workflow_agent_sessions
+                    .iter()
+                    .find(|workflow_session| {
+                        workflow_session.session_agent_id.to_string() == reviewer_id
+                    })
+                    .map(|workflow_session| workflow_session.id)
+            }),
             step_id: Some(review.step_id),
             step_key: Some(step.step_key.clone()),
             sender_type: sender_type.to_string(),
@@ -1765,6 +1495,7 @@ async fn list_transcript_response(
                 serde_json::json!({
                     "source": "workflow_step_review",
                     "reviewer_type": reviewer_type,
+                    "reviewer_id": review.reviewer_id,
                     "verdict": workflow_review_verdict_label(&review.verdict),
                     "review_round": review.review_round,
                     "review_id": review.id,
@@ -1922,9 +1653,11 @@ mod tests {
             chat_message::{ChatSenderType, CreateChatMessage},
             chat_session::CreateChatSession,
             workflow_execution::CreateWorkflowExecution,
+            workflow_plan::CreateWorkflowPlan,
+            workflow_plan_revision::{CreateWorkflowPlanRevision, WorkflowPlanRevision},
             workflow_round::{CreateWorkflowRound, WorkflowRound},
             workflow_step::{CreateWorkflowStep, WorkflowStep},
-            workflow_types::WorkflowStepType,
+            workflow_types::{WorkflowRevisionEditor, WorkflowStepType, WorkflowValidationStatus},
         },
     };
     use serde_json::{Value, json};
@@ -2456,6 +2189,36 @@ mod tests {
                 &WorkflowStepStatus::Running
             ),
             Some(WorkflowSidebarState::Running)
+        );
+    }
+
+    #[test]
+    fn structured_reviewer_transcript_has_a_deduplication_key() {
+        let step_id = Uuid::new_v4();
+        let entry = WorkflowTranscriptEntry {
+            id: Uuid::new_v4(),
+            execution_id: Uuid::new_v4(),
+            round_id: Some(Uuid::new_v4()),
+            workflow_agent_session_id: Some(Uuid::new_v4()),
+            step_id: Some(step_id),
+            step_key: Some("review".to_string()),
+            sender_type: "agent".to_string(),
+            entry_type: "review".to_string(),
+            content: "approved".to_string(),
+            meta_json: Some(
+                serde_json::json!({
+                    "reviewer_type": "reviewer",
+                    "review_round": 2,
+                })
+                .to_string(),
+            ),
+            created_at: Utc::now().to_rfc3339(),
+            agent_name: Some("Reviewer member".to_string()),
+        };
+
+        assert_eq!(
+            workflow_transcript_review_key(&entry),
+            Some((step_id, "reviewer".to_string(), 2))
         );
     }
 }

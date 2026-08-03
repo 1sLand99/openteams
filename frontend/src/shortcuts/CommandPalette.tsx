@@ -13,6 +13,7 @@ export function CommandPalette() {
   } = useShortcuts();
   const [query, setQuery] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!paletteOpen) return;
     setQuery('');
@@ -34,8 +35,21 @@ export function CommandPalette() {
   );
   if (!paletteOpen) return null;
   return (
-    <div className="fixed inset-0 z-[70] flex justify-center bg-black/55 px-4 pt-[12vh] backdrop-blur-[2px]">
+    <div
+      className="fixed inset-0 z-[70] flex justify-center bg-black/55 px-4 pt-[12vh] backdrop-blur-[2px]"
+      onMouseDown={(event) => {
+        const target = event.target;
+        if (
+          target instanceof Node &&
+          dialogRef.current &&
+          !dialogRef.current.contains(target)
+        ) {
+          setPaletteOpen(false);
+        }
+      }}
+    >
       <div
+        ref={dialogRef}
         data-command-palette
         role="dialog"
         aria-modal="true"

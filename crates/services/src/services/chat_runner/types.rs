@@ -296,6 +296,8 @@ pub enum ChatRunnerError {
     NativeSkills(#[from] NativeSkillError),
     #[error(transparent)]
     SessionWorktree(#[from] SessionWorktreeError),
+    #[error(transparent)]
+    WorkflowRuntime(#[from] crate::services::workflow::workflow_runtime::WorkflowRuntimeError),
     #[error("invalid workflow plan: {0}")]
     InvalidWorkflowPlan(String),
 }

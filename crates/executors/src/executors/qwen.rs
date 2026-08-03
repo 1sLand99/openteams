@@ -20,7 +20,8 @@ use crate::{
     },
     env::ExecutionEnv,
     executors::{
-        AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorPrompt, SpawnedChild,
+        StandardCodingAgentExecutor,
         utils::{dotenv_has_nonempty_value, json_has_nonempty_string, read_json_file},
     },
     mcp_config::{McpConfig, read_canonical_mcp_config},
@@ -368,6 +369,55 @@ impl StandardCodingAgentExecutor for QwenCode {
                 combined_prompt,
                 session_id,
                 qwen_command,
+                &runtime_env,
+                &self.cmd,
+                self.approvals.clone(),
+            )
+            .await
+    }
+
+    async fn spawn_structured(
+        &self,
+        current_dir: &Path,
+        prompt: &ExecutorPrompt,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        let command = self.build_command_builder()?.build_initial()?;
+        let harness = self.acp_harness().await?;
+        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
+        let mut prompt = prompt.clone();
+        prompt.text = self.append_prompt.combine_prompt(&prompt.text);
+        harness
+            .spawn_structured_with_command(
+                current_dir,
+                prompt,
+                command,
+                &runtime_env,
+                &self.cmd,
+                self.approvals.clone(),
+            )
+            .await
+    }
+
+    async fn spawn_follow_up_structured(
+        &self,
+        current_dir: &Path,
+        prompt: &ExecutorPrompt,
+        session_id: &str,
+        _reset_to_message_id: Option<&str>,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        let command = self.build_command_builder()?.build_follow_up(&[])?;
+        let harness = self.acp_harness().await?;
+        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
+        let mut prompt = prompt.clone();
+        prompt.text = self.append_prompt.combine_prompt(&prompt.text);
+        harness
+            .spawn_follow_up_structured_with_command(
+                current_dir,
+                prompt,
+                session_id,
+                command,
                 &runtime_env,
                 &self.cmd,
                 self.approvals.clone(),

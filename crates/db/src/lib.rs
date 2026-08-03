@@ -248,7 +248,7 @@ async fn apply_workflow_execution_status_migration_shim(
                                                             'skipped'
                                                         )),
                 retry_count                     INTEGER NOT NULL DEFAULT 0,
-                max_retry                       INTEGER NOT NULL DEFAULT 1,
+                max_retry                       INTEGER NOT NULL DEFAULT 3,
                 round_index                     INTEGER NOT NULL DEFAULT 1,
                 display_order                   INTEGER NOT NULL DEFAULT 0,
                 latest_run_id                   BLOB,

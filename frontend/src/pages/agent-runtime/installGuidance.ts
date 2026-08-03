@@ -27,6 +27,8 @@ export interface AgentInstallGuideEntry {
   authCommands: string[] | null;
   /** Command typed inside the running CLI to finish sign-in, e.g. "/login". */
   authFollowUpCommand?: string;
+  /** Env vars (e.g. a PAT) that authenticate non-interactively; shown as a hint. */
+  authEnvVars?: string[];
 }
 
 export interface InstallGuideStep {
@@ -159,6 +161,18 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
         windows: null,
       },
       authCommands: ["kimi login"],
+    },
+    QODER_CLI: {
+      requiresNode: false,
+      documentationUrl: "https://docs.qoder.com/en/cli/install",
+      windowsSupport: "supported",
+      installCommands: {
+        posix: ["curl -fsSL https://qoder.com/install | bash"],
+        windows: ["irm https://qoder.com/install.ps1 | iex"],
+      },
+      authCommands: ["qodercli"],
+      authFollowUpCommand: "/login",
+      authEnvVars: ["QODER_PERSONAL_ACCESS_TOKEN"],
     },
   };
 

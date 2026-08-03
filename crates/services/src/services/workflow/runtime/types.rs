@@ -12,6 +12,8 @@ pub enum WorkflowRuntimeError {
     SessionWorktree(#[from] crate::services::session_worktree::SessionWorktreeError),
     #[error("workflow validation error: {0}")]
     Validation(String),
+    #[error("workflow planning agent resolution failed: {0}")]
+    PlanningAgentResolution(String),
     #[error("workflow step interrupted: {0}")]
     Interrupted(String),
 }
@@ -23,6 +25,49 @@ pub struct WorkflowCardAgent {
     pub workflow_agent_session_id: Option<String>,
     pub agent_id: String,
     pub name: String,
+}
+
+/// Plan-generation-time agent descriptor exposed to the planner.
+///
+/// Built from `ChatAgent`, `ChatSessionAgent` (member execution config and
+/// `allowed_skill_ids`), the linked `ProjectMember`, and the resolved skill
+/// data — never inferred from the member name. `agent_id` is the unique
+/// session-member planning id produced by `workflow_plan_agent_id`, so
+/// multiple session members backed by the same underlying agent stay
+/// individually assignable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowPlanningAgent {
+    /// Unique session-member planning id. Plans must reference this id in
+    /// `agents.lead`, `agents.available`, and `nodes[].data.agentId`.
+    pub agent_id: String,
+    pub session_agent_id: String,
+    /// Underlying `ChatAgent` id backing this session member.
+    pub underlying_agent_id: String,
+    pub name: String,
+    /// Workflow duty of this member: `lead` or `worker`.
+    pub workflow_role: String,
+    /// Professional role declared on the linked `ProjectMember`
+    /// (`ProjectMember.role`), when the member is linked to one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub member_role: Option<String>,
+    /// Effective runner after applying the member execution config override
+    /// on top of the underlying agent runner.
+    pub runner_type: String,
+    /// Effective model name resolved by
+    /// `resolve_effective_member_execution_config`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_name: Option<String>,
+    /// Tools enabled on the underlying agent configuration.
+    pub tools_enabled: Vec<String>,
+    /// Skills actually enabled for the effective runner and allowed for this
+    /// session member.
+    pub skills: Vec<String>,
+    /// Capability summary sourced from the underlying agent's system prompt,
+    /// whitespace-normalized and length-capped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability_profile: Option<String>,
+    /// Responsibility boundary for this member inside the workflow.
+    pub responsibilities: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -188,6 +233,10 @@ pub struct WorkflowStepRunResult {
     pub summary: String,
     pub content: String,
     pub outputs: Vec<String>,
+    /// Complete structured task report. This must survive the Task -> Lead/User
+    /// review handoff so reviewers can inspect verification, changed files,
+    /// self-review notes, issues, and evidence rather than only free text.
+    pub structured_report: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -209,5 +258,6 @@ pub struct SummaryPayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowRevisionFeedbackSource {
     Lead,
+    Reviewer,
     User,
 }

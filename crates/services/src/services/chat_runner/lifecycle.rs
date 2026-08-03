@@ -1905,6 +1905,13 @@ impl ChatRunner {
                 team_protocol.as_deref(),
                 workflow_generation_blocked,
             );
+            let executor_prompt = ExecutorPrompt {
+                text: prompt.clone(),
+                images: match message_attachments.as_ref() {
+                    Some(attachments) => attachments.executor_images().await,
+                    None => Vec::new(),
+                },
+            };
             startup_timing.mark(
                 startup_timing::StartupMilestoneName::PromptBuilt,
                 Some(format!("prompt_bytes={}", prompt.len())),
@@ -2057,9 +2064,9 @@ impl ChatRunner {
             let mut spawned = if session_agent.state != ChatSessionAgentState::Dead {
                 if let Some(agent_session_id) = session_agent.agent_session_id.as_deref() {
                     executor
-                        .spawn_follow_up(
+                        .spawn_follow_up_structured(
                             PathBuf::from(&workspace_path).as_path(),
-                            &prompt,
+                            &executor_prompt,
                             agent_session_id,
                             session_agent.agent_message_id.as_deref(),
                             &env,
@@ -2067,12 +2074,20 @@ impl ChatRunner {
                         .await?
                 } else {
                     executor
-                        .spawn(PathBuf::from(&workspace_path).as_path(), &prompt, &env)
+                        .spawn_structured(
+                            PathBuf::from(&workspace_path).as_path(),
+                            &executor_prompt,
+                            &env,
+                        )
                         .await?
                 }
             } else {
                 executor
-                    .spawn(PathBuf::from(&workspace_path).as_path(), &prompt, &env)
+                    .spawn_structured(
+                        PathBuf::from(&workspace_path).as_path(),
+                        &executor_prompt,
+                        &env,
+                    )
                     .await?
             };
             startup_timing

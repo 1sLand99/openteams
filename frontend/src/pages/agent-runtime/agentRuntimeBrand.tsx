@@ -59,6 +59,12 @@ export const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
     title: "OpenTeams CLI",
     logoSrc: "/logos/openteams-logo.svg",
   },
+  QODER_CLI: {
+    title: "Qoder",
+    logoSrc: "/logos/qoder-logo.svg",
+    logoMode: "mask",
+    logoClassName: "h-[20px] w-[20px]",
+  },
   QWEN_CODE: {
     title: "Qwen",
     logoSrc: "/logos/qwen-dark.svg",

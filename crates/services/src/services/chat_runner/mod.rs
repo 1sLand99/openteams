@@ -8,6 +8,7 @@ use std::{
     },
 };
 
+use base64::Engine as _;
 use chrono::Utc;
 use dashmap::DashMap;
 use db::{
@@ -29,8 +30,8 @@ use db::{
 use executors::{
     env::{ExecutionEnv, RepoContext},
     executors::{
-        BaseCodingAgent, CancellationToken, ExecutorError, ExecutorExitSignal,
-        StandardCodingAgentExecutor,
+        BaseCodingAgent, CancellationToken, ExecutorError, ExecutorExitSignal, ExecutorPrompt,
+        ExecutorPromptImage, StandardCodingAgentExecutor,
     },
     logs::{
         NormalizedEntryError, NormalizedEntryType, TokenUsageInfo,

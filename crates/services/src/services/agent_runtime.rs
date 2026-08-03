@@ -1,15 +1,14 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    future::Future,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{
-        Arc, LazyLock, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
+    sync::{Arc, LazyLock, Mutex},
+    time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use executors::{
     command::{CmdOverrides, CommandBuilder, redacted_command},
     env::ExecutionEnv,
@@ -22,18 +21,65 @@ use executors::{
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{process::Command, time::timeout};
 use ts_rs::TS;
 
 const STORE_FILE_NAME: &str = "agent_runtime_config.json";
-const DISCOVERY_TTL: ChronoDuration = ChronoDuration::hours(24);
 const RUNTIME_DISCOVERY_CONCURRENCY: usize = 4;
+const CLI_PROBE_CACHE_TTL: Duration = Duration::from_secs(30);
 
-static BACKGROUND_RUNTIME_REFRESH_RUNNING: AtomicBool = AtomicBool::new(false);
 static RUNTIME_REFRESH_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 static RUNTIME_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static CLI_PROBE_GATES: LazyLock<DashMap<CliProbeCacheKey, Arc<tokio::sync::Mutex<()>>>> =
+    LazyLock::new(DashMap::new);
+static CLI_RUNNER_GATES: LazyLock<DashMap<BaseCodingAgent, Arc<tokio::sync::Mutex<()>>>> =
+    LazyLock::new(DashMap::new);
+static CLI_PROBE_CACHE: LazyLock<DashMap<CliProbeCacheKey, CachedCliProbe>> =
+    LazyLock::new(DashMap::new);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliProbeCachePolicy {
+    Reuse,
+    Refresh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CliProbeRequestKey {
+    runner: BaseCodingAgent,
+    current_dir: PathBuf,
+    execution_fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CliProbeKind {
+    Version,
+    Models,
+    Acp,
+    Command,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CliProbeCacheKey {
+    request: CliProbeRequestKey,
+    kind: CliProbeKind,
+}
+
+#[derive(Debug, Clone)]
+enum CliProbeValue {
+    Version(Option<String>),
+    Models(Option<Vec<String>>),
+    Acp(Option<AcpCapabilityProbe>),
+    Command(Option<ResolvedRuntimeCommand>),
+}
+
+#[derive(Debug, Clone)]
+struct CachedCliProbe {
+    completed_at: Instant,
+    result: Result<CliProbeValue, String>,
+}
 
 #[derive(Debug, Error)]
 pub enum AgentRuntimeError {
@@ -210,17 +256,21 @@ pub fn list_runtime_statuses() -> Result<AgentRuntimeListResponse, AgentRuntimeE
 }
 
 pub async fn list_runtime_statuses_with_discovery(
-    current_dir: &Path,
+    _current_dir: &Path,
 ) -> Result<AgentRuntimeListResponse, AgentRuntimeError> {
+    list_runtime_statuses()
+}
+
+/// Rebuilds the runtime snapshot exclusively from local files and cached
+/// metadata. This is safe for startup, list, and window-focus paths because it
+/// never runs a CLI command.
+pub async fn refresh_runtime_statuses() -> Result<AgentRuntimeRefreshResponse, AgentRuntimeError> {
     let store = read_store(&store_path())?;
     let profiles = ExecutorConfigs::get_cached();
-    let runners = build_statuses(&profiles, &store);
-
-    if runtime_discovery_needs_refresh(&profiles, &store) {
-        spawn_background_runtime_discovery(current_dir.to_path_buf());
-    }
-
-    Ok(AgentRuntimeListResponse { runners })
+    Ok(AgentRuntimeRefreshResponse {
+        runners: build_statuses(&profiles, &store),
+        errors: Vec::new(),
+    })
 }
 
 pub async fn refresh_runtime_discovery(
@@ -259,7 +309,6 @@ async fn refresh_runtime_discovery_unlocked(
     .collect::<Vec<_>>()
     .await;
 
-    let outcomes = outcomes.into_iter().collect::<Result<Vec<_>, _>>()?;
     let (store, errors) = update_store(&path, |latest| {
         Ok(apply_discovery_outcomes(latest, outcomes))
     })?;
@@ -267,35 +316,6 @@ async fn refresh_runtime_discovery_unlocked(
         runners: build_statuses(&profiles, &store),
         errors,
     })
-}
-
-fn spawn_background_runtime_discovery(current_dir: PathBuf) {
-    if BACKGROUND_RUNTIME_REFRESH_RUNNING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-
-    tokio::spawn(async move {
-        let _refresh_guard = BackgroundRefreshGuard;
-        let result = match RUNTIME_REFRESH_LOCK.try_lock() {
-            Ok(_guard) => refresh_runtime_discovery_unlocked(&current_dir).await,
-            Err(_) => return,
-        };
-
-        if let Err(err) = result {
-            tracing::warn!("Failed to refresh agent runtime discovery in background: {err}");
-        }
-    });
-}
-
-struct BackgroundRefreshGuard;
-
-impl Drop for BackgroundRefreshGuard {
-    fn drop(&mut self) {
-        BACKGROUND_RUNTIME_REFRESH_RUNNING.store(false, Ordering::Release);
-    }
 }
 
 enum RunnerDiscoveryOutcome {
@@ -413,28 +433,42 @@ async fn discover_runner_runtime(
     executor_config: &ExecutorConfig,
     store: &AgentRuntimeStore,
     current_dir: &Path,
-) -> Result<RunnerDiscoveryOutcome, AgentRuntimeError> {
+) -> RunnerDiscoveryOutcome {
     let Some(mut base) = executor_config
         .get_default()
         .or_else(|| executor_config.configurations.values().next())
         .cloned()
     else {
-        return Ok(RunnerDiscoveryOutcome::Skipped);
+        return RunnerDiscoveryOutcome::Skipped;
     };
 
     let mut env = ExecutionEnv::new(Default::default(), false, String::new());
-    apply_config_to_executor_and_env(runner, &mut base, &mut env, store)?;
+    if let Err(error) = apply_config_to_executor_and_env(runner, &mut base, &mut env, store) {
+        return RunnerDiscoveryOutcome::Failed {
+            runner,
+            message: status_error_detail("runtime_configuration", error),
+            detected_version: None,
+            preserved_models: models_for_runner(runner, executor_config, store),
+        };
+    }
     if !base.get_availability_info().is_available() {
-        return Ok(RunnerDiscoveryOutcome::Skipped);
+        return RunnerDiscoveryOutcome::Skipped;
     }
 
     let (version_result, discovered_models) = tokio::join!(
-        detect_cli_version(&base, &env),
-        discover_models_for_executor(&base, current_dir, &env)
+        coordinated_detect_cli_version(
+            runner,
+            &base,
+            current_dir,
+            &env,
+            None,
+            CliProbeCachePolicy::Refresh,
+        ),
+        discover_models_for_executor(runner, &base, current_dir, &env)
     );
     let (detected_version, version_error) = split_probe_result(version_result);
 
-    Ok(match discovered_models {
+    match discovered_models {
         Ok(Some(models)) => RunnerDiscoveryOutcome::ModelsDiscovered {
             runner,
             models,
@@ -456,7 +490,7 @@ async fn discover_runner_runtime(
             detected_version,
             preserved_models: models_for_runner(runner, executor_config, store),
         },
-    })
+    }
 }
 
 pub fn update_runtime_config(
@@ -540,13 +574,31 @@ pub async fn runtime_diagnostics(
     apply_config_to_executor_and_env(runner, &mut runtime_executor, &mut env, &store)?;
 
     let version_result = if status.installed {
-        detect_cli_version(&runtime_executor, &env).await
+        coordinated_detect_cli_version(
+            runner,
+            &runtime_executor,
+            probe_dir,
+            &env,
+            auth_method_id,
+            CliProbeCachePolicy::Reuse,
+        )
+        .await
     } else {
         Ok(None)
     };
     let (detected_version, version_error) = split_probe_result(version_result);
-    let (resolved_runtime_command, command_error) =
-        split_probe_result(resolve_runtime_command(&runtime_executor).await);
+    let (resolved_runtime_command, command_error) = split_probe_result(
+        coordinated_resolve_runtime_command(
+            runner,
+            &runtime_executor,
+            probe_dir,
+            &env,
+            auth_method_id,
+            status.installed,
+            CliProbeCachePolicy::Reuse,
+        )
+        .await,
+    );
     let command_source = resolved_runtime_command.as_ref().map(|_| {
         if cmd_overrides_for_executor(&runtime_executor)
             .and_then(|cmd| cmd.base_command_override.as_deref())
@@ -555,9 +607,10 @@ pub async fn runtime_diagnostics(
             "override".to_string()
         } else {
             match &runtime_executor {
-                CodingAgent::Gemini(_) | CodingAgent::QwenCode(_) | CodingAgent::KimiCode(_) => {
-                    "native"
-                }
+                CodingAgent::Gemini(_)
+                | CodingAgent::QwenCode(_)
+                | CodingAgent::KimiCode(_)
+                | CodingAgent::QoderCli(_) => "native",
                 _ => "default",
             }
             .to_string()
@@ -567,16 +620,34 @@ pub async fn runtime_diagnostics(
         .as_ref()
         .map(|command| command.executable_path.clone());
     let resolved_command = resolved_runtime_command.map(|command| command.rendered);
-    let (acp_probe, acp_probe_error) = match runtime_executor
-        .probe_acp(probe_dir, &env, auth_method_id)
+    let (acp_probe, acp_probe_error, acp_probe_succeeded) = if status.installed {
+        match coordinated_probe_acp(
+            runner,
+            &runtime_executor,
+            probe_dir,
+            &env,
+            auth_method_id,
+            CliProbeCachePolicy::Reuse,
+        )
         .await
-    {
-        Ok(probe) => (probe, None),
-        Err(error) => (None, Some(error.to_string())),
+        {
+            Ok(probe) => {
+                let succeeded = probe.is_some();
+                (probe, None, succeeded)
+            }
+            Err(error) => (None, Some(error.to_string()), false),
+        }
+    } else {
+        (None, None, false)
     };
-    let latest_store = if let Some(version) = detected_version.as_deref() {
+    let latest_store = if detected_version.is_some() || acp_probe_succeeded {
         update_store(&path, |latest| {
-            cache_runner_version(latest, runner, version.to_string());
+            if let Some(version) = detected_version.as_deref() {
+                cache_runner_version(latest, runner, version.to_string());
+            }
+            if acp_probe_succeeded {
+                clear_cached_authentication_required_error(latest, runner);
+            }
             Ok(())
         })?
         .0
@@ -620,9 +691,20 @@ pub async fn runtime_diagnostics(
     })
 }
 
+#[derive(Debug, Clone)]
 struct ResolvedRuntimeCommand {
     executable_path: String,
     rendered: String,
+}
+
+async fn resolve_runtime_command_for_diagnostics(
+    installed: bool,
+    executor: &CodingAgent,
+) -> Result<Option<ResolvedRuntimeCommand>, String> {
+    if !installed {
+        return Ok(None);
+    }
+    resolve_runtime_command(executor).await
 }
 
 async fn resolve_runtime_command(
@@ -852,6 +934,7 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
         CodingAgent::Copilot(_) => "copilot".to_string(),
         CodingAgent::Droid(_) => "droid".to_string(),
         CodingAgent::KimiCode(_) => "kimi".to_string(),
+        CodingAgent::QoderCli(_) => "qodercli".to_string(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => return None,
         #[cfg(feature = "qa-mode")]
@@ -872,6 +955,7 @@ fn cmd_overrides_for_executor(executor: &CodingAgent) -> Option<&CmdOverrides> {
         CodingAgent::Copilot(config) => Some(&config.cmd),
         CodingAgent::Droid(config) => Some(&config.cmd),
         CodingAgent::KimiCode(config) => Some(&config.cmd),
+        CodingAgent::QoderCli(config) => Some(&config.cmd),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => None,
         #[cfg(feature = "qa-mode")]
@@ -1005,24 +1089,240 @@ fn version_for_discovery_update(
     })
 }
 
+fn cli_probe_request_key(
+    runner: BaseCodingAgent,
+    executor: &CodingAgent,
+    current_dir: &Path,
+    env: &ExecutionEnv,
+    auth_method_id: Option<&str>,
+) -> Result<CliProbeRequestKey, String> {
+    let mut hasher = Sha256::new();
+    let executor_json = serde_json::to_vec(executor).map_err(|error| error.to_string())?;
+    hasher.update((executor_json.len() as u64).to_le_bytes());
+    hasher.update(executor_json);
+
+    let mut env_vars = env.vars.iter().collect::<Vec<_>>();
+    env_vars.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    for (key, value) in env_vars {
+        hasher.update((key.len() as u64).to_le_bytes());
+        hasher.update(key.as_bytes());
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+    if let Some(auth_method_id) = auth_method_id {
+        hasher.update((auth_method_id.len() as u64).to_le_bytes());
+        hasher.update(auth_method_id.as_bytes());
+    }
+
+    Ok(CliProbeRequestKey {
+        runner,
+        current_dir: current_dir.to_path_buf(),
+        execution_fingerprint: hasher.finalize().into(),
+    })
+}
+
+fn reusable_cached_cli_probe(
+    key: &CliProbeCacheKey,
+    policy: CliProbeCachePolicy,
+    requested_at: Instant,
+) -> Option<Result<CliProbeValue, String>> {
+    let cached = CLI_PROBE_CACHE.get(key)?;
+    let completed_during_request = cached.completed_at >= requested_at;
+    let reusable_success = policy == CliProbeCachePolicy::Reuse
+        && cached.completed_at.elapsed() <= CLI_PROBE_CACHE_TTL
+        && cached.result.is_ok();
+    (completed_during_request || reusable_success).then(|| cached.result.clone())
+}
+
+async fn run_coordinated_cli_probe<F, Fut>(
+    key: CliProbeCacheKey,
+    policy: CliProbeCachePolicy,
+    probe: F,
+) -> Result<CliProbeValue, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<CliProbeValue, String>>,
+{
+    let requested_at = Instant::now();
+    if let Some(cached) = reusable_cached_cli_probe(&key, policy, requested_at) {
+        return cached;
+    }
+
+    let gate = CLI_PROBE_GATES
+        .entry(key.clone())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _guard = gate.lock().await;
+
+    if let Some(cached) = reusable_cached_cli_probe(&key, policy, requested_at) {
+        return cached;
+    }
+
+    // CLI implementations commonly share user-level auth/config files. The
+    // runner gate prevents unrelated protocol probes from racing inside one CLI
+    // while the request gate above still provides exact-key singleflight.
+    let runner_gate = CLI_RUNNER_GATES
+        .entry(key.request.runner)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _runner_guard = runner_gate.lock().await;
+    let result = probe().await;
+    CLI_PROBE_CACHE.retain(|_, cached| cached.completed_at.elapsed() <= CLI_PROBE_CACHE_TTL);
+    CLI_PROBE_CACHE.insert(
+        key,
+        CachedCliProbe {
+            completed_at: Instant::now(),
+            result: result.clone(),
+        },
+    );
+    result
+}
+
+async fn coordinated_probe_acp(
+    runner: BaseCodingAgent,
+    executor: &CodingAgent,
+    current_dir: &Path,
+    env: &ExecutionEnv,
+    auth_method_id: Option<&str>,
+    policy: CliProbeCachePolicy,
+) -> Result<Option<AcpCapabilityProbe>, String> {
+    let key = CliProbeCacheKey {
+        request: cli_probe_request_key(runner, executor, current_dir, env, auth_method_id)?,
+        kind: CliProbeKind::Acp,
+    };
+    match run_coordinated_cli_probe(key, policy, || async {
+        executor
+            .probe_acp(current_dir, env, auth_method_id)
+            .await
+            .map(CliProbeValue::Acp)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    {
+        Ok(CliProbeValue::Acp(probe)) => Ok(probe),
+        Ok(_) => Err("CLI probe coordinator returned an unexpected ACP result".to_string()),
+        Err(error) => Err(error),
+    }
+}
+
+async fn coordinated_detect_cli_version(
+    runner: BaseCodingAgent,
+    executor: &CodingAgent,
+    current_dir: &Path,
+    env: &ExecutionEnv,
+    auth_method_id: Option<&str>,
+    policy: CliProbeCachePolicy,
+) -> Result<Option<String>, String> {
+    let key = CliProbeCacheKey {
+        request: cli_probe_request_key(runner, executor, current_dir, env, auth_method_id)?,
+        kind: CliProbeKind::Version,
+    };
+    match run_coordinated_cli_probe(key, policy, || async {
+        detect_cli_version(executor, env)
+            .await
+            .map(CliProbeValue::Version)
+    })
+    .await
+    {
+        Ok(CliProbeValue::Version(version)) => Ok(version),
+        Ok(_) => Err("CLI probe coordinator returned an unexpected version result".to_string()),
+        Err(error) => Err(error),
+    }
+}
+
+async fn coordinated_list_models(
+    runner: BaseCodingAgent,
+    executor: &CodingAgent,
+    current_dir: &Path,
+    env: &ExecutionEnv,
+    auth_method_id: Option<&str>,
+    policy: CliProbeCachePolicy,
+) -> Result<Option<Vec<String>>, String> {
+    let key = CliProbeCacheKey {
+        request: cli_probe_request_key(runner, executor, current_dir, env, auth_method_id)?,
+        kind: CliProbeKind::Models,
+    };
+    match run_coordinated_cli_probe(key, policy, || async {
+        executor
+            .list_models(current_dir, env)
+            .await
+            .map(CliProbeValue::Models)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    {
+        Ok(CliProbeValue::Models(models)) => Ok(models),
+        Ok(_) => Err("CLI probe coordinator returned an unexpected model result".to_string()),
+        Err(error) => Err(error),
+    }
+}
+
+async fn coordinated_resolve_runtime_command(
+    runner: BaseCodingAgent,
+    executor: &CodingAgent,
+    current_dir: &Path,
+    env: &ExecutionEnv,
+    auth_method_id: Option<&str>,
+    installed: bool,
+    policy: CliProbeCachePolicy,
+) -> Result<Option<ResolvedRuntimeCommand>, String> {
+    let key = CliProbeCacheKey {
+        request: cli_probe_request_key(runner, executor, current_dir, env, auth_method_id)?,
+        kind: CliProbeKind::Command,
+    };
+    match run_coordinated_cli_probe(key, policy, || async {
+        resolve_runtime_command_for_diagnostics(installed, executor)
+            .await
+            .map(CliProbeValue::Command)
+    })
+    .await
+    {
+        Ok(CliProbeValue::Command(command)) => Ok(command),
+        Ok(_) => Err("CLI probe coordinator returned an unexpected command result".to_string()),
+        Err(error) => Err(error),
+    }
+}
+
 async fn discover_models_for_executor(
+    runner: BaseCodingAgent,
     executor: &CodingAgent,
     current_dir: &Path,
     env: &ExecutionEnv,
 ) -> Result<Option<Vec<String>>, String> {
-    if let Some(probe) = executor
-        .probe_acp(current_dir, env, None)
-        .await
-        .map_err(|err| err.to_string())?
+    let acp_result = coordinated_probe_acp(
+        runner,
+        executor,
+        current_dir,
+        env,
+        None,
+        CliProbeCachePolicy::Refresh,
+    )
+    .await;
+    if let Ok(Some(probe)) = &acp_result
         && let Some(models) = probe.model_ids()
     {
         return Ok(Some(models));
     }
 
-    executor
-        .list_models(current_dir, env)
-        .await
-        .map_err(|err| err.to_string())
+    match coordinated_list_models(
+        runner,
+        executor,
+        current_dir,
+        env,
+        None,
+        CliProbeCachePolicy::Refresh,
+    )
+    .await
+    {
+        Ok(Some(models)) => Ok(Some(models)),
+        Ok(None) => acp_result.map(|_| None),
+        Err(model_error) => Err(match acp_result {
+            Ok(_) => model_error,
+            Err(acp_error) => {
+                format!("ACP probe failed: {acp_error}; model listing failed: {model_error}")
+            }
+        }),
+    }
 }
 
 fn build_statuses(
@@ -1042,32 +1342,6 @@ fn build_statuses(
         .collect::<Vec<_>>();
     runners.sort_by_key(|status| status.runner_type.to_string());
     runners
-}
-
-fn runtime_discovery_needs_refresh(profiles: &ExecutorConfigs, store: &AgentRuntimeStore) -> bool {
-    let now = Utc::now();
-    profiles.executors.iter().any(|(runner, executor_config)| {
-        let Some(mut base) = executor_config
-            .get_default()
-            .or_else(|| executor_config.configurations.values().next())
-            .cloned()
-        else {
-            return false;
-        };
-        if let Some(config) = store.configs.get(runner)
-            && apply_executor_options(*runner, &mut base, &config.executor_options).is_err()
-        {
-            return true;
-        }
-        if !base.get_availability_info().is_available() {
-            return false;
-        }
-        store
-            .discoveries
-            .get(runner)
-            .map(|discovery| now - discovery.last_checked_at >= DISCOVERY_TTL)
-            .unwrap_or(true)
-    })
 }
 
 fn build_status(
@@ -1153,6 +1427,28 @@ fn remove_status_error_stage(error: Option<&str>, stage: &str) -> Option<String>
     )
 }
 
+fn clear_cached_authentication_required_error(
+    store: &mut AgentRuntimeStore,
+    runner: BaseCodingAgent,
+) {
+    let Some(discovery) = store.discoveries.get_mut(&runner) else {
+        return;
+    };
+    discovery.last_error = merge_status_error_details(
+        discovery
+            .last_error
+            .as_deref()
+            .into_iter()
+            .flat_map(str::lines)
+            .map(|line| {
+                (!line
+                    .to_ascii_lowercase()
+                    .contains("authentication required"))
+                .then(|| line.to_string())
+            }),
+    );
+}
+
 fn split_probe_result<T>(result: Result<Option<T>, String>) -> (Option<T>, Option<String>) {
     match result {
         Ok(value) => (value, None),
@@ -1194,6 +1490,7 @@ fn reasoning_capability_for_runner(
         BaseCodingAgent::KimiCode => Some(AgentRuntimeReasoningCapability::Effort {
             options: strings(["low", "high", "max"]),
         }),
+        BaseCodingAgent::QoderCli => None,
         BaseCodingAgent::Amp | BaseCodingAgent::CursorAgent | BaseCodingAgent::Copilot => None,
         #[cfg(feature = "qa-mode")]
         BaseCodingAgent::QaMock | BaseCodingAgent::AcpQa => None,
@@ -1264,6 +1561,7 @@ fn model_name(config: &CodingAgent) -> Option<&str> {
         CodingAgent::Copilot(config) => config.model.as_deref(),
         CodingAgent::Droid(config) => config.model.as_deref(),
         CodingAgent::KimiCode(config) => config.model.as_deref(),
+        CodingAgent::QoderCli(config) => config.model.as_deref(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => None,
         _ => None,
@@ -1359,7 +1657,9 @@ fn update_store<T>(
 
 #[cfg(test)]
 mod tests {
-    use executors::executors::{AppendPrompt, kimi::KimiCode};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use executors::executors::{AppendPrompt, kimi::KimiCode, qoder::QoderCli};
 
     use super::*;
 
@@ -1373,6 +1673,229 @@ mod tests {
             acp_mcp_policy: Default::default(),
             approvals: None,
         })
+    }
+
+    fn test_probe_key(runner: BaseCodingAgent, kind: CliProbeKind, salt: u8) -> CliProbeCacheKey {
+        let mut fingerprint = [0; 32];
+        fingerprint[0] = salt;
+        CliProbeCacheKey {
+            request: CliProbeRequestKey {
+                runner,
+                current_dir: PathBuf::from(format!("/openteams-probe-test-{salt}")),
+                execution_fingerprint: fingerprint,
+            },
+            kind,
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_identical_acp_probes_share_one_execution() {
+        let key = test_probe_key(BaseCodingAgent::Gemini, CliProbeKind::Acp, 201);
+        CLI_PROBE_CACHE.remove(&key);
+        let starts = Arc::new(AtomicUsize::new(0));
+
+        let first_starts = Arc::clone(&starts);
+        let first = run_coordinated_cli_probe(
+            key.clone(),
+            CliProbeCachePolicy::Reuse,
+            move || async move {
+                first_starts.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                Ok(CliProbeValue::Acp(None))
+            },
+        );
+        let second_starts = Arc::clone(&starts);
+        let second = run_coordinated_cli_probe(
+            key.clone(),
+            CliProbeCachePolicy::Refresh,
+            move || async move {
+                second_starts.fetch_add(1, Ordering::SeqCst);
+                Ok(CliProbeValue::Acp(None))
+            },
+        );
+
+        let (first_result, second_result) = tokio::join!(first, second);
+
+        assert!(matches!(first_result, Ok(CliProbeValue::Acp(None))));
+        assert!(matches!(second_result, Ok(CliProbeValue::Acp(None))));
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        CLI_PROBE_CACHE.remove(&key);
+    }
+
+    #[tokio::test]
+    async fn concurrent_identical_non_acp_probes_share_one_execution() {
+        let key = test_probe_key(BaseCodingAgent::Codex, CliProbeKind::Version, 202);
+        CLI_PROBE_CACHE.remove(&key);
+        let starts = Arc::new(AtomicUsize::new(0));
+
+        let make_probe = |starts: Arc<AtomicUsize>| async move {
+            starts.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            Ok(CliProbeValue::Version(Some("codex 1.2.3".to_string())))
+        };
+        let first = run_coordinated_cli_probe(key.clone(), CliProbeCachePolicy::Reuse, {
+            let starts = Arc::clone(&starts);
+            move || make_probe(starts)
+        });
+        let second = run_coordinated_cli_probe(key.clone(), CliProbeCachePolicy::Refresh, {
+            let starts = Arc::clone(&starts);
+            move || make_probe(starts)
+        });
+
+        let (first_result, second_result) = tokio::join!(first, second);
+
+        assert!(matches!(first_result, Ok(CliProbeValue::Version(Some(_)))));
+        assert!(matches!(second_result, Ok(CliProbeValue::Version(Some(_)))));
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        CLI_PROBE_CACHE.remove(&key);
+    }
+
+    #[tokio::test]
+    async fn different_probe_keys_for_one_runner_are_serialized() {
+        let first_key = test_probe_key(BaseCodingAgent::Codex, CliProbeKind::Version, 203);
+        let second_key = test_probe_key(BaseCodingAgent::Codex, CliProbeKind::Models, 204);
+        CLI_PROBE_CACHE.remove(&first_key);
+        CLI_PROBE_CACHE.remove(&second_key);
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum_active = Arc::new(AtomicUsize::new(0));
+
+        let make_probe = |active: Arc<AtomicUsize>, maximum_active: Arc<AtomicUsize>| async move {
+            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+            maximum_active.fetch_max(current, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            active.fetch_sub(1, Ordering::SeqCst);
+            Ok(CliProbeValue::Version(None))
+        };
+        let first = run_coordinated_cli_probe(first_key.clone(), CliProbeCachePolicy::Refresh, {
+            let active = Arc::clone(&active);
+            let maximum_active = Arc::clone(&maximum_active);
+            move || make_probe(active, maximum_active)
+        });
+        let second = run_coordinated_cli_probe(second_key.clone(), CliProbeCachePolicy::Refresh, {
+            let active = Arc::clone(&active);
+            let maximum_active = Arc::clone(&maximum_active);
+            move || make_probe(active, maximum_active)
+        });
+
+        let (first_result, second_result) = tokio::join!(first, second);
+
+        assert!(first_result.is_ok());
+        assert!(second_result.is_ok());
+        assert_eq!(maximum_active.load(Ordering::SeqCst), 1);
+        CLI_PROBE_CACHE.remove(&first_key);
+        CLI_PROBE_CACHE.remove(&second_key);
+    }
+
+    #[tokio::test]
+    async fn concurrent_probe_failure_is_shared_but_not_reused_later() {
+        let key = test_probe_key(BaseCodingAgent::Opencode, CliProbeKind::Version, 205);
+        CLI_PROBE_CACHE.remove(&key);
+        let starts = Arc::new(AtomicUsize::new(0));
+
+        let first_starts = Arc::clone(&starts);
+        let first = run_coordinated_cli_probe(
+            key.clone(),
+            CliProbeCachePolicy::Reuse,
+            move || async move {
+                first_starts.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                Err("temporary probe failure".to_string())
+            },
+        );
+        let second_starts = Arc::clone(&starts);
+        let second = run_coordinated_cli_probe(
+            key.clone(),
+            CliProbeCachePolicy::Reuse,
+            move || async move {
+                second_starts.fetch_add(1, Ordering::SeqCst);
+                Ok(CliProbeValue::Version(None))
+            },
+        );
+        let (first_result, second_result) = tokio::join!(first, second);
+        assert_eq!(first_result.unwrap_err(), "temporary probe failure");
+        assert_eq!(second_result.unwrap_err(), "temporary probe failure");
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        let retry_starts = Arc::clone(&starts);
+        let retry = run_coordinated_cli_probe(
+            key.clone(),
+            CliProbeCachePolicy::Reuse,
+            move || async move {
+                retry_starts.fetch_add(1, Ordering::SeqCst);
+                Ok(CliProbeValue::Version(None))
+            },
+        )
+        .await;
+        assert!(retry.is_ok());
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        CLI_PROBE_CACHE.remove(&key);
+    }
+
+    #[test]
+    fn cli_probe_key_tracks_runner_workspace_auth_and_config() {
+        let runner = BaseCodingAgent::KimiCode;
+        let executor = model_agent(Some("kimi-k2.5"));
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+        let base = cli_probe_request_key(
+            runner,
+            &executor,
+            Path::new("/workspace/one"),
+            &env,
+            Some("oauth"),
+        )
+        .unwrap();
+        let workspace_changed = cli_probe_request_key(
+            runner,
+            &executor,
+            Path::new("/workspace/two"),
+            &env,
+            Some("oauth"),
+        )
+        .unwrap();
+        let auth_changed = cli_probe_request_key(
+            runner,
+            &executor,
+            Path::new("/workspace/one"),
+            &env,
+            Some("api_key"),
+        )
+        .unwrap();
+        let config_changed = cli_probe_request_key(
+            runner,
+            &model_agent(Some("kimi-k2.5-preview")),
+            Path::new("/workspace/one"),
+            &env,
+            Some("oauth"),
+        )
+        .unwrap();
+
+        assert_ne!(base, workspace_changed);
+        assert_ne!(base, auth_changed);
+        assert_ne!(base, config_changed);
+    }
+
+    #[tokio::test]
+    async fn invalid_runner_probe_config_is_isolated_as_one_outcome() {
+        let runner = BaseCodingAgent::KimiCode;
+        let executor_config = ExecutorConfig::new_with_default(model_agent(None));
+        let mut store = AgentRuntimeStore::default();
+        let mut config = default_config(runner);
+        config.executor_options = serde_json::json!({ "model": 123 });
+        store.configs.insert(runner, config);
+
+        let outcome = discover_runner_runtime(
+            runner,
+            &executor_config,
+            &store,
+            Path::new("/workspace/one"),
+        )
+        .await;
+
+        assert!(matches!(
+            outcome,
+            RunnerDiscoveryOutcome::Failed { runner: failed_runner, message, .. }
+                if failed_runner == runner && message.starts_with("[runtime_configuration]")
+        ));
     }
 
     #[test]
@@ -1552,6 +2075,31 @@ mod tests {
     }
 
     #[test]
+    fn successful_acp_probe_clears_cached_authentication_required_error() {
+        let runner = BaseCodingAgent::QoderCli;
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: Vec::new(),
+                version: Some("qodercli 1.2.3".to_string()),
+                last_checked_at: Utc::now(),
+                last_error: Some(
+                    "[model_discovery] I/O error: Authentication required: Authentication is required\n[version_check] temporary warning"
+                        .to_string(),
+                ),
+            },
+        );
+
+        clear_cached_authentication_required_error(&mut store, runner);
+
+        assert_eq!(
+            store.discoveries[&runner].last_error.as_deref(),
+            Some("[version_check] temporary warning")
+        );
+    }
+
+    #[test]
     fn status_error_details_preserve_each_failed_stage() {
         let merged = merge_status_error_details([
             Some(status_error_detail(
@@ -1583,6 +2131,22 @@ mod tests {
             detail,
             "command=`/Users/test/.local/bin/copilot --version`; operation=execute version command; result=process failed with exit code 1: authentication required"
         );
+    }
+
+    #[tokio::test]
+    async fn missing_runner_skips_runtime_command_resolution() {
+        let mut executor = model_agent(None);
+        let CodingAgent::KimiCode(config) = &mut executor else {
+            panic!("expected KimiCode executor");
+        };
+        config.cmd.base_command_override =
+            Some("openteams-test-command-that-must-not-exist-8dd8c9e9".to_string());
+
+        let result = resolve_runtime_command_for_diagnostics(false, &executor)
+            .await
+            .expect("uninstalled runner should not resolve its command");
+
+        assert!(result.is_none());
     }
 
     #[test]
@@ -1668,6 +2232,38 @@ mod tests {
         );
         assert_eq!(statuses[0].env_summary[0].value, "secret");
         assert_eq!(statuses[0].auth_state, AgentRuntimeAuthState::Authenticated);
+    }
+
+    #[test]
+    fn qoder_runtime_status_recognizes_local_auth_state_file() {
+        let temp = tempfile::tempdir().expect("temporary Qoder home");
+        let auth_dir = temp.path().join(".auth");
+        std::fs::create_dir(&auth_dir).expect("create auth directory");
+        std::fs::write(auth_dir.join("user"), "encrypted-login-state")
+            .expect("write Qoder auth state");
+
+        let runner = BaseCodingAgent::QoderCli;
+        let executor = CodingAgent::QoderCli(QoderCli {
+            append_prompt: AppendPrompt::default(),
+            model: Some("auto".to_string()),
+            acp: None,
+            cmd: CmdOverrides::default(),
+            acp_mcp_policy: Default::default(),
+            approvals: None,
+        });
+        let executor_config = ExecutorConfig::new_with_default(executor);
+        let mut runtime = default_config(runner);
+        runtime.env_json.insert(
+            "QODER_CONFIG_DIR".to_string(),
+            temp.path().to_string_lossy().into_owned(),
+        );
+        let mut store = AgentRuntimeStore::default();
+        store.configs.insert(runner, runtime);
+        let base = executor_config.get_default().expect("Qoder default config");
+
+        let status = build_status(runner, &executor_config, base, &store, true);
+
+        assert_eq!(status.auth_state, AgentRuntimeAuthState::Authenticated);
     }
 
     #[test]

@@ -21,14 +21,17 @@ pub fn summarize_round_results(
             result_summary = Some(payload.summary.clone());
         }
         step_summaries.push(format!(
-            "- [{}] {}: {:?} - {}",
-            step.step_key, step.title, step.status, payload.summary
+            "- [{}] {}: {} - {}",
+            step.step_key,
+            step.title,
+            to_workflow_wire_value(&step.status),
+            payload.summary
         ));
     }
 
     IterationRoundSummary {
         round_index: round.round_index,
-        status: format!("{:?}", round.status).to_lowercase(),
+        status: to_workflow_wire_value(&round.status),
         result_summary,
         outputs,
         step_summaries,

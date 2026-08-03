@@ -398,11 +398,12 @@ impl WorkflowOrchestrator {
                         }
                         continue;
                     }
-                    let role = if lead_session_agent_id == Some(session_agent_uuid) {
-                        WorkflowAgentSessionRole::Lead
-                    } else {
-                        WorkflowAgentSessionRole::Worker
-                    };
+                    let role = workflow_agent_session_role_for_assignment(
+                        &compiled.steps,
+                        lead_session_agent_id,
+                        session_agent_uuid,
+                        agent_id_str,
+                    );
                     let ws_id = Uuid::new_v4();
                     let ws = WorkflowAgentSession::create(
                         pool,
@@ -606,7 +607,7 @@ impl WorkflowOrchestrator {
                 agent_session_id: None,
                 event_type: WorkflowEventType::RoundStarted,
                 status_before: None,
-                status_after: Some(format!("{:?}", execution.status).to_lowercase()),
+                status_after: Some(to_workflow_wire_value(&execution.status)),
                 detail_json: None,
             },
             Uuid::new_v4(),
@@ -2072,6 +2073,27 @@ fn step_transition_duration_ms(step: &WorkflowStep, to_status: &str) -> Option<i
             .num_milliseconds()
             .max(0)
     })
+}
+
+pub(super) fn workflow_agent_session_role_for_assignment(
+    compiled_steps: &[CompiledStep],
+    lead_session_agent_id: Option<Uuid>,
+    session_agent_id: Uuid,
+    assigned_agent_id: &str,
+) -> WorkflowAgentSessionRole {
+    if lead_session_agent_id == Some(session_agent_id) {
+        return WorkflowAgentSessionRole::Lead;
+    }
+    if compiled_steps.iter().any(|step| {
+        step.step_type == WorkflowStepType::Review
+            && step.assigned_agent_id.as_deref() == Some(assigned_agent_id)
+    }) {
+        // A review node owns this session's workflow role. This makes the
+        // session projection agree with the node that executes the review.
+        WorkflowAgentSessionRole::Reviewer
+    } else {
+        WorkflowAgentSessionRole::Worker
+    }
 }
 
 pub(crate) fn resolve_step_workflow_session<'a>(

@@ -183,6 +183,10 @@ pub fn build_effective_member_executor(
                 let inherited = config.acp.clone().unwrap_or_default();
                 config.acp = Some(inherited.overlay(member_acp));
             }
+            CodingAgent::QoderCli(config) => {
+                let inherited = config.acp.clone().unwrap_or_default();
+                config.acp = Some(inherited.overlay(member_acp));
+            }
             _ => {}
         }
     }
@@ -209,6 +213,14 @@ pub fn executor_acp_full_access_enabled(executor: &CodingAgent) -> bool {
                 == AcpAccessMode::FullAccess
         }
         CodingAgent::KimiCode(config) => {
+            config
+                .acp
+                .as_ref()
+                .and_then(|acp| acp.access_mode)
+                .unwrap_or_default()
+                == AcpAccessMode::FullAccess
+        }
+        CodingAgent::QoderCli(config) => {
             config
                 .acp
                 .as_ref()
@@ -414,6 +426,7 @@ mod tests {
             BaseCodingAgent::Gemini,
             BaseCodingAgent::QwenCode,
             BaseCodingAgent::KimiCode,
+            BaseCodingAgent::QoderCli,
         ] {
             let executor = profiles.get_coding_agent_or_default(&ExecutorProfileId::new(runner));
             assert!(executor_acp_full_access_enabled(&executor), "{runner}");

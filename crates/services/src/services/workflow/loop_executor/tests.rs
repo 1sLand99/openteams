@@ -79,21 +79,21 @@ mod tests {
     }
 
     #[test]
-    fn loop_lead_review_rejected_business_event_uses_review_node_rejected_context() {
+    fn loop_reviewer_rejection_event_uses_actual_reviewer_context() {
         let execution = sample_execution();
         let step_id = Uuid::new_v4();
 
-        let event = loop_lead_review_rejected_event(&execution, step_id);
+        let event = loop_reviewer_review_rejected_event(&execution, step_id, "reviewer");
 
         assert_eq!(event.session_id, execution.session_id);
         assert_eq!(event.execution_id, execution.id);
         assert_eq!(event.plan_id, execution.plan_id);
         assert_eq!(event.step_id, step_id);
-        assert_eq!(event.reviewer_type, "lead");
+        assert_eq!(event.reviewer_type, "reviewer");
     }
 
     #[test]
-    fn loop_lead_review_rejected_runtime_path_sets_review_node_rejected_analytics() {
+    fn loop_reviewer_rejection_runtime_path_sets_reviewer_analytics() {
         let execution = sample_execution();
         let step_id = Uuid::new_v4();
         let session_id = execution.session_id.to_string();
@@ -101,7 +101,8 @@ mod tests {
         let plan_id = execution.plan_id.to_string();
         let task_id = step_id.to_string();
 
-        let event = loop_lead_review_rejected_analytics_parts(&execution, step_id);
+        let event =
+            loop_reviewer_review_rejected_analytics_parts(&execution, step_id, "reviewer");
 
         assert_eq!(event.payload.event_name(), "quality.review_decision_recorded");
         assert_eq!(event.context.session_id.map(|id| id.to_string()).as_deref(), Some(session_id.as_str()));
@@ -110,10 +111,36 @@ mod tests {
         assert_eq!(event.context.step_id.map(|id| id.to_string()).as_deref(), Some(task_id.as_str()));
         let properties = event.payload.properties();
         assert_eq!(properties["review_verdict"], serde_json::json!("rejected"));
-        assert_eq!(properties["reviewer_type"], serde_json::json!("lead"));
+        assert_eq!(properties["reviewer_type"], serde_json::json!("reviewer"));
         assert_eq!(
             properties["resolution"],
             serde_json::json!("review_node_rejected")
+        );
+    }
+
+    #[test]
+    fn review_scope_steps_are_ordered_by_internal_dag_edges() {
+        let review_scope = vec!["publish".to_string(), "draft".to_string(), "review".to_string()];
+        let edges = vec![
+            db::models::workflow_types::WorkflowPlanEdge {
+                id: "draft-review".to_string(),
+                source: "draft".to_string(),
+                target: "review".to_string(),
+                edge_type: None,
+                data: None,
+            },
+            db::models::workflow_types::WorkflowPlanEdge {
+                id: "review-publish".to_string(),
+                source: "review".to_string(),
+                target: "publish".to_string(),
+                edge_type: None,
+                data: None,
+            },
+        ];
+
+        assert_eq!(
+            review_scope_step_keys_in_dag_order(&review_scope, &edges),
+            vec!["draft", "review", "publish"]
         );
     }
 
@@ -229,12 +256,22 @@ mod tests {
     }
 
     #[test]
-    fn all_waived_targets_pass_before_the_final_attempt_limit_is_applied() {
-        assert!(workflow_review_attempt_limit_reached(
-            MAX_WORKFLOW_REVIEW_ATTEMPTS
-        ));
+    fn persisted_loop_retry_budget_drives_review_attempt_limit() {
+        let mut workflow_loop = sample_loop("loop-a");
+        workflow_loop.max_retry = 0;
+        assert_eq!(max_loop_review_attempts(&workflow_loop), 1);
+        assert!(loop_review_attempt_limit_reached(1, 1));
+
+        workflow_loop.max_retry = 2;
+        assert_eq!(max_loop_review_attempts(&workflow_loop), 3);
+        assert!(!loop_review_attempt_limit_reached(2, 3));
+        assert!(loop_review_attempt_limit_reached(3, 3));
+    }
+
+    #[test]
+    fn all_waived_targets_pass_before_the_dynamic_attempt_limit_is_applied() {
         assert_eq!(
-            rejected_loop_review_disposition(MAX_WORKFLOW_REVIEW_ATTEMPTS, &[]),
+            rejected_loop_review_disposition(2, 2, &[]),
             RejectedLoopReviewDisposition::PassedByUserWaiver
         );
 
@@ -245,11 +282,16 @@ mod tests {
             feedback: "still unresolved".to_string(),
         };
         assert_eq!(
-            rejected_loop_review_disposition(
-                MAX_WORKFLOW_REVIEW_ATTEMPTS,
-                &[remaining_target]
-            ),
+            rejected_loop_review_disposition(2, 2, &[remaining_target]),
             RejectedLoopReviewDisposition::LimitReached
+        );
+        assert_eq!(
+            rejected_loop_review_disposition(1, 2, &[LoopFeedbackTarget {
+                step: sample_loop_step(&sample_loop("loop-a"), "retry"),
+                issue_scope_id: "retry-issue".to_string(),
+                feedback: "retry".to_string(),
+            }]),
+            RejectedLoopReviewDisposition::Retry
         );
     }
 

@@ -1146,7 +1146,8 @@ export type BaseCodingAgent =
   | 'QWEN_CODE'
   | 'COPILOT'
   | 'DROID'
-  | 'KIMI_CODE';
+  | 'KIMI_CODE'
+  | 'QODER_CLI';
 
 export type AvailabilityInfo =
   | { type: 'LOGIN_DETECTED'; last_auth_timestamp: bigint }
@@ -1500,11 +1501,6 @@ export interface WorkflowTranscriptEntry {
   meta_json?: string | null;
   created_at: string;
   agent_name?: string | null;
-}
-
-export interface GeneratePlanAndRunResponse {
-  execution_id: string;
-  workflow_card_message: BackendChatMessage;
 }
 
 export interface ExecutePlanReviewOverride {

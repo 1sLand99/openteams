@@ -477,7 +477,7 @@ export enum WorkflowLoopStatus { pending = "pending", running = "running", waiti
 
 export enum ReviewVerdict { approved = "approved", rejected = "rejected" }
 
-export enum ReviewerType { lead = "lead", user = "user" }
+export enum ReviewerType { lead = "lead", reviewer = "reviewer", user = "user" }
 
 export enum WorkflowEdgeKind { hard = "hard", soft = "soft" }
 
@@ -499,7 +499,20 @@ export type WorkflowPlanNode = { id: string, type: string, position: WorkflowNod
 
 export type WorkflowNodePosition = { x: number, y: number, };
 
-export type WorkflowNodeData = { stepType: string, agentId: string | null, title: string, instructions: string, acceptance: Array<string> | null, outputs: Array<string> | null, interruptible: boolean, maxRetry: number | null, status: string | null, loopKey: string | null, reviewScope: Array<string> | null, };
+export type WorkflowNodeData = { stepType: string, agentId: string | null, title: string, instructions: string, acceptance: Array<string> | null, outputs: Array<string> | null,
+/**
+ * Verifiable checklist items the task must satisfy (task nodes only).
+ */
+checklist: Array<string> | null,
+/**
+ * Verification/test commands or methods used to prove the task is done
+ * (task nodes only).
+ */
+verificationCommands: Array<string> | null,
+/**
+ * Evidence the task must produce on completion (task nodes only).
+ */
+completionEvidence: Array<string> | null, interruptible: boolean, maxRetry: number | null, status: string | null, loopKey: string | null, reviewScope: Array<string> | null, };
 
 export type WorkflowLoopDef = { loopKey: string, memberSteps: Array<string>, reviewStep: string, maxRetry: number | null, userReviewRequired: boolean | null, };
 
@@ -588,7 +601,7 @@ export type AcpConfigOptionSnapshot = { id: string, name: string, description: s
 
 export enum AcpConfigSource { none = "none", stable = "stable", legacy_model = "legacy_model" }
 
-export type AcpCapabilityProbe = { protocol_version: string, agent_name: string | null, agent_version: string | null, auth_methods: Array<AcpAuthMethodInfo>, supports_session_list: boolean, supports_session_resume: boolean, supports_session_close: boolean, supports_session_delete: boolean, supports_additional_directories: boolean, agent_capabilities: JsonValue, config_source: AcpConfigSource, config_options: Array<AcpConfigOptionSnapshot>, };
+export type AcpCapabilityProbe = { protocol_version: string, agent_name: string | null, agent_version: string | null, auth_methods: Array<AcpAuthMethodInfo>, supports_session_list: boolean, supports_session_resume: boolean, supports_session_load: boolean, supports_session_close: boolean, supports_session_delete: boolean, supports_additional_directories: boolean, agent_capabilities: JsonValue, config_source: AcpConfigSource, config_options: Array<AcpConfigOptionSnapshot>, };
 
 export type ChatStreamEvent = { "type": "message_new", message: ChatMessage, } | { "type": "message_updated", message: ChatMessage, } | { "type": "work_item_new", work_item: ChatWorkItem, } | { "type": "agent_delta", session_id: string, session_agent_id: string, agent_id: string, run_id: string, stream_type: ChatStreamDeltaType, content: string, delta: boolean, is_final: boolean, } | { "type": "agent_run_started", session_id: string, session_agent_id: string, agent_id: string, agent_name: string, model: string | null, run_id: string,
 /**
@@ -1354,9 +1367,9 @@ export type ScriptRequest = { script: string, language: ScriptRequestLanguage, c
 
 export type ScriptRequestLanguage = "Bash";
 
-export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", OPEN_TEAMS_CLI = "OPEN_TEAMS_CLI", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", COPILOT = "COPILOT", DROID = "DROID", KIMI_CODE = "KIMI_CODE" }
+export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", OPEN_TEAMS_CLI = "OPEN_TEAMS_CLI", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", COPILOT = "COPILOT", DROID = "DROID", KIMI_CODE = "KIMI_CODE", QODER_CLI = "QODER_CLI" }
 
-export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode };
+export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli };
 
 export type SlashCommandDescription = {
 /**
@@ -1386,7 +1399,7 @@ executor: BaseCodingAgent,
  */
 variant: string | null, };
 
-export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } };
+export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli } };
 
 export type ExecutorConfigs = { executors: { [key in BaseCodingAgent]?: ExecutorConfig }, };
 
@@ -1435,6 +1448,8 @@ auto_approve: boolean,
 auto_compact: boolean, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type QwenCode = { append_prompt: AppendPrompt, model?: string | null, thinking_effort?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+
+export type QoderCli = { append_prompt: AppendPrompt, model?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Droid = { append_prompt: AppendPrompt, autonomy: Autonomy, model?: string | null, reasoning_effort?: DroidReasoningEffort | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 

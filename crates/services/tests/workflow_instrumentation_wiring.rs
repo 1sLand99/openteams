@@ -18,10 +18,6 @@ fn read_repo_file(path: &str) -> String {
         .unwrap_or_else(|err| panic!("failed to read {}: {}", full_path.display(), err))
 }
 
-fn count_occurrences(haystack: &str, needle: &str) -> usize {
-    haystack.match_indices(needle).count()
-}
-
 #[test]
 fn error_reporting_config_defaults_on_existing_v10_and_gates_sentry_startup() {
     let mut raw = serde_json::to_value(Config::default()).expect("serialize config");
@@ -152,21 +148,11 @@ fn workflow_and_message_routes_wire_engagement_and_risk_events() {
         read_repo_file("crates/services/src/services/workflow/orchestrator/plan_control.rs");
 
     assert!(workflow_route.contains("workflow_analytics::track_approval_timeout("));
-    assert!(workflow_route.contains("workflow_analytics::track_plan_generated("));
-    assert!(workflow_route.contains("workflow_analytics::track_plan_executed("));
-    assert_eq!(
-        count_occurrences(&workflow_route, "workflow_analytics::track_plan_executed("),
-        1,
-        "workflow route should emit plan_executed only once (generate path)"
-    );
-    assert_eq!(
-        count_occurrences(&workflow_route, "workflow_analytics::track_plan_generated("),
-        1,
-        "workflow route should only contain failure hook for plan_generated"
-    );
+    // The unconfirmed generate-and-run REST entry was removed; plan generation
+    // flows through the chat `workflow_generate` -> preview -> execute chain.
     assert!(
-        count_occurrences(&workflow_route, "track_plan_generation_failure();") >= 4,
-        "generate_plan_and_run failure branches should all track plan_generated=false"
+        !workflow_route.contains("generate_plan_and_run"),
+        "generate_plan_and_run handler must stay removed"
     );
     assert!(plan_control.contains("workflow_analytics::track_plan_generated("));
     assert!(plan_control.contains("workflow_analytics::track_plan_executed("));

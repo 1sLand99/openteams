@@ -17,7 +17,7 @@ use db::models::{
     workflow_plan_revision::WorkflowPlanRevision,
     workflow_step::WorkflowStep,
     workflow_step_edge::WorkflowStepEdge,
-    workflow_types::WorkflowPlanJson,
+    workflow_types::{DEFAULT_WORKFLOW_RETRY, WorkflowPlanJson},
 };
 use deployment::Deployment;
 use serde::{Deserialize, Serialize};
@@ -677,7 +677,13 @@ async fn build_plan_workflow_card_projection(
             lead_review_required: true,
             user_review_required: true,
             retry_count: 0,
-            max_retry: node.data.max_retry.unwrap_or(1) as i32,
+            max_retry: node.data.max_retry.unwrap_or_else(|| {
+                parsed_plan
+                    .globals
+                    .as_ref()
+                    .map(|globals| globals.default_retry)
+                    .unwrap_or(DEFAULT_WORKFLOW_RETRY)
+            }) as i32,
             loop_key: node.data.loop_key.clone(),
             latest_review: None,
             agent_name: node

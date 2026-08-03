@@ -14,8 +14,8 @@ use db::{
         workflow_step::WorkflowStep,
         workflow_transcript::{CreateWorkflowTranscript, WorkflowTranscript},
         workflow_types::{
-            CompiledLoopDef, ReviewVerdict, ReviewerType, WorkflowEventType, WorkflowLoopStatus,
-            WorkflowStepStatus, to_workflow_wire_value,
+            CompiledLoopDef, ReviewVerdict, ReviewerType, WorkflowAgentSessionRole,
+            WorkflowEventType, WorkflowLoopStatus, WorkflowStepStatus, to_workflow_wire_value,
         },
     },
 };
@@ -31,15 +31,15 @@ use super::{
         OrchestratorError, WorkflowOrchestrator, reducer, resolve_step_workflow_session,
     },
     workflow_review::{
-        LoopReviewPromptStepInput, LoopReviewProtocolMessage, build_loop_review_prompt,
-        loop_review_protocol_json_schema, parse_loop_review_output,
+        LoopReviewPromptContext, LoopReviewPromptStepInput, LoopReviewProtocolMessage,
+        build_loop_review_prompt, loop_review_protocol_json_schema, parse_loop_review_output,
+        validate_loop_review_acceptance_coverage,
     },
     workflow_runtime::{
-        MAX_WORKFLOW_REVIEW_ATTEMPTS, SummaryPayload, WORKFLOW_PROTOCOL_PARSE_MAX_RETRIES,
-        WorkflowRevisionFeedbackSource, build_workflow_protocol_retry_prompt,
-        parse_summary_payload, resolve_workflow_response_language_instruction,
-        run_workflow_step_agent_follow_up, run_workflow_step_agent_prompt,
-        should_retry_workflow_protocol_parse_failure, workflow_review_attempt_limit_reached,
+        SummaryPayload, WORKFLOW_PROTOCOL_PARSE_MAX_RETRIES, WorkflowRevisionFeedbackSource,
+        build_workflow_protocol_retry_prompt, parse_summary_payload,
+        resolve_workflow_response_language_instruction, run_workflow_step_agent_follow_up,
+        run_workflow_step_agent_prompt, should_retry_workflow_protocol_parse_failure,
     },
 };
 use crate::services::inbox::InboxService;

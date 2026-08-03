@@ -208,6 +208,36 @@ async fn configured_authentication_runs_before_session_creation() {
 }
 
 #[tokio::test]
+async fn expired_configured_authentication_is_typed() {
+    let workspace = std::env::temp_dir().join(format!("openteams-acp-qa-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&workspace)
+        .await
+        .expect("create workspace");
+    let executor = AcpQaExecutor {
+        command: env!("CARGO_BIN_EXE_acp-qa-agent").to_string(),
+        auth_method_id: Some("qa-auth".to_string()),
+        ..AcpQaExecutor::default()
+    };
+    let mut env = ExecutionEnv::new(
+        RepoContext::new(workspace.clone(), Vec::new()),
+        false,
+        String::new(),
+    );
+    env.insert("ACP_QA_REQUIRE_AUTH", "1");
+    env.insert("ACP_QA_EXPIRE_AUTH", "1");
+
+    let error = executor
+        .spawn(&workspace, "expired authentication", &env)
+        .await
+        .expect_err("expired authentication should be required again");
+    assert!(matches!(error, ExecutorError::AuthRequired(_)));
+
+    tokio::fs::remove_dir_all(workspace)
+        .await
+        .expect("remove workspace");
+}
+
+#[tokio::test]
 async fn prompt_error_and_abnormal_exit_are_reported_without_hanging() {
     let workspace = std::env::temp_dir().join(format!("openteams-acp-qa-{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&workspace)
@@ -239,6 +269,42 @@ async fn prompt_error_and_abnormal_exit_are_reported_without_hanging() {
             .any(|event| matches!(event, AcpEvent::Error(_)))
             || exit_events.is_empty()
     );
+
+    tokio::fs::remove_dir_all(workspace)
+        .await
+        .expect("remove workspace");
+}
+
+#[tokio::test]
+async fn cancellation_notifies_agent_and_finishes_promptly() {
+    let workspace = std::env::temp_dir().join(format!("openteams-acp-qa-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&workspace)
+        .await
+        .expect("create workspace");
+    let executor = AcpQaExecutor {
+        command: env!("CARGO_BIN_EXE_acp-qa-agent").to_string(),
+        ..AcpQaExecutor::default()
+    };
+    let env = ExecutionEnv::new(
+        RepoContext::new(workspace.clone(), Vec::new()),
+        false,
+        String::new(),
+    );
+    let mut spawned = executor
+        .spawn(&workspace, "[qa:sleep]", &env)
+        .await
+        .expect("spawn cancellable ACP turn");
+    spawned
+        .cancel
+        .take()
+        .expect("ACP cancellation token")
+        .cancel();
+    let exit = spawned.exit_signal.take().expect("exit signal");
+    let result = tokio::time::timeout(Duration::from_secs(3), exit)
+        .await
+        .expect("cancellation timeout")
+        .expect("exit signal sender");
+    assert!(matches!(result, ExecutorExitResult::Success));
 
     tokio::fs::remove_dir_all(workspace)
         .await

@@ -192,6 +192,7 @@ pub enum ReviewVerdict {
 #[ts(use_ts_enum)]
 pub enum ReviewerType {
     Lead,
+    Reviewer,
     User,
 }
 
@@ -201,6 +202,9 @@ pub enum ReviewerType {
 #[ts(use_ts_enum)]
 pub enum WorkflowEdgeKind {
     Hard,
+    /// Kept so previously persisted compiled graphs can still be deserialized.
+    /// New plan submissions reject soft edges until the scheduler implements
+    /// distinct soft-dependency semantics.
     Soft,
 }
 
@@ -337,8 +341,13 @@ fn default_interrupt_mode() -> String {
 }
 
 fn default_retry() -> u32 {
-    1
+    DEFAULT_WORKFLOW_RETRY
 }
+
+/// Retry budgets count rework attempts after the initial execution/review.
+/// Zero therefore means one initial attempt and no automatic rework.
+pub const DEFAULT_WORKFLOW_RETRY: u32 = 3;
+pub const MAX_WORKFLOW_RETRY: u32 = 10;
 
 fn default_true() -> bool {
     true
@@ -402,6 +411,16 @@ pub struct WorkflowNodeData {
     pub acceptance: Option<Vec<String>>,
     #[serde(default)]
     pub outputs: Option<Vec<String>>,
+    /// Verifiable checklist items the task must satisfy (task nodes only).
+    #[serde(default)]
+    pub checklist: Option<Vec<String>>,
+    /// Verification/test commands or methods used to prove the task is done
+    /// (task nodes only).
+    #[serde(default)]
+    pub verification_commands: Option<Vec<String>>,
+    /// Evidence the task must produce on completion (task nodes only).
+    #[serde(default)]
+    pub completion_evidence: Option<Vec<String>>,
     #[serde(default = "default_true")]
     pub interruptible: bool,
     #[serde(default)]

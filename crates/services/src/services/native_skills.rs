@@ -192,6 +192,13 @@ static RUNNER_COMPAT_MAP: Lazy<Vec<(&'static str, AgentCompatEntry)>> = Lazy::ne
             },
         ),
         (
+            "QODER_CLI",
+            AgentCompatEntry {
+                compatible_id: "qoder-cli",
+                agent_dir_id: "qoder",
+            },
+        ),
+        (
             "OPENTEAMS_CLI",
             AgentCompatEntry {
                 compatible_id: "openteams-cli",

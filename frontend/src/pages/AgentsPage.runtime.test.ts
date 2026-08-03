@@ -66,7 +66,7 @@ assert.match(
 );
 assert.match(
   source,
-  /currentDiagnostics &&[\s\S]*?!currentDiagnostics\.installed[\s\S]*?!diagnosticsLoading[\s\S]*?t\("agents\.details\.nativeCliMissing"\)/u,
+  /<AgentInstallGuide[\s\S]*?runner=\{runner\}[\s\S]*?rechecking=\{rechecking\}[\s\S]*?onRecheck=\{onRecheck\}/u,
 );
 assert.doesNotMatch(source, /npx/iu);
 assert.match(source, /const envSummary = runner\.env_summary;/u);
@@ -97,7 +97,16 @@ assert.match(
 );
 assert.match(
   source,
-  /const isAcpRunner[\s\S]*?runner === "GEMINI"[\s\S]*?runner === "QWEN_CODE"[\s\S]*?runner === "KIMI_CODE"/u,
+  /const isAcpRunner[\s\S]*?runner === "GEMINI"[\s\S]*?runner === "QWEN_CODE"[\s\S]*?runner === "KIMI_CODE"[\s\S]*?runner === "QODER_CLI"/u,
+);
+assert.match(
+  source,
+  /import qoderCliSchema from "..\/..\/..\/shared\/schemas\/qoder_cli\.json";/u,
+);
+assert.match(source, /QODER_CLI: qoderCliSchema,/u);
+assert.match(
+  source,
+  /QODER_CLI: \{[\s\S]*?title: "Qoder"[\s\S]*?logoSrc: "\/logos\/qoder-logo\.svg"/u,
 );
 assert.match(
   source,
@@ -108,6 +117,28 @@ assert.match(
   source,
   /const handleRefreshConfig = async \(\) => \{[\s\S]*?await agentRuntimeApi\.refresh\(\)[\s\S]*?setRefreshRevision/u,
 );
+const focusEffect = source.slice(
+  source.indexOf('const handleWindowFocus'),
+  source.indexOf('window.addEventListener("focus"'),
+);
+assert.match(focusEffect, /agentRuntimeApi\.refreshLight\(\)/u);
+assert.doesNotMatch(focusEffect, /agentRuntimeApi\.refresh\(\)/u);
+assert.doesNotMatch(focusEffect, /setRefreshRevision/u);
+assert.match(source, /sidebarDiagnosticsStore\.get\(runner\.runner_type\)/u);
+assert.match(
+  source,
+  /sidebarDiagnosticsStore\.set\(runner\.runner_type, result\)/u,
+);
+const explicitRefreshHandler = source.slice(
+  source.indexOf('const handleRefreshConfig'),
+  source.indexOf('const handleDiagnosticsLoaded'),
+);
+assert.match(explicitRefreshHandler, /invalidateSidebarDiagnostics\(\)/u);
+const saveHandler = source.slice(
+  source.indexOf('const handleSave'),
+  source.indexOf('const handleOpenConfig'),
+);
+assert.match(saveHandler, /invalidateSidebarDiagnostics\(runner\)/u);
 const headerRefreshButton = source.slice(
   source.indexOf('onClick={() => void handleRefreshConfig()}'),
   source.indexOf('</button>', source.indexOf('onClick={() => void handleRefreshConfig()}')),

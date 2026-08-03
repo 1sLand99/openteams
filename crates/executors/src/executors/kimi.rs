@@ -24,7 +24,8 @@ use crate::{
     },
     env::ExecutionEnv,
     executors::{
-        AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorPrompt, SpawnedChild,
+        StandardCodingAgentExecutor,
         utils::{json_has_nonempty_string, read_json_file},
     },
     mcp_config::{McpConfig, read_canonical_mcp_config},
@@ -332,6 +333,53 @@ impl StandardCodingAgentExecutor for KimiCode {
             .spawn_follow_up_with_command(
                 current_dir,
                 combined_prompt,
+                session_id,
+                command,
+                env,
+                &self.cmd,
+                self.approvals.clone(),
+            )
+            .await
+    }
+
+    async fn spawn_structured(
+        &self,
+        current_dir: &Path,
+        prompt: &ExecutorPrompt,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        let harness = self.acp_harness(env).await?;
+        let command = self.build_command_builder()?.build_initial()?;
+        let mut prompt = prompt.clone();
+        prompt.text = self.append_prompt.combine_prompt(&prompt.text);
+        harness
+            .spawn_structured_with_command(
+                current_dir,
+                prompt,
+                command,
+                env,
+                &self.cmd,
+                self.approvals.clone(),
+            )
+            .await
+    }
+
+    async fn spawn_follow_up_structured(
+        &self,
+        current_dir: &Path,
+        prompt: &ExecutorPrompt,
+        session_id: &str,
+        _reset_to_message_id: Option<&str>,
+        env: &ExecutionEnv,
+    ) -> Result<SpawnedChild, ExecutorError> {
+        let harness = self.acp_harness(env).await?;
+        let command = self.build_command_builder()?.build_follow_up(&[])?;
+        let mut prompt = prompt.clone();
+        prompt.text = self.append_prompt.combine_prompt(&prompt.text);
+        harness
+            .spawn_follow_up_structured_with_command(
+                current_dir,
+                prompt,
                 session_id,
                 command,
                 env,

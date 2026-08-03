@@ -56,6 +56,7 @@ const guidedRunners: BaseCodingAgent[] = [
   "GEMINI",
   "KIMI_CODE",
   "OPENCODE",
+  "QODER_CLI",
   "QWEN_CODE",
 ];
 for (const runner of guidedRunners) {
@@ -172,6 +173,38 @@ check(
   "kimi install uses the official install script",
   kimiOnLinux?.steps[0]?.commands[0] ===
     "curl -LsSf https://code.kimi.com/install.sh | bash",
+);
+
+const qoderOnMac = resolveInstallGuide(makeRunner("QODER_CLI"), "macos");
+check(
+  "qoder install uses the official install script",
+  qoderOnMac?.steps[0]?.commands[0] ===
+    "curl -fsSL https://qoder.com/install | bash",
+);
+check(
+  "qoder skips the node step for script installs",
+  qoderOnMac?.steps.every((step) => step.kind !== "node") === true,
+);
+check(
+  "qoder auth starts the CLI and finishes with /login",
+  qoderOnMac?.steps[1]?.commands[0] === "qodercli" &&
+    qoderOnMac?.steps[1]?.authFollowUpCommand === "/login",
+);
+const qoderOnWindows = resolveInstallGuide(
+  makeRunner("QODER_CLI"),
+  "windows",
+);
+check(
+  "qoder installs natively on Windows via PowerShell",
+  qoderOnWindows?.windowsSupport === "supported" &&
+    qoderOnWindows?.steps[0]?.commands[0] ===
+      "irm https://qoder.com/install.ps1 | iex",
+);
+check(
+  "qoder documents the PAT env var for headless auth",
+  getInstallGuideEntry("QODER_CLI")?.authEnvVars?.includes(
+    "QODER_PERSONAL_ACCESS_TOKEN",
+  ) === true,
 );
 
 const droidOnMac = resolveInstallGuide(makeRunner("DROID"), "macos");

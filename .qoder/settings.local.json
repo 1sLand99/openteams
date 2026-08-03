@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /Users/ming/workspace/openteams/ | head -40)"
+    ]
+  }
+}

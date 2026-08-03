@@ -241,14 +241,26 @@ impl WorkflowOrchestrator {
                 "step has no run_id, cannot retry review only".to_string(),
             )
         })?;
+        let persisted_content = summary_payload
+            .content
+            .or_else(|| step.content.clone())
+            .unwrap_or_default();
+        let structured_report = serde_json::from_str::<serde_json::Value>(&persisted_content)
+            .ok()
+            .filter(|value| {
+                value.get("type").and_then(|kind| kind.as_str()) == Some("final_result")
+            });
+        let content = structured_report
+            .as_ref()
+            .and_then(|value| value.get("content").and_then(|content| content.as_str()))
+            .unwrap_or(&persisted_content)
+            .to_string();
         let result = WorkflowStepRunResult {
             run_id,
             summary: summary_payload.summary,
-            content: summary_payload
-                .content
-                .or_else(|| step.content.clone())
-                .unwrap_or_default(),
+            content,
             outputs: summary_payload.outputs,
+            structured_report: structured_report.map(|value| value.to_string()),
         };
 
         // Prepare retry keeping task outputs
