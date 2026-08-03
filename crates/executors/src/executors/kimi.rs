@@ -29,7 +29,9 @@ use crate::{
         utils::{json_has_nonempty_string, read_json_file},
     },
     mcp_config::{McpConfig, read_canonical_mcp_config},
-    model_discovery::{discover_model_map_from_cli_command, read_config_value},
+    model_discovery::{
+        discover_model_map_from_cli_command, model_ids_from_model_map_json, read_config_value,
+    },
 };
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
@@ -160,22 +162,50 @@ impl KimiCode {
         Ok(harness.with_mcp_servers(effective.servers))
     }
 
-    async fn configured_default_model(
-        &self,
-        env: &ExecutionEnv,
-    ) -> Result<Option<String>, ExecutorError> {
-        let Some(path) = kimi_code_home(Some(env)).map(|home| home.join("config.toml")) else {
-            return Ok(None);
-        };
-        let Some(config) = read_config_value(&path).await? else {
-            return Ok(None);
-        };
-        Ok(config
-            .get("default_model")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned))
+    async fn configured_default_model(&self, env: &ExecutionEnv) -> Option<String> {
+        for home in kimi_code_homes(Some(env)) {
+            let path = home.join("config.toml");
+            let config = match read_config_value(&path).await {
+                Ok(Some(config)) => config,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        path = %path.display(),
+                        "ignoring unreadable Kimi config"
+                    );
+                    continue;
+                }
+            };
+            if let Some(model) = config
+                .get("default_model")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                return Some(model.to_string());
+            }
+        }
+        None
+    }
+
+    async fn configured_models(&self, env: &ExecutionEnv) -> Vec<String> {
+        let mut models = BTreeSet::new();
+        for home in kimi_code_homes(Some(env)) {
+            let path = home.join("config.toml");
+            match read_config_value(&path).await {
+                Ok(Some(config)) => models.extend(model_ids_from_model_map_json(&config)),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        path = %path.display(),
+                        "ignoring unreadable Kimi config"
+                    );
+                }
+            }
+        }
+        models.into_iter().collect()
     }
 
     fn discovered_model_option(
@@ -216,21 +246,18 @@ impl KimiCode {
 impl StandardCodingAgentExecutor for KimiCode {
     fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
         let env = env.clone().with_profile(&self.cmd);
-        let Some(home) = kimi_code_home(Some(&env)) else {
-            return self.authentication_detected(
-                &env,
-                &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
-                false,
-            );
-        };
-        let oauth_login = read_json_file(&home.join("credentials").join("kimi-code.json"))
-            .is_some_and(|value| {
+        let homes = kimi_code_homes(Some(&env));
+        let oauth_login = homes.iter().any(|home| {
+            read_json_file(&home.join("credentials").join("kimi-code.json")).is_some_and(|value| {
                 json_has_nonempty_string(&value, &["/access_token", "/refresh_token"])
-            });
-        let provider_configured = std::fs::read_to_string(home.join("config.toml"))
-            .ok()
-            .and_then(|content| toml::from_str::<toml::Value>(&content).ok())
-            .is_some_and(|value| kimi_provider_configured(&value));
+            })
+        });
+        let provider_configured = homes.iter().any(|home| {
+            std::fs::read_to_string(home.join("config.toml"))
+                .ok()
+                .and_then(|content| toml::from_str::<toml::Value>(&content).ok())
+                .is_some_and(|value| kimi_provider_configured(&value))
+        });
         self.authentication_detected(
             &env,
             &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
@@ -247,16 +274,23 @@ impl StandardCodingAgentExecutor for KimiCode {
         current_dir: &Path,
         env: &ExecutionEnv,
     ) -> Result<Option<Vec<String>>, ExecutorError> {
-        let mut models = discover_model_map_from_cli_command(
+        let mut models = BTreeSet::new();
+        match discover_model_map_from_cli_command(
             current_dir,
             env,
             &self.cmd,
             self.provider_list_command()?,
         )
-        .await?
-        .unwrap_or_default()
-        .into_iter()
-        .collect::<BTreeSet<_>>();
+        .await
+        {
+            Ok(Some(discovered)) => models.extend(discovered),
+            Ok(None) => {}
+            Err(error) => tracing::debug!(
+                error = %error,
+                "Kimi provider listing is unavailable; falling back to configured models"
+            ),
+        }
+        models.extend(self.configured_models(env).await);
         if let Some(model) = self
             .model
             .as_deref()
@@ -288,7 +322,7 @@ impl StandardCodingAgentExecutor for KimiCode {
         if let Some(models) = self.list_models(current_dir, env).await?
             && !models.is_empty()
         {
-            let default_model = self.configured_default_model(env).await?;
+            let default_model = self.configured_default_model(env).await;
             probe.config_source = AcpConfigSource::Stable;
             probe
                 .config_options
@@ -401,9 +435,11 @@ impl StandardCodingAgentExecutor for KimiCode {
         let mut roots = dirs::home_dir()
             .map(|home| vec![home.join(".agents").join("skills")])
             .unwrap_or_default();
-        if let Some(home) = kimi_code_home(None) {
+        for home in kimi_code_homes(None) {
             roots.push(home.join("skills"));
         }
+        roots.sort();
+        roots.dedup();
         roots
     }
 
@@ -464,16 +500,38 @@ fn unsupported_terminal_auth(method_id: &str) -> ExecutorError {
     ))
 }
 
+fn kimi_code_homes(env: Option<&ExecutionEnv>) -> Vec<PathBuf> {
+    let mut configured = Vec::new();
+    for key in ["KIMI_CODE_HOME", "KIMI_SHARE_DIR"] {
+        if let Some(path) = env
+            .and_then(|env| env.get(key).cloned())
+            .or_else(|| std::env::var(key).ok())
+            .and_then(|value| {
+                let value = value.trim();
+                (!value.is_empty()).then(|| PathBuf::from(value))
+            })
+            && !configured.contains(&path)
+        {
+            configured.push(path);
+        }
+    }
+    if !configured.is_empty() {
+        return configured;
+    }
+
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let modern = home.join(".kimi-code");
+    let legacy = home.join(".kimi");
+    match (modern.exists(), legacy.exists()) {
+        (false, true) => vec![legacy, modern],
+        _ => vec![modern, legacy],
+    }
+}
+
 fn kimi_code_home(env: Option<&ExecutionEnv>) -> Option<PathBuf> {
-    let configured = env
-        .and_then(|env| env.get("KIMI_CODE_HOME").cloned())
-        .or_else(|| std::env::var("KIMI_CODE_HOME").ok());
-    configured
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".kimi-code")))
+    kimi_code_homes(env).into_iter().next()
 }
 
 fn kimi_mcp_config_path(env: Option<&ExecutionEnv>) -> Option<PathBuf> {
@@ -624,5 +682,109 @@ mod tests {
                 &agent_client_protocol::schema::v1::SessionConfigOptionValue::value_id("default")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_kimi_share_dir_provides_models_and_default() {
+        let temp = TempDir::new().expect("create legacy Kimi home");
+        tokio::fs::write(
+            temp.path().join("config.toml"),
+            r#"
+                default_model = "kimi-code/k3"
+
+                [models."kimi-code/kimi-for-coding"]
+                model = "kimi-for-coding"
+
+                [models."kimi-code/k3"]
+                model = "k3"
+            "#,
+        )
+        .await
+        .expect("write legacy Kimi config");
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(temp.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+        env.insert("KIMI_SHARE_DIR", temp.path().to_string_lossy().into_owned());
+
+        assert_eq!(
+            kimi().configured_models(&env).await,
+            vec![
+                "kimi-code/k3".to_string(),
+                "kimi-code/kimi-for-coding".to_string()
+            ]
+        );
+        assert_eq!(
+            kimi().configured_default_model(&env).await.as_deref(),
+            Some("kimi-code/k3")
+        );
+        assert_eq!(
+            kimi_mcp_config_path(Some(&env)),
+            Some(temp.path().join("mcp.json"))
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_provider_command_falls_back_to_configured_models() {
+        let temp = TempDir::new().expect("create legacy Kimi home");
+        tokio::fs::write(
+            temp.path().join("config.toml"),
+            r#"
+                [models."kimi-code/kimi-for-coding"]
+                model = "kimi-for-coding"
+            "#,
+        )
+        .await
+        .expect("write legacy Kimi config");
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(temp.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+        env.insert("KIMI_SHARE_DIR", temp.path().to_string_lossy().into_owned());
+        let mut executor = kimi();
+        executor.model = None;
+        #[cfg(windows)]
+        {
+            executor.cmd.base_command_override = Some("cmd.exe /c exit /b 2".to_string());
+        }
+        #[cfg(not(windows))]
+        {
+            executor.cmd.base_command_override = Some("sh -c 'exit 2'".to_string());
+        }
+
+        assert_eq!(
+            executor.list_models(temp.path(), &env).await.unwrap(),
+            Some(vec!["kimi-code/kimi-for-coding".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_config_is_skipped_without_failing_probe() {
+        let temp = TempDir::new().expect("create Kimi home with malformed config");
+        tokio::fs::write(temp.path().join("config.toml"), "default_model = [broken")
+            .await
+            .expect("write malformed Kimi config");
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(temp.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+        env.insert("KIMI_SHARE_DIR", temp.path().to_string_lossy().into_owned());
+
+        assert!(kimi().configured_models(&env).await.is_empty());
+        assert_eq!(kimi().configured_default_model(&env).await, None);
+        let mut executor = kimi();
+        executor.model = None;
+        #[cfg(windows)]
+        {
+            executor.cmd.base_command_override = Some("cmd.exe /c exit /b 2".to_string());
+        }
+        #[cfg(not(windows))]
+        {
+            executor.cmd.base_command_override = Some("sh -c 'exit 2'".to_string());
+        }
+        assert_eq!(executor.list_models(temp.path(), &env).await.unwrap(), None);
     }
 }
