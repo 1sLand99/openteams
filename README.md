@@ -125,18 +125,24 @@ You can also connect supported coding agents such as:
 📚 [More agent installation guides](https://doc.openteams-lab.com/getting-started)
 
 ## Major updates
+- **2026.08.04 (v1.0.9)**
+  - Support Pi agent (new ACP-based runtime with approval, launcher, and MCP extensions)
+  - Workflow runtime hardening: prompt safety, budget caps, reviewer-loop invariants, and per-prompt budget allocation
+  - Redesign chat agent activity log for readability; render activity log prose with shared markdown renderer
+  - Support Qoder CLI; format workflow detail and log UI
+  - Agent install notify and OAuth status checking
+- **2026.07.27 (v1.0.5)**
+  - Support ACP approval and agent permission config
+  - Add workflow node skip functionality
+  - Universe app executor v1.0
+  - Improve permission UI and inbox notification style
+  - Transform Kimi to ACP protocol; manage `~/.openteams/opencode` number and size
+- **2026.07.20 (v1.0.0)**
+  - First stable release: custom AI members, agent auto mode, merge conflict window
+  - macOS DMG installer styling; command help dialog for new users
+  - Support visiting links in agent messages and Enter-to-confirm dialogs
 - **2026.05.20 (v0.4.4)**
   - Workflow mode beta version
-- **2026.05.07 (v0.3.22)**
-  - Supports saving members from a group chat session as a preset team with a single click
-- **2026.04.14 (v0.3.15)**
-  - Workspace File Change Viewer
-- **2026.04.06 (v0.3.12)**
-  - Enable dark ui mode
-  - fix openteams-cli concurrency issues
-- **2026.04.02 (v0.3.10)**
-  - Implement in-app version update
-  - The documentation website is now live.
 
 ## Roadmap
 

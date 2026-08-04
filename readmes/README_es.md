@@ -124,18 +124,24 @@ También puedes conectar agentes de código compatibles como:
 📚 [Más guías de instalación de agentes](https://doc.openteams-lab.com/getting-started)
 
 ## Actualizaciones importantes
+- **2026.08.04 (v1.0.9)**
+  - Soporte para Pi agent (nuevo runtime basado en ACP con aprobación, lanzador y extensiones MCP)
+  - Refuerzo del runtime de Workflow: seguridad de prompts, límites de presupuesto, invariantes de bucle de revisor, asignación de presupuesto por prompt
+  - Rediseño del registro de actividad del agent de chat para mejorar la legibilidad; renderizado del registro de actividad con un motor markdown compartido
+  - Soporte para Qoder CLI; mejora de la UI de detalles y registros de workflow
+  - Notificación de instalación de agent y verificación de estado de OAuth
+- **2026.07.27 (v1.0.5)**
+  - Soporte para aprobación ACP y configuración de permisos de agent
+  - Funcionalidad de omisión de nodos de workflow
+  - Ejecutor de aplicación Universe v1.0
+  - Mejora de la UI de permisos y estilo de notificaciones de bandeja de entrada
+  - Conversión de Kimi a protocolo ACP; gestión del número y tamaño de `~/.openteams/opencode`
+- **2026.07.20 (v1.0.0)**
+  - Primera versión estable: miembros de IA personalizados, modo agent automático, ventana de conflicto de fusión
+  - Estilización del instalador DMG de macOS; diálogo de ayuda de comandos para nuevos usuarios
+  - Soporte para visitar enlaces en mensajes de agent y confirmación de diálogos con Enter
 - **2026.05.20 (v0.4.4)**
   - Versión beta del modo Workflow
-- **2026.05.07 (v0.3.22)**
-  - Permite guardar con un clic los miembros de una sesión de chat grupal como equipo predefinido
-- **2026.04.14 (v0.3.15)**
-  - Visor de cambios de archivos del espacio de trabajo
-- **2026.04.06 (v0.3.12)**
-  - Activación del modo de UI oscura
-  - Corrección de problemas de concurrencia en openteams-cli
-- **2026.04.02 (v0.3.10)**
-  - Implementación de actualización de versión dentro de la app
-  - El sitio de documentación ya está disponible
 
 ## Hoja de ruta
 
