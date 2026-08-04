@@ -101,6 +101,10 @@ and prefer a shared resolver over adding another copy.
 - Treat `.openteams/` as runtime data, not user source.
 - Rust types exposed to the frontend must derive `TS`, be registered in
   `crates/server/src/bin/generate_types.rs`, and be regenerated.
+- Do not add wrapper functions merely to implement one feature or rename an
+  existing operation. Prefer updating the existing function and its call sites
+  directly; introduce a wrapper only when it represents a real abstraction,
+  compatibility boundary, or independently reusable behavior.
 - Preserve existing service boundaries and compatibility paths unless the task
   explicitly changes them.
 - Do not commit secrets or local `.env` values.

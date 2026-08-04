@@ -111,11 +111,18 @@ impl AcpClient {
             .lock()
             .await
             .observe_session_update(&notification.update);
-        if let Some(error) = detect_tool_result_api_error(&notification.update) {
+        let pi_agent_error = detect_pi_agent_error_notification(&notification.update);
+        if let Some(error) = pi_agent_error
+            .clone()
+            .or_else(|| detect_tool_result_api_error(&notification.update))
+        {
             let mut terminal_api_error = self.terminal_api_error.lock().await;
             if terminal_api_error.is_none() {
                 *terminal_api_error = Some(error);
             }
+        }
+        if pi_agent_error.is_some() {
+            return Ok(());
         }
         self.observe_tool_call(&notification.update).await;
         self.send_event(events::event_from_notification(notification))
@@ -621,6 +628,35 @@ impl AcpClient {
     }
 }
 
+fn detect_pi_agent_error_notification(update: &SessionUpdate) -> Option<DetectedApiError> {
+    let SessionUpdate::AgentMessageChunk(chunk) = update else {
+        return None;
+    };
+    let level = chunk
+        .meta
+        .as_ref()?
+        .get("piAcp")?
+        .get("notify")?
+        .get("level")?
+        .as_str()?;
+    if level != "error" {
+        return None;
+    }
+    let ContentBlock::Text(text) = &chunk.content else {
+        return None;
+    };
+    let message = text.text.trim();
+    if message.is_empty() {
+        return None;
+    }
+    Some(
+        detect_api_error(message).unwrap_or_else(|| DetectedApiError {
+            error_type: crate::logs::NormalizedEntryError::Other,
+            message: message.to_string(),
+        }),
+    )
+}
+
 fn merge_tool_call_update(cached: &mut ToolCallUpdate, update: &ToolCallUpdate) {
     if let Some(kind) = update.fields.kind {
         cached.fields.kind = Some(kind);
@@ -875,8 +911,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use agent_client_protocol::schema::v1::{
-        CreateTerminalRequest, PermissionOption, SessionId, SessionUpdate, TerminalOutputRequest,
-        ToolCall, ToolCallId, ToolCallUpdate, ToolCallUpdateFields, WaitForTerminalExitRequest,
+        ContentChunk, CreateTerminalRequest, PermissionOption, SessionId, SessionUpdate,
+        TerminalOutputRequest, TextContent, ToolCall, ToolCallId, ToolCallUpdate,
+        ToolCallUpdateFields, WaitForTerminalExitRequest,
     };
 
     use super::*;
@@ -894,6 +931,36 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn pi_error_notifications_become_terminal_agent_errors() {
+        let error_meta = serde_json::json!({
+            "piAcp": { "notify": { "level": "error" } }
+        })
+        .as_object()
+        .cloned()
+        .expect("Pi ACP error metadata");
+        let error = SessionUpdate::AgentMessageChunk(
+            ContentChunk::new(ContentBlock::Text(TextContent::new(
+                "Pi provider connection failed.",
+            )))
+            .meta(error_meta),
+        );
+        let detected = detect_pi_agent_error_notification(&error).expect("Pi terminal error");
+        assert_eq!(detected.error_type, NormalizedEntryError::Other);
+        assert_eq!(detected.message, "Pi provider connection failed.");
+
+        let info_meta = serde_json::json!({
+            "piAcp": { "notify": { "level": "info" } }
+        })
+        .as_object()
+        .cloned()
+        .expect("Pi ACP info metadata");
+        let info = SessionUpdate::AgentMessageChunk(
+            ContentChunk::new(ContentBlock::Text(TextContent::new("Pi is ready."))).meta(info_meta),
+        );
+        assert!(detect_pi_agent_error_notification(&info).is_none());
     }
 
     #[derive(Default)]

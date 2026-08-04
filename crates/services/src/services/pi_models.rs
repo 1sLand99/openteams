@@ -127,7 +127,20 @@ struct PiProviderConfig {
     #[serde(rename = "apiKey", skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
     api: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compat: Option<PiOpenAiCompletionsCompat>,
     models: Vec<PiModelConfig>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PiOpenAiCompletionsCompat {
+    supports_store: bool,
+    supports_developer_role: bool,
+    supports_reasoning_effort: bool,
+    max_tokens_field: &'static str,
+    supports_strict_mode: bool,
+    supports_long_cache_retention: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -352,6 +365,17 @@ fn build_pi_provider(provider: &CustomProviderEntry, api: &'static str) -> PiPro
         api_key: non_empty(provider.options.api_key.as_deref())
             .map(|api_key| encode_pi_config_literal(&api_key)),
         api,
+        // Pi assumes unknown OpenAI-compatible URLs support the newest OpenAI
+        // request shape. OpenTeams custom providers frequently point at proxies
+        // that only implement the conservative Chat Completions surface.
+        compat: (api == "openai-completions").then_some(PiOpenAiCompletionsCompat {
+            supports_store: false,
+            supports_developer_role: false,
+            supports_reasoning_effort: false,
+            max_tokens_field: "max_tokens",
+            supports_strict_mode: false,
+            supports_long_cache_retention: false,
+        }),
         models: models
             .into_iter()
             .map(|(id, model)| build_pi_model(id, model))
@@ -874,6 +898,14 @@ writeFileSync(outputPath, JSON.stringify(resolved), { mode: 0o600 });
         let mapped = &desired.providers["openteams-openai-proxy"];
         assert_eq!(mapped["baseUrl"], "https://openai-proxy.example.test/v1");
         assert_eq!(mapped["apiKey"], TEST_SECRET);
+        assert_eq!(mapped["compat"]["supportsStore"], false);
+        assert_eq!(mapped["compat"]["supportsDeveloperRole"], false);
+        assert_eq!(mapped["compat"]["supportsReasoningEffort"], false);
+        assert_eq!(mapped["compat"]["maxTokensField"], "max_tokens");
+        assert_eq!(mapped["compat"]["supportsStrictMode"], false);
+        assert_eq!(mapped["compat"]["supportsLongCacheRetention"], false);
+        assert!(desired.providers["openteams-anthropic-proxy"]["compat"].is_null());
+        assert!(desired.providers["openteams-google-proxy"]["compat"].is_null());
         assert_eq!(mapped["models"][0]["input"], json!(["text", "image"]));
         assert_eq!(mapped["models"][0]["contextWindow"], 200_000);
         assert_eq!(mapped["models"][0]["maxTokens"], 8_192);
@@ -882,6 +914,25 @@ writeFileSync(outputPath, JSON.stringify(resolved), { mode: 0o600 });
         assert_eq!(desired.skipped[0].provider_id, "unsupported");
         assert!(desired.skipped[0].reason.contains("@ai-sdk/azure"));
         assert!(!format!("{:?}", desired.skipped).contains(TEST_SECRET));
+    }
+
+    #[test]
+    fn pi_openai_custom_provider_uses_conservative_chat_completions_compat() {
+        let config = config(HashMap::from([(
+            "ark".into(),
+            provider("ark", "@ai-sdk/openai", "glm-5.2"),
+        )]));
+
+        let desired = build_desired_providers(&config);
+        let mapped = &desired.providers["openteams-ark"];
+
+        assert_eq!(mapped["api"], "openai-completions");
+        assert_eq!(mapped["compat"]["supportsStore"], false);
+        assert_eq!(mapped["compat"]["supportsDeveloperRole"], false);
+        assert_eq!(mapped["compat"]["supportsReasoningEffort"], false);
+        assert_eq!(mapped["compat"]["maxTokensField"], "max_tokens");
+        assert_eq!(mapped["compat"]["supportsStrictMode"], false);
+        assert_eq!(mapped["compat"]["supportsLongCacheRetention"], false);
     }
 
     #[test]

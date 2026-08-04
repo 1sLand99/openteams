@@ -3023,8 +3023,8 @@ mod tests {
         );
         assert_eq!(
             output.token_usage.as_ref().unwrap().total_tokens,
-            35,
-            "total tokens must match fake Pi output"
+            30,
+            "billable total must equal Pi input plus output tokens"
         );
         assert!(
             output.run_id.is_some(),

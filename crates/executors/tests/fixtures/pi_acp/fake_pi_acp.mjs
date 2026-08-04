@@ -29,6 +29,8 @@ const pidFile = process.env.OPENTEAMS_FAKE_PI_CHILD_PID_FILE;
 const permissionLog = process.env.OPENTEAMS_FAKE_PI_PERMISSION_LOG;
 const protocolLog = process.env.OPENTEAMS_FAKE_PI_PROTOCOL_LOG;
 const hangMode = process.env.OPENTEAMS_FAKE_PI_HANG === "1";
+const errorMode = process.env.OPENTEAMS_FAKE_PI_ERROR === "1";
+const chatProtocolMode = process.env.OPENTEAMS_FAKE_PI_CHAT_PROTOCOL === "1";
 const toolCallTrigger = process.env.OPENTEAMS_FAKE_PI_TOOL_CALL;
 const mcpToolCallTrigger = process.env.OPENTEAMS_FAKE_PI_MCP_TOOL_CALL;
 
@@ -138,6 +140,17 @@ function sendAgentMessage(sessionId, text) {
       sessionUpdate: "agent_message_chunk",
       content: { type: "text", text },
       messageId: "pi-message",
+    },
+  });
+}
+
+function sendAgentError(sessionId, text) {
+  notify("session/update", {
+    sessionId,
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text },
+      _meta: { piAcp: { notify: { level: "error" } } },
     },
   });
 }
@@ -279,7 +292,15 @@ rl.on("line", (line) => {
         pendingPerm = { permId, promptId: id, promptText: text, sessionId: sid, toolName: "mcp__test__read" };
         break;
       }
-      sendAgentMessage(sid, `echo:${text}`);
+      if (errorMode) {
+        sendAgentError(sid, "Pi provider connection failed.");
+        respond(id, { stopReason: "end_turn" });
+        break;
+      }
+      const reply = chatProtocolMode
+        ? JSON.stringify([{ type: "send", to: "you", content: `echo:${text}`, intent: "reply" }])
+        : `echo:${text}`;
+      sendAgentMessage(sid, reply);
       sendUsageUpdate(sid);
       respond(id, {
         stopReason: cancelled ? "cancelled" : "end_turn",

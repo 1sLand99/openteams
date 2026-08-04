@@ -1144,6 +1144,27 @@ rl.on("close", () => {
             ["first", "second"]
         );
 
+        let mut error_env = env.clone();
+        error_env.insert("OPENTEAMS_FAKE_PI_ERROR", "1");
+        let failed = pi
+            .spawn(temp.path(), "provider-error", &error_env)
+            .await
+            .expect("fixed pi-acp provider error prompt");
+        let (failed_events, failed_exit) = finish_turn(failed).await;
+        assert!(
+            matches!(failed_exit, crate::executors::ExecutorExitResult::Failure),
+            "unexpected Pi provider error result: {failed_exit:?}, events: {failed_events:?}"
+        );
+        assert!(failed_events.iter().any(|event| {
+            matches!(event, AcpEvent::Error(message) if message.contains("Pi provider connection failed"))
+        }));
+        assert!(
+            !failed_events
+                .iter()
+                .any(|event| matches!(event, AcpEvent::Done(_)))
+        );
+        assert_recorded_tree_terminated(&temp.path().join("pids.json")).await;
+
         let mut cancel_env = env.clone();
         cancel_env.insert("OPENTEAMS_FAKE_PI_HANG", "1");
         let mut cancelled = pi
@@ -1541,18 +1562,39 @@ rl.on("close", () => {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("src/executors/pi/approval_extension.mjs");
         let script = r#"
           const { default: install } = await import(process.argv[1]);
-          let handler;
-          install({ on(name, fn) { if (name === 'tool_call') handler = fn; } });
+          const handlers = {};
+          install({ on(name, fn) { handlers[name] = fn; } });
           const calls = [];
           for (const [toolName, allowed] of [['bash', true], ['docs_lookup', false]]) {
             let confirms = 0;
-            const result = await handler(
+            const result = await handlers.tool_call(
               { toolName, toolCallId: `${toolName}-id`, input: { value: 1 } },
               { ui: { async confirm() { confirms += 1; return allowed; } } },
             );
             calls.push({ toolName, confirms, blocked: result?.block === true });
           }
-          process.stdout.write(JSON.stringify(calls));
+          const notifications = [];
+          const ctx = { ui: { notify(message, level) { notifications.push({ message, level }); } } };
+          await handlers.agent_end({
+            willRetry: true,
+            messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'Connection error.' }],
+          }, ctx);
+          await handlers.agent_end({
+            willRetry: false,
+            messages: [
+              { role: 'assistant', stopReason: 'error', errorMessage: 'Connection error.' },
+              { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'recovered' }] },
+            ],
+          }, ctx);
+          await handlers.agent_end({
+            willRetry: false,
+            messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'Connection error.' }],
+          }, ctx);
+          await handlers.agent_end({
+            willRetry: false,
+            messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'secret-value' }],
+          }, ctx);
+          process.stdout.write(JSON.stringify({ calls, notifications }));
         "#;
         let output = Command::new(node)
             .args(["--input-type=module", "--eval", script])
@@ -1560,11 +1602,26 @@ rl.on("close", () => {
             .output()
             .expect("run extension test");
         assert!(output.status.success());
-        let calls: serde_json::Value =
+        let result: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("extension result");
+        let calls = &result["calls"];
         assert_eq!(calls[0]["confirms"], 1);
         assert_eq!(calls[0]["blocked"], false);
         assert_eq!(calls[1]["confirms"], 1);
         assert_eq!(calls[1]["blocked"], true);
+        let notifications = &result["notifications"];
+        assert_eq!(notifications.as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            notifications[0]["message"],
+            "Pi provider connection failed."
+        );
+        assert_eq!(notifications[0]["level"], "error");
+        assert_eq!(notifications[1]["message"], "Pi provider request failed.");
+        assert!(
+            !output
+                .stdout
+                .windows(12)
+                .any(|bytes| bytes == b"secret-value")
+        );
     }
 }

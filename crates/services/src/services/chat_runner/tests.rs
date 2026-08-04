@@ -4283,10 +4283,7 @@ fn pi_layered_error_mapping_preserves_acp_startup_failures() {
 #[cfg(unix)]
 #[tokio::test]
 async fn pi_free_chat_dispatches_through_service_and_projects_records() {
-    use db::models::{
-        chat_run::ChatRun,
-        chat_session_agent::CreateChatSessionAgent,
-    };
+    use db::models::chat_session_agent::CreateChatSessionAgent;
     use std::os::unix::fs::PermissionsExt;
 
     const PI_FIXTURE_DIR: &str =
@@ -4343,6 +4340,7 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
         std::env::set_var("OPENTEAMS_FAKE_PI_SESSION_FILE", &session_file);
         std::env::set_var("OPENTEAMS_FAKE_PI_PERMISSION_LOG", &perm_log);
         std::env::set_var("OPENTEAMS_FAKE_PI_PROTOCOL_LOG", &proto_log);
+        std::env::set_var("OPENTEAMS_FAKE_PI_CHAT_PROTOCOL", "1");
     }
 
     let db = setup_chat_runner_db().await;
@@ -4398,24 +4396,10 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
         .await
         .expect("set lead session agent");
 
-    let session = ChatSession {
-        id: session.id,
-        title: session.title.clone(),
-        status: session.status.clone(),
-        lead_agent_id: None,
-        lead_session_agent_id: Some(session_agent.id),
-        summary_text: None,
-        archive_ref: None,
-        last_seen_diff_key: None,
-        default_workspace_path: Some(workspace.to_string_lossy().to_string()),
-        chat_input_mode: None,
-        project_id: None,
-        worktree_mode: ChatSessionWorktreeMode::Disabled,
-        pinned_at: None,
-        created_at: session.created_at,
-        updated_at: session.updated_at,
-        archived_at: None,
-    };
+    let session = ChatSession::find_by_id(&db.pool, session_id)
+        .await
+        .expect("read Pi chat session")
+        .expect("Pi chat session exists");
 
     let runner = ChatRunner::new(db.clone());
     let message = chat::create_message(
@@ -4423,7 +4407,7 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
         session_id,
         ChatSenderType::User,
         None,
-        "hello pi".to_string(),
+        "@Pi hello pi".to_string(),
         None,
     )
     .await
@@ -4431,24 +4415,39 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
 
     runner.handle_message(&session, &message).await;
 
-    let mut agent_idle = false;
+    let mut run_completed = false;
     for _ in 0..150 {
         let sa = ChatSessionAgent::find_by_id(&db.pool, session_agent.id)
             .await
             .expect("find sa")
             .expect("sa exists");
-        if sa.state == ChatSessionAgentState::Idle || sa.state == ChatSessionAgentState::Dead {
-            agent_idle = true;
+        if sa.agent_session_id.is_some()
+            && (sa.state == ChatSessionAgentState::Idle
+                || sa.state == ChatSessionAgentState::Dead)
+        {
+            run_completed = true;
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert!(agent_idle, "Pi agent should reach Idle state");
-
     let sa = ChatSessionAgent::find_by_id(&db.pool, session_agent.id)
         .await
         .expect("find sa")
         .expect("sa exists");
+    if !run_completed {
+        let run_dirs = sqlx::query_scalar::<_, String>(
+            "SELECT run_dir FROM chat_runs WHERE session_agent_id = ? ORDER BY run_index",
+        )
+        .bind(session_agent.id)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read Pi run directories");
+        panic!(
+            "Pi agent run did not complete; state={:?}, has_session_id={}, run_dirs={run_dirs:?}",
+            sa.state,
+            sa.agent_session_id.is_some()
+        );
+    }
     assert_eq!(sa.state, ChatSessionAgentState::Idle);
     assert!(
         sa.agent_session_id.is_some(),
@@ -4467,8 +4466,16 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
     .await
     .expect("fetch messages");
     assert!(
-        messages.iter().any(|(st, c)| st == "agent" && c.contains("echo:hello pi")),
+        messages
+            .iter()
+            .any(|(st, c)| st == "agent" && c.contains("echo:") && c.contains("@Pi hello pi")),
         "agent message must contain echo response: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|(_, content)| content.contains("响应格式无效")),
+        "valid Pi protocol output must not trigger a parsing retry: {messages:?}"
     );
 
     let run = sqlx::query_as::<_, (Uuid,)>(
@@ -4488,6 +4495,7 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
 
     unsafe {
         std::env::remove_var("OPENTEAMS_PI_QA_NPX_PATH");
+        std::env::remove_var("OPENTEAMS_FAKE_PI_CHAT_PROTOCOL");
     }
 }
 
@@ -4686,7 +4694,6 @@ async fn pi_member_isolation_through_build_effective_member_executor() {
         .spawn(&workspace, "member-a-test", &env_a)
         .await
         .expect("spawn A");
-    let proto_log_a = proto_log.clone();
     drop(spawned_a);
 
     let spawned_b = executor_b
