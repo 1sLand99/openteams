@@ -111,11 +111,18 @@ impl AcpClient {
             .lock()
             .await
             .observe_session_update(&notification.update);
-        if let Some(error) = detect_tool_result_api_error(&notification.update) {
+        let pi_agent_error = detect_pi_agent_error_notification(&notification.update);
+        if let Some(error) = pi_agent_error
+            .clone()
+            .or_else(|| detect_tool_result_api_error(&notification.update))
+        {
             let mut terminal_api_error = self.terminal_api_error.lock().await;
             if terminal_api_error.is_none() {
                 *terminal_api_error = Some(error);
             }
+        }
+        if pi_agent_error.is_some() {
+            return Ok(());
         }
         self.observe_tool_call(&notification.update).await;
         self.send_event(events::event_from_notification(notification))
@@ -621,6 +628,35 @@ impl AcpClient {
     }
 }
 
+fn detect_pi_agent_error_notification(update: &SessionUpdate) -> Option<DetectedApiError> {
+    let SessionUpdate::AgentMessageChunk(chunk) = update else {
+        return None;
+    };
+    let level = chunk
+        .meta
+        .as_ref()?
+        .get("piAcp")?
+        .get("notify")?
+        .get("level")?
+        .as_str()?;
+    if level != "error" {
+        return None;
+    }
+    let ContentBlock::Text(text) = &chunk.content else {
+        return None;
+    };
+    let message = text.text.trim();
+    if message.is_empty() {
+        return None;
+    }
+    Some(
+        detect_api_error(message).unwrap_or_else(|| DetectedApiError {
+            error_type: crate::logs::NormalizedEntryError::Other,
+            message: message.to_string(),
+        }),
+    )
+}
+
 fn merge_tool_call_update(cached: &mut ToolCallUpdate, update: &ToolCallUpdate) {
     if let Some(kind) = update.fields.kind {
         cached.fields.kind = Some(kind);
@@ -872,9 +908,12 @@ fn select_lines(content: &str, line: Option<u32>, limit: Option<u32>) -> String 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use agent_client_protocol::schema::v1::{
-        CreateTerminalRequest, PermissionOption, SessionId, SessionUpdate, TerminalOutputRequest,
-        ToolCall, ToolCallId, ToolCallUpdate, ToolCallUpdateFields, WaitForTerminalExitRequest,
+        ContentChunk, CreateTerminalRequest, PermissionOption, SessionId, SessionUpdate,
+        TerminalOutputRequest, TextContent, ToolCall, ToolCallId, ToolCallUpdate,
+        ToolCallUpdateFields, WaitForTerminalExitRequest,
     };
 
     use super::*;
@@ -894,9 +933,118 @@ mod tests {
         )
     }
 
+    #[test]
+    fn pi_error_notifications_become_terminal_agent_errors() {
+        let error_meta = serde_json::json!({
+            "piAcp": { "notify": { "level": "error" } }
+        })
+        .as_object()
+        .cloned()
+        .expect("Pi ACP error metadata");
+        let error = SessionUpdate::AgentMessageChunk(
+            ContentChunk::new(ContentBlock::Text(TextContent::new(
+                "Pi provider connection failed.",
+            )))
+            .meta(error_meta),
+        );
+        let detected = detect_pi_agent_error_notification(&error).expect("Pi terminal error");
+        assert_eq!(detected.error_type, NormalizedEntryError::Other);
+        assert_eq!(detected.message, "Pi provider connection failed.");
+
+        let info_meta = serde_json::json!({
+            "piAcp": { "notify": { "level": "info" } }
+        })
+        .as_object()
+        .cloned()
+        .expect("Pi ACP info metadata");
+        let info = SessionUpdate::AgentMessageChunk(
+            ContentChunk::new(ContentBlock::Text(TextContent::new("Pi is ready."))).meta(info_meta),
+        );
+        assert!(detect_pi_agent_error_notification(&info).is_none());
+    }
+
     #[derive(Default)]
     struct CapturingApprovalService {
         request: Mutex<Option<ExecutorApprovalRequest>>,
+    }
+
+    #[derive(Default)]
+    struct CountingApprovalService {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutorApprovalService for CountingApprovalService {
+        async fn request_tool_approval(
+            &self,
+            _tool_name: &str,
+            _tool_input: serde_json::Value,
+            _tool_call_id: &str,
+            _cancel: CancellationToken,
+        ) -> Result<ApprovalStatus, ExecutorApprovalError> {
+            unreachable!("ACP requests use request_acp_tool_approval")
+        }
+
+        async fn request_acp_tool_approval(
+            &self,
+            _request: ExecutorApprovalRequest,
+            _cancel: CancellationToken,
+        ) -> Result<String, ExecutorApprovalError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok("allow".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn pi_native_and_mcp_tools_share_ask_auto_allow_auto_reject_policy_matrix() {
+        for title in ["Run Pi tool: bash", "Run Pi tool: docs_lookup"] {
+            for (policy, expected_option, expected_calls) in [
+                (AcpApprovalPolicy::Ask, "allow", 1),
+                (AcpApprovalPolicy::AutoAllow, "allow", 0),
+                (AcpApprovalPolicy::AutoReject, "reject", 0),
+            ] {
+                let (output, output_task) = AcpOutput::start(tokio::io::sink());
+                let approvals = Arc::new(CountingApprovalService::default());
+                let client = AcpClient::new(
+                    output.clone(),
+                    Some(approvals.clone()),
+                    policy,
+                    CancellationToken::new(),
+                    PathBuf::from("/workspace"),
+                    Vec::new(),
+                    AcpClientServicePolicy::default(),
+                    HashMap::new(),
+                );
+                let permission = RequestPermissionRequest::new(
+                    SessionId::new("pi-session"),
+                    ToolCallUpdate::new(
+                        ToolCallId::new(format!("{title}-id")),
+                        ToolCallUpdateFields::new().title(title),
+                    ),
+                    vec![
+                        PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
+                        PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+                    ],
+                );
+
+                let response = client
+                    .request_permission(permission)
+                    .await
+                    .expect("permission response");
+                let RequestPermissionOutcome::Selected(selected) = response.outcome else {
+                    panic!("expected selected permission for {title} and {policy:?}");
+                };
+                assert_eq!(selected.option_id.0.as_ref(), expected_option);
+                assert_eq!(approvals.calls.load(Ordering::Relaxed), expected_calls);
+
+                drop(client);
+                drop(output);
+                output_task
+                    .await
+                    .expect("output task")
+                    .expect("output flush");
+            }
+        }
     }
 
     #[async_trait::async_trait]

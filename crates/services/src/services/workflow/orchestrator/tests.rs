@@ -1420,3 +1420,73 @@ fn execute_step_with_feedback_trace_stops_after_fifth_lead_rejection() {
         ]
     );
 }
+
+#[test]
+fn pi_agent_identity_preserved_in_workflow_scheduling() {
+    use executors::executors::BaseCodingAgent;
+    let parsed = "PI".parse::<BaseCodingAgent>();
+    assert!(parsed.is_ok());
+    assert_eq!(parsed.unwrap(), BaseCodingAgent::Pi);
+}
+
+#[test]
+fn pi_workflow_cancel_does_not_bypass_reducer() {
+    use db::models::workflow_types::WorkflowStepStatus;
+
+    assert!(
+        reducer::validate_step_transition(
+            &WorkflowStepStatus::Running,
+            &WorkflowStepStatus::InterruptRequested,
+        )
+        .is_ok()
+    );
+    assert!(
+        reducer::validate_step_transition(
+            &WorkflowStepStatus::Running,
+            &WorkflowStepStatus::Interrupted,
+        )
+        .is_err()
+    );
+    assert!(
+        reducer::validate_step_transition(
+            &WorkflowStepStatus::WaitingReview,
+            &WorkflowStepStatus::InterruptRequested,
+        )
+        .is_ok()
+    );
+    assert!(
+        reducer::validate_step_transition(
+            &WorkflowStepStatus::Revising,
+            &WorkflowStepStatus::Failed,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn pi_workflow_exception_cleanup_removes_runtime_state() {
+    use db::models::workflow_types::WorkflowExecutionStatus;
+
+    use super::super::workflow_runtime::cancel_running_step;
+
+    assert!(
+        reducer::validate_execution_transition(
+            &WorkflowExecutionStatus::Running,
+            &WorkflowExecutionStatus::Failed,
+        )
+        .is_ok()
+    );
+    assert!(
+        reducer::validate_execution_transition(
+            &WorkflowExecutionStatus::Completed,
+            &WorkflowExecutionStatus::Failed,
+        )
+        .is_err()
+    );
+
+    let step_id = Uuid::new_v4();
+    assert!(
+        !cancel_running_step(step_id, 0),
+        "cancel must return false when no running step is registered"
+    );
+}

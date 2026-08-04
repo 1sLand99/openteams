@@ -462,6 +462,10 @@ impl ExecutorConfigs {
         if executor_profile_id.executor == BaseCodingAgent::AcpQa {
             return CodingAgent::AcpQa(crate::executors::acp::AcpQaExecutor::from_qa_environment());
         }
+        #[cfg(feature = "qa-mode")]
+        if executor_profile_id.executor == BaseCodingAgent::Pi {
+            return CodingAgent::Pi(crate::executors::pi::Pi::from_qa_environment());
+        }
         self.get_coding_agent(executor_profile_id)
             .unwrap_or_else(|| {
                 let mut default_executor_profile_id = executor_profile_id.clone();
@@ -547,7 +551,18 @@ mod tests {
         claude::ClaudeCode,
         codex::{Codex, ReasoningSummary},
         kimi::KimiCode,
+        pi::Pi,
     };
+
+    #[test]
+    fn default_profiles_include_strongly_typed_pi() {
+        match ExecutorConfigs::from_defaults()
+            .get_coding_agent(&ExecutorProfileId::new(BaseCodingAgent::Pi))
+        {
+            Some(CodingAgent::Pi(Pi { model, .. })) => assert_eq!(model, None),
+            other => panic!("expected Pi DEFAULT profile, got {other:?}"),
+        }
+    }
 
     #[test]
     fn default_profiles_include_supported_codex_models() {

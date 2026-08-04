@@ -15,6 +15,66 @@ mod tests {
         dir.join(name)
     }
 
+    #[test]
+    fn pi_sync_failure_response_reports_saved_settings_and_retry_without_secret() {
+        const SECRET: &str = "server-pi-secret-never-leak";
+        let path = temp_test_path("isolated-home/.pi/agent/models.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(r#"{{"providers":{{"credential":"{SECRET}"}}"#),
+        )
+        .unwrap();
+
+        let error = services::services::pi_models::synchronize_pi_models_in_agent_dir(
+            &CliConfig::default_config(),
+            path.parent().unwrap(),
+        )
+        .expect_err("invalid Pi JSON must fail without replacement");
+        let api_error = pi_sync_error_message(&error.to_string());
+        let warning = pi_sync_warning("saved", false, false);
+        let response: ApiResponse<(), ProviderMutationWarning> =
+            ApiResponse::error_with_data(warning);
+        let serialized = serde_json::to_string(&response).unwrap();
+
+        assert!(api_error.contains("existing models file was preserved"));
+        assert!(!api_error.contains(SECRET));
+        assert!(serialized.contains("settings_saved"));
+        assert!(serialized.contains("retry_available"));
+        assert!(serialized.contains("/api/config/cli/pi-models/sync"));
+        assert!(!serialized.contains(SECRET));
+
+        let _ = std::fs::remove_dir_all(path.ancestors().nth(4).unwrap());
+    }
+
+    #[test]
+    fn pi_retry_metadata_survives_additional_sync_failures() {
+        let failure = aggregate_provider_sync_failures(
+            "saved",
+            true,
+            Some("cli failed".to_string()),
+            Some("profiles failed".to_string()),
+        )
+        .expect("aggregated failure");
+        let ProviderMutationSyncFailure::Pi(warning) = failure else {
+            panic!("Pi failure must retain priority and retry metadata");
+        };
+        let response: ApiResponse<(), ProviderMutationWarning> =
+            ApiResponse::error_with_data(warning);
+        let serialized = serde_json::to_value(response).expect("serialize warning");
+
+        assert_eq!(serialized["error_data"]["settings_saved"], true);
+        assert_eq!(serialized["error_data"]["retry_available"], true);
+        assert_eq!(
+            serialized["error_data"]["retry_path"],
+            PI_MODELS_SYNC_RETRY_PATH
+        );
+        assert_eq!(
+            serialized["error_data"]["failed_syncs"],
+            json!(["pi_models", "openteams_cli", "profiles"])
+        );
+    }
+
     fn config_with_shortcut(
         platform: &str,
         command_id: &str,
@@ -676,7 +736,7 @@ mod tests {
             CustomProviderEntry {
                 id: "litellm".into(),
                 name: Some("LITELLM".into()),
-                npm: Some(LEGACY_CUSTOM_PROVIDER_NPM.into()),
+                npm: Some("@ai-sdk/anthropic".into()),
                 options: services::services::cli_config::CustomProviderOptions {
                     base_url: Some("https://litellm.example.com/v1".into()),
                     api_key: Some("secret".into()),
@@ -707,7 +767,7 @@ mod tests {
             CustomProviderEntry {
                 id: "anthropic-proxy".into(),
                 name: Some("Anthropic Proxy".into()),
-                npm: Some(LEGACY_CUSTOM_PROVIDER_NPM.into()),
+                npm: Some("@ai-sdk/anthropic".into()),
                 options: services::services::cli_config::CustomProviderOptions {
                     base_url: Some("https://api.anthropic.com".into()),
                     api_key: Some("secret".into()),
@@ -726,7 +786,7 @@ mod tests {
                 .as_ref()
                 .and_then(|providers| providers.get("anthropic-proxy"))
                 .and_then(|provider| provider.npm.as_deref()),
-            Some(LEGACY_CUSTOM_PROVIDER_NPM)
+            Some("@ai-sdk/anthropic")
         );
     }
 

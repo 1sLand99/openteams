@@ -205,6 +205,13 @@ static RUNNER_COMPAT_MAP: Lazy<Vec<(&'static str, AgentCompatEntry)>> = Lazy::ne
                 agent_dir_id: "agents",
             },
         ),
+        (
+            "PI",
+            AgentCompatEntry {
+                compatible_id: "pi",
+                agent_dir_id: "agents",
+            },
+        ),
     ]
 });
 

@@ -94,6 +94,12 @@ async fn check_agent_availability(
     State(_deployment): State<DeploymentImpl>,
     Query(query): Query<CheckAgentAvailabilityQuery>,
 ) -> ResponseJson<ApiResponse<AvailabilityInfo>> {
+    if query.executor == BaseCodingAgent::Pi
+        && let Err(error) = coordinate_pi_models_from_saved_config().await
+    {
+        tracing::warn!(error = %error, "Pi model coordination failed before availability detection");
+    }
+
     let profiles = ExecutorConfigs::get_cached();
     let profile_id = ExecutorProfileId::new(query.executor);
 

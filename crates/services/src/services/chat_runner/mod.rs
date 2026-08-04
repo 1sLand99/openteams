@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Component, Path, PathBuf},
-    str::FromStr,
     sync::{
         Arc, LazyLock,
         atomic::{AtomicBool, AtomicU8, Ordering},
@@ -31,7 +30,7 @@ use executors::{
     env::{ExecutionEnv, RepoContext},
     executors::{
         BaseCodingAgent, CancellationToken, ExecutorError, ExecutorExitSignal, ExecutorPrompt,
-        ExecutorPromptImage, StandardCodingAgentExecutor,
+        ExecutorPromptImage, ExecutorRunCleanup, StandardCodingAgentExecutor,
     },
     logs::{
         NormalizedEntryError, NormalizedEntryType, TokenUsageInfo,
@@ -63,7 +62,7 @@ use crate::services::{
     approvals::executor_approvals::{ExecutorApprovalBridge, ExecutorApprovalScope},
     inbox::InboxService,
     member_execution::{
-        build_effective_member_executor, executor_acp_full_access_enabled,
+        build_effective_member_executor_for_run, executor_acp_full_access_enabled,
         refresh_session_agent_execution_config_before_run,
         resolve_effective_member_execution_config,
     },
@@ -81,3 +80,6 @@ include!("protocol_messages.rs");
 include!("attachments.rs");
 include!("lifecycle.rs");
 include!("module_declarations.rs");
+
+#[cfg(test)]
+pub(crate) static PI_FIXTURE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));

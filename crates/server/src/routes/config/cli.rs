@@ -60,6 +60,88 @@ async fn sync_cli_config_to_openteams_cli(
     }
 }
 
+async fn sync_pi_models_explicitly(
+    State(_deployment): State<DeploymentImpl>,
+) -> ResponseJson<ApiResponse<PiModelsSyncResult>> {
+    match coordinate_pi_models_from_saved_config().await {
+        Ok(result) => ResponseJson(ApiResponse::success(result)),
+        Err(error) => {
+            tracing::warn!(error = %error, "Failed to synchronize Pi models");
+            ResponseJson(ApiResponse::error(&pi_sync_error_message(
+                &error.to_string(),
+            )))
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct ProviderMutationWarning {
+    pub settings_saved: bool,
+    pub retry_available: bool,
+    pub retry_path: String,
+    pub failed_syncs: Vec<String>,
+    pub message: String,
+}
+
+fn pi_sync_warning(
+    saved_action: &str,
+    openteams_cli_failed: bool,
+    profiles_failed: bool,
+) -> ProviderMutationWarning {
+    let mut failed_syncs = vec!["pi_models".to_string()];
+    if openteams_cli_failed {
+        failed_syncs.push("openteams_cli".to_string());
+    }
+    if profiles_failed {
+        failed_syncs.push("profiles".to_string());
+    }
+    ProviderMutationWarning {
+        settings_saved: true,
+        retry_available: true,
+        retry_path: PI_MODELS_SYNC_RETRY_PATH.to_string(),
+        failed_syncs,
+        message: format!(
+            "Provider {saved_action}, but Pi model synchronization failed. The saved settings were not rolled back."
+        ),
+    }
+}
+
+fn pi_sync_error_message(error: &str) -> String {
+    format!(
+        "Failed to synchronize Pi models; the existing models file was preserved: {error}"
+    )
+}
+
+enum ProviderMutationSyncFailure {
+    Pi(ProviderMutationWarning),
+    Other(String),
+}
+
+fn aggregate_provider_sync_failures(
+    saved_action: &str,
+    pi_failed: bool,
+    cli_error: Option<String>,
+    profile_error: Option<String>,
+) -> Option<ProviderMutationSyncFailure> {
+    if pi_failed {
+        return Some(ProviderMutationSyncFailure::Pi(pi_sync_warning(
+            saved_action,
+            cli_error.is_some(),
+            profile_error.is_some(),
+        )));
+    }
+    if let Some(error) = cli_error {
+        return Some(ProviderMutationSyncFailure::Other(format!(
+            "Provider {saved_action} but failed to sync to openteams-cli: {error}"
+        )));
+    }
+    profile_error.map(|error| {
+        ProviderMutationSyncFailure::Other(format!(
+            "Provider {saved_action} but failed to sync OpenTeams CLI profiles: {error}"
+        ))
+    })
+}
+
 async fn sync_to_openteams_cli(
     openteams_config: &CliConfig,
     custom_provider_id: Option<&str>,
@@ -131,7 +213,7 @@ async fn list_custom_providers(
 async fn create_custom_provider(
     State(_deployment): State<DeploymentImpl>,
     Json(entry): Json<CustomProviderEntry>,
-) -> ResponseJson<ApiResponse<CustomProviderEntry>> {
+) -> ResponseJson<ApiResponse<CustomProviderEntry, ProviderMutationWarning>> {
     if entry.id.is_empty() {
         return ResponseJson(ApiResponse::error("Provider id cannot be empty"));
     }
@@ -155,20 +237,34 @@ async fn create_custom_provider(
         return ResponseJson(ApiResponse::error(&format!("Failed to save config: {}", e)));
     }
 
-    // 自动同步到 openteams-cli，失败时返回错误而非静默吞掉
-    if let Err(e) = sync_custom_providers_to_cli(&config, None).await {
-        tracing::error!("Failed to sync custom providers to cli: {}", e);
-        return ResponseJson(ApiResponse::error(&format!(
-            "Provider saved but failed to sync to openteams-cli: {}",
-            e
-        )));
+    let pi_sync_error = synchronize_pi_models(&config).await.err();
+    if let Some(error) = &pi_sync_error {
+        tracing::warn!(error = %error, provider_id = %entry.id, "Provider saved but Pi model synchronization failed");
     }
-    if let Err(e) = sync_openteams_cli_profiles_from_disk().await {
+
+    let cli_sync_error = sync_custom_providers_to_cli(&config, None).await.err();
+    if let Some(e) = &cli_sync_error {
+        tracing::error!("Failed to sync custom providers to cli: {}", e);
+    }
+    let profile_sync_error = sync_openteams_cli_profiles_from_disk().await.err();
+    if let Some(e) = &profile_sync_error {
         tracing::error!("Failed to sync OpenTeams CLI profiles: {}", e);
-        return ResponseJson(ApiResponse::error(&format!(
-            "Provider saved but failed to sync OpenTeams CLI profiles: {}",
-            e
-        )));
+    }
+
+    if let Some(failure) = aggregate_provider_sync_failures(
+        "saved",
+        pi_sync_error.is_some(),
+        cli_sync_error.map(|error| error.to_string()),
+        profile_sync_error.map(|error| error.to_string()),
+    ) {
+        return match failure {
+            ProviderMutationSyncFailure::Pi(warning) => {
+                ResponseJson(ApiResponse::error_with_data(warning))
+            }
+            ProviderMutationSyncFailure::Other(message) => {
+                ResponseJson(ApiResponse::error(&message))
+            }
+        };
     }
 
     let mut masked = entry;
@@ -181,7 +277,7 @@ async fn update_custom_provider(
     State(_deployment): State<DeploymentImpl>,
     Path(id): Path<String>,
     Json(mut entry): Json<CustomProviderEntry>,
-) -> ResponseJson<ApiResponse<CustomProviderEntry>> {
+) -> ResponseJson<ApiResponse<CustomProviderEntry, ProviderMutationWarning>> {
     entry.id = id.clone();
 
     let mut config = read_cli_config_from_disk().await;
@@ -202,25 +298,40 @@ async fn update_custom_provider(
         entry.options.api_key = old.options.api_key.clone();
     }
 
-    providers.insert(id, entry.clone());
+    providers.insert(id.clone(), entry.clone());
 
     if let Err(e) = write_cli_config_to_disk(&config).await {
         return ResponseJson(ApiResponse::error(&format!("Failed to save config: {}", e)));
     }
 
-    if let Err(e) = sync_custom_providers_to_cli(&config, None).await {
-        tracing::error!("Failed to sync custom providers to cli: {}", e);
-        return ResponseJson(ApiResponse::error(&format!(
-            "Provider saved but failed to sync to openteams-cli: {}",
-            e
-        )));
+    let pi_sync_error = synchronize_pi_models(&config).await.err();
+    if let Some(error) = &pi_sync_error {
+        tracing::warn!(error = %error, provider_id = %id, "Provider saved but Pi model synchronization failed");
     }
-    if let Err(e) = sync_openteams_cli_profiles_from_disk().await {
+
+    let cli_sync_error = sync_custom_providers_to_cli(&config, None).await.err();
+    if let Some(e) = &cli_sync_error {
+        tracing::error!("Failed to sync custom providers to cli: {}", e);
+    }
+    let profile_sync_error = sync_openteams_cli_profiles_from_disk().await.err();
+    if let Some(e) = &profile_sync_error {
         tracing::error!("Failed to sync OpenTeams CLI profiles: {}", e);
-        return ResponseJson(ApiResponse::error(&format!(
-            "Provider saved but failed to sync OpenTeams CLI profiles: {}",
-            e
-        )));
+    }
+
+    if let Some(failure) = aggregate_provider_sync_failures(
+        "saved",
+        pi_sync_error.is_some(),
+        cli_sync_error.map(|error| error.to_string()),
+        profile_sync_error.map(|error| error.to_string()),
+    ) {
+        return match failure {
+            ProviderMutationSyncFailure::Pi(warning) => {
+                ResponseJson(ApiResponse::error_with_data(warning))
+            }
+            ProviderMutationSyncFailure::Other(message) => {
+                ResponseJson(ApiResponse::error(&message))
+            }
+        };
     }
 
     mask_custom_provider_key(&mut entry);
@@ -231,7 +342,7 @@ async fn update_custom_provider(
 async fn delete_custom_provider(
     State(_deployment): State<DeploymentImpl>,
     Path(id): Path<String>,
-) -> ResponseJson<ApiResponse<()>> {
+) -> ResponseJson<ApiResponse<(), ProviderMutationWarning>> {
     let mut config = read_cli_config_from_disk().await;
     let providers = config
         .provider
@@ -252,19 +363,34 @@ async fn delete_custom_provider(
         return ResponseJson(ApiResponse::error(&format!("Failed to save config: {}", e)));
     }
 
-    if let Err(e) = sync_custom_providers_to_cli(&config, Some(&id)).await {
-        tracing::error!("Failed to sync custom providers to cli: {}", e);
-        return ResponseJson(ApiResponse::error(&format!(
-            "Provider deleted but failed to sync to openteams-cli: {}",
-            e
-        )));
+    let pi_sync_error = synchronize_pi_models(&config).await.err();
+    if let Some(error) = &pi_sync_error {
+        tracing::warn!(error = %error, provider_id = %id, "Provider deleted but Pi model synchronization failed");
     }
-    if let Err(e) = sync_openteams_cli_profiles_from_disk().await {
+
+    let cli_sync_error = sync_custom_providers_to_cli(&config, Some(&id)).await.err();
+    if let Some(e) = &cli_sync_error {
+        tracing::error!("Failed to sync custom providers to cli: {}", e);
+    }
+    let profile_sync_error = sync_openteams_cli_profiles_from_disk().await.err();
+    if let Some(e) = &profile_sync_error {
         tracing::error!("Failed to sync OpenTeams CLI profiles: {}", e);
-        return ResponseJson(ApiResponse::error(&format!(
-            "Provider deleted but failed to sync OpenTeams CLI profiles: {}",
-            e
-        )));
+    }
+
+    if let Some(failure) = aggregate_provider_sync_failures(
+        "deleted",
+        pi_sync_error.is_some(),
+        cli_sync_error.map(|error| error.to_string()),
+        profile_sync_error.map(|error| error.to_string()),
+    ) {
+        return match failure {
+            ProviderMutationSyncFailure::Pi(warning) => {
+                ResponseJson(ApiResponse::error_with_data(warning))
+            }
+            ProviderMutationSyncFailure::Other(message) => {
+                ResponseJson(ApiResponse::error(&message))
+            }
+        };
     }
 
     ResponseJson(ApiResponse::success(()))
@@ -702,57 +828,6 @@ fn qualify_model_id(provider_id: &str, model_id: &str) -> Option<String> {
 
 fn model_variant_key(model_id: &str) -> String {
     canonical_variant_key(model_id.trim())
-}
-
-fn normalized_custom_provider_npm(id: &str, entry: &CustomProviderEntry) -> Option<String> {
-    if should_use_openai_compatible_npm(id, entry) {
-        return Some(DEFAULT_CUSTOM_PROVIDER_NPM.to_string());
-    }
-
-    entry
-        .npm
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn should_use_openai_compatible_npm(id: &str, entry: &CustomProviderEntry) -> bool {
-    let npm = entry
-        .npm
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let id_or_name_mentions_litellm = id.to_ascii_lowercase().contains("litellm")
-        || entry
-            .name
-            .as_deref()
-            .map(|name| name.to_ascii_lowercase().contains("litellm"))
-            .unwrap_or(false);
-    let endpoint_mentions_litellm = entry
-        .options
-        .base_url
-        .as_deref()
-        .map(|base_url| {
-            base_url.to_ascii_lowercase().contains("litellm")
-                || Url::parse(base_url)
-                    .ok()
-                    .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
-                    .map(|host| host.contains("litellm"))
-                    .unwrap_or(false)
-        })
-        .unwrap_or(false);
-
-    (id_or_name_mentions_litellm || endpoint_mentions_litellm)
-        && matches!(npm, None | Some(LEGACY_CUSTOM_PROVIDER_NPM))
-}
-
-fn normalize_custom_provider_entries(config: &mut CliConfig) {
-    if let Some(custom_providers) = config.provider.custom_providers.as_mut() {
-        for (id, entry) in custom_providers.iter_mut() {
-            entry.npm = normalized_custom_provider_npm(id, entry);
-        }
-    }
 }
 
 fn mask_custom_provider_key(entry: &mut CustomProviderEntry) {

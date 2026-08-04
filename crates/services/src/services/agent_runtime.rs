@@ -14,7 +14,7 @@ use executors::{
     env::ExecutionEnv,
     executors::{
         AvailabilityInfo, BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor,
-        acp::AcpCapabilityProbe, opencode::Opencode,
+        acp::AcpCapabilityProbe, opencode::Opencode, pi::Pi,
     },
     profile::{ExecutorConfig, ExecutorConfigs, ProfileError},
 };
@@ -25,6 +25,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{process::Command, time::timeout};
 use ts_rs::TS;
+
+use super::pi_models::{PiModelsSyncDiagnostic, coordinate_pi_models_with_diagnostic};
 
 const STORE_FILE_NAME: &str = "agent_runtime_config.json";
 const RUNTIME_DISCOVERY_CONCURRENCY: usize = 4;
@@ -184,6 +186,8 @@ pub enum AgentRuntimeReasoningCapability {
 #[ts(export)]
 pub struct AgentRuntimeListResponse {
     pub runners: Vec<AgentRuntimeStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pi_models_sync: Option<PiModelsSyncDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -199,6 +203,8 @@ pub struct AgentRuntimeRefreshError {
 pub struct AgentRuntimeRefreshResponse {
     pub runners: Vec<AgentRuntimeStatus>,
     pub errors: Vec<AgentRuntimeRefreshError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pi_models_sync: Option<PiModelsSyncDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -225,6 +231,8 @@ pub struct AgentRuntimeDiagnostics {
     pub env_summary: Vec<AgentRuntimeEnvSummary>,
     #[ts(type = "JsonValue")]
     pub executor_options: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pi_models_sync: Option<PiModelsSyncDiagnostic>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -247,37 +255,44 @@ pub fn store_path() -> PathBuf {
     utils::assets::asset_dir().join(STORE_FILE_NAME)
 }
 
-pub fn list_runtime_statuses() -> Result<AgentRuntimeListResponse, AgentRuntimeError> {
+pub async fn list_runtime_statuses() -> Result<AgentRuntimeListResponse, AgentRuntimeError> {
+    let pi_models_sync = coordinate_pi_models_with_diagnostic().await;
     let store = read_store(&store_path())?;
     let profiles = ExecutorConfigs::get_cached();
     Ok(AgentRuntimeListResponse {
         runners: build_statuses(&profiles, &store),
+        pi_models_sync: Some(pi_models_sync),
     })
 }
 
 pub async fn list_runtime_statuses_with_discovery(
     _current_dir: &Path,
 ) -> Result<AgentRuntimeListResponse, AgentRuntimeError> {
-    list_runtime_statuses()
+    list_runtime_statuses().await
 }
 
 /// Rebuilds the runtime snapshot exclusively from local files and cached
 /// metadata. This is safe for startup, list, and window-focus paths because it
 /// never runs a CLI command.
 pub async fn refresh_runtime_statuses() -> Result<AgentRuntimeRefreshResponse, AgentRuntimeError> {
+    let pi_models_sync = coordinate_pi_models_with_diagnostic().await;
     let store = read_store(&store_path())?;
     let profiles = ExecutorConfigs::get_cached();
     Ok(AgentRuntimeRefreshResponse {
         runners: build_statuses(&profiles, &store),
         errors: Vec::new(),
+        pi_models_sync: Some(pi_models_sync),
     })
 }
 
 pub async fn refresh_runtime_discovery(
     current_dir: &Path,
 ) -> Result<AgentRuntimeRefreshResponse, AgentRuntimeError> {
+    let pi_models_sync = coordinate_pi_models_with_diagnostic().await;
     let _guard = RUNTIME_REFRESH_LOCK.lock().await;
-    refresh_runtime_discovery_unlocked(current_dir).await
+    let mut response = refresh_runtime_discovery_unlocked(current_dir).await?;
+    response.pi_models_sync = Some(pi_models_sync);
+    Ok(response)
 }
 
 async fn refresh_runtime_discovery_unlocked(
@@ -315,6 +330,7 @@ async fn refresh_runtime_discovery_unlocked(
     Ok(AgentRuntimeRefreshResponse {
         runners: build_statuses(&profiles, &store),
         errors,
+        pi_models_sync: None,
     })
 }
 
@@ -550,6 +566,11 @@ pub async fn runtime_diagnostics(
     probe_dir: &Path,
     auth_method_id: Option<&str>,
 ) -> Result<AgentRuntimeDiagnostics, AgentRuntimeError> {
+    let pi_models_sync = if runner == BaseCodingAgent::Pi {
+        Some(coordinate_pi_models_with_diagnostic().await)
+    } else {
+        None
+    };
     let path = store_path();
     let store = read_store(&path)?;
     let profiles = ExecutorConfigs::get_cached();
@@ -611,6 +632,7 @@ pub async fn runtime_diagnostics(
                 | CodingAgent::QwenCode(_)
                 | CodingAgent::KimiCode(_)
                 | CodingAgent::QoderCli(_) => "native",
+                CodingAgent::Pi(_) => "npx",
                 _ => "default",
             }
             .to_string()
@@ -688,6 +710,7 @@ pub async fn runtime_diagnostics(
         run_mode: latest_status.run_mode,
         env_summary: latest_status.env_summary,
         executor_options: latest_status.executor_options,
+        pi_models_sync,
     })
 }
 
@@ -710,7 +733,7 @@ async fn resolve_runtime_command_for_diagnostics(
 async fn resolve_runtime_command(
     executor: &CodingAgent,
 ) -> Result<Option<ResolvedRuntimeCommand>, String> {
-    let Some(base) = version_command_base(executor) else {
+    let Some(base) = runtime_command_base(executor) else {
         return Ok(None);
     };
     let parts = CommandBuilder::new(base).build_initial().map_err(|error| {
@@ -730,6 +753,20 @@ async fn resolve_runtime_command(
         executable_path,
         rendered,
     }))
+}
+
+fn runtime_command_base(executor: &CodingAgent) -> Option<String> {
+    if let Some(base_override) = cmd_overrides_for_executor(executor)
+        .and_then(|cmd| cmd.base_command_override.as_deref())
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+    {
+        return Some(base_override.to_string());
+    }
+    match executor {
+        CodingAgent::Pi(_) => Some(Pi::default_command()),
+        _ => version_command_base(executor),
+    }
 }
 
 pub fn apply_agent_runtime_config(
@@ -935,6 +972,7 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
         CodingAgent::Droid(_) => "droid".to_string(),
         CodingAgent::KimiCode(_) => "kimi".to_string(),
         CodingAgent::QoderCli(_) => "qodercli".to_string(),
+        CodingAgent::Pi(_) => Pi::version_command(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => return None,
         #[cfg(feature = "qa-mode")]
@@ -956,6 +994,7 @@ fn cmd_overrides_for_executor(executor: &CodingAgent) -> Option<&CmdOverrides> {
         CodingAgent::Droid(config) => Some(&config.cmd),
         CodingAgent::KimiCode(config) => Some(&config.cmd),
         CodingAgent::QoderCli(config) => Some(&config.cmd),
+        CodingAgent::Pi(config) => Some(&config.cmd),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => None,
         #[cfg(feature = "qa-mode")]
@@ -1304,6 +1343,13 @@ async fn discover_models_for_executor(
         return Ok(Some(models));
     }
 
+    if runner == BaseCodingAgent::Pi {
+        return match acp_result {
+            Ok(_) => Ok(None),
+            Err(error) => Err(format!("ACP initialize failed: {error}")),
+        };
+    }
+
     match coordinated_list_models(
         runner,
         executor,
@@ -1370,7 +1416,15 @@ fn build_status(
     } else {
         None
     };
-    let availability = configured_base.get_availability_info();
+    let availability = if runner == BaseCodingAgent::Pi {
+        if node_available {
+            AvailabilityInfo::InstallationFound
+        } else {
+            AvailabilityInfo::NotFound
+        }
+    } else {
+        configured_base.get_availability_info()
+    };
     let installed = availability.is_available();
     let executable = installed && config.run_mode != AgentRunMode::Disabled;
     let mut auth_env = ExecutionEnv::new(Default::default(), false, String::new());
@@ -1491,7 +1545,10 @@ fn reasoning_capability_for_runner(
             options: strings(["low", "high", "max"]),
         }),
         BaseCodingAgent::QoderCli => None,
-        BaseCodingAgent::Amp | BaseCodingAgent::CursorAgent | BaseCodingAgent::Copilot => None,
+        BaseCodingAgent::Amp
+        | BaseCodingAgent::CursorAgent
+        | BaseCodingAgent::Copilot
+        | BaseCodingAgent::Pi => None,
         #[cfg(feature = "qa-mode")]
         BaseCodingAgent::QaMock | BaseCodingAgent::AcpQa => None,
     }
@@ -1562,6 +1619,7 @@ fn model_name(config: &CodingAgent) -> Option<&str> {
         CodingAgent::Droid(config) => config.model.as_deref(),
         CodingAgent::KimiCode(config) => config.model.as_deref(),
         CodingAgent::QoderCli(config) => config.model.as_deref(),
+        CodingAgent::Pi(config) => config.model.as_deref(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => None,
         _ => None,
@@ -1659,7 +1717,13 @@ fn update_store<T>(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use executors::executors::{AppendPrompt, kimi::KimiCode, qoder::QoderCli};
+    use executors::executors::{
+        AppendPrompt,
+        acp::{AcpConfigChoice, AcpConfigOptionKind, AcpConfigOptionSnapshot, AcpConfigSource},
+        kimi::KimiCode,
+        pi::Pi,
+        qoder::QoderCli,
+    };
 
     use super::*;
 
@@ -1673,6 +1737,123 @@ mod tests {
             acp_mcp_policy: Default::default(),
             approvals: None,
         })
+    }
+
+    fn pi_agent() -> CodingAgent {
+        CodingAgent::Pi(Pi::default())
+    }
+
+    #[test]
+    fn pi_runtime_requires_node_only() {
+        let runner = BaseCodingAgent::Pi;
+        let executor_config = ExecutorConfig::new_with_default(pi_agent());
+        let base = executor_config.get_default().unwrap();
+        let store = AgentRuntimeStore::default();
+
+        for (node, expected) in [(false, false), (true, true)] {
+            let status = build_status(runner, &executor_config, base, &store, node);
+            assert_eq!(status.installed, expected);
+            assert_eq!(status.node_available, node);
+        }
+    }
+
+    #[test]
+    fn runtime_responses_expose_structured_pi_sync_diagnostics() {
+        let diagnostic = PiModelsSyncDiagnostic {
+            synchronized: false,
+            result: None,
+            error: Some("Pi model coordination failed".to_string()),
+            retry_available: true,
+            retry_path: super::super::pi_models::PI_MODELS_SYNC_RETRY_PATH.to_string(),
+        };
+        let response = AgentRuntimeListResponse {
+            runners: Vec::new(),
+            pi_models_sync: Some(diagnostic),
+        };
+        let serialized = serde_json::to_value(response).expect("runtime response");
+
+        assert_eq!(serialized["pi_models_sync"]["synchronized"], false);
+        assert_eq!(serialized["pi_models_sync"]["retry_available"], true);
+        assert_eq!(
+            serialized["pi_models_sync"]["retry_path"],
+            super::super::pi_models::PI_MODELS_SYNC_RETRY_PATH
+        );
+    }
+
+    #[test]
+    fn pi_acp_model_values_remain_exact() {
+        let exact_models = vec![
+            "openrouter/anthropic/claude-sonnet-4.5".to_string(),
+            "custom-provider/model:id@revision".to_string(),
+        ];
+        let probe = AcpCapabilityProbe {
+            protocol_version: "1".to_string(),
+            agent_name: Some("pi-acp".to_string()),
+            agent_version: Some("0.0.33".to_string()),
+            auth_methods: Vec::new(),
+            supports_session_list: true,
+            supports_session_resume: false,
+            supports_session_load: true,
+            supports_session_close: false,
+            supports_session_delete: true,
+            supports_additional_directories: false,
+            agent_capabilities: serde_json::json!({}),
+            config_source: AcpConfigSource::Stable,
+            config_options: vec![AcpConfigOptionSnapshot {
+                id: "model".to_string(),
+                name: "Model".to_string(),
+                description: None,
+                category: Some("model".to_string()),
+                kind: AcpConfigOptionKind::Select {
+                    current_value: exact_models[0].clone(),
+                    options: exact_models
+                        .iter()
+                        .map(|value| AcpConfigChoice {
+                            value: value.clone(),
+                            name: value.clone(),
+                            description: None,
+                        })
+                        .collect(),
+                },
+            }],
+        };
+
+        assert_eq!(probe.model_ids().unwrap(), exact_models);
+    }
+
+    #[test]
+    fn pi_acp_probe_failure_preserves_installed_state_and_cached_models() {
+        let runner = BaseCodingAgent::Pi;
+        let executor_config = ExecutorConfig::new_with_default(pi_agent());
+        let base = executor_config.get_default().unwrap();
+        let preserved_models = vec!["provider/exact-model".to_string()];
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: preserved_models.clone(),
+                version: Some("pi 0.83.0".to_string()),
+                last_checked_at: Utc::now(),
+                last_error: None,
+            },
+        );
+
+        let errors = apply_discovery_outcomes(
+            &mut store,
+            vec![RunnerDiscoveryOutcome::Failed {
+                runner,
+                message: "[model_discovery] ACP initialize failed: NPX process exited".to_string(),
+                detected_version: None,
+                preserved_models: preserved_models.clone(),
+            }],
+        );
+        let status = build_status(runner, &executor_config, base, &store, true);
+
+        assert!(status.installed);
+        assert!(status.executable);
+        assert_eq!(status.discovered_models, preserved_models);
+        assert_eq!(errors[0].preserved_models, status.discovered_models);
+        assert!(status.last_error.unwrap().contains("ACP initialize failed"));
     }
 
     fn test_probe_key(runner: BaseCodingAgent, kind: CliProbeKind, salt: u8) -> CliProbeCacheKey {
@@ -2482,6 +2663,7 @@ mod tests {
         assert!(value.get("model_override").is_none());
         assert!(value.get("reasoning_level").is_none());
         assert!(value.get("model_reasoning_effort").is_none());
+        assert!(value.get("npx_available").is_none());
         assert_eq!(value["executor_options"]["ask_for_approval"], "never");
     }
 

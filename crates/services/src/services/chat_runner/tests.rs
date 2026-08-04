@@ -4181,3 +4181,532 @@ async fn capture_untracked_files_can_be_filtered_against_run_baseline() {
 
     assert_eq!(filtered, vec!["current_session_new.txt".to_string()]);
 }
+
+#[test]
+fn pi_agent_type_is_recognized_in_chat_agent_configuration() {
+    use executors::executors::BaseCodingAgent;
+    let agent = ChatAgent {
+        runner_type: "PI".to_string(),
+        ..test_agent("pi-test", "system")
+    };
+    assert_eq!(
+        agent.runner_type.parse::<BaseCodingAgent>(),
+        Ok(BaseCodingAgent::Pi)
+    );
+}
+
+#[test]
+fn pi_acp_quota_token_usage_is_parsed_for_free_chat_records() {
+    let line = r#"{"type":"token_usage","total_tokens":35,"model_context_window":0,"input_tokens":10,"output_tokens":20,"runtime_agent":"pi","runtime_model_id":"offline-model","usage_scope":"turn_delta"}"#;
+    let usage = ChatRunner::parse_token_usage_from_stdout_line(line).expect("usage");
+    assert_eq!(usage.total_tokens, 35);
+    assert_eq!(usage.input_tokens, Some(10));
+    assert_eq!(usage.output_tokens, Some(20));
+    assert_eq!(usage.runtime_agent.as_deref(), Some("pi"));
+    assert_eq!(usage.runtime_model_id.as_deref(), Some("offline-model"));
+}
+
+#[test]
+fn pi_session_follow_up_uses_acp_session_load_semantics() {
+    use executors::executors::{BaseCodingAgent, ExecutorError};
+    use std::io;
+
+    let agent = ChatAgent {
+        runner_type: "PI".to_string(),
+        ..test_agent("pi-followup", "system")
+    };
+    assert_eq!(
+        agent.runner_type.parse::<BaseCodingAgent>(),
+        Ok(BaseCodingAgent::Pi)
+    );
+
+    let follow_up_error = ExecutorError::FollowUpNotSupported(
+        "Pi ACP could not reuse the requested session: I/O error: ACP startup failed: Unknown sessionId: stale"
+            .to_string(),
+    );
+    assert!(
+        matches!(follow_up_error, ExecutorError::FollowUpNotSupported(_)),
+        "Pi follow-up failure must be FollowUpNotSupported variant"
+    );
+    let display = format!("{follow_up_error}");
+    assert!(display.contains("Follow-up is not supported"));
+    assert!(display.contains("Unknown sessionId"));
+
+    let startup_error = ExecutorError::Io(io::Error::other(
+        "ACP startup failed: connection refused",
+    ));
+    assert!(
+        !matches!(startup_error, ExecutorError::FollowUpNotSupported(_)),
+        "ACP startup failure must not be classified as FollowUpNotSupported"
+    );
+}
+
+#[test]
+fn pi_layered_error_mapping_preserves_acp_startup_failures() {
+    use executors::executors::ExecutorError;
+    use std::io;
+
+    let startup_io = ExecutorError::Io(io::Error::other(
+        "ACP startup failed: connection refused",
+    ));
+    let display = format!("{startup_io}");
+    assert!(
+        display.contains("ACP startup failed"),
+        "ACP startup failure must preserve prefix in Display: {display}"
+    );
+
+    let auth_error =
+        ExecutorError::AuthRequired("ACP startup failed: AuthRequired".to_string());
+    assert!(
+        matches!(auth_error, ExecutorError::AuthRequired(_)),
+        "ACP auth failure must be AuthRequired variant"
+    );
+    assert!(
+        !matches!(auth_error, ExecutorError::Io(_)),
+        "ACP auth failure must not be Io variant"
+    );
+
+    let follow_up = ExecutorError::FollowUpNotSupported(
+        "Pi ACP could not reuse the requested session: stale-id".to_string(),
+    );
+    let fu_display = format!("{follow_up}");
+    assert!(fu_display.contains("Follow-up is not supported"));
+    assert!(fu_display.contains("Pi ACP could not reuse"));
+
+    assert!(
+        !matches!(startup_io, ExecutorError::FollowUpNotSupported(_)
+            | ExecutorError::AuthRequired(_)),
+        "Io, FollowUpNotSupported, and AuthRequired must be distinct variants"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_free_chat_dispatches_through_service_and_projects_records() {
+    use db::models::chat_session_agent::CreateChatSessionAgent;
+    use std::os::unix::fs::PermissionsExt;
+
+    let _fixture_lock = super::PI_FIXTURE_TEST_LOCK.lock().await;
+
+    const PI_FIXTURE_DIR: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../executors/tests/fixtures/pi_acp");
+
+    let temp = tempfile::tempdir().expect("pi qa workspace");
+    let root = temp.path();
+
+    let bin = root.join("bin");
+    let nm_bin = root.join("node_modules/.bin");
+    let pi_pkg = root.join("node_modules/@earendil-works/pi-coding-agent");
+    let mcp_pkg = root.join("node_modules/pi-mcp-adapter");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&nm_bin).unwrap();
+    std::fs::create_dir_all(&pi_pkg).unwrap();
+    std::fs::create_dir_all(&mcp_pkg).unwrap();
+
+    std::fs::write(pi_pkg.join("package.json"), r#"{"version":"0.83.0"}"#).unwrap();
+    std::fs::write(mcp_pkg.join("package.json"), r#"{"version":"2.18.0"}"#).unwrap();
+    std::fs::write(mcp_pkg.join("index.ts"), "export default () => {};").unwrap();
+
+    let mode = 0o755;
+    let npx_path = bin.join("npx");
+    std::fs::write(&npx_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_npx.sh")).unwrap()).unwrap();
+    std::fs::set_permissions(&npx_path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+    let pi_acp_path = bin.join("pi-acp");
+    std::fs::write(&pi_acp_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_acp.mjs")).unwrap()).unwrap();
+    std::fs::set_permissions(&pi_acp_path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+    let pi_bin_path = nm_bin.join("pi");
+    std::fs::write(&pi_bin_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi.mjs")).unwrap()).unwrap();
+    std::fs::set_permissions(&pi_bin_path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+    let mcp_bin_path = nm_bin.join("pi-mcp-adapter");
+    std::fs::write(&mcp_bin_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_mcp_adapter.mjs")).unwrap()).unwrap();
+    std::fs::set_permissions(&mcp_bin_path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let prompts = root.join("prompts.txt");
+    let pids = root.join("pids.json");
+    let session_file = root.join("sessions/session.jsonl");
+    let perm_log = root.join("permissions.jsonl");
+    let proto_log = root.join("protocol.jsonl");
+
+    unsafe {
+        std::env::set_var("OPENTEAMS_PI_QA_NPX_PATH", &npx_path);
+        std::env::set_var("PATH", format!("{}:{}:{}", bin.display(), nm_bin.display(), std::env::var("PATH").unwrap_or_default()));
+        std::env::set_var("HOME", root.join("home"));
+        std::env::set_var("OPENTEAMS_FAKE_PI_PROMPTS", &prompts);
+        std::env::set_var("OPENTEAMS_FAKE_PI_CHILD_PID_FILE", &pids);
+        std::env::set_var("OPENTEAMS_FAKE_PI_SESSION_FILE", &session_file);
+        std::env::set_var("OPENTEAMS_FAKE_PI_PERMISSION_LOG", &perm_log);
+        std::env::set_var("OPENTEAMS_FAKE_PI_PROTOCOL_LOG", &proto_log);
+        std::env::set_var("OPENTEAMS_FAKE_PI_CHAT_PROTOCOL", "1");
+    }
+
+    let db = setup_chat_runner_db().await;
+    let session_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO chat_sessions (id, title, status, default_workspace_path, worktree_mode)
+           VALUES (?, ?, ?, ?, ?)"#,
+    )
+    .bind(session_id)
+    .bind("pi service test")
+    .bind(ChatSessionStatus::Active)
+    .bind(workspace.to_string_lossy().to_string())
+    .bind(ChatSessionWorktreeMode::Disabled)
+    .execute(&db.pool)
+    .await
+    .expect("insert session");
+
+    let agent = ChatAgent::create(
+        &db.pool,
+        &CreateChatAgent {
+            name: "Pi Agent".to_string(),
+            runner_type: "PI".to_string(),
+            system_prompt: Some("You are Pi.".to_string()),
+            tools_enabled: Some(json!({})),
+            model_name: None,
+            owner_project_id: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create pi agent");
+
+    let session_agent = ChatSessionAgent::create(
+        &db.pool,
+        &CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: Some("Pi".to_string()),
+            workspace_path: Some(workspace.to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create session agent");
+
+    sqlx::query("UPDATE chat_sessions SET lead_session_agent_id = ? WHERE id = ?")
+        .bind(session_agent.id)
+        .bind(session_id)
+        .execute(&db.pool)
+        .await
+        .expect("set lead session agent");
+
+    let session = ChatSession::find_by_id(&db.pool, session_id)
+        .await
+        .expect("read Pi chat session")
+        .expect("Pi chat session exists");
+
+    let runner = ChatRunner::new(db.clone());
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@Pi hello pi".to_string(),
+        None,
+    )
+    .await
+    .expect("create message");
+
+    runner.handle_message(&session, &message).await;
+
+    let mut run_completed = false;
+    for _ in 0..150 {
+        let sa = ChatSessionAgent::find_by_id(&db.pool, session_agent.id)
+            .await
+            .expect("find sa")
+            .expect("sa exists");
+        if sa.agent_session_id.is_some()
+            && (sa.state == ChatSessionAgentState::Idle
+                || sa.state == ChatSessionAgentState::Dead)
+        {
+            run_completed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let sa = ChatSessionAgent::find_by_id(&db.pool, session_agent.id)
+        .await
+        .expect("find sa")
+        .expect("sa exists");
+    if !run_completed {
+        let run_dirs = sqlx::query_scalar::<_, String>(
+            "SELECT run_dir FROM chat_runs WHERE session_agent_id = ? ORDER BY run_index",
+        )
+        .bind(session_agent.id)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read Pi run directories");
+        panic!(
+            "Pi agent run did not complete; state={:?}, has_session_id={}, run_dirs={run_dirs:?}",
+            sa.state,
+            sa.agent_session_id.is_some()
+        );
+    }
+    assert_eq!(sa.state, ChatSessionAgentState::Idle);
+    assert!(
+        sa.agent_session_id.is_some(),
+        "session ID must be persisted"
+    );
+    assert_eq!(
+        sa.agent_session_id.as_deref(),
+        Some("pi-offline-session")
+    );
+
+    let messages = sqlx::query_as::<_, (String, String)>(
+        "SELECT sender_type, content FROM chat_messages WHERE session_id = ? ORDER BY created_at",
+    )
+    .bind(session_id)
+    .fetch_all(&db.pool)
+    .await
+    .expect("fetch messages");
+    assert!(
+        messages
+            .iter()
+            .any(|(st, c)| st == "agent" && c.contains("echo:") && c.contains("@Pi hello pi")),
+        "agent message must contain echo response: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|(_, content)| content.contains("响应格式无效")),
+        "valid Pi protocol output must not trigger a parsing retry: {messages:?}"
+    );
+
+    let run = sqlx::query_as::<_, (Uuid,)>(
+        "SELECT id FROM chat_runs WHERE session_agent_id = ? ORDER BY run_index DESC LIMIT 1",
+    )
+    .bind(session_agent.id)
+    .fetch_optional(&db.pool)
+    .await
+    .expect("fetch run");
+    assert!(run.is_some(), "chat run record must exist");
+
+    let prompts_content = std::fs::read_to_string(&prompts).expect("read prompts");
+    assert!(
+        prompts_content.contains("hello pi"),
+        "prompts file must record the prompt: {prompts_content}"
+    );
+
+    unsafe {
+        std::env::remove_var("OPENTEAMS_PI_QA_NPX_PATH");
+        std::env::remove_var("OPENTEAMS_FAKE_PI_CHAT_PROTOCOL");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn pi_member_isolation_through_build_effective_member_executor() {
+    use crate::services::member_execution::build_effective_member_executor_for_run;
+    use executors::env::RepoContext;
+    use executors::executors::{BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor};
+    use std::os::unix::fs::PermissionsExt;
+
+    let _fixture_lock = super::PI_FIXTURE_TEST_LOCK.lock().await;
+
+    const PI_FIXTURE_DIR: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../executors/tests/fixtures/pi_acp");
+
+    let temp = tempfile::tempdir().expect("member isolation workspace");
+    let root = temp.path();
+
+    let bin = root.join("bin");
+    let nm_bin = root.join("node_modules/.bin");
+    let pi_pkg = root.join("node_modules/@earendil-works/pi-coding-agent");
+    let mcp_pkg = root.join("node_modules/pi-mcp-adapter");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&nm_bin).unwrap();
+    std::fs::create_dir_all(&pi_pkg).unwrap();
+    std::fs::create_dir_all(&mcp_pkg).unwrap();
+    std::fs::write(pi_pkg.join("package.json"), r#"{"version":"0.83.0"}"#).unwrap();
+    std::fs::write(mcp_pkg.join("package.json"), r#"{"version":"2.18.0"}"#).unwrap();
+    std::fs::write(mcp_pkg.join("index.ts"), "export default () => {};").unwrap();
+
+    let mode = 0o755;
+    let npx_path = bin.join("npx");
+    std::fs::write(&npx_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_npx.sh")).unwrap()).unwrap();
+    std::fs::set_permissions(&npx_path, std::fs::Permissions::from_mode(mode)).unwrap();
+    let pi_acp_path = bin.join("pi-acp");
+    std::fs::write(&pi_acp_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_acp.mjs")).unwrap()).unwrap();
+    std::fs::set_permissions(&pi_acp_path, std::fs::Permissions::from_mode(mode)).unwrap();
+    let pi_bin_path = nm_bin.join("pi");
+    std::fs::write(&pi_bin_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi.mjs")).unwrap()).unwrap();
+    std::fs::set_permissions(&pi_bin_path, std::fs::Permissions::from_mode(mode)).unwrap();
+    let mcp_bin_path = nm_bin.join("pi-mcp-adapter");
+    std::fs::write(&mcp_bin_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_mcp_adapter.mjs")).unwrap()).unwrap();
+    std::fs::set_permissions(&mcp_bin_path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let pi_agent_dir = root.join("home/.pi/agent");
+    std::fs::create_dir_all(&pi_agent_dir).unwrap();
+    std::fs::write(
+        pi_agent_dir.join("mcp.json"),
+        serde_json::json!({
+            "mcpServers": {
+                "alpha": {"command": "/bin/echo", "env": {"TOKEN": "alpha-secret"}},
+                "beta": {"command": "/bin/echo", "env": {"KEY": "beta-secret"}}
+            },
+            "settings": {"hostConfigDiscovery": "off"}
+        }).to_string(),
+    ).unwrap();
+
+    let prompts = root.join("prompts.txt");
+    let pids = root.join("pids.json");
+    let session_file = root.join("sessions/session.jsonl");
+    let perm_log = root.join("permissions.jsonl");
+    let proto_log = root.join("protocol.jsonl");
+
+    unsafe {
+        std::env::set_var("OPENTEAMS_PI_QA_NPX_PATH", &npx_path);
+        std::env::set_var("PATH", format!("{}:{}:{}", bin.display(), nm_bin.display(), std::env::var("PATH").unwrap_or_default()));
+        std::env::set_var("HOME", root.join("home"));
+        std::env::set_var("OPENTEAMS_FAKE_PI_PROMPTS", &prompts);
+        std::env::set_var("OPENTEAMS_FAKE_PI_CHILD_PID_FILE", &pids);
+        std::env::set_var("OPENTEAMS_FAKE_PI_SESSION_FILE", &session_file);
+        std::env::set_var("OPENTEAMS_FAKE_PI_PERMISSION_LOG", &perm_log);
+        std::env::set_var("OPENTEAMS_FAKE_PI_PROTOCOL_LOG", &proto_log);
+    }
+
+    let db = setup_chat_runner_db().await;
+
+    let agent = ChatAgent::create(
+        &db.pool,
+        &CreateChatAgent {
+            name: "Pi Member A".to_string(),
+            runner_type: "PI".to_string(),
+            system_prompt: Some("You are Pi.".to_string()),
+            tools_enabled: Some(json!({ "mcpServers": { "alpha": true } })),
+            model_name: None,
+            owner_project_id: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create agent A");
+
+    let sa_a = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id: Uuid::new_v4(),
+            agent_id: agent.id,
+            member_name: Some("MemberA".to_string()),
+            workspace_path: Some(workspace.to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create sa A");
+
+    let agent_b = ChatAgent::create(
+        &db.pool,
+        &CreateChatAgent {
+            name: "Pi Member B".to_string(),
+            runner_type: "PI".to_string(),
+            system_prompt: Some("You are Pi.".to_string()),
+            tools_enabled: Some(json!({ "mcpServers": { "beta": true } })),
+            model_name: None,
+            owner_project_id: None,
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create agent B");
+
+    let sa_b = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id: Uuid::new_v4(),
+            agent_id: agent_b.id,
+            member_name: Some("MemberB".to_string()),
+            workspace_path: Some(workspace.to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create sa B");
+
+    let mut env_a = executors::env::ExecutionEnv::new(
+        RepoContext::new(workspace.clone(), Vec::new()),
+        false,
+        String::new(),
+    );
+    let (config_a, executor_a) = build_effective_member_executor_for_run(
+        &db.pool, &agent, &sa_a, &mut env_a,
+    )
+    .await
+    .expect("build executor A");
+
+    let mut env_b = executors::env::ExecutionEnv::new(
+        RepoContext::new(workspace.clone(), Vec::new()),
+        false,
+        String::new(),
+    );
+    let (config_b, executor_b) = build_effective_member_executor_for_run(
+        &db.pool, &agent_b, &sa_b, &mut env_b,
+    )
+    .await
+    .expect("build executor B");
+
+    assert_eq!(config_a.runner_type, BaseCodingAgent::Pi);
+    assert_eq!(config_b.runner_type, BaseCodingAgent::Pi);
+
+    let pi_a = match &executor_a {
+        CodingAgent::Pi(pi) => pi,
+        _ => panic!("expected Pi executor for A"),
+    };
+    let pi_b = match &executor_b {
+        CodingAgent::Pi(pi) => pi,
+        _ => panic!("expected Pi executor for B"),
+    };
+
+    assert!(
+        pi_a.acp_mcp_policy.allowed_server_names.is_some(),
+        "Pi A must have an explicit MCP allowlist"
+    );
+    assert!(
+        pi_b.acp_mcp_policy.allowed_server_names.is_some(),
+        "Pi B must have an explicit MCP allowlist"
+    );
+
+    let allow_a = pi_a.acp_mcp_policy.allowed_server_names.as_ref().unwrap();
+    let allow_b = pi_b.acp_mcp_policy.allowed_server_names.as_ref().unwrap();
+    assert!(
+        allow_a.contains("alpha") && !allow_a.contains("beta"),
+        "Member A allowlist must contain alpha, not beta: {allow_a:?}"
+    );
+    assert!(
+        allow_b.contains("beta") && !allow_b.contains("alpha"),
+        "Member B allowlist must contain beta, not alpha: {allow_b:?}"
+    );
+
+    let spawned_a = executor_a
+        .spawn(&workspace, "member-a-test", &env_a)
+        .await
+        .expect("spawn A");
+    drop(spawned_a);
+
+    let spawned_b = executor_b
+        .spawn(&workspace, "member-b-test", &env_b)
+        .await
+        .expect("spawn B");
+    drop(spawned_b);
+
+    unsafe {
+        std::env::remove_var("OPENTEAMS_PI_QA_NPX_PATH");
+    }
+}

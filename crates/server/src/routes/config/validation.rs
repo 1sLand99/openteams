@@ -44,7 +44,6 @@ const DEFAULT_OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1/";
 const DEFAULT_MINIMAX_ENDPOINT: &str = "https://api.minimaxi.com/anthropic/v1/";
 const DEFAULT_OLLAMA_ENDPOINT: &str = "http://localhost:11434/";
 const DEFAULT_CUSTOM_PROVIDER_NPM: &str = "@ai-sdk/openai-compatible";
-const LEGACY_CUSTOM_PROVIDER_NPM: &str = "@ai-sdk/anthropic";
 const AUTO_MODEL_VARIANT_PREFIX: &str = "AUTO_MODEL_";
 
 struct ValidationRequestSpec {

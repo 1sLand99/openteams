@@ -31,6 +31,7 @@ pub mod native_skills;
 pub mod notification;
 pub mod oauth_credentials;
 pub mod onboarding;
+pub mod pi_models;
 pub mod project;
 pub use project::{
     delivery as project_delivery, member as project_member, migration as project_migration,

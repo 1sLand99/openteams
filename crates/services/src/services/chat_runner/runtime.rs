@@ -12,6 +12,7 @@ pub(super) struct ExitWatcherArgs {
     pub(super) stop: CancellationToken,
     pub(super) executor_cancel: Option<CancellationToken>,
     pub(super) exit_signal: Option<ExecutorExitSignal>,
+    pub(super) cleanup: Option<ExecutorRunCleanup>,
     pub(super) msg_store: Arc<MsgStore>,
     pub(super) completion_status: Arc<AtomicU8>,
     pub(super) terminal_failure_reason: Arc<Mutex<Option<String>>>,
@@ -2707,6 +2708,7 @@ impl ChatRunner {
     ) {
         let run_controls = self.run_controls.clone();
         tokio::spawn(async move {
+            let cleanup = args.cleanup;
             Self::watch_executor_lifecycle_with_timeout(
                 args.child,
                 args.stop,
@@ -2720,6 +2722,7 @@ impl ChatRunner {
                 EXECUTOR_GRACEFUL_STOP_TIMEOUT,
             )
             .await;
+            drop(cleanup);
             let should_remove = run_controls
                 .get(&session_agent_id)
                 .is_some_and(|control| control.run_id == run_id);

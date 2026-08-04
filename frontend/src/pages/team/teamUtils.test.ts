@@ -5,6 +5,7 @@ import {
   canonicalRuntimeModelId,
   effectiveAcpConfigValue,
   findAcpSelectConfigOption,
+  normalizeRunnerType,
   resolveUniqueAcpChoice,
   withoutAcpModeOverrides,
   withoutAcpThoughtLevelOverrides,
@@ -101,6 +102,41 @@ assert.deepEqual(
     (override) => override.option_id,
   ),
   ["session-mode", "session-model"],
+);
+
+// --- Pi runner registration and exact ACP model values -------------------
+
+assert.equal(normalizeRunnerType("PI"), "PI");
+assert.equal(normalizeRunnerType("pi"), "PI");
+assert.equal(normalizeRunnerType("Pi"), "PI");
+
+const piModelOption: AcpConfigOptionSnapshot = {
+  ...modelOption,
+  id: "model",
+  current_value: "openai/gpt-5.3-codex(high)",
+  options: [
+    {
+      value: "openai/gpt-5.3-codex(high)",
+      name: "GPT 5.3 Codex (high)",
+      description: null,
+    },
+    {
+      value: "anthropic/claude-opus-4-6",
+      name: "Claude Opus 4.6",
+      description: null,
+    },
+  ],
+};
+assert.equal(
+  resolveUniqueAcpChoice(
+    "openai/gpt-5.3-codex(high)",
+    piModelOption.options,
+  )?.value,
+  "openai/gpt-5.3-codex(high)",
+);
+assert.deepEqual(
+  effectiveAcpConfigValue(piModelOption, [], "anthropic/claude-opus-4-6", ""),
+  { type: "value_id", value: "anthropic/claude-opus-4-6" },
 );
 
 console.log("Team ACP config matching: PASS");

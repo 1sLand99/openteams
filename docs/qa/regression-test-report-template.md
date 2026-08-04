@@ -63,14 +63,14 @@ description: "与 OpenTeams 功能回归测试操作手册逐用例对应的详�
 | BLOCKED |  |
 | SKIPPED |  |
 | NOT_RUN |  |
-| 合计 | 72 |
+| 合计 | 74 |
 
 ### 3.2 按优先级
 
 | 优先级 | 总数 | PASS | FAIL | BLOCKED | SKIPPED | NOT_RUN |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | P0 | 32 |  |  |  |  |  |
-| P1 | 37 |  |  |  |  |  |
+| P1 | 39 |  |  |  |  |  |
 | P2 | 3 |  |  |  |  |  |
 
 ### 3.3 缺陷
@@ -140,6 +140,8 @@ description: "与 OpenTeams 功能回归测试操作手册逐用例对应的详�
 | CLI-109 | P1 | `NOT_RUN` |  |  |  |  |
 | CLI-110 | P1 | `NOT_RUN` |  |  |  |  |
 | CLI-111 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-112 | P1 | `NOT_RUN` |  |  |  |  |
+| CLI-113 | P1 | `NOT_RUN` |  |  |  |  |
 | CLI-201 | P0 | `NOT_RUN` |  |  |  |  |
 | CLI-202 | P1 | `NOT_RUN` |  |  |  |  |
 | CLI-203 | P1 | `NOT_RUN` |  |  |  |  |
@@ -197,6 +199,8 @@ description: "与 OpenTeams 功能回归测试操作手册逐用例对应的详�
 | GitHub Copilot CLI | `COPILOT` |  |  |  |  |  |  |  |  |  |  | CLI-109 |
 | Factory Droid | `DROID` |  |  |  |  |  |  |  |  |  |  | CLI-110 |
 | Kimi Code | `KIMI_CODE` |  |  |  |  |  |  |  |  |  |  | CLI-111 |
+| Pi | `PI` |  |  |  |  |  |  |  |  |  |  | CLI-112 |
+| Qoder CLI | `QODER_CLI` |  |  |  |  |  |  |  |  |  |  | CLI-113 |
 | Claude Code Router | `CLAUDE_CODE` 变体 |  |  |  |  |  |  |  |  |  |  | CLI-204 |
 
 ### 跨 Runner 验证

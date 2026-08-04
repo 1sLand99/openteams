@@ -1015,6 +1015,47 @@ function InspectorCard({
     t('workflow.inspector.noInstructions', {
       defaultValue: 'No task instructions were provided for this step.',
     });
+  const cleanContractItems = (items?: Array<string> | null) =>
+    (items ?? [])
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  const contractSections = [
+    {
+      key: 'acceptance',
+      title: t('workflow.inspector.acceptanceHeading', {
+        defaultValue: 'Acceptance Criteria',
+      }),
+      items: cleanContractItems(planNode?.data.acceptance),
+    },
+    {
+      key: 'expectedOutputs',
+      title: t('workflow.inspector.expectedOutputsHeading', {
+        defaultValue: 'Expected Outputs',
+      }),
+      items: cleanContractItems(planNode?.data.outputs),
+    },
+    {
+      key: 'checklist',
+      title: t('workflow.inspector.checklistHeading', {
+        defaultValue: 'Checklist',
+      }),
+      items: cleanContractItems(planNode?.data.checklist),
+    },
+    {
+      key: 'verificationCommands',
+      title: t('workflow.inspector.verificationCommandsHeading', {
+        defaultValue: 'Verification Commands',
+      }),
+      items: cleanContractItems(planNode?.data.verificationCommands),
+    },
+    {
+      key: 'completionEvidence',
+      title: t('workflow.inspector.completionEvidenceHeading', {
+        defaultValue: 'Completion Evidence',
+      }),
+      items: cleanContractItems(planNode?.data.completionEvidence),
+    },
+  ].filter((section) => section.items.length > 0);
   const summaryText =
     step.summary_text?.trim() ||
     t('workflow.inspector.noSummary', {
@@ -1252,6 +1293,21 @@ function InspectorCard({
                 className="w-full select-text"
               />
             </InspectorSection>
+
+            {contractSections.map((section) => (
+              <InspectorSection key={section.key} title={section.title}>
+                <ul className="list-disc space-y-1 pl-4 text-[12px] leading-[1.6] text-[var(--ink-muted)]">
+                  {section.items.map((item, index) => (
+                    <li
+                      key={`${section.key}-${index}`}
+                      className="whitespace-pre-wrap break-words"
+                    >
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              </InspectorSection>
+            ))}
 
             {(isFailed || isCompleted) && (
               <InspectorSection

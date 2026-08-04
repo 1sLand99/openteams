@@ -229,7 +229,7 @@ export function AgentInstallGuide({
 
       <p className="mb-3 text-[12px] leading-relaxed text-[var(--ink-tertiary)]">
         {needsInstall
-          ? t("agents.setup.installHint")
+          ? t(guide.entry.installHintKey ?? "agents.setup.installHint")
           : t("agents.setup.authHint")}
       </p>
 

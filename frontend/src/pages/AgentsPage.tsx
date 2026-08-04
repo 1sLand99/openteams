@@ -33,6 +33,7 @@ import type {
   AgentRuntimeStatus,
   BaseCodingAgent,
   JsonValue,
+  PiModelsSyncDiagnostic,
 } from "@/types";
 import {
   envSummaryToText,
@@ -56,6 +57,7 @@ import geminiSchema from "../../../shared/schemas/gemini.json";
 import kimiCodeSchema from "../../../shared/schemas/kimi_code.json";
 import openTeamsCliSchema from "../../../shared/schemas/open_teams_cli.json";
 import opencodeSchema from "../../../shared/schemas/opencode.json";
+import piSchema from "../../../shared/schemas/pi.json";
 import qoderCliSchema from "../../../shared/schemas/qoder_cli.json";
 import qwenCodeSchema from "../../../shared/schemas/qwen_code.json";
 
@@ -131,6 +133,12 @@ const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
     title: "OpenTeams CLI",
     logoSrc: "/logos/openteams-logo.svg",
   },
+  PI: {
+    title: "Pi",
+    logoSrc: "/logos/pi-logo.svg",
+    logoMode: "mask",
+    logoClassName: "h-[20px] w-[20px]",
+  },
   QODER_CLI: {
     title: "Qoder",
     logoSrc: "/logos/qoder-logo.svg",
@@ -170,6 +178,7 @@ const agentConfigSchemas: Record<BaseCodingAgent, AgentJsonSchema> = {
   KIMI_CODE: kimiCodeSchema,
   OPENCODE: opencodeSchema,
   OPEN_TEAMS_CLI: openTeamsCliSchema,
+  PI: piSchema,
   QODER_CLI: qoderCliSchema,
   QWEN_CODE: qwenCodeSchema,
 };
@@ -203,7 +212,8 @@ const isAcpRunner = (runner: BaseCodingAgent): boolean =>
   runner === "GEMINI" ||
   runner === "QWEN_CODE" ||
   runner === "KIMI_CODE" ||
-  runner === "QODER_CLI";
+  runner === "QODER_CLI" ||
+  runner === "PI";
 
 const formatRunnerKey = (runner: BaseCodingAgent): string =>
   runner.toLowerCase().replaceAll("_", " ");
@@ -1659,6 +1669,9 @@ export function AgentsPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshingConfig, setRefreshingConfig] = useState(false);
   const [refreshRevision, setRefreshRevision] = useState(0);
+  const [piModelsSync, setPiModelsSync] =
+    useState<PiModelsSyncDiagnostic | null>(null);
+  const [piModelsSyncRetrying, setPiModelsSyncRetrying] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [selectedRunner, setSelectedRunner] =
     useState<AgentRuntimeStatus | null>(null);
@@ -1797,6 +1810,7 @@ export function AgentsPage() {
       if (showLoading) setLoadError(null);
       try {
         const response = await agentRuntimeApi.list();
+        setPiModelsSync(response.pi_models_sync);
         updateRuntimeRunners(response.runners);
         setRuntimeLoaded(true);
         setLoadError(null);
@@ -1835,6 +1849,7 @@ export function AgentsPage() {
       void (async () => {
         try {
           const response = await agentRuntimeApi.refreshLight();
+          setPiModelsSync(response.pi_models_sync);
           updateRuntimeRunners(response.runners);
         } catch {
           // Silent background recheck; explicit refresh surfaces errors.
@@ -1871,6 +1886,7 @@ export function AgentsPage() {
     setNotice(null);
     try {
       const response = await agentRuntimeApi.refresh();
+      setPiModelsSync(response.pi_models_sync);
       updateRuntimeRunners(response.runners, { notifyErrors: true });
       setRuntimeLoaded(true);
       setLoadError(null);
@@ -1892,6 +1908,23 @@ export function AgentsPage() {
       showToast(message);
     } finally {
       setRefreshingConfig(false);
+    }
+  };
+
+  const handleRetryPiModelsSync = async () => {
+    const retryPath = piModelsSync?.retry_path;
+    if (!retryPath || piModelsSyncRetrying) return;
+    setPiModelsSyncRetrying(true);
+    try {
+      await agentRuntimeApi.retryPiModelsSync(retryPath);
+      setPiModelsSync(null);
+      setNotice(t("agents.piSync.retrySucceeded"));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : t("agents.piSync.retryFailed");
+      showToast(message);
+    } finally {
+      setPiModelsSyncRetrying(false);
     }
   };
 
@@ -1954,6 +1987,11 @@ export function AgentsPage() {
     },
     [],
   );
+  const piModelsSyncWarning =
+    piModelsSync && !piModelsSync.synchronized ? piModelsSync : null;
+  const piDownloadInProgress =
+    refreshingConfig &&
+    runners.some((runner) => runner.runner_type === "PI");
   const systemBreadcrumbLabel = t("agents.breadcrumb.system");
   const agentNavToggleLabel = agentNavCollapsed
     ? "Expand agent list (Ctrl/Cmd+B)"
@@ -2037,7 +2075,7 @@ export function AgentsPage() {
       </header>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--surface-2)]">
-        {(loadError || notice) && (
+        {(loadError || notice || piModelsSyncWarning || piDownloadInProgress) && (
           <div className="shrink-0 space-y-2 border-b border-[var(--hairline)] p-3">
             {loadError && (
               <div className="rounded-[8px] border border-red-500/30 bg-red-500/10 p-3 text-[14px] text-red-400">
@@ -2051,6 +2089,41 @@ export function AgentsPage() {
             {notice && (
               <div className="rounded-[8px] border border-[var(--primary)]/30 bg-[var(--primary-tint)] p-3 text-[14px] text-[var(--primary)]">
                 {notice}
+              </div>
+            )}
+            {piModelsSyncWarning && (
+              <div className="rounded-[8px] border border-amber-500/30 bg-amber-500/5 p-3 text-[14px] text-amber-400">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-2 font-medium">
+                    <AlertTriangle className="h-4 w-4" />
+                    {t("agents.piSync.failedTitle")}
+                  </span>
+                  {piModelsSyncWarning.retry_available && (
+                    <button
+                      type="button"
+                      onClick={() => void handleRetryPiModelsSync()}
+                      disabled={piModelsSyncRetrying}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-amber-500/30 px-3 py-1 text-[12px] font-medium transition hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <RefreshCw
+                        className={`h-3 w-3 ${piModelsSyncRetrying ? "animate-spin" : ""}`}
+                      />
+                      {piModelsSyncRetrying
+                        ? t("agents.piSync.retrying")
+                        : t("agents.piSync.retry")}
+                    </button>
+                  )}
+                </div>
+                {piModelsSyncWarning.error && (
+                  <p className="mt-1 break-words text-amber-400/80">
+                    {piModelsSyncWarning.error}
+                  </p>
+                )}
+              </div>
+            )}
+            {piDownloadInProgress && (
+              <div className="rounded-[8px] border border-[var(--primary)]/30 bg-[var(--primary-tint)] p-3 text-[14px] text-[var(--primary)]">
+                {t("agents.refreshConfig.piDownloadInProgress")}
               </div>
             )}
           </div>

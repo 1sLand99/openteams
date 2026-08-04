@@ -2021,7 +2021,13 @@ impl ChatRunner {
                     .to_string(),
             );
             let (effective_execution, mut executor) =
-                build_effective_member_executor(&agent, &session_agent, &mut env)
+                build_effective_member_executor_for_run(
+                    &self.db.pool,
+                    &agent,
+                    &session_agent,
+                    &mut env,
+                )
+                    .await
                     .map_err(|err| ChatRunnerError::Io(std::io::Error::other(err.to_string())))?;
             let acp_full_access = executor_acp_full_access_enabled(&executor);
             if acp_full_access {
@@ -2190,6 +2196,7 @@ impl ChatRunner {
                     stop,
                     executor_cancel: spawned.cancel,
                     exit_signal: spawned.exit_signal,
+                    cleanup: spawned.cleanup,
                     msg_store,
                     completion_status,
                     terminal_failure_reason,

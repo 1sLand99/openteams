@@ -591,7 +591,14 @@ async fn run_workflow_agent_prompt_inner(
         env.insert("VK_WORKFLOW_RUN_ID", record.run_id.to_string());
     }
     let (effective_execution, mut executor) =
-        match build_effective_member_executor(agent, &effective_session_agent, &mut env) {
+        match build_effective_member_executor_for_run(
+            &db.pool,
+            agent,
+            &effective_session_agent,
+            &mut env,
+        )
+        .await
+        {
             Ok(value) => value,
             Err(error) => {
                 let error = WorkflowRuntimeError::Io(std::io::Error::other(error.to_string()));

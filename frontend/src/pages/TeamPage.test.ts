@@ -3,7 +3,9 @@
 // No test runner is installed. Run with:
 //     pnpm exec tsx src/pages/TeamPage.test.ts
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 let failures = 0;
 const check = (label: string, cond: boolean, detail?: unknown) => {
@@ -209,7 +211,7 @@ check(
 check(
   "ACP member permissions appear immediately without waiting for diagnostics",
   configTabsSource.includes(
-    'props.runnerType === "GEMINI" ||\n    props.runnerType === "QWEN_CODE" ||\n    props.runnerType === "KIMI_CODE" ||\n    props.runnerType === "QODER_CLI"',
+    'props.runnerType === "GEMINI" ||\n    props.runnerType === "QWEN_CODE" ||\n    props.runnerType === "KIMI_CODE" ||\n    props.runnerType === "QODER_CLI" ||\n    props.runnerType === "PI"',
   ) &&
     !configTabsSource.includes(
       "const supportsAcpPermissions = props.acpProbeAvailable",
@@ -257,6 +259,59 @@ check(
     source.includes("}, [runnerType, selectedMember?.id]);") &&
     !source.includes("}, [runnerType, selectedMember]);"),
   { source },
+);
+
+const teamUtilsSource = readFileSync(
+  new URL("./team/teamUtils.ts", import.meta.url),
+  "utf8",
+);
+
+check(
+  "member runtime normalization recognizes PI from the shared runtime list",
+  /"QODER_CLI",[\s\S]*?"PI",[\s\S]*?\];/u.test(teamUtilsSource),
+  teamUtilsSource,
+);
+
+check(
+  "member runtime options keep coming from the generic available-runtime filter",
+  source.includes(
+    ".filter((runner) => getRuntimeDisplayState(runner) === \"available\")",
+  ) &&
+    source.includes("id: runner.runner_type") &&
+    configTabsSource.includes('value as BaseCodingAgent'),
+  { source, configTabsSource },
+);
+
+check(
+  "member-level skill, MCP and ACP approval entries stay generic for PI",
+  source.includes(".listNative(runnerType)") &&
+    source.includes("mcpServersApi\n      .load(runnerType)") &&
+    !/pi[-_ ]?(skill|mcp)/iu.test(source) &&
+    !/pi[-_ ]?(skill|mcp)/iu.test(configTabsSource),
+  { source, configTabsSource },
+);
+
+// Workflow nodes reference team members (whose runtime may be PI), so no
+// workflow component may hardcode a runner allowlist that would exclude Pi.
+const workflowRoot = fileURLToPath(
+  new URL("../components/workflow/", import.meta.url),
+);
+const collectFiles = (dir: string): string[] =>
+  readdirSync(dir).flatMap((entry): string[] => {
+    const full = join(dir, entry);
+    return statSync(full).isDirectory() ? collectFiles(full) : [full];
+  });
+const workflowRunnerAllowlists = collectFiles(workflowRoot)
+  .filter((file) => /\.(ts|tsx)$/u.test(file) && !/\.test\./u.test(file))
+  .filter((file) =>
+    /runner_type\s*===\s*"(GEMINI|QWEN_CODE|KIMI_CODE|QODER_CLI)"/u.test(
+      readFileSync(file, "utf8"),
+    ),
+  );
+check(
+  "workflow components hold no hardcoded runner allowlist excluding Pi",
+  workflowRunnerAllowlists.length === 0,
+  workflowRunnerAllowlists,
 );
 
 if (failures > 0) {

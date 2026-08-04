@@ -9,8 +9,10 @@
 import type {
   AcpConfigOptionSnapshot,
   AcpExecutionOptions,
+  BaseCodingAgent as GeneratedBaseCodingAgent,
   KeyboardShortcutsConfig,
   MemberQueueSnapshot,
+  PiModelsSyncDiagnostic,
 } from '../../shared/types';
 
 export type {
@@ -30,6 +32,8 @@ export type {
   QueuedMessageListItem,
   QueuedMessageStatus,
   WorkspaceGitErrorData,
+  PiModelsSyncDiagnostic,
+  PiModelsSyncResult,
   ValidateWorkspacePathRequest,
   ValidateWorkspacePathResponse,
 } from '../../shared/types';
@@ -1135,19 +1139,9 @@ export interface UpdateNativeSkillRequest {
 
 // ----- Agent runtime ---------------------------------------------------------
 
-export type BaseCodingAgent =
-  | 'CLAUDE_CODE'
-  | 'AMP'
-  | 'GEMINI'
-  | 'CODEX'
-  | 'OPENCODE'
-  | 'OPEN_TEAMS_CLI'
-  | 'CURSOR_AGENT'
-  | 'QWEN_CODE'
-  | 'COPILOT'
-  | 'DROID'
-  | 'KIMI_CODE'
-  | 'QODER_CLI';
+// Derived from the generated `shared/types.ts` enum so the frontend agent
+// registry can never drift from the backend. Do not hand-write agent ids here.
+export type BaseCodingAgent = `${GeneratedBaseCodingAgent}`;
 
 export type AvailabilityInfo =
   | { type: 'LOGIN_DETECTED'; last_auth_timestamp: bigint }
@@ -1194,6 +1188,7 @@ export interface AgentRuntimeStatus {
 
 export interface AgentRuntimeListResponse {
   runners: AgentRuntimeStatus[];
+  pi_models_sync: PiModelsSyncDiagnostic | null;
 }
 
 export interface AgentRuntimeRefreshError {
@@ -1205,6 +1200,7 @@ export interface AgentRuntimeRefreshError {
 export interface AgentRuntimeRefreshResponse {
   runners: AgentRuntimeStatus[];
   errors: AgentRuntimeRefreshError[];
+  pi_models_sync: PiModelsSyncDiagnostic | null;
 }
 
 export interface AgentRuntimeDiagnostics {
@@ -1228,6 +1224,7 @@ export interface AgentRuntimeDiagnostics {
   run_mode: AgentRunMode;
   env_summary: AgentRuntimeEnvSummary[];
   executor_options: JsonValue;
+  pi_models_sync: PiModelsSyncDiagnostic | null;
 }
 
 export interface AcpAuthMethodInfo {
@@ -1411,6 +1408,11 @@ export interface WorkflowCardPlanNode {
     agent_name?: string | null;
     instructions?: string | null;
     status?: string | null;
+    acceptance?: string[] | null;
+    outputs?: string[] | null;
+    checklist?: string[] | null;
+    verificationCommands?: string[] | null;
+    completionEvidence?: string[] | null;
     reviewScope?: string[] | null;
     loopKey?: string | null;
     loop_key?: string | null;

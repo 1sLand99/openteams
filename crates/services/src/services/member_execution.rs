@@ -1,4 +1,8 @@
-use std::str::FromStr;
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use anyhow::{Result, anyhow};
 use db::models::{
@@ -12,7 +16,7 @@ use db::models::{
 use executors::{
     env::ExecutionEnv,
     executors::{
-        BaseCodingAgent, CodingAgent,
+        BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor,
         acp::{AcpAccessMode, AcpExecutionOptions, mcp::AcpMcpPolicy},
     },
     model_sync::with_member_execution_overrides,
@@ -21,7 +25,9 @@ use executors::{
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
-use crate::services::agent_runtime::apply_agent_runtime_config;
+use crate::services::{
+    agent_runtime::apply_agent_runtime_config, native_skills::list_native_skills_for_runner,
+};
 
 pub const EXECUTOR_PROFILE_VARIANT_KEY: &str = "executor_profile_variant";
 
@@ -187,11 +193,130 @@ pub fn build_effective_member_executor(
                 let inherited = config.acp.clone().unwrap_or_default();
                 config.acp = Some(inherited.overlay(member_acp));
             }
+            CodingAgent::Pi(config) => {
+                let inherited = config.acp.clone().unwrap_or_default();
+                config.acp = Some(inherited.overlay(member_acp));
+            }
             _ => {}
         }
     }
-    executor.set_acp_mcp_policy(resolve_acp_mcp_policy(&agent.tools_enabled.0));
+    let mut mcp_policy = resolve_acp_mcp_policy(&agent.tools_enabled.0);
+    if matches!(executor, CodingAgent::Pi(_)) && mcp_policy.allowed_server_names.is_none() {
+        mcp_policy.allowed_server_names = Some(Default::default());
+    }
+    executor.set_acp_mcp_policy(mcp_policy);
     Ok((resolved, executor))
+}
+
+pub async fn build_effective_member_executor_for_run(
+    pool: &SqlitePool,
+    agent: &ChatAgent,
+    session_agent: &ChatSessionAgent,
+    env: &mut ExecutionEnv,
+) -> Result<(EffectiveMemberExecutionConfig, CodingAgent)> {
+    let (resolved, mut executor) = build_effective_member_executor(agent, session_agent, env)?;
+    if let CodingAgent::Pi(config) = &mut executor {
+        let skill_paths = resolve_pi_member_skill_paths(pool, session_agent, config).await?;
+        config
+            .freeze_runtime_snapshot(skill_paths)
+            .await
+            .map_err(|error| anyhow!(error.to_string()))?;
+    }
+    Ok((resolved, executor))
+}
+
+async fn resolve_pi_member_skill_paths(
+    pool: &SqlitePool,
+    session_agent: &ChatSessionAgent,
+    config: &executors::executors::pi::Pi,
+) -> Result<Vec<PathBuf>> {
+    let mut requested = Vec::new();
+    let mut seen = HashSet::new();
+    for raw_id in &session_agent.allowed_skill_ids.0 {
+        let id = raw_id.trim();
+        if id.is_empty() || Uuid::parse_str(id).is_err() {
+            return Err(anyhow!(
+                "invalid Pi member configuration: allowed skill ID is invalid"
+            ));
+        }
+        if seen.insert(id.to_string()) {
+            requested.push(id.to_string());
+        }
+    }
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let installed = list_native_skills_for_runner(pool, BaseCodingAgent::Pi)
+        .await
+        .map_err(|error| {
+            anyhow!("invalid Pi member configuration: failed to resolve Skill Registry: {error}")
+        })?;
+    let roots = canonical_existing_roots(config.native_skill_discovery_roots()).await?;
+    let installed = installed
+        .into_iter()
+        .filter(|item| item.enabled)
+        .map(|item| (item.skill.id.to_string(), PathBuf::from(item.native_path)))
+        .collect::<Vec<_>>();
+    resolve_requested_pi_skill_paths(&requested, &installed, &roots).await
+}
+
+async fn resolve_requested_pi_skill_paths(
+    requested: &[String],
+    installed: &[(String, PathBuf)],
+    roots: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::with_capacity(requested.len());
+    for skill_id in requested {
+        let item = installed
+            .iter()
+            .find(|(installed_id, _)| installed_id == skill_id)
+            .ok_or_else(|| anyhow!(
+                "invalid Pi member configuration: allowed skill `{skill_id}` is missing from the Skill Registry"
+            ))?;
+        paths.push(validate_pi_skill_path(&item.1, roots).await?);
+    }
+    Ok(paths)
+}
+
+async fn canonical_existing_roots(roots: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    let mut canonical = Vec::new();
+    for root in roots {
+        match tokio::fs::canonicalize(&root).await {
+            Ok(root) if root.is_absolute() => canonical.push(root),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow!(
+                    "invalid Pi member configuration: failed to validate Skill Registry root: {error}"
+                ));
+            }
+        }
+    }
+    Ok(canonical)
+}
+
+async fn validate_pi_skill_path(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
+    let canonical = tokio::fs::canonicalize(path).await.map_err(|_| {
+        anyhow!("invalid Pi member configuration: authorized SKILL.md path is missing or invalid")
+    })?;
+    let metadata = tokio::fs::metadata(&canonical).await.map_err(|_| {
+        anyhow!("invalid Pi member configuration: authorized SKILL.md path is missing or invalid")
+    })?;
+    if !canonical.is_absolute()
+        || !metadata.is_file()
+        || canonical.file_name().and_then(|name| name.to_str()) != Some("SKILL.md")
+    {
+        return Err(anyhow!(
+            "invalid Pi member configuration: authorized Skill path is not an absolute SKILL.md file"
+        ));
+    }
+    if !roots.iter().any(|root| canonical.starts_with(root)) {
+        return Err(anyhow!(
+            "invalid Pi member configuration: authorized SKILL.md path escapes the Skill Registry"
+        ));
+    }
+    Ok(canonical)
 }
 
 pub fn executor_acp_full_access_enabled(executor: &CodingAgent) -> bool {
@@ -221,6 +346,14 @@ pub fn executor_acp_full_access_enabled(executor: &CodingAgent) -> bool {
                 == AcpAccessMode::FullAccess
         }
         CodingAgent::QoderCli(config) => {
+            config
+                .acp
+                .as_ref()
+                .and_then(|acp| acp.access_mode)
+                .unwrap_or_default()
+                == AcpAccessMode::FullAccess
+        }
+        CodingAgent::Pi(config) => {
             config
                 .acp
                 .as_ref()
@@ -416,6 +549,101 @@ mod tests {
         let policy = resolve_acp_mcp_policy(&serde_json::json!({}));
         assert!(policy.allowed_server_names.is_none());
         assert!(policy.disabled_server_names.is_empty());
+    }
+
+    #[test]
+    fn pi_member_without_mcp_selection_gets_an_explicit_empty_allowlist() {
+        let mut pi_agent = agent();
+        pi_agent.runner_type = "PI".to_string();
+        pi_agent.tools_enabled = Json(serde_json::json!({}));
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let (_, executor) = build_effective_member_executor(
+            &pi_agent,
+            &session_agent(Default::default()),
+            &mut env,
+        )
+        .expect("Pi executor");
+
+        let CodingAgent::Pi(pi) = executor else {
+            panic!("expected Pi");
+        };
+        assert_eq!(
+            pi.acp_mcp_policy.allowed_server_names,
+            Some(Default::default())
+        );
+    }
+
+    #[tokio::test]
+    async fn different_pi_members_receive_only_their_registry_skill_paths() {
+        let temp = tempfile::tempdir().expect("skill registry");
+        let root = temp.path().join("skills");
+        let alpha = root.join("alpha").join("SKILL.md");
+        let beta = root.join("beta").join("SKILL.md");
+        tokio::fs::create_dir_all(alpha.parent().expect("alpha parent"))
+            .await
+            .expect("alpha directory");
+        tokio::fs::create_dir_all(beta.parent().expect("beta parent"))
+            .await
+            .expect("beta directory");
+        tokio::fs::write(&alpha, "alpha").await.expect("alpha");
+        tokio::fs::write(&beta, "beta").await.expect("beta");
+        let roots = canonical_existing_roots(vec![root]).await.expect("roots");
+        let alpha_id = Uuid::new_v4().to_string();
+        let beta_id = Uuid::new_v4().to_string();
+        let installed = vec![
+            (alpha_id.clone(), alpha.clone()),
+            (beta_id.clone(), beta.clone()),
+        ];
+
+        let member_alpha =
+            resolve_requested_pi_skill_paths(std::slice::from_ref(&alpha_id), &installed, &roots)
+                .await
+                .expect("alpha snapshot");
+        let member_beta =
+            resolve_requested_pi_skill_paths(std::slice::from_ref(&beta_id), &installed, &roots)
+                .await
+                .expect("beta snapshot");
+
+        assert_eq!(
+            member_alpha,
+            [tokio::fs::canonicalize(&alpha).await.unwrap()]
+        );
+        assert_eq!(member_beta, [tokio::fs::canonicalize(&beta).await.unwrap()]);
+        assert!(!member_alpha.contains(&member_beta[0]));
+        let missing_id = Uuid::new_v4().to_string();
+        let error =
+            resolve_requested_pi_skill_paths(std::slice::from_ref(&missing_id), &installed, &roots)
+                .await
+                .expect_err("unauthorized skill must be absent");
+        assert!(
+            error
+                .to_string()
+                .contains("missing from the Skill Registry")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pi_skill_snapshot_rejects_symlink_escape() {
+        let temp = tempfile::tempdir().expect("skill registry");
+        let root = temp.path().join("skills");
+        let outside = temp.path().join("outside");
+        tokio::fs::create_dir_all(&root).await.expect("root");
+        tokio::fs::create_dir_all(&outside).await.expect("outside");
+        let outside_skill = outside.join("SKILL.md");
+        tokio::fs::write(&outside_skill, "outside")
+            .await
+            .expect("outside skill");
+        std::os::unix::fs::symlink(&outside_skill, root.join("SKILL.md")).expect("skill symlink");
+        let roots = canonical_existing_roots(vec![root.clone()])
+            .await
+            .expect("roots");
+
+        let error = validate_pi_skill_path(&root.join("SKILL.md"), &roots)
+            .await
+            .expect_err("escape must fail");
+        assert!(error.to_string().contains("escapes the Skill Registry"));
     }
 
     #[test]

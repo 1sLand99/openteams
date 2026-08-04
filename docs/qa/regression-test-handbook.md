@@ -118,7 +118,7 @@ qa_test/<RUN_ID>/
 
 - 仓库依赖可安装，Rust、Node.js 和 pnpm 满足项目要求。
 - 至少配置一个仅用于测试的可运行 Agent/Provider，用于 `CHAT-*` 和 `WF-*`。
-- 执行完整 CLI 兼容认证时，测试实验室必须安装并认证 11 个生产 CLI Agent；缺少任一个时，对应 `CLI-*` 用例标记为 `BLOCKED`，不得标记为 `SKIPPED`。
+- 执行完整 CLI 兼容认证时，测试实验室必须安装并认证 13 个生产 CLI Agent；缺少任一个时，对应 `CLI-*` 用例标记为 `BLOCKED`，不得标记为 `SKIPPED`。
 - 浏览器允许访问本地前后端。
 - Git 可用，但不得改写全局 Git 配置。
 - GitHub 用例需要测试专用 GitHub 账号和测试仓库；缺失时只有 `INT-001`、`INT-002` 可标记为 `SKIPPED`。
@@ -590,7 +590,7 @@ git -C "${REG_CLI_REPO}" log -1 --oneline
 
 ### 11.1 生产 CLI Agent 清单
 
-兼容性清单以生产 `BaseCodingAgent` 类型为真源。当前必须覆盖以下 11 个 runner；测试 Agent 不得仅抽测自己已安装的子集。
+兼容性清单以生产 `BaseCodingAgent` 类型为真源。当前必须覆盖以下 13 个 runner；测试 Agent 不得仅抽测自己已安装的子集。
 
 | 用例 | 产品名称 | runner key | 主要启动方式 | 兼容性重点 |
 | --- | --- | --- | --- | --- |
@@ -605,12 +605,14 @@ git -C "${REG_CLI_REPO}" log -1 --oneline
 | CLI-109 | GitHub Copilot CLI | `COPILOT` | OpenTeams 固定版本的 `@github/copilot` | 登录、流式运行、续聊 |
 | CLI-110 | Factory Droid | `DROID` | `droid exec` | autonomy level、权限、stream-json |
 | CLI-111 | Kimi Code | `KIMI_CODE` | `kimi acp` | ACP probe、provider/model、认证、续聊 |
+| CLI-112 | Pi | `PI` | OpenTeams 固定版本的 `pi-acp` + `@earendil-works/pi-coding-agent` + `pi-mcp-adapter` (NPX) | ACP initialize、模型刷新、Skill/MCP 成员隔离、`--no-skills` 强制、三种审批策略、provider 配置同步、session/load 续聊 |
+| CLI-113 | Qoder CLI | `QODER_CLI` | `qodercli --acp` | ACP probe、五档模型、PAT 认证、`--strict-mcp-config`、workspace/full access、session/resume 续聊 |
 
 `QA_MOCK` 和 `ACP_QA` 仅在 `qa-mode` 中存在，不属于生产 CLI 兼容清单，由 PRE-003 自动化测试覆盖。Claude Code Router（CCR）不是独立 `BaseCodingAgent`，但作为 `CLAUDE_CODE` 的受支持适配器变体由 CLI-204 单独覆盖。
 
 ### 11.2 标准逐 CLI 执行程序
 
-CLI-101 至 CLI-111 都必须完整执行以下步骤，不得用“其他 Agent 已通过”代替。每个 runner 使用独立成员 `<RUN_ID>-<runner-key>` 和独立会话 `<RUN_ID>-cli-<runner-key>`，工作区固定为 `REG_CLI_REPO`。
+CLI-101 至 CLI-113 都必须完整执行以下步骤，不得用“其他 Agent 已通过”代替。每个 runner 使用独立成员 `<RUN_ID>-<runner-key>` 和独立会话 `<RUN_ID>-cli-<runner-key>`，工作区固定为 `REG_CLI_REPO`。
 
 1. **发现与诊断**：在 Agent runtime 选择目标 runner，执行 Refresh；记录 `installed`、`executable`、availability、version、resolved command、command source、config path、run mode、discovered models、model source、last error。对已安装且已认证的 CLI，产品必须识别为可运行。
 2. **配置持久化**：保持 `run_mode=auto` 或测试批准的 local 模式，选择一个已发现/实验室指定模型；若有 reasoning、mode、autonomy 或 ACP 选项，选择安全测试值。保存、刷新页面并重新打开核对。
@@ -637,14 +639,14 @@ CLI-101 至 CLI-111 都必须完整执行以下步骤，不得用“其他 Agent
 步骤：
 
 1. 从生成的 `BaseCodingAgent` 类型和 Agent runtime 页面分别收集生产 runner key。
-2. 对照本节 11 项清单，记录每项安装方式、认证账号类型、CLI 版本和凭据责任人；报告中只记录账号别名，不记录秘密。
-3. 对 11 项逐一执行 Refresh 和 diagnostics，保存状态矩阵。
+2. 对照本节 13 项清单，记录每项安装方式、认证账号类型、CLI 版本和凭据责任人；报告中只记录账号别名，不记录秘密。
+3. 对 13 项逐一执行 Refresh 和 diagnostics，保存状态矩阵。
 4. 创建 `<RUN_ID>-cli-compat` 项目，工作区设为 `REG_CLI_REPO`。
 5. 对无法安装/认证/执行的项停止对应 runner 用例并标记 `BLOCKED`；判断是实验室缺口还是产品发现错误。
 
 验收标准：
 
-- 类型真源、Agent runtime 和报告矩阵的 11 个生产 runner 一一对应，无缺失、重复或错误 key。
+- 类型真源、Agent runtime 和报告矩阵的 13 个生产 runner 一一对应，无缺失、重复或错误 key。
 - QA-only runner 不出现在生产 UI。
 - 已安装/认证项显示 executable；已知未安装项显示明确 Not found/setup 信息，不导致全页失败。
 - CLI 兼容项目精确使用 `REG_CLI_REPO`。
@@ -836,41 +838,102 @@ CLI-101 至 CLI-111 都必须完整执行以下步骤，不得用“其他 Agent
 - `kimi acp`、provider list 和实际运行使用一致的 Kimi 配置。
 - Kimi 的认证、模型、权限和 session 信息不串到 Gemini/Qwen。
 
-### CLI-201 跨 Runner 会话、日志与工作区隔离
+### CLI-112 Pi 兼容性
 
-- 优先级：P0
-- 前置：CLI-101 至 CLI-111 均已产生首次运行、续聊和文件提交。
+- 优先级：P1
+- 前置：Node.js 与 npx 均可执行；Pi 未全局安装不影响测试；三个 NPX 包（`pi-acp@0.0.33`、`@earendil-works/pi-coding-agent@0.83.0`、`pi-mcp-adapter@2.18.0`）已在 npm 缓存或可网络获取；provider API Key 已配置。
 
 步骤：
 
-1. 汇总 11 个会话的 runner key、成员 ID、run ID、外部 session/thread ID、模型和 resolved workspace。
+1. 以 `PI` 完整执行"标准逐 CLI 执行程序"步骤 1–7。
+2. **发现与诊断补充**：确认 availability 只依赖 Node.js + npx（不依赖全局 Pi）；记录 `pi-acp` 版本 0.0.33、Pi coding-agent 版本 0.83.0、MCP adapter 版本 2.18.0；确认 Pi models sync 状态为 `synchronized=true`。
+3. **模型刷新**：执行 ACP probe，记录 `initialize` 事件中的 `configOptions`（category=model）；确认模型值来自 ACP 服务端返回，不经前端硬编码或格式转换。
+4. **Provider 配置同步**：确认 Pi provider 配置同步将 `openteams-` 命名空间的受管条目原子写入 `~/.pi/agent/providers.json`（隔离 HOME）；验证 0600 权限、无效 JSON 保护、密钥以 Pi 字面量编码且不泄漏到命令行、日志或 API 响应。
+5. **Skill/MCP 成员隔离**：为两个差异化成员分别配置不同的 MCP allowlist 和 Skill 路径；验证 `freeze_runtime_snapshot` 按成员策略过滤 `mcpServers`；验证 `--no-skills` 强制追加；验证未授权的 MCP 服务器不出现在启动参数、运行时快照或工具列表中；验证密钥在快照中被遮蔽。
+6. **三种审批策略**：对原生工具（bash）和 MCP 工具分别执行 `ask`（弹出审批 UI，允许/拒绝按预期）、`auto_allow`（永不回退到 reject）、`auto_reject`（自动拒绝）；验证 `permission.jsonl` 记录正确的决策。
+7. **session/load 续聊**：在同一成员发送续聊消息，验证使用 `session/load`（非历史拼接）；核对外部 session ID 复用。
+8. **取消**：启动长任务并 Stop，验证 `session/cancel` notification 发送、protocol.jsonl 记录 cancel 事件、终态正确、进程树清理完整。
+9. **离线 fixture 回归**：确认 `cargo test -p executors --features qa-mode --test pi_acp_fixture` 在无 npm 网络、无全局 Pi、无真实 provider 密钥条件下通过；真实 NPX 冒烟为 `#[ignore]` 不进入默认 CI。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- 实际 runner 为 `PI`，命令中包含固定版本 `pi-acp@0.0.33`、`@earendil-works/pi-coding-agent@0.83.0`、`pi-mcp-adapter@2.18.0`，无 `latest` 或未定版本。
+- `--no-skills` 强制追加到 launcher 命令；只有成员 Registry 校验通过的 Skill 路径进入 Pi 参数。
+- 仅成员 MCP allowlist 中的服务器进入隔离快照和工具面；未授权的全局或项目 MCP 不会启动。
+- 原生工具与 MCP 工具均经过三种审批策略，审批门一致（`approval_extension.mjs` 对所有 `tool_call` 使用同一 `ctx.ui.confirm`）。
+- provider 配置同步使用原子合并（同目录 create_new 临时文件 + 0600 + rename），无效旧 JSON 不损坏原文件。
+- 密钥只以 Pi 原生字面值进入受保护文件，不进入命令行、日志、普通 API 错误或前端响应。
+- 取消后 `protocol.jsonl` 包含 `session/cancel` 记录，进程树完整清理。
+- 参考文档：`docs/agents/pi.md`（架构与维护）、`docs/pi-agent-e2e-regression-test-plan.md`（E2E 测试用例）。
+
+### CLI-113 Qoder CLI 兼容性
+
+- 优先级：P1
+- 前置：用户已授权安装 Qoder CLI；`QODER_PERSONAL_ACCESS_TOKEN` 通过环境变量注入；`QODER_CONFIG_DIR` 指向隔离测试目录。
+
+步骤：
+
+1. 以 `QODER_CLI` 完整执行"标准逐 CLI 执行程序"步骤 1–7。
+2. **安装与版本**：执行 `qodercli --version`，确认 `installed=true`、`executable` 解析到 `qodercli`；Agent Runtime Refresh 后 availability 为 `INSTALLATION_FOUND`。
+3. **未认证错误**：不设置 PAT 且 `QODER_CONFIG_DIR` 为空目录时，`is_authenticated` 返回 false；尝试发送消息返回明确的未认证类型错误，不静默成功。
+4. **initialize 握手**：ACP probe 发送 `ProtocolVersion::V1`，响应协议版本 v1；记录 agent name=Qoder、`session_capabilities`（new/resume/load/close/delete）、`configOptions`（category=model 包含五档模型 lite/efficient/auto/performance/ultimate）。
+5. **五档模型**：逐档通过 `session/set_config_option` 设置模型，每次 Agent 响应确认 requested value 为 current；设置 `lite` 和 `performance` 各发送最小只读消息，核对 usage 记录对应模型。
+6. **三种审批策略**：对 `workspace_only + ask` 执行文件写入并完成单次审批；切换 `auto_allow` 验证永不回退到 reject；切换 `auto_reject` 验证自动拒绝；确认配置改变只影响 `QODER_CLI`，其他 runner 不受影响。
+7. **Workspace/Full Access**：`workspace_only` 模式下 Agent 读取/写入工作区内文件成功，访问工作区外文件（含 `..`/绝对路径/symlink escape）被拒绝；`full_access` 模式下 `additional_directories` 内可访问，外部仍被拒绝。
+8. **MCP 允许与隔离**：配置无秘密测试 MCP stdio server，`--allowed-mcp-server-names` 包含允许的名称；配置两个 server 时 policy 只允许一个，`--strict-mcp-config` 阻止环境配置合并；空 allowlist 时不加载任何 server；MCP env/header secret 脱敏。
+9. **session/resume 续聊**：在同一成员发送续聊消息，验证使用 `session/resume`（非历史拼接）；核对外部 session ID 复用；Agent 正确复述上一轮 NONCE。
+10. **凭据不泄漏**：设置 sentinel PAT 值，搜索 raw transcript、诊断日志、stderr 输出不得出现 token 明文；terminal 子进程环境不含 `QODER_PERSONAL_ACCESS_TOKEN`（被 `is_sensitive_env_name` 过滤）；命令行参数不含 token。
+11. **进程清理**：正常完成时 `qodercli` 子进程退出码 0；取消运行后子进程被正确终止；Agent 非正常退出时报告 `abnormal exit` 不 hang。
+12. **图片支持**：发送附带图片的消息，`session/prompt` 请求中 image content block 被保留；流式响应正常。
+
+验收标准：
+
+- 满足全部逐 CLI 通用验收标准。
+- 实际 runner 为 `QODER_CLI`，命令为 `qodercli --acp --permission-mode default --strict-mcp-config --allowed-mcp-server-names <allowlist>`，无 `--yolo`/`--dangerously-skip-permissions` 等冲突标志。
+- 五档模型（lite/efficient/auto/performance/ultimate）可设置且 Agent 确认 current value = requested value。
+- `workspace_only` 阻止工作区外访问（含 `..`/绝对路径/symlink）；`full_access` 按配置允许 `additional_directories` 内访问。
+- `--strict-mcp-config` 生效，环境级/项目级 MCP 配置不被合并；secret 脱敏。
+- PAT 全程不泄漏到日志/transcript/终端环境/命令行/配置文件；`is_sensitive_env_name("QODER_PERSONAL_ACCESS_TOKEN")=true`。
+- 续聊使用原生 `session/resume`，不拼接历史；NONCE 正确复述。
+- 参考文档：`docs/qa/qoder-cli-acp-acceptance-plan.md`（完整验收方案）。
+
+### CLI-201 跨 Runner 会话、日志与工作区隔离
+
+- 优先级：P0
+- 前置：CLI-101 至 CLI-113 均已产生首次运行、续聊和文件提交。
+
+步骤：
+
+1. 汇总 13 个会话的 runner key、成员 ID、run ID、外部 session/thread ID、模型和 resolved workspace。
 2. 逐个重新打开会话，要求复述各自 NONCE；不得再次提供 NONCE。
-3. 对照 `REG_CLI_REPO` 的 11 个文件和提交，核对作者 runner 与内容。
+3. 对照 `REG_CLI_REPO` 的 13 个文件和提交，核对作者 runner 与内容。
 4. 搜索每个 runner 的日志和错误，检查是否出现其他 runner 的命令、模型、认证信息或 session ID。
 
 验收标准：
 
-- 11 个 runner 的运行归属、会话上下文和日志边界清晰，无静默 fallback 或跨成员 session 复用。
+- 13 个 runner 的运行归属、会话上下文和日志边界清晰，无静默 fallback 或跨成员 session 复用。
 - 每个 Agent 只复述自己的 NONCE；共享公开聊天历史之外的私有 runner 状态不得泄漏。
 - 工作区均为 `REG_CLI_REPO`，文件和提交与对应 runner 一一匹配。
 
 ### CLI-202 ACP Runner 配置与审批兼容性
 
 - 优先级：P1
-- 前置：CLI-103、CLI-108、CLI-111 通过。
+- 前置：CLI-103、CLI-108、CLI-111、CLI-112、CLI-113 通过。
 
 步骤：
 
-1. 分别打开 Gemini、Qwen、Kimi diagnostics，保存各自 ACP probe、config options 和 auth methods。
-2. 对三者逐一测试 `workspace_only + ask`、一次拒绝、一次允许和一个额外工作目录配置。
+1. 分别打开 Gemini、Qwen、Kimi、Pi、Qoder diagnostics，保存各自 ACP probe、config options 和 auth methods。
+2. 对五者逐一测试 `workspace_only + ask`、一次拒绝、一次允许和一个额外工作目录配置。
 3. 将其中一个 runner 改为 `auto_reject`，确认只影响该 runner 后恢复。
-4. 刷新和重启，核对三者配置持久化与隔离。
+4. 刷新和重启，核对五者配置持久化与隔离。
 
 验收标准：
 
-- 三个 ACP runner 的 probe、模型、认证和权限选项各自独立。
+- 五个 ACP runner 的 probe、模型、认证和权限选项各自独立。
 - ask/allow/reject 语义一致，配置改变只影响目标 runner。
 - 额外目录必须规范化并受访问边界约束；重启后设置不串位。
+- Pi 的 `--no-skills` 和 Qoder 的 `--strict-mcp-config` 在各自命令中独立生效。
 
 ### CLI-203 MCP 与 Native Skill 适配兼容性
 
@@ -879,7 +942,7 @@ CLI-101 至 CLI-111 都必须完整执行以下步骤，不得用“其他 Agent
 
 步骤：
 
-1. 对 11 个 runner 记录 diagnostics 中的 MCP/Skill 配置路径、native discovery roots 和 toggle 能力。
+1. 对 13 个 runner 记录 diagnostics 中的 MCP/Skill 配置路径、native discovery roots 和 toggle 能力。
 2. 在测试成员 Skills 配置中选择对应 runner 的测试 Skill，刷新并核对选择。
 3. 在单独消息中要求 Agent 调用测试 MCP 工具并遵循测试 Skill 输出格式。
 4. 禁用可 toggle 的测试 Skill 后重试；对不可 toggle 的 runner 只验证明确的只读状态。
@@ -887,7 +950,7 @@ CLI-101 至 CLI-111 都必须完整执行以下步骤，不得用“其他 Agent
 
 验收标准：
 
-- 11 个 runner 均读取自己的配置 schema/path，不把 `mcp` 与 `mcpServers` 等不同结构互相覆盖。
+- 13 个 runner 均读取自己的配置 schema/path，不把 `mcp` 与 `mcpServers` 等不同结构互相覆盖。
 - MCP 返回值、Skill 指令和运行记录的 runner key 一致；无工具重复调用。
 - toggle 能力与 UI/后端一致，不支持 toggle 时给出明确状态而非假成功。
 - 测试配置不得覆盖用户已有 MCP、Skill 或秘密。
