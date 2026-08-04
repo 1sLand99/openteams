@@ -28,6 +28,8 @@ use crate::{
     mcp_config::{McpConfig, read_canonical_mcp_config},
 };
 
+mod approval;
+
 pub const PI_ACP_VERSION: &str = "0.0.33";
 pub const PI_CODING_AGENT_VERSION: &str = "0.83.0";
 pub const PI_MCP_ADAPTER_VERSION: &str = "2.18.0";
@@ -253,7 +255,7 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), ExecutorError>
     file.sync_all().map_err(ExecutorError::Io)
 }
 
-#[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[derive(Derivative, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
 pub struct Pi {
     #[serde(default)]
@@ -277,20 +279,6 @@ pub struct Pi {
     #[ts(skip)]
     #[derivative(Debug = "ignore", PartialEq = "ignore")]
     runtime_snapshot: Option<Arc<PiRuntimeSnapshot>>,
-}
-
-impl Default for Pi {
-    fn default() -> Self {
-        Self {
-            append_prompt: AppendPrompt::default(),
-            model: None,
-            acp: None,
-            cmd: CmdOverrides::default(),
-            acp_mcp_policy: AcpMcpPolicy::default(),
-            approvals: None,
-            runtime_snapshot: None,
-        }
-    }
 }
 
 impl Pi {
@@ -497,7 +485,7 @@ impl StandardCodingAgentExecutor for Pi {
                 self.build_command_builder()?.build_initial()?,
                 &runtime_env,
                 &self.cmd,
-                self.approvals.clone(),
+                approval::wrap(self.approvals.clone()),
             )
             .await?;
         spawned.cleanup = Some(files.into_cleanup());
@@ -525,7 +513,7 @@ impl StandardCodingAgentExecutor for Pi {
                 self.build_command_builder()?.build_follow_up(&[])?,
                 &runtime_env,
                 &self.cmd,
-                self.approvals.clone(),
+                approval::wrap(self.approvals.clone()),
             )
             .await
             .map_err(map_pi_follow_up_error)?;
@@ -553,7 +541,7 @@ impl StandardCodingAgentExecutor for Pi {
                 self.build_command_builder()?.build_initial()?,
                 &runtime_env,
                 &self.cmd,
-                self.approvals.clone(),
+                approval::wrap(self.approvals.clone()),
             )
             .await?;
         spawned.cleanup = Some(files.into_cleanup());
@@ -583,7 +571,7 @@ impl StandardCodingAgentExecutor for Pi {
                 self.build_command_builder()?.build_follow_up(&[])?,
                 &runtime_env,
                 &self.cmd,
-                self.approvals.clone(),
+                approval::wrap(self.approvals.clone()),
             )
             .await
             .map_err(map_pi_follow_up_error)?;
@@ -1567,11 +1555,22 @@ rl.on("close", () => {
           const calls = [];
           for (const [toolName, allowed] of [['bash', true], ['docs_lookup', false]]) {
             let confirms = 0;
+            let prompt;
             const result = await handlers.tool_call(
-              { toolName, toolCallId: `${toolName}-id`, input: { value: 1 } },
-              { ui: { async confirm() { confirms += 1; return allowed; } } },
+              {
+                toolName,
+                toolCallId: `${toolName}-id`,
+                input: toolName === 'bash'
+                  ? { command: 'cargo test -p executors --features qa-mode pi' }
+                  : { value: 1 },
+              },
+              { ui: { async confirm(title, message) {
+                confirms += 1;
+                prompt = { title, message: JSON.parse(message) };
+                return allowed;
+              } } },
             );
-            calls.push({ toolName, confirms, blocked: result?.block === true });
+            calls.push({ toolName, confirms, prompt, blocked: result?.block === true });
           }
           const notifications = [];
           const ctx = { ui: { notify(message, level) { notifications.push({ message, level }); } } };
@@ -1607,6 +1606,11 @@ rl.on("close", () => {
         let calls = &result["calls"];
         assert_eq!(calls[0]["confirms"], 1);
         assert_eq!(calls[0]["blocked"], false);
+        assert_eq!(calls[0]["prompt"]["message"]["toolName"], "bash");
+        assert_eq!(
+            calls[0]["prompt"]["message"]["input"]["command"],
+            "cargo test -p executors --features qa-mode pi"
+        );
         assert_eq!(calls[1]["confirms"], 1);
         assert_eq!(calls[1]["blocked"], true);
         let notifications = &result["notifications"];
