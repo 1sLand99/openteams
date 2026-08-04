@@ -124,6 +124,22 @@ npx openteams-web
 📚 [更多 Agent 安装指南](https://doc.openteams-lab.com/getting-started)
 
 ## 重要更新
+- **2026.08.04 (v1.0.9)**
+  - 支持 Pi agent（全新基于 ACP 的运行时，含审批、启动器和 MCP 扩展）
+  - 工作流运行时加固：prompt 安全、预算上限、reviewer 循环不变式、每 prompt 预算分配
+  - 重新设计聊天 agent 活动日志以提升可读性；使用共享 markdown 渲染器渲染活动日志
+  - 支持 Qoder CLI；优化工作流详情和日志 UI
+  - Agent 安装通知与 OAuth 状态检查
+- **2026.07.27 (v1.0.5)**
+  - 支持 ACP 审批和 agent 权限配置
+  - 新增工作流节点跳过功能
+  - Universe app 执行器 v1.0
+  - 改进权限 UI 和收件箱通知样式
+  - 将 Kimi 转换为 ACP 协议；管理 `~/.openteams/opencode` 数量和大小
+- **2026.07.20 (v1.0.0)**
+  - 首个稳定版本：自定义 AI 成员、agent 自动模式、合并冲突窗口
+  - macOS DMG 安装器样式优化；新用户命令帮助对话框
+  - 支持在 agent 消息中访问链接和回车确认对话框
 - **2026.05.20 (v0.4.4)**
   - 工作流模式 beta 版
 - **2026.05.07 (v0.3.22)**
