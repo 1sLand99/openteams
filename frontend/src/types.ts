@@ -1411,6 +1411,11 @@ export interface WorkflowCardPlanNode {
     agent_name?: string | null;
     instructions?: string | null;
     status?: string | null;
+    acceptance?: string[] | null;
+    outputs?: string[] | null;
+    checklist?: string[] | null;
+    verificationCommands?: string[] | null;
+    completionEvidence?: string[] | null;
     reviewScope?: string[] | null;
     loopKey?: string | null;
     loop_key?: string | null;
