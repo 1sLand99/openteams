@@ -4286,6 +4286,8 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
     use db::models::chat_session_agent::CreateChatSessionAgent;
     use std::os::unix::fs::PermissionsExt;
 
+    let _fixture_lock = super::PI_FIXTURE_TEST_LOCK.lock().await;
+
     const PI_FIXTURE_DIR: &str =
         concat!(env!("CARGO_MANIFEST_DIR"), "/../executors/tests/fixtures/pi_acp");
 
@@ -4506,6 +4508,8 @@ async fn pi_member_isolation_through_build_effective_member_executor() {
     use executors::env::RepoContext;
     use executors::executors::{BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor};
     use std::os::unix::fs::PermissionsExt;
+
+    let _fixture_lock = super::PI_FIXTURE_TEST_LOCK.lock().await;
 
     const PI_FIXTURE_DIR: &str =
         concat!(env!("CARGO_MANIFEST_DIR"), "/../executors/tests/fixtures/pi_acp");

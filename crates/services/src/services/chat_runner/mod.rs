@@ -80,3 +80,6 @@ include!("protocol_messages.rs");
 include!("attachments.rs");
 include!("lifecycle.rs");
 include!("module_declarations.rs");
+
+#[cfg(test)]
+pub(crate) static PI_FIXTURE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));

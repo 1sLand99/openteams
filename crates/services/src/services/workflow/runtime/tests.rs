@@ -2781,6 +2781,9 @@ mod tests {
         };
         use std::os::unix::fs::PermissionsExt;
 
+        let _fixture_lock =
+            crate::services::chat_runner::PI_FIXTURE_TEST_LOCK.lock().await;
+
         const PI_FIXTURE_DIR: &str = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../executors/tests/fixtures/pi_acp"
