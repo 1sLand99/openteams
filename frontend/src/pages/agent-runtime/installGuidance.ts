@@ -29,6 +29,8 @@ export interface AgentInstallGuideEntry {
   authFollowUpCommand?: string;
   /** Env vars (e.g. a PAT) that authenticate non-interactively; shown as a hint. */
   authEnvVars?: string[];
+  /** Locale key overriding `agents.setup.installHint` for this runner. */
+  installHintKey?: string;
 }
 
 export interface InstallGuideStep {
@@ -162,6 +164,20 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
       },
       authCommands: ["kimi login"],
     },
+    // Pi runs through OpenTeams' pinned npx package set, so there is no
+    // global install or interactive login step: Node.js (which bundles npx)
+    // is the only prerequisite.
+    PI: {
+      requiresNode: true,
+      documentationUrl: "https://github.com/badlogic/pi-mono",
+      windowsSupport: "supported",
+      installCommands: {
+        posix: [],
+        windows: [],
+      },
+      authCommands: null,
+      installHintKey: "agents.setup.piInstallHint",
+    },
     QODER_CLI: {
       requiresNode: false,
       documentationUrl: "https://docs.qoder.com/en/cli/install",
@@ -236,7 +252,9 @@ export function resolveInstallGuide(
       commandSet === "windows"
         ? (entry.installCommands.windows ?? entry.installCommands.posix)
         : entry.installCommands.posix;
-    steps.push({ kind: "install", commands: installCommands });
+    if (installCommands.length > 0) {
+      steps.push({ kind: "install", commands: installCommands });
+    }
   }
 
   if (runnerNeedsAuth(runner) && entry.authCommands) {

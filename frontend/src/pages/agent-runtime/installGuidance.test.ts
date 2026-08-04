@@ -56,6 +56,7 @@ const guidedRunners: BaseCodingAgent[] = [
   "GEMINI",
   "KIMI_CODE",
   "OPENCODE",
+  "PI",
   "QODER_CLI",
   "QWEN_CODE",
 ];
@@ -205,6 +206,49 @@ check(
   getInstallGuideEntry("QODER_CLI")?.authEnvVars?.includes(
     "QODER_PERSONAL_ACCESS_TOKEN",
   ) === true,
+);
+
+// --- Pi (pinned npx environment, no global install) -------------------
+
+const piMissingBoth = resolveInstallGuide(makeRunner("PI"), "macos");
+check(
+  "pi without node offers only the node step",
+  piMissingBoth?.steps.map((step) => step.kind).join(",") === "node",
+  piMissingBoth?.steps,
+);
+
+check(
+  "pi never offers global install or auth steps",
+  piMissingBoth?.steps.every(
+    (step) => step.kind !== "install" && step.kind !== "auth",
+  ) === true,
+);
+
+const piReady = resolveInstallGuide(
+  makeRunner("PI", {
+    installed: true,
+    executable: true,
+    availability: { type: "INSTALLATION_FOUND" },
+    auth_state: "authenticated",
+    node_available: true,
+  }),
+  "macos",
+);
+check(
+  "pi with node is usable without any global pi install",
+  piReady === null,
+);
+check(
+  "pi points at the pinned-environment install hint",
+  getInstallGuideEntry("PI")?.installHintKey === "agents.setup.piInstallHint",
+);
+
+const piWindows = resolveInstallGuide(makeRunner("PI"), "windows");
+check(
+  "pi is supported natively on windows via winget Node.js",
+  piWindows?.windowsSupport === "supported" &&
+    piWindows?.steps[0]?.commands[0] === "winget install OpenJS.NodeJS.LTS",
+  piWindows?.steps,
 );
 
 const droidOnMac = resolveInstallGuide(makeRunner("DROID"), "macos");

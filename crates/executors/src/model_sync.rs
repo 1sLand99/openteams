@@ -153,6 +153,7 @@ fn supports_model(config: &CodingAgent) -> bool {
             | CodingAgent::KimiCode(_)
             | CodingAgent::QoderCli(_)
             | CodingAgent::OpenTeamsCli(_)
+            | CodingAgent::Pi(_)
     )
 }
 
@@ -213,6 +214,11 @@ pub fn with_model(config: &CodingAgent, model: &str) -> Option<CodingAgent> {
             let mut next = base.clone();
             next.model = Some(model);
             Some(CodingAgent::OpenTeamsCli(next))
+        }
+        CodingAgent::Pi(base) => {
+            let mut next = base.clone();
+            next.model = Some(model);
+            Some(CodingAgent::Pi(next))
         }
         _ => None,
     }

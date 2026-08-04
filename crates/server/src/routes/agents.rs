@@ -38,7 +38,9 @@ struct RuntimeDiagnosticsQuery {
 }
 
 async fn get_runtime() -> Result<ResponseJson<ApiResponse<AgentRuntimeListResponse>>, ApiError> {
-    let response = list_runtime_statuses().map_err(api_error_from_runtime)?;
+    let response = list_runtime_statuses()
+        .await
+        .map_err(api_error_from_runtime)?;
     Ok(ResponseJson(ApiResponse::success(response)))
 }
 

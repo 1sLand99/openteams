@@ -167,22 +167,14 @@ impl ChatRunner {
         Ok(())
     }
 
-    pub(super) fn parse_runner_type(
-        &self,
-        agent: &ChatAgent,
-    ) -> Result<BaseCodingAgent, ChatRunnerError> {
-        let raw = agent.runner_type.trim();
-        let normalized = raw.replace(['-', ' '], "_").to_ascii_uppercase();
-        BaseCodingAgent::from_str(&normalized)
-            .map_err(|_| ChatRunnerError::UnknownRunnerType(raw.to_string()))
-    }
-
     pub(crate) async fn resolve_session_agent_skills(
         &self,
         session_agent: &ChatSessionAgent,
         agent: &ChatAgent,
     ) -> Result<Vec<ChatSkill>, ChatRunnerError> {
-        let runner_type = self.parse_runner_type(agent)?;
+        let runner_type = resolve_effective_member_execution_config(agent, session_agent)
+            .map_err(|error| ChatRunnerError::UnknownRunnerType(error.to_string()))?
+            .runner_type;
         let allowed_skill_ids = session_agent
             .allowed_skill_ids
             .0
@@ -212,7 +204,9 @@ impl ChatRunner {
         agent: &ChatAgent,
         skill_names: &[&str],
     ) -> Result<(), ChatRunnerError> {
-        let runner_type = self.parse_runner_type(agent)?;
+        let runner_type = resolve_effective_member_execution_config(agent, session_agent)
+            .map_err(|error| ChatRunnerError::UnknownRunnerType(error.to_string()))?
+            .runner_type;
 
         ensure_builtin_skills_installed(&self.db.pool, runner_type, skill_names).await?;
         auto_allow_builtin_skills(&self.db.pool, session_agent, runner_type, skill_names).await?;

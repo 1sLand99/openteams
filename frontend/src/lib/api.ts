@@ -36,6 +36,7 @@ import type {
   ConflictFileInfo,
   ContinueQueuedMessageResponse,
   CreateChatAgent,
+  PiModelsSyncResult,
   CreateChatMessageRequest,
   CreateChatSession,
   CreateChatSessionAgentRequest,
@@ -573,6 +574,12 @@ export const agentRuntimeApi = {
       method: "POST",
     });
     return handleApiResponse<AgentRuntimeRefreshResponse>(r);
+  },
+  // Retries the managed Pi provider/model synchronization using the
+  // backend-provided retry path from `PiModelsSyncDiagnostic.retry_path`.
+  retryPiModelsSync: async (retryPath: string): Promise<PiModelsSyncResult> => {
+    const r = await makeRequest(retryPath, { method: "POST" });
+    return handleApiResponse<PiModelsSyncResult>(r);
   },
   updateConfig: async (
     runner: BaseCodingAgent,

@@ -3,10 +3,11 @@ use std::{io, process::ExitStatus};
 use command_group::AsyncGroupChild;
 #[cfg(unix)]
 use nix::{
-    sys::signal::{Signal, killpg},
+    errno::Errno,
+    sys::signal::{Signal, kill, killpg},
     unistd::{Pid, getpgid},
 };
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 
 const FORCE_KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -43,6 +44,7 @@ pub async fn kill_process_group(child: &mut AsyncGroupChild) -> io::Result<ExitS
         if let Some(pid) = child.inner().id() {
             let pgid = getpgid(Some(Pid::from_raw(pid as i32)))
                 .map_err(|e| io::Error::other(e.to_string()))?;
+            let mut leader_status = None;
 
             for sig in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGKILL] {
                 tracing::info!("Sending {:?} to process group {}", sig, pgid);
@@ -55,24 +57,63 @@ pub async fn kill_process_group(child: &mut AsyncGroupChild) -> io::Result<ExitS
                     );
                 }
 
-                if let Some(status) = child.inner().try_wait()? {
+                let wait = if sig == Signal::SIGKILL {
+                    FORCE_KILL_WAIT_TIMEOUT
+                } else {
+                    Duration::from_secs(2)
+                };
+                tracing::info!("Waiting {:?} for process group {} to exit", wait, pgid);
+                if wait_for_process_group_exit(child, pgid, wait, &mut leader_status).await? {
                     tracing::info!("Process group {} exited after {:?}", pgid, sig);
-                    return Ok(status);
-                }
-
-                if sig != Signal::SIGKILL {
-                    tracing::info!("Waiting 2s for process group {} to exit", pgid);
-                    if let Ok(status) = wait_for_child_exit(child, Duration::from_secs(2)).await {
-                        tracing::info!("Process group {} exited after {:?}", pgid, sig);
-                        return Ok(status);
-                    }
+                    return leader_status.ok_or_else(|| {
+                        io::Error::other("process group exited without a leader status")
+                    });
                 }
             }
+
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("process group {pgid} survived SIGKILL"),
+            ));
         }
     }
 
     child.kill().await?;
     wait_for_child_exit(child, FORCE_KILL_WAIT_TIMEOUT).await
+}
+
+#[cfg(unix)]
+async fn wait_for_process_group_exit(
+    child: &mut AsyncGroupChild,
+    pgid: Pid,
+    timeout: Duration,
+    leader_status: &mut Option<ExitStatus>,
+) -> io::Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if leader_status.is_none() {
+            *leader_status = child.inner().try_wait()?;
+        }
+        if !process_group_exists(pgid)? {
+            if leader_status.is_none() {
+                *leader_status = Some(child.wait().await?);
+            }
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(unix)]
+fn process_group_exists(pgid: Pid) -> io::Result<bool> {
+    match kill(Pid::from_raw(-pgid.as_raw()), None) {
+        Ok(()) | Err(Errno::EPERM) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
+        Err(error) => Err(io::Error::other(error.to_string())),
+    }
 }
 
 async fn wait_for_child_exit(

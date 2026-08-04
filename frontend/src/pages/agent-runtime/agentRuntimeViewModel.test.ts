@@ -187,6 +187,61 @@ check(
     same(parseRuntimeErrorDetails("  \n "), []),
 );
 
+// --- Pi runtime states -------------------------------------------------
+
+const piAcpModels = ["openai/gpt-5.3-codex(high)", "anthropic/claude-opus-4-6"];
+const piAvailable: AgentRuntimeStatus = {
+  ...baseRunner,
+  runner_type: "PI",
+  discovered_models: piAcpModels,
+};
+
+check(
+  "pi with node is available without a global install",
+  getRuntimeDisplayState(piAvailable) === "available",
+);
+const piWithoutNode: AgentRuntimeStatus = {
+  ...piAvailable,
+  installed: false,
+  executable: false,
+  availability: { type: "NOT_FOUND" },
+  node_available: false,
+};
+check(
+  "pi without node is not installed",
+  getRuntimeDisplayState(piWithoutNode) === "not_installed",
+);
+const piProbeFailed: AgentRuntimeStatus = {
+  ...piAvailable,
+  last_error: "[model_discovery] ACP initialize failed: probe timed out",
+};
+check(
+  "pi ACP probe failure keeps it installed but surfaces an error",
+  piProbeFailed.installed && getRuntimeDisplayState(piProbeFailed) === "error",
+);
+check(
+  "pi layered error keeps the model discovery stage",
+  same(parseRuntimeErrorDetails(piProbeFailed.last_error), [
+    {
+      stage: "model_discovery",
+      message: "ACP initialize failed: probe timed out",
+    },
+  ]),
+);
+check(
+  "pi model filter matches the exact ACP probe values",
+  same(
+    filterRuntimeRunners([piAvailable], "openai/gpt-5.3-codex(high)", "all").map(
+      (runner) => runner.runner_type,
+    ),
+    ["PI"],
+  ),
+);
+check(
+  "getRunnerLabel renders Pi",
+  getRunnerLabel("PI") === "Pi",
+);
+
 check(
   "getRunnerLabel keeps the Qoder CLI acronym uppercase",
   getRunnerLabel("QODER_CLI") === "Qoder CLI",

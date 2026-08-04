@@ -2,6 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+use url::Url;
+
+const DEFAULT_CUSTOM_PROVIDER_NPM: &str = "@ai-sdk/openai-compatible";
+const LEGACY_CUSTOM_PROVIDER_NPM: &str = "@ai-sdk/anthropic";
 
 /// CLI configuration for OpenTeams built-in executor (stored in ~/.openteams/config.toml)
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -148,6 +152,50 @@ impl CliConfig {
     pub fn config_path() -> Option<std::path::PathBuf> {
         dirs::home_dir().map(|h| h.join(".openteams").join("config.toml"))
     }
+}
+
+pub fn normalize_custom_provider_entries(config: &mut CliConfig) {
+    if let Some(custom_providers) = config.provider.custom_providers.as_mut() {
+        for (id, entry) in custom_providers.iter_mut() {
+            entry.npm = normalized_custom_provider_npm(id, entry);
+        }
+    }
+}
+
+pub fn normalized_custom_provider_npm(id: &str, entry: &CustomProviderEntry) -> Option<String> {
+    if should_use_openai_compatible_npm(id, entry) {
+        return Some(DEFAULT_CUSTOM_PROVIDER_NPM.to_string());
+    }
+
+    entry
+        .npm
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn should_use_openai_compatible_npm(id: &str, entry: &CustomProviderEntry) -> bool {
+    let npm = entry
+        .npm
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let id_or_name_mentions_litellm = id.to_ascii_lowercase().contains("litellm")
+        || entry
+            .name
+            .as_deref()
+            .is_some_and(|name| name.to_ascii_lowercase().contains("litellm"));
+    let endpoint_mentions_litellm = entry.options.base_url.as_deref().is_some_and(|base_url| {
+        base_url.to_ascii_lowercase().contains("litellm")
+            || Url::parse(base_url)
+                .ok()
+                .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+                .is_some_and(|host| host.contains("litellm"))
+    });
+
+    (id_or_name_mentions_litellm || endpoint_mentions_litellm)
+        && matches!(npm, None | Some(LEGACY_CUSTOM_PROVIDER_NPM))
 }
 
 /// openteams-cli provider configuration (stored in ~/.config/openteams-cli/openteams.json)

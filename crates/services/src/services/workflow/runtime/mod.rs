@@ -70,7 +70,7 @@ use crate::services::{
     analytics_events::{AnalyticsEvent, AnalyticsEventPayload, duration_bucket},
     approvals::executor_approvals::{ExecutorApprovalBridge, ExecutorApprovalScope},
     member_execution::{
-        build_effective_member_executor, executor_acp_full_access_enabled,
+        build_effective_member_executor_for_run, executor_acp_full_access_enabled,
         refresh_session_agent_execution_config_before_run,
     },
     session_worktree::{EnsureOutcome, EnsureWorktreeInput, SessionWorktreeService},

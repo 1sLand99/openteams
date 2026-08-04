@@ -872,6 +872,8 @@ fn select_lines(content: &str, line: Option<u32>, limit: Option<u32>) -> String 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use agent_client_protocol::schema::v1::{
         CreateTerminalRequest, PermissionOption, SessionId, SessionUpdate, TerminalOutputRequest,
         ToolCall, ToolCallId, ToolCallUpdate, ToolCallUpdateFields, WaitForTerminalExitRequest,
@@ -897,6 +899,85 @@ mod tests {
     #[derive(Default)]
     struct CapturingApprovalService {
         request: Mutex<Option<ExecutorApprovalRequest>>,
+    }
+
+    #[derive(Default)]
+    struct CountingApprovalService {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutorApprovalService for CountingApprovalService {
+        async fn request_tool_approval(
+            &self,
+            _tool_name: &str,
+            _tool_input: serde_json::Value,
+            _tool_call_id: &str,
+            _cancel: CancellationToken,
+        ) -> Result<ApprovalStatus, ExecutorApprovalError> {
+            unreachable!("ACP requests use request_acp_tool_approval")
+        }
+
+        async fn request_acp_tool_approval(
+            &self,
+            _request: ExecutorApprovalRequest,
+            _cancel: CancellationToken,
+        ) -> Result<String, ExecutorApprovalError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok("allow".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn pi_native_and_mcp_tools_share_ask_auto_allow_auto_reject_policy_matrix() {
+        for title in ["Run Pi tool: bash", "Run Pi tool: docs_lookup"] {
+            for (policy, expected_option, expected_calls) in [
+                (AcpApprovalPolicy::Ask, "allow", 1),
+                (AcpApprovalPolicy::AutoAllow, "allow", 0),
+                (AcpApprovalPolicy::AutoReject, "reject", 0),
+            ] {
+                let (output, output_task) = AcpOutput::start(tokio::io::sink());
+                let approvals = Arc::new(CountingApprovalService::default());
+                let client = AcpClient::new(
+                    output.clone(),
+                    Some(approvals.clone()),
+                    policy,
+                    CancellationToken::new(),
+                    PathBuf::from("/workspace"),
+                    Vec::new(),
+                    AcpClientServicePolicy::default(),
+                    HashMap::new(),
+                );
+                let permission = RequestPermissionRequest::new(
+                    SessionId::new("pi-session"),
+                    ToolCallUpdate::new(
+                        ToolCallId::new(format!("{title}-id")),
+                        ToolCallUpdateFields::new().title(title),
+                    ),
+                    vec![
+                        PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
+                        PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+                    ],
+                );
+
+                let response = client
+                    .request_permission(permission)
+                    .await
+                    .expect("permission response");
+                let RequestPermissionOutcome::Selected(selected) = response.outcome else {
+                    panic!("expected selected permission for {title} and {policy:?}");
+                };
+                assert_eq!(selected.option_id.0.as_ref(), expected_option);
+                assert_eq!(approvals.calls.load(Ordering::Relaxed), expected_calls);
+
+                drop(client);
+                drop(output);
+                output_task
+                    .await
+                    .expect("output task")
+                    .expect("output flush");
+            }
+        }
     }
 
     #[async_trait::async_trait]

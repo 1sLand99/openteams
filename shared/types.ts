@@ -579,13 +579,13 @@ export type AgentRuntimeStatus = { runner_type: BaseCodingAgent, installed: bool
  */
 node_available: boolean, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, };
 
-export type AgentRuntimeListResponse = { runners: Array<AgentRuntimeStatus>, };
+export type AgentRuntimeListResponse = { runners: Array<AgentRuntimeStatus>, pi_models_sync: PiModelsSyncDiagnostic | null, };
 
 export type AgentRuntimeRefreshError = { runner_type: BaseCodingAgent, message: string, preserved_models: Array<string>, };
 
-export type AgentRuntimeRefreshResponse = { runners: Array<AgentRuntimeStatus>, errors: Array<AgentRuntimeRefreshError>, };
+export type AgentRuntimeRefreshResponse = { runners: Array<AgentRuntimeStatus>, errors: Array<AgentRuntimeRefreshError>, pi_models_sync: PiModelsSyncDiagnostic | null, };
 
-export type AgentRuntimeDiagnostics = { runner_type: BaseCodingAgent, installed: boolean, executable: boolean, availability: AvailabilityInfo, auth_state: AgentRuntimeAuthState, node_available: boolean, config_path: string, install_indicator_path: string | null, resolved_command: string | null, command_source: string | null, acp_probe: AcpCapabilityProbe | null, acp_probe_error: string | null, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, };
+export type AgentRuntimeDiagnostics = { runner_type: BaseCodingAgent, installed: boolean, executable: boolean, availability: AvailabilityInfo, auth_state: AgentRuntimeAuthState, node_available: boolean, config_path: string, install_indicator_path: string | null, resolved_command: string | null, command_source: string | null, acp_probe: AcpCapabilityProbe | null, acp_probe_error: string | null, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, pi_models_sync: PiModelsSyncDiagnostic | null, };
 
 export type AcpAuthMethodInfo = { id: string, name: string, description: string | null, };
 
@@ -1291,9 +1291,17 @@ export type ModelLimits = { context: bigint | null, output: bigint | null, };
 
 export type ModelVariantConfig = { disabled: boolean | null, };
 
+export type PiModelsSkippedProvider = { provider_id: string, reason: string, };
+
+export type PiModelsSyncResult = { updated: boolean, managed_provider_count: number, removed_provider_count: number, skipped: Array<PiModelsSkippedProvider>, };
+
+export type PiModelsSyncDiagnostic = { synchronized: boolean, result: PiModelsSyncResult | null, error: string | null, retry_available: boolean, retry_path: string, };
+
 export type SyncToCliRequest = { custom_provider_id: string | null, };
 
 export type SyncToCliResponse = { synced: boolean, message: string, config_path: string | null, };
+
+export type ProviderMutationWarning = { settings_saved: boolean, retry_available: boolean, retry_path: string, failed_syncs: Array<string>, message: string, };
 
 export type RestartCliResponse = { restarted: boolean, message: string, base_url: string | null, port: number | null, };
 
@@ -1367,9 +1375,9 @@ export type ScriptRequest = { script: string, language: ScriptRequestLanguage, c
 
 export type ScriptRequestLanguage = "Bash";
 
-export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", OPEN_TEAMS_CLI = "OPEN_TEAMS_CLI", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", COPILOT = "COPILOT", DROID = "DROID", KIMI_CODE = "KIMI_CODE", QODER_CLI = "QODER_CLI" }
+export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", OPEN_TEAMS_CLI = "OPEN_TEAMS_CLI", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", COPILOT = "COPILOT", DROID = "DROID", KIMI_CODE = "KIMI_CODE", QODER_CLI = "QODER_CLI", PI = "PI" }
 
-export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli };
+export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli } | { "PI": Pi };
 
 export type SlashCommandDescription = {
 /**
@@ -1399,7 +1407,7 @@ executor: BaseCodingAgent,
  */
 variant: string | null, };
 
-export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli } };
+export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli } | { "PI": Pi } };
 
 export type ExecutorConfigs = { executors: { [key in BaseCodingAgent]?: ExecutorConfig }, };
 
@@ -1454,6 +1462,8 @@ export type QoderCli = { append_prompt: AppendPrompt, model?: string | null, acp
 export type Droid = { append_prompt: AppendPrompt, autonomy: Autonomy, model?: string | null, reasoning_effort?: DroidReasoningEffort | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type KimiCode = { append_prompt: AppendPrompt, model?: string | null, thinking_effort?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+
+export type Pi = { append_prompt: AppendPrompt, model?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Autonomy = "normal" | "low" | "medium" | "high" | "skip-permissions-unsafe";
 

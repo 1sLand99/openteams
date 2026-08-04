@@ -229,6 +229,11 @@
         }
       }
     },
+    "PI": {
+      "DEFAULT": {
+        "PI": {}
+      }
+    },
     "CURSOR_AGENT": {
       "DEFAULT": {
         "CURSOR_AGENT": {

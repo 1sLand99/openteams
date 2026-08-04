@@ -33,6 +33,7 @@ use services::services::{
     cli_config::{
         CliConfig, CustomProviderEntry, CustomProviderOptions, OllamaConfig, OpenTeamsCliConfig,
         OpenTeamsCliProviderConfig, OpenTeamsCliProviderOptions, ProviderCredentials,
+        normalize_custom_provider_entries, normalized_custom_provider_npm,
     },
     config::{
         Config, ConfigError, SoundFile,
@@ -40,6 +41,10 @@ use services::services::{
         save_config_to_file_atomic,
     },
     container::ContainerService,
+    pi_models::{
+        PI_MODELS_SYNC_RETRY_PATH, PiModelsSyncResult, coordinate_pi_models_from_saved_config,
+        synchronize_pi_models,
+    },
     worktree_manager::WorktreeManager,
 };
 use tokio::fs;
@@ -64,6 +69,10 @@ pub fn router() -> Router<DeploymentImpl> {
         .route(
             "/config/cli/sync-to-cli",
             post(sync_cli_config_to_openteams_cli),
+        )
+        .route(
+            "/config/cli/pi-models/sync",
+            post(sync_pi_models_explicitly),
         )
         .route("/config/cli/providers", get(list_cli_providers))
         .route(

@@ -2650,4 +2650,433 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn pi_node_execution_accepts_pi_agent_type() {
+        use executors::executors::BaseCodingAgent;
+        let runner_type = "PI".to_string();
+        let parsed = runner_type.parse::<BaseCodingAgent>();
+        assert!(parsed.is_ok());
+        assert_eq!(parsed.unwrap(), BaseCodingAgent::Pi);
+    }
+
+    #[test]
+    fn pi_node_events_preserve_acp_error_mapping() {
+        use executors::executors::ExecutorError;
+        use std::io;
+
+        let startup_error = ExecutorError::Io(io::Error::other(
+            "ACP startup failed: connection refused",
+        ));
+        let display = format!("{startup_error}");
+        assert!(
+            display.contains("ACP startup failed"),
+            "ACP startup failure must preserve prefix: {display}"
+        );
+        assert!(
+            !matches!(startup_error, ExecutorError::FollowUpNotSupported(_)),
+            "ACP startup failure must remain Io, not FollowUpNotSupported"
+        );
+
+        let follow_up_error = ExecutorError::FollowUpNotSupported(
+            "Pi ACP could not reuse the requested session: Unknown sessionId".to_string(),
+        );
+        assert!(format!("{follow_up_error}").contains("Unknown sessionId"));
+    }
+
+    #[test]
+    fn pi_node_cancel_uses_acp_cancel_notification() {
+        use crate::services::workflow::workflow_orchestrator::reducer;
+
+        assert!(reducer::validate_step_transition(
+            &WorkflowStepStatus::Running,
+            &WorkflowStepStatus::InterruptRequested,
+        )
+        .is_ok());
+        assert!(reducer::validate_step_transition(
+            &WorkflowStepStatus::Running,
+            &WorkflowStepStatus::Interrupted,
+        )
+        .is_err());
+        assert!(reducer::validate_step_transition(
+            &WorkflowStepStatus::InterruptRequested,
+            &WorkflowStepStatus::Interrupted,
+        )
+        .is_ok());
+        assert!(reducer::validate_step_transition(
+            &WorkflowStepStatus::InterruptRequested,
+            &WorkflowStepStatus::Failed,
+        )
+        .is_ok());
+
+        let step_id = Uuid::new_v4();
+        clear_running_step(step_id, 0);
+        cancel_running_step(step_id, 0);
+        let token = executors::executors::CancellationToken::new();
+        register_running_step(step_id, 0, token.clone());
+        assert!(
+            token.is_cancelled(),
+            "pre-registered cancel must fire on register"
+        );
+        clear_running_step(step_id, 0);
+    }
+
+    #[test]
+    fn pi_reducer_state_transitions_do_not_bypass_reducer() {
+        use crate::services::workflow::workflow_orchestrator::reducer;
+
+        assert!(reducer::validate_step_transition(
+            &WorkflowStepStatus::Running,
+            &WorkflowStepStatus::InterruptRequested,
+        )
+        .is_ok());
+        assert!(reducer::validate_step_transition(
+            &WorkflowStepStatus::InterruptRequested,
+            &WorkflowStepStatus::Interrupted,
+        )
+        .is_ok());
+        assert!(reducer::validate_step_transition(
+            &WorkflowStepStatus::WaitingReview,
+            &WorkflowStepStatus::InterruptRequested,
+        )
+        .is_ok());
+        assert!(reducer::validate_step_transition(
+            &WorkflowStepStatus::Running,
+            &WorkflowStepStatus::Interrupted,
+        )
+        .is_err());
+        assert!(reducer::validate_step_transition(
+            &WorkflowStepStatus::Running,
+            &WorkflowStepStatus::Skipped,
+        )
+        .is_err());
+        assert!(reducer::validate_execution_transition(
+            &WorkflowExecutionStatus::Running,
+            &WorkflowExecutionStatus::Failed,
+        )
+        .is_ok());
+        assert!(reducer::validate_execution_transition(
+            &WorkflowExecutionStatus::Completed,
+            &WorkflowExecutionStatus::Failed,
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pi_workflow_step_executes_through_runtime_and_projects_records() {
+        use crate::services::chat_runner::ChatRunner;
+        use db::models::{
+            chat_agent::{ChatAgent, CreateChatAgent},
+            chat_session::{ChatSession, ChatSessionWorktreeMode},
+            chat_session_agent::{ChatSessionAgent, CreateChatSessionAgent},
+            member_execution_config::MemberExecutionConfig,
+            workflow_agent_session::{CreateWorkflowAgentSession, WorkflowAgentSession},
+            workflow_execution::{CreateWorkflowExecution, WorkflowExecution},
+            workflow_plan::{CreateWorkflowPlan, WorkflowPlan},
+            workflow_plan_revision::{CreateWorkflowPlanRevision, WorkflowPlanRevision},
+            workflow_round::{CreateWorkflowRound, WorkflowRound},
+            workflow_step::{CreateWorkflowStep, WorkflowStep},
+            workflow_types::*,
+        };
+        use std::os::unix::fs::PermissionsExt;
+
+        const PI_FIXTURE_DIR: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../executors/tests/fixtures/pi_acp"
+        );
+
+        let temp = tempfile::tempdir().expect("pi workflow workspace");
+        let root = temp.path();
+        let bin = root.join("bin");
+        let nm_bin = root.join("node_modules/.bin");
+        let pi_pkg = root.join("node_modules/@earendil-works/pi-coding-agent");
+        let mcp_pkg = root.join("node_modules/pi-mcp-adapter");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&nm_bin).unwrap();
+        std::fs::create_dir_all(&pi_pkg).unwrap();
+        std::fs::create_dir_all(&mcp_pkg).unwrap();
+        std::fs::write(pi_pkg.join("package.json"), r#"{"version":"0.83.0"}"#).unwrap();
+        std::fs::write(mcp_pkg.join("package.json"), r#"{"version":"2.18.0"}"#).unwrap();
+        std::fs::write(mcp_pkg.join("index.ts"), "export default () => {};").unwrap();
+
+        let mode = 0o755;
+        let npx_path = bin.join("npx");
+        std::fs::write(&npx_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_npx.sh")).unwrap()).unwrap();
+        std::fs::set_permissions(&npx_path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let pi_acp_path = bin.join("pi-acp");
+        std::fs::write(&pi_acp_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_acp.mjs")).unwrap()).unwrap();
+        std::fs::set_permissions(&pi_acp_path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let pi_bin_path = nm_bin.join("pi");
+        std::fs::write(&pi_bin_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi.mjs")).unwrap()).unwrap();
+        std::fs::set_permissions(&pi_bin_path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let mcp_bin_path = nm_bin.join("pi-mcp-adapter");
+        std::fs::write(&mcp_bin_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_mcp_adapter.mjs")).unwrap()).unwrap();
+        std::fs::set_permissions(&mcp_bin_path, std::fs::Permissions::from_mode(mode)).unwrap();
+
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let prompts = root.join("prompts.txt");
+        let pids = root.join("pids.json");
+        let session_file = root.join("sessions/session.jsonl");
+        let perm_log = root.join("permissions.jsonl");
+        let proto_log = root.join("protocol.jsonl");
+
+        unsafe {
+            std::env::set_var("OPENTEAMS_PI_QA_NPX_PATH", &npx_path);
+            std::env::set_var("PATH", format!("{}:{}:{}", bin.display(), nm_bin.display(), std::env::var("PATH").unwrap_or_default()));
+            std::env::set_var("HOME", root.join("home"));
+            std::env::set_var("OPENTEAMS_FAKE_PI_PROMPTS", &prompts);
+            std::env::set_var("OPENTEAMS_FAKE_PI_CHILD_PID_FILE", &pids);
+            std::env::set_var("OPENTEAMS_FAKE_PI_SESSION_FILE", &session_file);
+            std::env::set_var("OPENTEAMS_FAKE_PI_PERMISSION_LOG", &perm_log);
+            std::env::set_var("OPENTEAMS_FAKE_PI_PROTOCOL_LOG", &proto_log);
+        }
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite");
+        sqlx::migrate!("../db/migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        let db = DBService { pool: pool.clone() };
+
+        let session_id = Uuid::new_v4();
+        let session = ChatSession::create(
+            &db.pool,
+            &db::models::chat_session::CreateChatSession {
+                title: Some("pi workflow test".to_string()),
+                workspace_path: Some(workspace.to_string_lossy().to_string()),
+                project_id: None,
+                worktree_mode: Some(ChatSessionWorktreeMode::Disabled),
+            },
+            session_id,
+        )
+        .await
+        .expect("create session");
+
+        let agent = ChatAgent::create(
+            &db.pool,
+            &CreateChatAgent {
+                name: "Pi Worker".to_string(),
+                runner_type: "PI".to_string(),
+                system_prompt: Some("You are Pi.".to_string()),
+                tools_enabled: Some(serde_json::json!({})),
+                model_name: None,
+                owner_project_id: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create agent");
+
+        let session_agent = ChatSessionAgent::create(
+            &db.pool,
+            &CreateChatSessionAgent {
+                session_id,
+                agent_id: agent.id,
+                member_name: Some("PiWorker".to_string()),
+                workspace_path: Some(workspace.to_string_lossy().to_string()),
+                allowed_skill_ids: Vec::new(),
+                project_member_id: None,
+                execution_config: MemberExecutionConfig::default(),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create session agent");
+
+        let plan_json = r#"{"nodes":[],"edges":[],"loops":[]}"#.to_string();
+        let plan = WorkflowPlan::create(
+            &db.pool,
+            &CreateWorkflowPlan {
+                session_id,
+                source_message_id: None,
+                created_by_session_agent_id: Some(session_agent.id),
+                title: "Pi workflow".to_string(),
+                summary_text: None,
+                plan_json: plan_json.clone(),
+                plan_schema_version: 1,
+                plan_hash: "pi-plan".to_string(),
+                validation_status: WorkflowValidationStatus::Valid,
+                validation_errors_json: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create plan");
+
+        let revision = WorkflowPlanRevision::create(
+            &db.pool,
+            &CreateWorkflowPlanRevision {
+                plan_id: plan.id,
+                revision_no: 1,
+                edited_by: WorkflowRevisionEditor::System,
+                editor_session_agent_id: Some(session_agent.id),
+                reason: Some("Pi fixture".to_string()),
+                plan_json,
+                plan_hash: "pi-plan".to_string(),
+                validation_status: WorkflowValidationStatus::Valid,
+                validation_errors_json: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create revision");
+
+        let execution = WorkflowExecution::create(
+            &db.pool,
+            &CreateWorkflowExecution {
+                session_id,
+                plan_id: plan.id,
+                active_revision_id: Some(revision.id),
+                lead_session_agent_id: Some(session_agent.id),
+                title: "Pi execution".to_string(),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create execution");
+
+        let round = WorkflowRound::create(
+            &db.pool,
+            &CreateWorkflowRound {
+                execution_id: execution.id,
+                round_index: 1,
+                source_revision_id: Some(revision.id),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create round");
+
+        sqlx::query("UPDATE chat_workflow_executions SET active_round_id = ?2 WHERE id = ?1")
+            .bind(execution.id)
+            .bind(round.id)
+            .execute(&db.pool)
+            .await
+            .expect("set active round");
+
+        let workflow_session = WorkflowAgentSession::create(
+            &db.pool,
+            &CreateWorkflowAgentSession {
+                workflow_execution_id: execution.id,
+                session_agent_id: session_agent.id,
+                role: WorkflowAgentSessionRole::Worker,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create workflow session");
+
+        let step = WorkflowStep::create(
+            &db.pool,
+            &CreateWorkflowStep {
+                execution_id: execution.id,
+                round_id: round.id,
+                compiled_revision_id: Some(revision.id),
+                step_key: "pi-worker".to_string(),
+                step_type: WorkflowStepType::Task,
+                title: "Pi worker".to_string(),
+                instructions: "Run the Pi fixture".to_string(),
+                assigned_workflow_agent_session_id: Some(workflow_session.id),
+                max_retry: 2,
+                round_index: 1,
+                display_order: 0,
+                loop_id: None,
+                lead_review_required: Some(false),
+                user_review_required: Some(false),
+                revision_context: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create step");
+
+        let chat_runner = ChatRunner::new(db.clone());
+
+        let result = super::run_workflow_step_agent_prompt(
+            &db,
+            &chat_runner,
+            &session,
+            &agent,
+            &session_agent,
+            Some(&workflow_session),
+            "workflow pi test",
+            &step,
+        )
+        .await;
+
+        assert!(result.is_ok(), "workflow step should succeed: {:?}", result.err());
+
+        let output = result.unwrap();
+        assert!(
+            output.output.contains("echo:") && output.output.contains("workflow pi test"),
+            "output must contain echo response with workflow prompt: {}",
+            output.output
+        );
+        assert!(
+            output.token_usage.is_some(),
+            "token usage must be recorded"
+        );
+        assert_eq!(
+            output.token_usage.as_ref().unwrap().total_tokens,
+            35,
+            "total tokens must match fake Pi output"
+        );
+        assert!(
+            output.run_id.is_some(),
+            "run record ID must be persisted"
+        );
+
+        let updated_ws = WorkflowAgentSession::find_by_id(&db.pool, workflow_session.id)
+            .await
+            .expect("find ws")
+            .expect("ws exists");
+        assert!(
+            updated_ws.agent_session_id.is_some(),
+            "workflow session must persist agent_session_id"
+        );
+        assert_eq!(
+            updated_ws.agent_session_id.as_deref(),
+            Some("pi-offline-session")
+        );
+
+        let prompts_content = std::fs::read_to_string(&prompts).expect("read prompts");
+        assert!(
+            prompts_content.contains("workflow pi test"),
+            "prompts file must record workflow prompt"
+        );
+
+        let follow_up = super::run_workflow_step_agent_follow_up(
+            &db,
+            &chat_runner,
+            &session,
+            &agent,
+            &session_agent,
+            &updated_ws,
+            "workflow follow-up",
+            &step,
+        )
+        .await;
+
+        assert!(follow_up.is_ok(), "follow-up should succeed: {:?}", follow_up.err());
+        let fu_output = follow_up.unwrap();
+        assert!(
+            fu_output.output.contains("echo:") && fu_output.output.contains("workflow follow-up"),
+            "follow-up output must contain echo response"
+        );
+
+        let prompts_after = std::fs::read_to_string(&prompts).expect("read prompts after");
+        assert!(
+            prompts_after.contains("workflow follow-up"),
+            "prompts file must record follow-up prompt"
+        );
+
+        unsafe {
+            std::env::remove_var("OPENTEAMS_PI_QA_NPX_PATH");
+        }
+    }
 }

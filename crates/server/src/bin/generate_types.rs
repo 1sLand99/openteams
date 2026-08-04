@@ -443,8 +443,12 @@ fn generate_types_content() -> String {
         services::services::cli_config::ModelModalities::decl(),
         services::services::cli_config::ModelLimits::decl(),
         services::services::cli_config::ModelVariantConfig::decl(),
+        services::services::pi_models::PiModelsSkippedProvider::decl(),
+        services::services::pi_models::PiModelsSyncResult::decl(),
+        services::services::pi_models::PiModelsSyncDiagnostic::decl(),
         server::routes::config::SyncToCliRequest::decl(),
         server::routes::config::SyncToCliResponse::decl(),
+        server::routes::config::ProviderMutationWarning::decl(),
         server::routes::config::RestartCliResponse::decl(),
         server::routes::config::CustomProviderProbeRequest::decl(),
         server::routes::config::CustomProviderProbeStatus::decl(),
@@ -504,6 +508,7 @@ fn generate_types_content() -> String {
         executors::executors::qoder::QoderCli::decl(),
         executors::executors::droid::Droid::decl(),
         executors::executors::kimi::KimiCode::decl(),
+        executors::executors::pi::Pi::decl(),
         executors::executors::droid::Autonomy::decl(),
         executors::executors::droid::ReasoningEffortLevel::decl(),
         executors::executors::AppendPrompt::decl(),
@@ -627,6 +632,10 @@ fn generate_schemas() -> Result<HashMap<&'static str, String>, serde_json::Error
         (
             "kimi_code",
             generate_json_schema::<executors::executors::kimi::KimiCode>()?,
+        ),
+        (
+            "pi",
+            generate_json_schema::<executors::executors::pi::Pi>()?,
         ),
     ]);
     println!(

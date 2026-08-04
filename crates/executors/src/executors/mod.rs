@@ -1,4 +1,8 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use command_group::AsyncGroupChild;
@@ -25,7 +29,7 @@ use crate::{
     executors::{
         amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::CursorAgent,
         droid::Droid, gemini::Gemini, kimi::KimiCode, opencode::Opencode,
-        openteams_cli::OpenTeamsCli, qoder::QoderCli, qwen::QwenCode,
+        openteams_cli::OpenTeamsCli, pi::Pi, qoder::QoderCli, qwen::QwenCode,
     },
     logs::utils::patch,
     mcp_config::McpConfig,
@@ -46,6 +50,7 @@ pub mod gemini;
 pub mod kimi;
 pub mod opencode;
 pub mod openteams_cli;
+pub mod pi;
 #[cfg(feature = "qa-mode")]
 pub mod qa_mock;
 pub mod qoder;
@@ -155,6 +160,7 @@ pub enum CodingAgent {
     Droid,
     KimiCode,
     QoderCli,
+    Pi,
     #[cfg(feature = "qa-mode")]
     QaMock(QaMockExecutor),
     #[cfg(feature = "qa-mode")]
@@ -168,6 +174,7 @@ impl CodingAgent {
             Self::QwenCode(config) => config.acp_mcp_policy = policy,
             Self::KimiCode(config) => config.acp_mcp_policy = policy,
             Self::QoderCli(config) => config.acp_mcp_policy = policy,
+            Self::Pi(config) => config.acp_mcp_policy = policy,
             #[cfg(feature = "qa-mode")]
             Self::AcpQa(config) => config.acp_mcp_policy = policy,
             _ => {}
@@ -252,7 +259,7 @@ impl CodingAgent {
             }
             Self::CursorAgent(_) => vec![BaseAgentCapability::SetupHelper],
             Self::Copilot(_) => vec![],
-            Self::KimiCode(_) | Self::QoderCli(_) => vec![
+            Self::KimiCode(_) | Self::QoderCli(_) | Self::Pi(_) => vec![
                 BaseAgentCapability::SessionFork,
                 BaseAgentCapability::SetupHelper,
             ],
@@ -476,6 +483,26 @@ pub type ExecutorExitSignal = tokio::sync::oneshot::Receiver<ExecutorExitResult>
 /// When cancelled, the executor should attempt to cancel gracefully before being killed.
 pub type CancellationToken = tokio_util::sync::CancellationToken;
 
+/// Files whose lifetime must match the executor process rather than command startup.
+#[derive(Debug)]
+pub struct ExecutorRunCleanup {
+    paths: Vec<PathBuf>,
+}
+
+impl ExecutorRunCleanup {
+    pub(crate) fn new(paths: Vec<PathBuf>) -> Self {
+        Self { paths }
+    }
+}
+
+impl Drop for ExecutorRunCleanup {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct SpawnedChild {
     pub child: AsyncGroupChild,
@@ -483,6 +510,8 @@ pub struct SpawnedChild {
     pub exit_signal: Option<ExecutorExitSignal>,
     /// Container → Executor: signals when container wants to cancel the execution
     pub cancel: Option<CancellationToken>,
+    /// Runtime resources retained until the container finishes process-tree cleanup.
+    pub cleanup: Option<ExecutorRunCleanup>,
 }
 
 impl From<AsyncGroupChild> for SpawnedChild {
@@ -491,6 +520,7 @@ impl From<AsyncGroupChild> for SpawnedChild {
             child,
             exit_signal: None,
             cancel: None,
+            cleanup: None,
         }
     }
 }
@@ -599,6 +629,18 @@ mod tests {
         assert_eq!(
             BaseCodingAgent::from_str("ACP_QA").unwrap(),
             BaseCodingAgent::AcpQa
+        );
+    }
+
+    #[test]
+    fn pi_is_a_strongly_typed_production_variant() {
+        assert_eq!(
+            BaseCodingAgent::from_str("PI").unwrap(),
+            BaseCodingAgent::Pi
+        );
+        assert_eq!(
+            serde_json::to_string(&BaseCodingAgent::Pi).unwrap(),
+            r#""PI""#
         );
     }
 

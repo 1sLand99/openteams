@@ -1245,7 +1245,8 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
     props.runnerType === "GEMINI" ||
     props.runnerType === "QWEN_CODE" ||
     props.runnerType === "KIMI_CODE" ||
-    props.runnerType === "QODER_CLI";
+    props.runnerType === "QODER_CLI" ||
+    props.runnerType === "PI";
   const effectiveActiveTab = selectedMember
     ? activeTab === "permissions" && !supportsAcpPermissions
       ? "config"

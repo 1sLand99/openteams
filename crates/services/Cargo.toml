@@ -18,6 +18,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = "0.8"
 url = "2.5"
 anyhow = { workspace = true }
 tracing = { workspace = true }
@@ -66,7 +67,7 @@ harness = false
 required-features = ["qa-mode"]
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Storage_FileSystem"] }
 junction = "1.0"
 
 [target.'cfg(not(windows))'.dependencies]

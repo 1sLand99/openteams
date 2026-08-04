@@ -28,6 +28,32 @@ pub struct EffectiveAcpMcpConfig {
     pub config_hash: String,
 }
 
+/// Filter canonical definitions for an isolated Pi adapter snapshot. Only the
+/// server map is retained; ambient adapter settings and approval policies are
+/// deliberately excluded because OpenTeams owns both isolation and approval.
+pub fn resolve_isolated_mcp_snapshot(
+    canonical_config: &Value,
+    policy: &AcpMcpPolicy,
+) -> Result<Value, ExecutorError> {
+    let filtered = filter_canonical_servers(canonical_config, policy)?;
+    let mut servers = filtered
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for server in servers.values_mut() {
+        if let Some(server) = server.as_object_mut() {
+            server.remove("approveTools");
+        }
+    }
+    Ok(serde_json::json!({
+        "mcpServers": servers,
+        "settings": {
+            "hostConfigDiscovery": "off"
+        }
+    }))
+}
+
 /// Validate a complete ACP MCP list against the negotiated Agent capabilities.
 pub fn validate_mcp_servers(
     servers: &[McpServer],
@@ -375,6 +401,60 @@ mod tests {
                 .as_object()
                 .expect("server map")
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn different_pi_member_snapshots_contain_only_their_allowlisted_servers() {
+        let canonical = serde_json::json!({
+            "settings": {"hostConfigDiscovery": "on", "approveTools": true},
+            "mcpServers": {
+                "allowed": {"command": "/bin/echo", "approveTools": true},
+                "denied": {"command": "/bin/echo"}
+            }
+        });
+        let policy = AcpMcpPolicy {
+            allowed_server_names: Some(["allowed".to_string()].into_iter().collect()),
+            disabled_server_names: Default::default(),
+        };
+
+        let alpha_snapshot =
+            resolve_isolated_mcp_snapshot(&canonical, &policy).expect("alpha snapshot");
+        let beta_snapshot = resolve_isolated_mcp_snapshot(
+            &canonical,
+            &AcpMcpPolicy {
+                allowed_server_names: Some(["denied".to_string()].into_iter().collect()),
+                disabled_server_names: Default::default(),
+            },
+        )
+        .expect("beta snapshot");
+
+        assert_eq!(
+            alpha_snapshot["mcpServers"]
+                .as_object()
+                .expect("servers")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["allowed"]
+        );
+        assert_eq!(
+            beta_snapshot["mcpServers"]
+                .as_object()
+                .expect("servers")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["denied"]
+        );
+        assert!(alpha_snapshot["mcpServers"].get("denied").is_none());
+        assert!(beta_snapshot["mcpServers"].get("allowed").is_none());
+        assert_eq!(alpha_snapshot["settings"]["hostConfigDiscovery"], "off");
+        assert!(alpha_snapshot["settings"].get("approveTools").is_none());
+        assert!(
+            alpha_snapshot["mcpServers"]["allowed"]
+                .get("approveTools")
+                .is_none()
         );
     }
 }
