@@ -142,16 +142,6 @@ Vous pouvez aussi connecter des agents de code pris en charge :
   - Prise en charge des liens dans les messages d'agent et confirmation par Entrée des dialogues
 - **2026.05.20 (v0.4.4)**
   - Version beta du mode Workflow
-- **2026.05.07 (v0.3.22)**
-  - Possibilité d'enregistrer en un clic les membres d'une session de chat de groupe comme équipe prédéfinie
-- **2026.04.14 (v0.3.15)**
-  - Visualiseur des changements de fichiers de l'espace de travail
-- **2026.04.06 (v0.3.12)**
-  - Activation du mode UI sombre
-  - Correction des problèmes de concurrence d'openteams-cli
-- **2026.04.02 (v0.3.10)**
-  - Mise en place de la mise à jour de version dans l'application
-  - Le site de documentation est désormais en ligne
 
 ## Feuille de route
 

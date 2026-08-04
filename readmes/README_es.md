@@ -142,16 +142,6 @@ También puedes conectar agentes de código compatibles como:
   - Soporte para visitar enlaces en mensajes de agent y confirmación de diálogos con Enter
 - **2026.05.20 (v0.4.4)**
   - Versión beta del modo Workflow
-- **2026.05.07 (v0.3.22)**
-  - Permite guardar con un clic los miembros de una sesión de chat grupal como equipo predefinido
-- **2026.04.14 (v0.3.15)**
-  - Visor de cambios de archivos del espacio de trabajo
-- **2026.04.06 (v0.3.12)**
-  - Activación del modo de UI oscura
-  - Corrección de problemas de concurrencia en openteams-cli
-- **2026.04.02 (v0.3.10)**
-  - Implementación de actualización de versión dentro de la app
-  - El sitio de documentación ya está disponible
 
 ## Hoja de ruta
 

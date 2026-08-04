@@ -143,16 +143,6 @@ You can also connect supported coding agents such as:
   - Support visiting links in agent messages and Enter-to-confirm dialogs
 - **2026.05.20 (v0.4.4)**
   - Workflow mode beta version
-- **2026.05.07 (v0.3.22)**
-  - Supports saving members from a group chat session as a preset team with a single click
-- **2026.04.14 (v0.3.15)**
-  - Workspace File Change Viewer
-- **2026.04.06 (v0.3.12)**
-  - Enable dark ui mode
-  - fix openteams-cli concurrency issues
-- **2026.04.02 (v0.3.10)**
-  - Implement in-app version update
-  - The documentation website is now live.
 
 ## Roadmap
 
