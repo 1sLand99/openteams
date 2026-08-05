@@ -590,6 +590,10 @@ impl StandardCodingAgentExecutor for Pi {
         super::acp::normalize_logs(msg_store, worktree_path);
     }
 
+    fn default_runtime_config_path(&self) -> Option<PathBuf> {
+        pi_coding_agent_dir().map(|directory| directory.join("settings.json"))
+    }
+
     fn default_mcp_config_path(&self) -> Option<PathBuf> {
         dirs::home_dir().map(|home| home.join(".pi").join("agent").join("mcp.json"))
     }
@@ -616,9 +620,40 @@ impl StandardCodingAgentExecutor for Pi {
     }
 }
 
+fn pi_coding_agent_dir() -> Option<PathBuf> {
+    pi_coding_agent_dir_from(
+        std::env::var_os("PI_CODING_AGENT_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+fn pi_coding_agent_dir_from(
+    configured_directory: Option<PathBuf>,
+    user_home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    configured_directory.or_else(|| user_home.map(|home| home.join(".pi").join("agent")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_agent_directory_prefers_configured_directory_and_has_default() {
+        let user_home = PathBuf::from("/users/tester");
+        let configured_directory = PathBuf::from("/configured/pi-agent");
+
+        assert_eq!(
+            pi_coding_agent_dir_from(Some(configured_directory.clone()), Some(user_home.clone())),
+            Some(configured_directory)
+        );
+        assert_eq!(
+            pi_coding_agent_dir_from(None, Some(user_home.clone())),
+            Some(user_home.join(".pi").join("agent"))
+        );
+    }
 
     #[cfg(unix)]
     async fn wait_for_pi_process_handshake(

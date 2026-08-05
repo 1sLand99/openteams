@@ -1176,6 +1176,8 @@ export interface AgentRuntimeStatus {
   availability: AvailabilityInfo;
   auth_state: AgentRuntimeAuthState;
   node_available: boolean;
+  npm_available: boolean;
+  npx_available: boolean;
   discovered_models: string[];
   model_source: AgentRuntimeModelSource;
   version: string | null;
@@ -1210,6 +1212,8 @@ export interface AgentRuntimeDiagnostics {
   availability: AvailabilityInfo;
   auth_state: AgentRuntimeAuthState;
   node_available: boolean;
+  npm_available: boolean;
+  npx_available: boolean;
   config_path: string;
   install_indicator_path: string | null;
   resolved_command: string | null;

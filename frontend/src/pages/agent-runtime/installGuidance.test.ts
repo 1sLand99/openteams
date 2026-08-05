@@ -5,6 +5,7 @@ import type { AgentRuntimeStatus, BaseCodingAgent } from "@/types";
 import {
   detectClientPlatform,
   getInstallGuideEntry,
+  getMissingRuntimeTools,
   joinGuideCommands,
   resolveInstallGuide,
 } from "./installGuidance";
@@ -33,6 +34,8 @@ const makeRunner = (
     availability: { type: "NOT_FOUND" },
     auth_state: "unauthenticated",
     node_available: false,
+    npm_available: true,
+    npx_available: true,
     discovered_models: [],
     model_source: "none",
     version: null,
@@ -138,6 +141,7 @@ const installedUnauthedCodex = resolveInstallGuide(
     installed: true,
     executable: true,
     availability: { type: "INSTALLATION_FOUND" },
+    node_available: true,
   }),
   "windows",
 );
@@ -255,6 +259,108 @@ const droidOnMac = resolveInstallGuide(makeRunner("DROID"), "macos");
 check(
   "no auth commands are ever empty for guided runners",
   droidOnMac?.steps.some((step) => step.kind === "auth") === true,
+);
+
+// --- Missing npm/npx gating ----------------------------------------------
+
+const ampMissingNpm = resolveInstallGuide(
+  makeRunner("AMP", {
+    installed: true,
+    availability: { type: "INSTALLATION_FOUND" },
+    auth_state: "authenticated",
+    node_available: true,
+    npm_available: false,
+  }),
+  "macos",
+);
+check(
+  "npm executor installed but missing npm offers the npm step",
+  ampMissingNpm?.steps.map((step) => step.kind).join(",") === "npm",
+  ampMissingNpm?.steps,
+);
+check(
+  "npm step reinstalls Node.js to restore npm",
+  ampMissingNpm?.steps[0]?.commands[0]?.includes("nvm") === true,
+  ampMissingNpm?.steps,
+);
+check(
+  "npm executor reports only npm as missing",
+  getMissingRuntimeTools(
+    makeRunner("AMP", { node_available: true, npm_available: false }),
+  ).join(",") === "npm",
+);
+
+const claudeMissingNpmAndNpx = makeRunner("CLAUDE_CODE", {
+  installed: true,
+  availability: { type: "INSTALLATION_FOUND" },
+  auth_state: "authenticated",
+  node_available: true,
+  npm_available: false,
+  npx_available: false,
+});
+check(
+  "npx executor missing npm and npx reports both",
+  getMissingRuntimeTools(claudeMissingNpmAndNpx).join(",") === "npm,npx",
+);
+const claudeMissingNpmGuide = resolveInstallGuide(
+  claudeMissingNpmAndNpx,
+  "windows",
+);
+check(
+  "npx executor missing npm and npx offers a single npm remediation step",
+  claudeMissingNpmGuide?.steps.map((step) => step.kind).join(",") === "npm",
+  claudeMissingNpmGuide?.steps,
+);
+check(
+  "windows npm step uses the winget Node.js installer",
+  claudeMissingNpmGuide?.steps[0]?.commands[0] ===
+    "winget install OpenJS.NodeJS.LTS",
+);
+
+const codexMissingNpxOnly = makeRunner("CODEX", {
+  installed: true,
+  availability: { type: "INSTALLATION_FOUND" },
+  auth_state: "authenticated",
+  node_available: true,
+  npm_available: true,
+  npx_available: false,
+});
+check(
+  "npx executor missing only npx offers the npx step",
+  resolveInstallGuide(codexMissingNpxOnly, "linux")
+    ?.steps.map((step) => step.kind)
+    .join(",") === "npx",
+);
+check(
+  "npx executor missing only npx reports npx",
+  getMissingRuntimeTools(codexMissingNpxOnly).join(",") === "npx",
+);
+
+const piMissingNode = makeRunner("PI", {
+  node_available: false,
+  npm_available: false,
+  npx_available: false,
+});
+check(
+  "missing node lists every unavailable required tool",
+  getMissingRuntimeTools(piMissingNode).join(",") === "node,npm,npx",
+);
+check(
+  "missing node collapses remediation to the node step",
+  resolveInstallGuide(piMissingNode, "macos")
+    ?.steps.map((step) => step.kind)
+    .join(",") === "node",
+);
+
+check(
+  "native-binary agents never report missing node tools",
+  getMissingRuntimeTools(
+    makeRunner("KIMI_CODE", {
+      node_available: false,
+      npm_available: false,
+      npx_available: false,
+    }),
+  ).length === 0,
 );
 
 // --- Clipboard text ----------------------------------------------------

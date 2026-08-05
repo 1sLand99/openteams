@@ -16,11 +16,12 @@ import {
 import { openExternalUrlInDesktop } from "@/lib/openExternalUrl";
 import {
   detectClientPlatform,
+  getMissingRuntimeTools,
   joinGuideCommands,
   resolveInstallGuide,
   type InstallGuideStep,
 } from "./installGuidance";
-import { getRunnerLabel } from "./agentRuntimeViewModel";
+import { getRunnerLabel, RUNTIME_TOOL_LABELS } from "./agentRuntimeViewModel";
 
 type TranslateFn = (
   key: string,
@@ -105,6 +106,7 @@ export function AgentInstallGuide({
     () => resolveInstallGuide(runner, platform),
     [runner, platform],
   );
+  const missingTools = getMissingRuntimeTools(runner);
   const runnerLabel = getRunnerLabel(runner.runner_type);
 
   useEffect(() => {
@@ -179,10 +181,27 @@ export function AgentInstallGuide({
     switch (step.kind) {
       case "node":
         return t("agents.setup.step.node");
+      case "npm":
+        return t("agents.setup.step.npm");
+      case "npx":
+        return t("agents.setup.step.npx");
       case "install":
         return t("agents.setup.step.install", { agent: runnerLabel });
       case "auth":
         return t("agents.setup.step.auth", { agent: runnerLabel });
+    }
+  };
+
+  const stepHint = (step: InstallGuideStep): string | null => {
+    switch (step.kind) {
+      case "node":
+        return t("agents.setup.nodeHint");
+      case "npm":
+        return t("agents.setup.npmHint");
+      case "npx":
+        return t("agents.setup.npxHint");
+      default:
+        return null;
     }
   };
 
@@ -220,6 +239,17 @@ export function AgentInstallGuide({
         </div>
       )}
 
+      {missingTools.length > 0 && (
+        <div className="mb-3 flex items-start gap-2 rounded-[8px] border border-amber-500/20 bg-amber-500/5 p-3 text-[12px] leading-relaxed text-amber-400">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          {t("agents.setup.missingTools", {
+            tools: missingTools
+              .map((tool) => RUNTIME_TOOL_LABELS[tool])
+              .join(", "),
+          })}
+        </div>
+      )}
+
       {platform === "windows" && guide.windowsSupport === "wsl_only" && (
         <div className="mb-3 flex items-start gap-2 rounded-[8px] border border-amber-500/20 bg-amber-500/5 p-3 text-[12px] leading-relaxed text-amber-400">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -245,9 +275,9 @@ export function AgentInstallGuide({
               onCopy={() => void handleCopyStep(step, index)}
               copyLabel={t("agents.setup.copy")}
             />
-            {step.kind === "node" && (
+            {stepHint(step) && (
               <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--ink-tertiary)]">
-                {t("agents.setup.nodeHint")}
+                {stepHint(step)}
               </p>
             )}
             {step.authFollowUpCommand && (
