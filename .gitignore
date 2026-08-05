@@ -98,6 +98,7 @@ openteams-cloud/
 
 .jj
 .sisyphus/
+.qoder/
 
 # Run artifacts
 .runs/
