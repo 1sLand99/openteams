@@ -577,7 +577,15 @@ export type AgentRuntimeStatus = { runner_type: BaseCodingAgent, installed: bool
  * Whether a Node.js runtime was detected on this machine. Drives the
  * "install Node.js" guidance for Node-based runners.
  */
-node_available: boolean, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, };
+node_available: boolean,
+/**
+ * Whether the npm CLI was detected through the login-shell PATH.
+ */
+npm_available: boolean,
+/**
+ * Whether the npx CLI was detected through the login-shell PATH.
+ */
+npx_available: boolean, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, };
 
 export type AgentRuntimeListResponse = { runners: Array<AgentRuntimeStatus>, pi_models_sync: PiModelsSyncDiagnostic | null, };
 
@@ -585,7 +593,7 @@ export type AgentRuntimeRefreshError = { runner_type: BaseCodingAgent, message: 
 
 export type AgentRuntimeRefreshResponse = { runners: Array<AgentRuntimeStatus>, errors: Array<AgentRuntimeRefreshError>, pi_models_sync: PiModelsSyncDiagnostic | null, };
 
-export type AgentRuntimeDiagnostics = { runner_type: BaseCodingAgent, installed: boolean, executable: boolean, availability: AvailabilityInfo, auth_state: AgentRuntimeAuthState, node_available: boolean, config_path: string, install_indicator_path: string | null, resolved_command: string | null, command_source: string | null, acp_probe: AcpCapabilityProbe | null, acp_probe_error: string | null, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, pi_models_sync: PiModelsSyncDiagnostic | null, };
+export type AgentRuntimeDiagnostics = { runner_type: BaseCodingAgent, installed: boolean, executable: boolean, availability: AvailabilityInfo, auth_state: AgentRuntimeAuthState, node_available: boolean, npm_available: boolean, npx_available: boolean, config_path: string, install_indicator_path: string | null, resolved_command: string | null, command_source: string | null, acp_probe: AcpCapabilityProbe | null, acp_probe_error: string | null, discovered_models: Array<string>, model_source: AgentRuntimeModelSource, version: string | null, last_checked_at: string | null, last_error: string | null, run_mode: AgentRunMode, env_summary: Array<AgentRuntimeEnvSummary>, executor_options: JsonValue, pi_models_sync: PiModelsSyncDiagnostic | null, };
 
 export type AcpAuthMethodInfo = { id: string, name: string, description: string | null, };
 
