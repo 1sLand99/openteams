@@ -67,6 +67,20 @@ export const normalizeRunnerType = (
     : null;
 };
 
+/**
+ * Runners that override the default ACP capability probe and may advertise
+ * ACP config options (model, thought_level, auth, permissions). Non-ACP
+ * runners use the default probe that returns `Ok(None)` and never produce
+ * ACP model options, so their model list comes from discovered/profile models
+ * and should be shown immediately without a loading placeholder.
+ */
+export const runnerSupportsAcp = (runnerType: BaseCodingAgent): boolean =>
+  runnerType === "GEMINI" ||
+  runnerType === "QWEN_CODE" ||
+  runnerType === "KIMI_CODE" ||
+  runnerType === "QODER_CLI" ||
+  runnerType === "PI";
+
 export const trimOrNull = (value: string): string | null => {
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
