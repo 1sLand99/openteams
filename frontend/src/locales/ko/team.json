@@ -48,6 +48,7 @@
   "teamPage.form.memberNameDesc": "@멘션과 메시지 라우팅에 사용됩니다",
   "teamPage.form.model": "모델",
   "teamPage.form.modelDesc": "이 멤버의 기본 모델입니다",
+  "teamPage.form.modelLoading": "모델을 불러오는 중…",
   "teamPage.form.reasoning": "추론 수준",
   "teamPage.form.reasoningDesc": "기본 추론 깊이입니다",
   "teamPage.form.runtime": "Agent 런타임",

@@ -48,6 +48,7 @@
   "teamPage.form.memberNameDesc": "用于 @ 提及和消息路由",
   "teamPage.form.model": "模型",
   "teamPage.form.modelDesc": "设置Agent使用的模型",
+  "teamPage.form.modelLoading": "正在加载模型…",
   "teamPage.form.reasoning": "推理级别",
   "teamPage.form.reasoningDesc": "设置Agent的推理级别",
   "teamPage.form.runtime": "Agent 运行时",

@@ -48,6 +48,7 @@
   "teamPage.form.memberNameDesc": "Used for @mentions and message routing.",
   "teamPage.form.model": "Model",
   "teamPage.form.modelDesc": "Default model for this member.",
+  "teamPage.form.modelLoading": "Loading models…",
   "teamPage.form.reasoning": "Reasoning level",
   "teamPage.form.reasoningDesc": "Default reasoning depth.",
   "teamPage.form.runtime": "Agent runtime",
