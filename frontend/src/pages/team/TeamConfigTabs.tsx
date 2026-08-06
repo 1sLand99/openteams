@@ -42,6 +42,7 @@ import {
   cx,
   effectiveAcpConfigValue,
   findAcpSelectConfigOption,
+  runnerSupportsAcp,
   type ProjectMemberWithExecution,
 } from "./teamUtils";
 
@@ -679,7 +680,7 @@ function ConfigTab({
                   })
                 }
               />
-            ) : acpProbeLoading ? (
+            ) : acpProbeLoading && runnerSupportsAcp(runnerType) ? (
               <DropdownSelect
                 value="__openteams_model_loading__"
                 options={[
@@ -1261,12 +1262,7 @@ function TeamProtocolTab({
 export function TeamConfigTabs(props: TeamConfigTabsProps) {
   const [activeTab, setActiveTab] = useState<MemberConfigTab>("config");
   const { selectedMember, t } = props;
-  const supportsAcpPermissions =
-    props.runnerType === "GEMINI" ||
-    props.runnerType === "QWEN_CODE" ||
-    props.runnerType === "KIMI_CODE" ||
-    props.runnerType === "QODER_CLI" ||
-    props.runnerType === "PI";
+  const supportsAcpPermissions = runnerSupportsAcp(props.runnerType);
   const effectiveActiveTab = selectedMember
     ? activeTab === "permissions" && !supportsAcpPermissions
       ? "config"
