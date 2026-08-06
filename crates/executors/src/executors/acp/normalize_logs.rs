@@ -745,13 +745,29 @@ impl PartialToolCallData {
         if tc.status != Default::default() {
             self.status = tc.status;
         }
-        if !tc.locations.is_empty() {
-            self.path = tc.locations.first().map(|l| {
-                PathBuf::from(workspace_utils::path::make_path_relative(
-                    &l.path.to_string_lossy(),
-                    &worktree_path.to_string_lossy(),
-                ))
+        let observed_path = tc
+            .locations
+            .first()
+            .map(|location| location.path.as_path())
+            .or_else(|| {
+                tc.content.iter().find_map(|content| match content {
+                    acp::ToolCallContent::Diff(diff) => Some(diff.path.as_path()),
+                    _ => None,
+                })
+            })
+            .or_else(|| {
+                tc.raw_input.as_ref().and_then(|input| {
+                    ["path", "filePath", "file_path"]
+                        .into_iter()
+                        .find_map(|key| input.get(key).and_then(serde_json::Value::as_str))
+                        .map(Path::new)
+                })
             });
+        if let Some(path) = observed_path {
+            self.path = Some(PathBuf::from(workspace_utils::path::make_path_relative(
+                &path.to_string_lossy(),
+                &worktree_path.to_string_lossy(),
+            )));
         }
         if !tc.content.is_empty() {
             self.content = tc.content.clone();
@@ -874,7 +890,9 @@ struct EditInput {
 
 #[cfg(test)]
 mod tests {
-    use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
+    use agent_client_protocol::schema::v1::{
+        ContentBlock, ContentChunk, Diff, TextContent, ToolCall, ToolCallId, ToolKind,
+    };
 
     use super::*;
 
@@ -930,6 +948,42 @@ mod tests {
             Some(serde_json::json!({
                 "acp_turn_signal": "permission_rejected"
             }))
+        );
+    }
+
+    #[test]
+    fn edit_tool_recovers_relative_path_from_raw_input_without_locations() {
+        let tool_call = ToolCall::new(ToolCallId::new("kimi-edit"), "Editing file")
+            .kind(ToolKind::Edit)
+            .raw_input(serde_json::json!({
+                "path": "/workspace/frontend/src/App.tsx",
+                "old_string": "before",
+                "new_string": "after"
+            }));
+        let mut tool_data = PartialToolCallData::default();
+
+        tool_data.extend(&tool_call, Path::new("/workspace"));
+
+        assert_eq!(
+            tool_data.path.as_deref(),
+            Some(Path::new("frontend/src/App.tsx"))
+        );
+    }
+
+    #[test]
+    fn edit_tool_recovers_relative_path_from_diff_without_locations() {
+        let tool_call = ToolCall::new(ToolCallId::new("kimi-edit"), "Editing file")
+            .kind(ToolKind::Edit)
+            .content(vec![
+                Diff::new("/workspace/crates/services/src/lib.rs", "updated").into(),
+            ]);
+        let mut tool_data = PartialToolCallData::default();
+
+        tool_data.extend(&tool_call, Path::new("/workspace"));
+
+        assert_eq!(
+            tool_data.path.as_deref(),
+            Some(Path::new("crates/services/src/lib.rs"))
         );
     }
 
