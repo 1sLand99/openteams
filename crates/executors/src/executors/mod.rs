@@ -127,6 +127,8 @@ pub enum ExecutorError {
     SetupHelperNotSupported,
     #[error("Auth required: {0}")]
     AuthRequired(String),
+    #[error("Configuration error: {0}")]
+    Configuration(String),
 }
 
 #[enum_dispatch]

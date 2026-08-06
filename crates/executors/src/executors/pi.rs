@@ -14,7 +14,8 @@ use workspace_utils::{msg_store::MsgStore, shell::resolve_executable_path_blocki
 
 use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
-    AcpCapabilityProbe, AcpClientServicePolicy, AcpExecutionOptions,
+    AcpCapabilityProbe, AcpClientServicePolicy, AcpConfigOptionKind, AcpConfigOverride,
+    AcpConfigValue, AcpExecutionOptions,
     mcp::{AcpMcpPolicy, resolve_isolated_mcp_snapshot},
 };
 use crate::{
@@ -40,6 +41,10 @@ pub const PI_MCP_ADAPTER_PACKAGE: &str = "pi-mcp-adapter";
 pub const PI_LAUNCHER_SOURCE: &str = include_str!("pi/launcher.mjs");
 const PI_MCP_EXTENSION_SOURCE: &str = include_str!("pi/mcp_extension.mjs");
 const PI_APPROVAL_EXTENSION_SOURCE: &str = include_str!("pi/approval_extension.mjs");
+// pi-acp 0.0.33 hardcodes its menu instead of querying Pi's
+// get_available_thinking_levels RPC. Keep this in sync with pinned Pi until a
+// released pi-acp version supplies the model-specific options itself.
+const PI_THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 const PI_AUTH_ENV_VARS: &[&str] = &[
     "ANTHROPIC_API_KEY",
@@ -332,7 +337,7 @@ impl Pi {
             .unwrap_or_else(PiRuntimeSnapshot::empty)
     }
 
-    async fn acp_harness(&self) -> Result<AcpAgentHarness, ExecutorError> {
+    async fn acp_harness(&self, env: &ExecutionEnv) -> Result<AcpAgentHarness, ExecutorError> {
         let options = self.acp.clone().unwrap_or_default();
         let approval_policy = match options.approval_mode.unwrap_or_default() {
             AcpApprovalMode::Ask => AcpApprovalPolicy::Ask,
@@ -362,6 +367,7 @@ impl Pi {
             selection.category_snapshot.as_deref() == Some("model")
                 || selection.option_id.eq_ignore_ascii_case("model")
         });
+        validate_pi_thinking_override(self.model.as_deref(), config_overrides, env)?;
         if let Some(model) = self
             .model
             .as_deref()
@@ -416,6 +422,168 @@ fn prerequisites_available_on_path(mut resolve: impl FnMut(&str) -> bool) -> boo
     resolve("node")
 }
 
+fn semantic_pi_config_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn pi_config_override_value<'a>(
+    config_overrides: &'a [AcpConfigOverride],
+    expected_key: &str,
+) -> Option<&'a str> {
+    config_overrides.iter().find_map(|selection| {
+        let matches = selection
+            .category_snapshot
+            .as_deref()
+            .is_some_and(|category| semantic_pi_config_key(category) == expected_key)
+            || semantic_pi_config_key(&selection.option_id) == expected_key;
+        match (&selection.value, matches) {
+            (AcpConfigValue::ValueId { value }, true) if !value.trim().is_empty() => {
+                Some(value.as_str())
+            }
+            _ => None,
+        }
+    })
+}
+
+fn configured_pi_model<'a>(
+    model: Option<&'a str>,
+    config_overrides: &'a [AcpConfigOverride],
+) -> Option<&'a str> {
+    pi_config_override_value(config_overrides, "model")
+        .or_else(|| model.filter(|value| !value.trim().is_empty()))
+}
+
+fn pi_coding_agent_dir_for_env(env: &ExecutionEnv) -> Option<PathBuf> {
+    pi_coding_agent_dir_from(
+        env.get("PI_CODING_AGENT_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("PI_CODING_AGENT_DIR")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            }),
+        env.get("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir),
+    )
+}
+
+fn load_pi_supported_thinking_levels(model_id: &str, env: &ExecutionEnv) -> Option<Vec<String>> {
+    let models_path = pi_coding_agent_dir_for_env(env)?.join("models.json");
+    let models: serde_json::Value = serde_json::from_slice(&fs::read(models_path).ok()?).ok()?;
+    pi_supported_thinking_levels(&models, model_id)
+}
+
+fn pi_supported_thinking_levels(
+    models: &serde_json::Value,
+    qualified_model_id: &str,
+) -> Option<Vec<String>> {
+    let (provider_id, model_id) = qualified_model_id.split_once('/')?;
+    let model = models
+        .get("providers")?
+        .get(provider_id)?
+        .get("models")?
+        .as_array()?
+        .iter()
+        .find(|model| model.get("id").and_then(serde_json::Value::as_str) == Some(model_id))?;
+    if !model
+        .get("reasoning")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some(vec!["off".to_string()]);
+    }
+
+    let level_map = model
+        .get("thinkingLevelMap")
+        .and_then(serde_json::Value::as_object);
+    Some(
+        PI_THINKING_LEVELS
+            .iter()
+            .filter(|level| {
+                let mapped = level_map.and_then(|mapping| mapping.get(**level));
+                if matches!(**level, "xhigh" | "max") {
+                    mapped.is_some_and(|value| !value.is_null())
+                } else {
+                    mapped.is_none_or(|value| !value.is_null())
+                }
+            })
+            .map(|level| (*level).to_string())
+            .collect(),
+    )
+}
+
+fn validate_pi_thinking_override(
+    model: Option<&str>,
+    config_overrides: &[AcpConfigOverride],
+    env: &ExecutionEnv,
+) -> Result<(), ExecutorError> {
+    let Some(model) = configured_pi_model(model, config_overrides) else {
+        return Ok(());
+    };
+    let Some(thought_level) = pi_config_override_value(config_overrides, "thoughtlevel") else {
+        return Ok(());
+    };
+    let Some(supported) = load_pi_supported_thinking_levels(model, env) else {
+        return Ok(());
+    };
+    if supported.iter().any(|level| level == thought_level) {
+        return Ok(());
+    }
+    Err(ExecutorError::Configuration(format!(
+        "Pi model `{model}` does not support thought level `{thought_level}`; supported values: {}",
+        supported.join(", ")
+    )))
+}
+
+fn filter_pi_thinking_options(
+    probe: &mut AcpCapabilityProbe,
+    configured_model: Option<&str>,
+    env: &ExecutionEnv,
+) {
+    let active_model = configured_model.map(str::to_string).or_else(|| {
+        probe.config_options.iter().find_map(|option| {
+            let is_model = option
+                .category
+                .as_deref()
+                .is_some_and(|category| semantic_pi_config_key(category) == "model")
+                || semantic_pi_config_key(&option.id) == "model";
+            match (&option.kind, is_model) {
+                (AcpConfigOptionKind::Select { current_value, .. }, true) => {
+                    Some(current_value.clone())
+                }
+                _ => None,
+            }
+        })
+    });
+    let Some(supported) = active_model
+        .as_deref()
+        .and_then(|model| load_pi_supported_thinking_levels(model, env))
+    else {
+        return;
+    };
+
+    for option in &mut probe.config_options {
+        let is_thought_level = option
+            .category
+            .as_deref()
+            .is_some_and(|category| semantic_pi_config_key(category) == "thoughtlevel")
+            || semantic_pi_config_key(&option.id) == "thoughtlevel";
+        if !is_thought_level {
+            continue;
+        }
+        if let AcpConfigOptionKind::Select { options, .. } = &mut option.kind {
+            options.retain(|choice| supported.iter().any(|level| level == &choice.value));
+        }
+    }
+}
+
 #[async_trait]
 impl StandardCodingAgentExecutor for Pi {
     fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
@@ -454,7 +622,7 @@ impl StandardCodingAgentExecutor for Pi {
         let snapshot = self.runtime_snapshot();
         let files = PiRunFiles::create(current_dir, &snapshot)?;
         let runtime_env = files.apply_to_env(env, &snapshot);
-        let result = super::acp::runtime::probe_acp_command(
+        let mut result = super::acp::runtime::probe_acp_command(
             self.build_command_builder()?.build_initial()?,
             current_dir,
             &runtime_env,
@@ -464,6 +632,16 @@ impl StandardCodingAgentExecutor for Pi {
                 .or(configured_auth_method_id),
         )
         .await?;
+        let config_overrides = self
+            .acp
+            .as_ref()
+            .and_then(|options| options.config_overrides.as_deref())
+            .unwrap_or_default();
+        filter_pi_thinking_options(
+            &mut result,
+            configured_pi_model(self.model.as_deref(), config_overrides),
+            env,
+        );
         Ok(Some(result))
     }
 
@@ -477,7 +655,7 @@ impl StandardCodingAgentExecutor for Pi {
         let files = PiRunFiles::create(current_dir, &snapshot)?;
         let runtime_env = files.apply_to_env(env, &snapshot);
         let mut spawned = self
-            .acp_harness()
+            .acp_harness(env)
             .await?
             .spawn_with_command(
                 current_dir,
@@ -504,7 +682,7 @@ impl StandardCodingAgentExecutor for Pi {
         let files = PiRunFiles::create(current_dir, &snapshot)?;
         let runtime_env = files.apply_to_env(env, &snapshot);
         let mut spawned = self
-            .acp_harness()
+            .acp_harness(env)
             .await?
             .spawn_follow_up_with_command(
                 current_dir,
@@ -533,7 +711,7 @@ impl StandardCodingAgentExecutor for Pi {
         let files = PiRunFiles::create(current_dir, &snapshot)?;
         let runtime_env = files.apply_to_env(env, &snapshot);
         let mut spawned = self
-            .acp_harness()
+            .acp_harness(env)
             .await?
             .spawn_structured_with_command(
                 current_dir,
@@ -562,7 +740,7 @@ impl StandardCodingAgentExecutor for Pi {
         let files = PiRunFiles::create(current_dir, &snapshot)?;
         let runtime_env = files.apply_to_env(env, &snapshot);
         let mut spawned = self
-            .acp_harness()
+            .acp_harness(env)
             .await?
             .spawn_follow_up_structured_with_command(
                 current_dir,
@@ -632,6 +810,150 @@ fn pi_coding_agent_dir_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executors::acp::{AcpConfigChoice, AcpConfigOptionSnapshot, AcpConfigSource};
+
+    fn pi_models_fixture() -> serde_json::Value {
+        serde_json::json!({
+            "providers": {
+                "test-provider": {
+                    "models": [
+                        { "id": "standard", "reasoning": true },
+                        {
+                            "id": "extended",
+                            "reasoning": true,
+                            "thinkingLevelMap": {
+                                "minimal": null,
+                                "xhigh": 32768,
+                                "max": 65536
+                            }
+                        },
+                        { "id": "plain", "reasoning": false }
+                    ]
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn pi_thinking_levels_follow_model_capabilities() {
+        assert_eq!(
+            pi_supported_thinking_levels(&pi_models_fixture(), "test-provider/standard"),
+            Some(
+                ["off", "minimal", "low", "medium", "high"]
+                    .map(str::to_string)
+                    .to_vec()
+            )
+        );
+        assert_eq!(
+            pi_supported_thinking_levels(&pi_models_fixture(), "test-provider/extended"),
+            Some(
+                ["off", "low", "medium", "high", "xhigh", "max"]
+                    .map(str::to_string)
+                    .to_vec()
+            )
+        );
+        assert_eq!(
+            pi_supported_thinking_levels(&pi_models_fixture(), "test-provider/plain"),
+            Some(vec!["off".to_string()])
+        );
+    }
+
+    #[test]
+    fn pi_probe_filters_levels_that_the_selected_model_cannot_activate() {
+        let directory = tempfile::tempdir().expect("temporary Pi agent directory");
+        fs::write(
+            directory.path().join("models.json"),
+            serde_json::to_vec(&pi_models_fixture()).expect("serialize Pi models fixture"),
+        )
+        .expect("write Pi models fixture");
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert(
+            "PI_CODING_AGENT_DIR",
+            directory.path().to_string_lossy().to_string(),
+        );
+        let mut probe = AcpCapabilityProbe {
+            protocol_version: "1".to_string(),
+            agent_name: Some("pi-acp".to_string()),
+            agent_version: Some(PI_ACP_VERSION.to_string()),
+            auth_methods: Vec::new(),
+            supports_session_list: false,
+            supports_session_resume: false,
+            supports_session_load: true,
+            supports_session_close: false,
+            supports_session_delete: false,
+            supports_additional_directories: false,
+            agent_capabilities: serde_json::json!({}),
+            config_source: AcpConfigSource::Stable,
+            config_options: vec![AcpConfigOptionSnapshot {
+                id: "thought_level".to_string(),
+                name: "Thinking".to_string(),
+                description: None,
+                category: Some("thought_level".to_string()),
+                kind: AcpConfigOptionKind::Select {
+                    current_value: "medium".to_string(),
+                    options: ["off", "minimal", "low", "medium", "high", "xhigh"]
+                        .map(|level| AcpConfigChoice {
+                            value: level.to_string(),
+                            name: level.to_string(),
+                            description: None,
+                        })
+                        .to_vec(),
+                },
+            }],
+        };
+
+        filter_pi_thinking_options(&mut probe, Some("test-provider/standard"), &env);
+
+        let AcpConfigOptionKind::Select { options, .. } = &probe.config_options[0].kind else {
+            panic!("Pi thought-level option must remain a select");
+        };
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["off", "minimal", "low", "medium", "high"]
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_pi_thinking_override_is_a_configuration_error() {
+        let directory = tempfile::tempdir().expect("temporary Pi agent directory");
+        fs::write(
+            directory.path().join("models.json"),
+            serde_json::to_vec(&pi_models_fixture()).expect("serialize Pi models fixture"),
+        )
+        .expect("write Pi models fixture");
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert(
+            "PI_CODING_AGENT_DIR",
+            directory.path().to_string_lossy().to_string(),
+        );
+        let pi = Pi {
+            model: Some("test-provider/standard".to_string()),
+            acp: Some(AcpExecutionOptions {
+                config_overrides: Some(vec![AcpConfigOverride {
+                    option_id: "thought_level".to_string(),
+                    value: AcpConfigValue::ValueId {
+                        value: "xhigh".to_string(),
+                    },
+                    label_snapshot: Some("Thinking".to_string()),
+                    category_snapshot: Some("thought_level".to_string()),
+                }]),
+                ..AcpExecutionOptions::default()
+            }),
+            ..Pi::default()
+        };
+
+        let Err(error) = pi.acp_harness(&env).await else {
+            panic!("unsupported Pi thinking level must fail before ACP startup");
+        };
+        assert!(matches!(error, ExecutorError::Configuration(_)));
+        let message = error.to_string();
+        assert!(message.contains("test-provider/standard"));
+        assert!(message.contains("thought level `xhigh`"));
+        assert!(message.contains("off, minimal, low, medium, high"));
+    }
 
     #[test]
     fn pi_agent_directory_prefers_configured_directory_and_has_default() {
