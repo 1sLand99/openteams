@@ -10,6 +10,7 @@ import {
   CircleAlert,
   FileText,
   FolderGit2,
+  Loader2,
   PackagePlus,
   RefreshCw,
   Server,
@@ -65,6 +66,7 @@ type TeamConfigTabsProps = {
   acpAuthMethodId: string;
   acpConfigOptions: AcpConfigOptionSnapshot[];
   acpConfigOverrides: AcpConfigOverride[];
+  acpProbeLoading: boolean;
   reasoningUnsupported: boolean;
   allowedSkillIds: string[];
   capability: AgentRuntimeReasoningCapability | null;
@@ -528,6 +530,7 @@ function SkillMarkdownPanel({
 function ConfigTab({
   acpConfigOptions,
   acpConfigOverrides,
+  acpProbeLoading,
   reasoningUnsupported,
   capability,
   isLeader,
@@ -675,6 +678,23 @@ function ConfigTab({
                     value,
                   })
                 }
+              />
+            ) : acpProbeLoading && modelOptions.length <= 1 ? (
+              <DropdownSelect
+                value="__openteams_model_loading__"
+                options={[
+                  {
+                    id: "__openteams_model_loading__",
+                    label: t("teamPage.form.modelLoading"),
+                  },
+                ]}
+                disabled
+                showSearch={false}
+                triggerIcon={
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--ink-tertiary)]" />
+                }
+                className="[&>button]:h-9 [&>button]:bg-[var(--surface-1)] [&>button]:font-mono [&>button]:text-[13px]"
+                onChange={() => undefined}
               />
             ) : (
               <DropdownSelect

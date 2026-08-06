@@ -668,6 +668,7 @@ pub async fn runtime_diagnostics(
     } else {
         (None, None, false)
     };
+    let acp_probe_models = acp_probe.as_ref().and_then(|probe| probe.model_ids());
     let latest_store = if detected_version.is_some() || acp_probe_succeeded {
         update_store(&path, |latest| {
             if let Some(version) = detected_version.as_deref() {
@@ -675,6 +676,9 @@ pub async fn runtime_diagnostics(
             }
             if acp_probe_succeeded {
                 clear_cached_authentication_required_error(latest, runner);
+                if let Some(models) = acp_probe_models.as_ref() {
+                    cache_runner_acp_models(latest, runner, models.clone());
+                }
             }
             Ok(())
         })?
@@ -1090,6 +1094,35 @@ fn cache_runner_version(store: &mut AgentRuntimeStore, runner: BaseCodingAgent, 
         .or_insert_with(|| AgentRuntimeDiscovery {
             models: Vec::new(),
             version: Some(version),
+            last_checked_at: now,
+            last_error: None,
+        });
+}
+
+/// Persists the model list discovered through an ACP capability probe so the
+/// next lightweight `list_runtime_statuses` call can populate the model
+/// dropdown immediately instead of waiting for another probe.
+fn cache_runner_acp_models(
+    store: &mut AgentRuntimeStore,
+    runner: BaseCodingAgent,
+    models: Vec<String>,
+) {
+    if models.is_empty() {
+        return;
+    }
+    let now = Utc::now();
+    store
+        .discoveries
+        .entry(runner)
+        .and_modify(|entry| {
+            entry.models = models.clone();
+            entry.last_checked_at = now;
+            entry.last_error =
+                remove_status_error_stage(entry.last_error.as_deref(), "model_discovery");
+        })
+        .or_insert_with(|| AgentRuntimeDiscovery {
+            models,
+            version: None,
             last_checked_at: now,
             last_error: None,
         });
@@ -2510,6 +2543,77 @@ mod tests {
             store.discoveries[&runner].last_error.as_deref(),
             Some("[version_check] temporary warning")
         );
+    }
+
+    #[test]
+    fn acp_probe_models_are_cached_for_runtime_status() {
+        let runner = BaseCodingAgent::Pi;
+        let mut store = AgentRuntimeStore::default();
+        cache_runner_acp_models(
+            &mut store,
+            runner,
+            vec![
+                "provider/model-a".to_string(),
+                "provider/model-b".to_string(),
+            ],
+        );
+
+        let discovery = store
+            .discoveries
+            .get(&runner)
+            .expect("ACP probe models should be cached");
+        assert_eq!(
+            discovery.models,
+            vec!["provider/model-a", "provider/model-b"]
+        );
+    }
+
+    #[test]
+    fn acp_probe_models_clear_stale_model_discovery_error() {
+        let runner = BaseCodingAgent::Pi;
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: Vec::new(),
+                version: Some("pi 0.83.0".to_string()),
+                last_checked_at: Utc::now(),
+                last_error: Some(
+                    "[model_discovery] ACP initialize failed: timeout\n[version_check] temporary warning"
+                        .to_string(),
+                ),
+            },
+        );
+
+        cache_runner_acp_models(&mut store, runner, vec!["provider/model-a".to_string()]);
+
+        let discovery = store.discoveries.get(&runner).unwrap();
+        assert_eq!(discovery.models, vec!["provider/model-a"]);
+        assert_eq!(discovery.version.as_deref(), Some("pi 0.83.0"));
+        assert_eq!(
+            discovery.last_error.as_deref(),
+            Some("[version_check] temporary warning")
+        );
+    }
+
+    #[test]
+    fn acp_probe_empty_models_are_not_cached() {
+        let runner = BaseCodingAgent::Pi;
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: vec!["existing-model".to_string()],
+                version: None,
+                last_checked_at: Utc::now(),
+                last_error: None,
+            },
+        );
+
+        cache_runner_acp_models(&mut store, runner, Vec::new());
+
+        let discovery = store.discoveries.get(&runner).unwrap();
+        assert_eq!(discovery.models, vec!["existing-model"]);
     }
 
     #[test]

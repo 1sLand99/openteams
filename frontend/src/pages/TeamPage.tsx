@@ -1722,6 +1722,7 @@ export function TeamPage() {
               acpAuthMethodId={acpAuthMethodId}
               acpConfigOptions={acpConfigOptions}
               acpConfigOverrides={acpConfigOverrides}
+              acpProbeLoading={acpProbeLoading}
               reasoningUnsupported={reasoningUnsupported}
               capability={capability}
               configuredMcpServerKeys={configuredMcpServerKeys}
