@@ -503,11 +503,12 @@ async fn required_session_mode_rejects_an_unverified_agent_response() {
         )
         .await
         .expect_err("unverified mode response must fail startup");
-    assert!(
-        error
-            .to_string()
-            .contains("did not activate the requested value for `mode`")
-    );
+    assert!(matches!(error, ExecutorError::Configuration(_)));
+    let message = error.to_string();
+    assert!(message.contains("ACP config option `mode` requested `default`"));
+    assert!(message.contains("Agent activated `yolo`"));
+    assert!(!message.contains("I/O error"));
+    assert!(!message.contains("ACP startup failed"));
 
     tokio::fs::remove_dir_all(workspace)
         .await

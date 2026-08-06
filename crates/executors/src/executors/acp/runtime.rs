@@ -47,6 +47,7 @@ use crate::{
 enum BootstrapError {
     FollowUpNotSupported(String),
     AuthRequired(String),
+    Configuration(String),
     Other(String),
 }
 
@@ -486,12 +487,15 @@ impl AcpAgentHarness {
                 if let Err(error) = &result
                     && !was_cancelled
                 {
-                    let startup_error =
-                        if error.code == agent_client_protocol::ErrorCode::AuthRequired {
+                    let startup_error = match error.code {
+                        agent_client_protocol::ErrorCode::AuthRequired => {
                             BootstrapError::AuthRequired(error.to_string())
-                        } else {
-                            BootstrapError::Other(error.to_string())
-                        };
+                        }
+                        agent_client_protocol::ErrorCode::InvalidParams => {
+                            BootstrapError::Configuration(error.to_string())
+                        }
+                        _ => BootstrapError::Other(error.to_string()),
+                    };
                     send_startup(&startup_tx, Err(startup_error));
                     let _ = output_for_runtime
                         .send(AcpEvent::Error(protocol_error_message(error)))
@@ -517,6 +521,9 @@ impl AcpAgentHarness {
             }
             Ok(Err(BootstrapError::AuthRequired(message))) => {
                 Err(ExecutorError::AuthRequired(message))
+            }
+            Ok(Err(BootstrapError::Configuration(message))) => {
+                Err(ExecutorError::Configuration(message))
             }
             Ok(Err(BootstrapError::Other(message))) => Err(ExecutorError::Io(
                 std::io::Error::other(format!("ACP startup failed: {message}")),
@@ -1463,12 +1470,30 @@ async fn set_config_option_and_verify(
         })?;
     if !config_current_value_matches(effective, &value) {
         return Err(invalid_config(format!(
-            "ACP Agent did not activate the requested value for `{}`",
-            option.id
+            "ACP config option `{}` requested {}, but the Agent activated {}; the requested value may be unsupported",
+            option.id,
+            config_value_display(&value),
+            config_current_value_display(effective),
         )));
     }
     *options = response.config_options;
     Ok(())
+}
+
+fn config_value_display(value: &SessionConfigOptionValue) -> String {
+    match value {
+        SessionConfigOptionValue::ValueId { value } => format!("`{value}`"),
+        SessionConfigOptionValue::Boolean { value } => format!("`{value}`"),
+        _ => "an unsupported value type".to_string(),
+    }
+}
+
+fn config_current_value_display(option: &SessionConfigOption) -> String {
+    match &option.kind {
+        SessionConfigKind::Select(select) => format!("`{}`", select.current_value),
+        SessionConfigKind::Boolean(boolean) => format!("`{}`", boolean.current_value),
+        _ => "an unsupported value type".to_string(),
+    }
 }
 
 fn config_current_value_matches(
