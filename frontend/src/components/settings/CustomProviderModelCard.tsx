@@ -54,10 +54,29 @@ export function CustomProviderModelCard({
     let secondFrame: number | null = null;
     const firstFrame = window.requestAnimationFrame(() => {
       secondFrame = window.requestAnimationFrame(() => {
-        cardRef.current?.scrollIntoView({
-          behavior: 'smooth',
-          block: 'start',
-        });
+        const card = cardRef.current;
+        if (!card) return;
+        // Do not use scrollIntoView here: it scrolls every ancestor scroll
+        // container (including overflow:hidden app-shell containers, which are
+        // still programmatically scrollable) and shifts the whole app UI when
+        // the app scale frame overflows the viewport. Scroll only the nearest
+        // scrollable ancestor (the provider side sheet) instead.
+        let scroller = card.parentElement;
+        while (scroller) {
+          const { overflowY } = window.getComputedStyle(scroller);
+          if (
+            (overflowY === 'auto' || overflowY === 'scroll') &&
+            scroller.scrollHeight > scroller.clientHeight
+          ) {
+            const top =
+              scroller.scrollTop +
+              card.getBoundingClientRect().top -
+              scroller.getBoundingClientRect().top;
+            scroller.scrollTo({ top, behavior: 'smooth' });
+            return;
+          }
+          scroller = scroller.parentElement;
+        }
       });
     });
 
