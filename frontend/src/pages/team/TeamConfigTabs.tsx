@@ -679,7 +679,7 @@ function ConfigTab({
                   })
                 }
               />
-            ) : acpProbeLoading && modelOptions.length <= 1 ? (
+            ) : acpProbeLoading ? (
               <DropdownSelect
                 value="__openteams_model_loading__"
                 options={[
