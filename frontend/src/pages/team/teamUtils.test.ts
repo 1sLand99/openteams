@@ -145,7 +145,14 @@ console.log("Team ACP config matching: PASS");
 
 // --- Runner ACP support classification ---------------------------------
 
-const acpRunners = ["GEMINI", "QWEN_CODE", "KIMI_CODE", "QODER_CLI", "PI"];
+const acpRunners = [
+  "GEMINI",
+  "HERMES",
+  "QWEN_CODE",
+  "KIMI_CODE",
+  "QODER_CLI",
+  "PI",
+];
 const nonAcpRunners = [
   "CLAUDE_CODE",
   "AMP",
