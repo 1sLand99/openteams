@@ -637,7 +637,8 @@ pub async fn runtime_diagnostics(
                 CodingAgent::Gemini(_)
                 | CodingAgent::QwenCode(_)
                 | CodingAgent::KimiCode(_)
-                | CodingAgent::QoderCli(_) => "native",
+                | CodingAgent::QoderCli(_)
+                | CodingAgent::Hermes(_) => "native",
                 CodingAgent::Pi(_) => "npx",
                 _ => "default",
             }
@@ -982,6 +983,7 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
         CodingAgent::Droid(_) => "droid".to_string(),
         CodingAgent::KimiCode(_) => "kimi".to_string(),
         CodingAgent::QoderCli(_) => "qodercli".to_string(),
+        CodingAgent::Hermes(_) => "hermes".to_string(),
         CodingAgent::Pi(_) => Pi::version_command(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => return None,
@@ -1005,6 +1007,7 @@ fn cmd_overrides_for_executor(executor: &CodingAgent) -> Option<&CmdOverrides> {
         CodingAgent::KimiCode(config) => Some(&config.cmd),
         CodingAgent::QoderCli(config) => Some(&config.cmd),
         CodingAgent::Pi(config) => Some(&config.cmd),
+        CodingAgent::Hermes(config) => Some(&config.cmd),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => None,
         #[cfg(feature = "qa-mode")]
@@ -1382,7 +1385,7 @@ async fn discover_models_for_executor(
         return Ok(Some(models));
     }
 
-    if runner == BaseCodingAgent::Pi {
+    if runner == BaseCodingAgent::Pi || runner == BaseCodingAgent::Hermes {
         return match acp_result {
             Ok(_) => Ok(None),
             Err(error) => Err(format!("ACP initialize failed: {error}")),
@@ -1641,7 +1644,8 @@ fn reasoning_capability_for_runner(
         BaseCodingAgent::Amp
         | BaseCodingAgent::CursorAgent
         | BaseCodingAgent::Copilot
-        | BaseCodingAgent::Pi => None,
+        | BaseCodingAgent::Pi
+        | BaseCodingAgent::Hermes => None,
         #[cfg(feature = "qa-mode")]
         BaseCodingAgent::QaMock | BaseCodingAgent::AcpQa => None,
     }
@@ -1713,6 +1717,7 @@ fn model_name(config: &CodingAgent) -> Option<&str> {
         CodingAgent::KimiCode(config) => config.model.as_deref(),
         CodingAgent::QoderCli(config) => config.model.as_deref(),
         CodingAgent::Pi(config) => config.model.as_deref(),
+        CodingAgent::Hermes(config) => config.model.as_deref(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => None,
         _ => None,
@@ -1967,6 +1972,7 @@ mod tests {
             BaseCodingAgent::Droid,
             BaseCodingAgent::KimiCode,
             BaseCodingAgent::QoderCli,
+            BaseCodingAgent::Hermes,
         ] {
             assert_eq!(
                 runtime_dependency_requirement(runner),
@@ -3091,6 +3097,32 @@ mod tests {
             Some(AgentRuntimeReasoningCapability::Effort {
                 options: strings(["low", "high", "max"]),
             })
+        );
+    }
+
+    #[test]
+    fn hermes_is_registered_as_an_acp_runner_without_static_reasoning() {
+        assert!(
+            ExecutorConfigs::from_defaults()
+                .executors
+                .contains_key(&BaseCodingAgent::Hermes),
+            "Hermes must have a default profile"
+        );
+        assert_eq!(
+            reasoning_capability_for_runner(BaseCodingAgent::Hermes),
+            None,
+            "Hermes model and options must come from the ACP probe, not static reasoning"
+        );
+        assert_eq!(
+            runtime_dependency_requirement(BaseCodingAgent::Hermes),
+            RuntimeDependencyRequirement::None,
+            "Hermes is a native CLI without node/npm/npx dependencies"
+        );
+        assert_eq!(
+            version_command_base(&CodingAgent::Hermes(
+                executors::executors::hermes::Hermes::default()
+            )),
+            Some("hermes".to_string())
         );
     }
 }
