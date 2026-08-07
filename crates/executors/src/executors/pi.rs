@@ -37,6 +37,11 @@ pub const PI_ACP_PACKAGE: &str = "pi-acp";
 pub const PI_CODING_AGENT_PACKAGE: &str = "@earendil-works/pi-coding-agent";
 pub const PI_MCP_ADAPTER_PACKAGE: &str = "pi-mcp-adapter";
 
+#[cfg(windows)]
+const NPX_COMMAND: &str = "npx.cmd";
+#[cfg(not(windows))]
+const NPX_COMMAND: &str = "npx";
+
 pub const PI_LAUNCHER_SOURCE: &str = include_str!("pi/launcher.mjs");
 const PI_MCP_EXTENSION_SOURCE: &str = include_str!("pi/mcp_extension.mjs");
 const PI_APPROVAL_EXTENSION_SOURCE: &str = include_str!("pi/approval_extension.mjs");
@@ -284,12 +289,14 @@ pub struct Pi {
 impl Pi {
     pub fn default_command() -> String {
         format!(
-            "npx --yes --package {PI_ACP_PACKAGE}@{PI_ACP_VERSION} --package {PI_CODING_AGENT_PACKAGE}@{PI_CODING_AGENT_VERSION} --package {PI_MCP_ADAPTER_PACKAGE}@{PI_MCP_ADAPTER_VERSION} pi-acp"
+            "{NPX_COMMAND} --yes --package {PI_ACP_PACKAGE}@{PI_ACP_VERSION} --package {PI_CODING_AGENT_PACKAGE}@{PI_CODING_AGENT_VERSION} --package {PI_MCP_ADAPTER_PACKAGE}@{PI_MCP_ADAPTER_VERSION} pi-acp"
         )
     }
 
     pub fn version_command() -> String {
-        format!("npx --yes --package {PI_CODING_AGENT_PACKAGE}@{PI_CODING_AGENT_VERSION} pi")
+        format!(
+            "{NPX_COMMAND} --yes --package {PI_CODING_AGENT_PACKAGE}@{PI_CODING_AGENT_VERSION} pi"
+        )
     }
 
     #[cfg(feature = "qa-mode")]
@@ -861,10 +868,12 @@ rl.on("close", () => {
             .unwrap();
         assert_eq!(
             command.redacted_display(),
-            "npx --yes --package pi-acp@0.0.33 --package @earendil-works/pi-coding-agent@0.83.0 --package pi-mcp-adapter@2.18.0 pi-acp"
+            format!(
+                "{NPX_COMMAND} --yes --package pi-acp@0.0.33 --package @earendil-works/pi-coding-agent@0.83.0 --package pi-mcp-adapter@2.18.0 pi-acp"
+            )
         );
         let (program, args) = command.into_parts_for_test();
-        assert_eq!(program, "npx");
+        assert_eq!(program, NPX_COMMAND);
         assert_eq!(
             args,
             [
@@ -881,7 +890,7 @@ rl.on("close", () => {
         assert!(!Pi::default_command().contains("latest"));
         assert_eq!(
             Pi::version_command(),
-            "npx --yes --package @earendil-works/pi-coding-agent@0.83.0 pi"
+            format!("{NPX_COMMAND} --yes --package @earendil-works/pi-coding-agent@0.83.0 pi")
         );
         assert!(!Pi::version_command().contains("latest"));
     }
@@ -910,6 +919,90 @@ rl.on("close", () => {
         assert_eq!(
             windows_launcher_wrapper(Path::new("C:/runtime/pi-run-launcher.mjs")),
             "@echo off\r\nnode \"%~dp0pi-run-launcher.mjs\" %*\r\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pinned_command_uses_a_spawnable_npx_cmd_shim() {
+        let temp = tempfile::tempdir().expect("temporary NPX shim");
+        let shim = temp.path().join(NPX_COMMAND);
+        fs::write(&shim, "@echo off\r\nexit /b 0\r\n").expect("fake npx.cmd");
+
+        let status = std::process::Command::new(shim)
+            .status()
+            .expect("spawn npx.cmd directly");
+
+        assert!(status.success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_launcher_executes_pi_javascript_entry_without_cmd_shim() {
+        use std::process::Command;
+
+        let node = resolve_executable_path_blocking("node.exe").expect("Node.js executable");
+        let temp = tempfile::tempdir().expect("temporary NPX environment");
+        let node_modules = temp.path().join("node_modules");
+        let bin = node_modules.join(".bin");
+        let pi_package = node_modules.join(PI_CODING_AGENT_PACKAGE);
+        let mcp_package = node_modules.join(PI_MCP_ADAPTER_PACKAGE);
+        fs::create_dir_all(&bin).expect("NPX bin");
+        fs::create_dir_all(&pi_package).expect("Pi package");
+        fs::create_dir_all(&mcp_package).expect("MCP package");
+        fs::write(
+            pi_package.join("package.json"),
+            format!(r#"{{"version":"{PI_CODING_AGENT_VERSION}","bin":{{"pi":"pi.mjs"}}}}"#),
+        )
+        .expect("Pi package metadata");
+        fs::write(
+            mcp_package.join("package.json"),
+            format!(r#"{{"version":"{PI_MCP_ADAPTER_VERSION}"}}"#),
+        )
+        .expect("MCP package metadata");
+        fs::write(mcp_package.join("index.ts"), "export default () => {};").expect("MCP entry");
+        let args_output = temp.path().join("args.json");
+        let args_output_json = serde_json::to_string(&args_output).expect("serialize args path");
+        fs::write(
+            pi_package.join("pi.mjs"),
+            format!(
+                "import {{ writeFileSync }} from \"node:fs\";\nwriteFileSync({args_output_json}, JSON.stringify(process.argv.slice(2)));\n"
+            ),
+        )
+        .expect("fake Pi entry");
+        let launcher = temp.path().join("launcher.mjs");
+        let approval = temp.path().join("approval_extension.mjs");
+        fs::write(&launcher, PI_LAUNCHER_SOURCE).expect("launcher");
+        fs::write(&approval, "export default () => {};").expect("approval extension");
+        let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .expect("test PATH");
+
+        let status = Command::new(node)
+            .arg(&launcher)
+            .args(["--mode", "rpc"])
+            .env("PATH", path)
+            .env("OPENTEAMS_PI_SKILL_PATHS_JSON", "[]")
+            .env("OPENTEAMS_PI_APPROVAL_EXTENSION", &approval)
+            .env("OPENTEAMS_PI_ENABLE_MCP_EXTENSION", "0")
+            .status()
+            .expect("run launcher");
+
+        assert!(status.success());
+        let args: Vec<String> =
+            serde_json::from_slice(&fs::read(args_output).expect("captured Pi arguments"))
+                .expect("Pi argument JSON");
+        assert_eq!(
+            args,
+            [
+                "--mode",
+                "rpc",
+                "--no-skills",
+                "--no-extensions",
+                "--extension",
+                approval.to_str().expect("approval path"),
+            ]
         );
     }
 

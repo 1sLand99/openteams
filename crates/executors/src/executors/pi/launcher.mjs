@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
 const PI_PACKAGE = "@earendil-works/pi-coding-agent";
@@ -16,6 +16,23 @@ function packageVersion(packageRoot) {
   }
 }
 
+function packageBin(packageRoot, command) {
+  let metadata;
+  try {
+    metadata = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+  } catch {
+    return undefined;
+  }
+  const configured = typeof metadata?.bin === "string" ? metadata.bin : metadata?.bin?.[command];
+  if (typeof configured !== "string" || !configured) return undefined;
+  const entry = resolve(packageRoot, configured);
+  const packageRelative = relative(packageRoot, entry);
+  if (packageRelative.startsWith("..") || isAbsolute(packageRelative) || !existsSync(entry)) {
+    return undefined;
+  }
+  return entry;
+}
+
 function locatePinnedNpxEnvironment() {
   for (const entry of (process.env.PATH ?? "").split(delimiter)) {
     if (!entry || !entry.endsWith(`${delimiter === ";" ? "\\" : "/"}.bin`)) continue;
@@ -23,9 +40,11 @@ function locatePinnedNpxEnvironment() {
     const piRoot = join(nodeModules, PI_PACKAGE);
     const mcpRoot = join(nodeModules, MCP_PACKAGE);
     if (packageVersion(piRoot) !== PI_VERSION || packageVersion(mcpRoot) !== MCP_VERSION) continue;
-    const pi = join(entry, process.platform === "win32" ? "pi.cmd" : "pi");
+    const pi = process.platform === "win32"
+      ? packageBin(piRoot, "pi")
+      : join(entry, "pi");
     const mcpEntry = join(mcpRoot, "index.ts");
-    if (existsSync(pi) && existsSync(mcpEntry)) return { pi, piRoot, nodeModules };
+    if (pi && existsSync(pi) && existsSync(mcpEntry)) return { pi, piRoot, nodeModules };
   }
   throw new Error("Pinned Pi packages were not found in the current NPX environment");
 }
@@ -67,7 +86,13 @@ if (process.env.OPENTEAMS_PI_ENABLE_MCP_EXTENSION === "1") {
   args.push("--extension", requiredAbsoluteFile("OPENTEAMS_PI_MCP_EXTENSION"));
 }
 
-const child = spawn(pi, args, { env: process.env, stdio: "inherit", shell: false });
+const childProgram = process.platform === "win32" ? process.execPath : pi;
+const childArgs = process.platform === "win32" ? [pi, ...args] : args;
+const child = spawn(childProgram, childArgs, {
+  env: process.env,
+  stdio: "inherit",
+  shell: false
+});
 const acpParentPid = process.ppid;
 let orphanCleanupStarted = false;
 
