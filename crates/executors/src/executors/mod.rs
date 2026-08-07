@@ -28,7 +28,7 @@ use crate::{
     env::ExecutionEnv,
     executors::{
         amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::CursorAgent,
-        droid::Droid, gemini::Gemini, kimi::KimiCode, opencode::Opencode,
+        droid::Droid, gemini::Gemini, hermes::Hermes, kimi::KimiCode, opencode::Opencode,
         openteams_cli::OpenTeamsCli, pi::Pi, qoder::QoderCli, qwen::QwenCode,
     },
     logs::utils::patch,
@@ -47,6 +47,7 @@ pub mod copilot;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
+pub mod hermes;
 pub mod kimi;
 pub mod opencode;
 pub mod openteams_cli;
@@ -163,6 +164,7 @@ pub enum CodingAgent {
     KimiCode,
     QoderCli,
     Pi,
+    Hermes,
     #[cfg(feature = "qa-mode")]
     QaMock(QaMockExecutor),
     #[cfg(feature = "qa-mode")]
@@ -177,6 +179,7 @@ impl CodingAgent {
             Self::KimiCode(config) => config.acp_mcp_policy = policy,
             Self::QoderCli(config) => config.acp_mcp_policy = policy,
             Self::Pi(config) => config.acp_mcp_policy = policy,
+            Self::Hermes(config) => config.acp_mcp_policy = policy,
             #[cfg(feature = "qa-mode")]
             Self::AcpQa(config) => config.acp_mcp_policy = policy,
             _ => {}
@@ -261,7 +264,7 @@ impl CodingAgent {
             }
             Self::CursorAgent(_) => vec![BaseAgentCapability::SetupHelper],
             Self::Copilot(_) => vec![],
-            Self::KimiCode(_) | Self::QoderCli(_) | Self::Pi(_) => vec![
+            Self::KimiCode(_) | Self::QoderCli(_) | Self::Pi(_) | Self::Hermes(_) => vec![
                 BaseAgentCapability::SessionFork,
                 BaseAgentCapability::SetupHelper,
             ],

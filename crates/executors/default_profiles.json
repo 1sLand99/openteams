@@ -576,6 +576,11 @@
           "model": "moonshot-cn/kimi-k2.6"
         }
       }
+    },
+    "HERMES": {
+      "DEFAULT": {
+        "HERMES": {}
+      }
     }
   }
 }

@@ -154,6 +154,7 @@ fn supports_model(config: &CodingAgent) -> bool {
             | CodingAgent::QoderCli(_)
             | CodingAgent::OpenTeamsCli(_)
             | CodingAgent::Pi(_)
+            | CodingAgent::Hermes(_)
     )
 }
 
@@ -219,6 +220,11 @@ pub fn with_model(config: &CodingAgent, model: &str) -> Option<CodingAgent> {
             let mut next = base.clone();
             next.model = Some(model);
             Some(CodingAgent::Pi(next))
+        }
+        CodingAgent::Hermes(base) => {
+            let mut next = base.clone();
+            next.model = Some(model);
+            Some(CodingAgent::Hermes(next))
         }
         _ => None,
     }
@@ -510,5 +516,22 @@ mod tests {
             panic!("expected QwenCode");
         };
         assert_eq!(qwen.thinking_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn member_execution_override_sets_hermes_model_without_thinking_effort() {
+        let base = agent_from_json(serde_json::json!({ "HERMES": {} }));
+
+        assert!(supports_model(&base));
+
+        let hermes = with_member_execution_overrides(&base, Some("hermes-pro"), Some("high"), None);
+        let CodingAgent::Hermes(config) = hermes else {
+            panic!("expected Hermes config");
+        };
+        assert_eq!(config.model.as_deref(), Some("hermes-pro"));
+        assert!(
+            config.acp.is_none(),
+            "Hermes dynamic options must come from the ACP probe, not member overrides"
+        );
     }
 }
