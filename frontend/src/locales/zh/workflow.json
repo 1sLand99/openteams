@@ -76,7 +76,7 @@
   "workflow.graph.zoomIn": "放大",
   "workflow.graph.zoomOut": "缩小",
   "workflow.inspector.acceptanceHeading": "验收标准",
-  "workflow.inspector.checklistHeading": "检查清单",
+  "workflow.inspector.selfCheckHeading": "自检清单",
   "workflow.inspector.closeChat": "关闭聊天",
   "workflow.inspector.completionEvidenceHeading": "完成证据",
   "workflow.inspector.errorHeading": "错误",

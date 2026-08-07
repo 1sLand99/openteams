@@ -499,11 +499,12 @@ export type WorkflowPlanNode = { id: string, type: string, position: WorkflowNod
 
 export type WorkflowNodePosition = { x: number, y: number, };
 
-export type WorkflowNodeData = { stepType: string, agentId: string | null, title: string, instructions: string, acceptance: Array<string> | null, outputs: Array<string> | null,
+export type WorkflowNodeData = { stepType: string, agentId: string | null, title: string, instructions: string, acceptance: AcceptanceCriteria | null, outputs: Array<string> | null,
 /**
- * Verifiable checklist items the task must satisfy (task nodes only).
+ * Self-check items the executor must verify before reporting completion
+ * (task nodes only). Replaces the legacy `checklist` field.
  */
-checklist: Array<string> | null,
+selfCheck: Array<string> | null,
 /**
  * Verification/test commands or methods used to prove the task is done
  * (task nodes only).
@@ -513,6 +514,8 @@ verificationCommands: Array<string> | null,
  * Evidence the task must produce on completion (task nodes only).
  */
 completionEvidence: Array<string> | null, interruptible: boolean, maxRetry: number | null, status: string | null, loopKey: string | null, reviewScope: Array<string> | null, };
+
+export type AcceptanceCriteria = { required: Array<string>, partial: Array<string>, recommended: Array<string>, };
 
 export type WorkflowLoopDef = { loopKey: string, memberSteps: Array<string>, reviewStep: string, maxRetry: number | null, userReviewRequired: boolean | null, };
 
@@ -524,7 +527,12 @@ export type WorkflowPlanPolicies = { approval_required_on: Array<string> | null,
 
 export type CompiledGraph = { plan_hash: string, compiled_graph_hash: string, steps: Array<CompiledStep>, edges: Array<CompiledEdge>, ready_step_keys: Array<string>, loops: Array<CompiledLoopDef> | null, };
 
-export type CompiledStep = { step_key: string, step_type: WorkflowStepType, title: string, instructions: string, assigned_agent_id: string | null, acceptance: Array<string> | null, outputs: Array<string> | null, interruptible: boolean, max_retry: number, display_order: number, loop_key: string | null, review_scope: Array<string> | null, };
+export type CompiledStep = { step_key: string, step_type: WorkflowStepType, title: string, instructions: string, assigned_agent_id: string | null,
+/**
+ * Tiered acceptance criteria. Legacy compiled graphs stored this as a
+ * flat string array; deserialization maps that form into `required`.
+ */
+acceptance: AcceptanceCriteria | null, outputs: Array<string> | null, interruptible: boolean, max_retry: number, display_order: number, loop_key: string | null, review_scope: Array<string> | null, };
 
 export type CompiledEdge = { edge_id: string, from_step_key: string, to_step_key: string, edge_kind: WorkflowEdgeKind, };
 

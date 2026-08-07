@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use db::models::workflow_types::{MAX_WORKFLOW_RETRY, WorkflowPlanJson};
+use db::models::workflow_types::{AcceptanceCriteria, MAX_WORKFLOW_RETRY, WorkflowPlanJson};
 
 /// 校验错误，包含人类可读的中文错误信息
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -235,16 +235,29 @@ pub fn validate_structure(plan: &WorkflowPlanJson) -> ValidationResult {
         }
     }
 
-    // task 节点必须建立可验证契约：acceptance、outputs、checklist、
+    // task 节点必须建立可验证契约：分级验收（required 级）、outputs、selfCheck、
     // 验证命令/方法、完成证据均不能为空；review/result 节点不适用该规则
     for node in &plan.nodes {
         if node.data.step_type != "task" {
             continue;
         }
+        if !node
+            .data
+            .acceptance
+            .as_ref()
+            .is_some_and(AcceptanceCriteria::has_non_empty_required)
+        {
+            errors.push(ValidationError {
+                field: format!("nodes[id={}].data.acceptance.required", node.id),
+                message: format!(
+                    "任务节点 '{}' 必须提供非空的验收标准（required 级至少一条有效条目）",
+                    node.id
+                ),
+            });
+        }
         let required_lists = [
-            ("acceptance", &node.data.acceptance, "验收标准"),
             ("outputs", &node.data.outputs, "产出物"),
-            ("checklist", &node.data.checklist, "检查清单"),
+            ("selfCheck", &node.data.self_check, "自检清单"),
             (
                 "verificationCommands",
                 &node.data.verification_commands,
@@ -266,6 +279,36 @@ pub fn validate_structure(plan: &WorkflowPlanJson) -> ValidationResult {
                     ),
                 });
             }
+        }
+    }
+
+    // 带 reviewScope 的 review 节点必须提供非空 acceptance（required 级），
+    // 作为 Loop 整体验收标准
+    for node in &plan.nodes {
+        if node.data.step_type != "review" {
+            continue;
+        }
+        let has_review_scope = node
+            .data
+            .review_scope
+            .as_ref()
+            .is_some_and(|scope| scope.iter().any(|item| !item.trim().is_empty()));
+        if !has_review_scope {
+            continue;
+        }
+        if !node
+            .data
+            .acceptance
+            .as_ref()
+            .is_some_and(AcceptanceCriteria::has_non_empty_required)
+        {
+            errors.push(ValidationError {
+                field: format!("nodes[id={}].data.acceptance.required", node.id),
+                message: format!(
+                    "带 reviewScope 的审核节点 '{}' 必须提供非空的验收标准（required 级至少一条有效条目），作为 Loop 整体验收标准",
+                    node.id
+                ),
+            });
         }
     }
 
@@ -545,9 +588,12 @@ mod tests {
                         agent_id: Some("agent-1".into()),
                         title: "任务 1".into(),
                         instructions: "执行任务 1".into(),
-                        acceptance: Some(vec!["功能按预期工作".into()]),
+                        acceptance: Some(AcceptanceCriteria {
+                            required: vec!["功能按预期工作".into()],
+                            ..Default::default()
+                        }),
                         outputs: Some(vec!["src/task1.rs".into()]),
-                        checklist: Some(vec!["实现核心逻辑".into()]),
+                        self_check: Some(vec!["实现核心逻辑".into()]),
                         verification_commands: Some(vec!["cargo test task1".into()]),
                         completion_evidence: Some(vec!["测试通过输出".into()]),
                         interruptible: true,
@@ -568,7 +614,7 @@ mod tests {
                         instructions: "汇总结果".into(),
                         acceptance: None,
                         outputs: None,
-                        checklist: None,
+                        self_check: None,
                         verification_commands: None,
                         completion_evidence: None,
                         interruptible: true,
@@ -794,7 +840,7 @@ mod tests {
                 instructions: "不应存在".into(),
                 acceptance: None,
                 outputs: None,
-                checklist: None,
+                self_check: None,
                 verification_commands: None,
                 completion_evidence: None,
                 interruptible: true,
@@ -822,7 +868,7 @@ mod tests {
                 instructions: "不应被 result 后继".into(),
                 acceptance: None,
                 outputs: None,
-                checklist: None,
+                self_check: None,
                 verification_commands: None,
                 completion_evidence: None,
                 interruptible: true,
@@ -900,15 +946,15 @@ mod tests {
         let task = &mut plan.nodes[0].data;
         task.acceptance = None;
         task.outputs = Some(vec!["   ".into()]);
-        task.checklist = None;
+        task.self_check = None;
         task.verification_commands = Some(vec![]);
         task.completion_evidence = None;
         let result = validate_structure(&plan);
         assert!(!result.is_valid);
         for field in [
-            "acceptance",
+            "acceptance.required",
             "outputs",
-            "checklist",
+            "selfCheck",
             "verificationCommands",
             "completionEvidence",
         ] {
@@ -940,7 +986,7 @@ mod tests {
                     instructions: "检查任务 1 的产出".into(),
                     acceptance: None,
                     outputs: None,
-                    checklist: None,
+                    self_check: None,
                     verification_commands: None,
                     completion_evidence: None,
                     interruptible: true,
@@ -953,5 +999,111 @@ mod tests {
         );
         let result = validate_structure(&plan);
         assert!(result.is_valid, "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn test_review_node_with_review_scope_requires_acceptance() {
+        let mut plan = make_valid_plan();
+        plan.nodes.insert(
+            1,
+            WorkflowPlanNode {
+                id: "review_1".into(),
+                node_type: "workflowStep".into(),
+                position: WorkflowNodePosition { x: 0.0, y: 70.0 },
+                data: WorkflowNodeData {
+                    step_type: "review".into(),
+                    agent_id: Some("agent-2".into()),
+                    title: "闭环评审".into(),
+                    instructions: "整体审核任务 1".into(),
+                    acceptance: None,
+                    outputs: None,
+                    self_check: None,
+                    verification_commands: None,
+                    completion_evidence: None,
+                    interruptible: true,
+                    max_retry: None,
+                    status: None,
+                    loop_key: None,
+                    review_scope: Some(vec!["task_1".into()]),
+                },
+            },
+        );
+        let result = validate_structure(&plan);
+        assert!(!result.is_valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| { e.field == "nodes[id=review_1].data.acceptance.required" })
+        );
+
+        // 提供 required 级验收标准后通过
+        plan.nodes[1].data.acceptance = Some(AcceptanceCriteria {
+            required: vec!["cargo test 通过".into()],
+            ..Default::default()
+        });
+        let result = validate_structure(&plan);
+        assert!(result.is_valid, "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn test_legacy_plan_fields_deserialize_into_new_shape() {
+        // 旧计划：acceptance 为字符串数组、含 checklist 字段
+        let legacy = r#"{
+            "version": "1",
+            "title": "旧计划",
+            "goal": "验证兼容读取",
+            "agents": { "lead": "agent-1", "available": ["agent-1"] },
+            "nodes": [
+                {
+                    "id": "task_1",
+                    "type": "workflowStep",
+                    "data": {
+                        "stepType": "task",
+                        "agentId": "agent-1",
+                        "title": "任务 1",
+                        "instructions": "执行任务 1",
+                        "acceptance": ["功能按预期工作", "测试通过"],
+                        "outputs": ["src/task1.rs"],
+                        "checklist": ["实现核心逻辑"],
+                        "verificationCommands": ["cargo test task1"],
+                        "completionEvidence": ["测试通过输出"]
+                    }
+                },
+                {
+                    "id": "result",
+                    "type": "workflowStep",
+                    "data": {
+                        "stepType": "result",
+                        "title": "最终结果",
+                        "instructions": "汇总结果"
+                    }
+                }
+            ],
+            "edges": [
+                { "id": "e1", "source": "task_1", "target": "result" }
+            ]
+        }"#;
+        let plan: WorkflowPlanJson = serde_json::from_str(legacy).expect("legacy plan parses");
+        let task = &plan.nodes[0].data;
+        // 旧数组 acceptance 映射为 required 级
+        assert_eq!(
+            task.acceptance,
+            Some(AcceptanceCriteria {
+                required: vec!["功能按预期工作".to_string(), "测试通过".to_string()],
+                ..Default::default()
+            })
+        );
+        // 旧 checklist 并入 self_check
+        assert_eq!(task.self_check, Some(vec!["实现核心逻辑".to_string()]));
+        // 旧计划通过新 validator
+        let result = validate_structure(&plan);
+        assert!(result.is_valid, "errors: {:?}", result.errors);
+        // 新写入不再包含 checklist，且 acceptance 为分级对象
+        let serialized = serde_json::to_value(&plan).expect("plan serializes");
+        let node_data = &serialized["nodes"][0]["data"];
+        assert!(node_data.get("checklist").is_none());
+        assert!(node_data["acceptance"].is_object());
+        assert!(node_data["acceptance"]["required"].is_array());
     }
 }

@@ -85,6 +85,10 @@ pub enum WorkflowStepProtocolMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkflowAcceptanceResult {
     pub criterion: String,
+    /// Criterion tier declared by the plan. Legacy stored results without a
+    /// level deserialize as `Required`.
+    #[serde(default)]
+    pub level: AcceptanceCriterionLevel,
     pub verdict: WorkflowAcceptanceVerdict,
     pub evidence: String,
 }
@@ -123,7 +127,7 @@ pub struct WorkflowVerificationResult {
     pub evidence: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowResultOverallStatus {
     Completed,
@@ -173,6 +177,98 @@ pub fn extract_json_payload(raw_output: &str) -> Option<String> {
     let start = trimmed.find('{')?;
     let end = trimmed.rfind('}')?;
     (start < end).then(|| trimmed[start..=end].to_string())
+}
+
+/// Extracts the LAST balanced JSON object in the output. Plan generation uses
+/// two-phase output (Markdown draft followed by the final plan JSON), so the
+/// final object is the one that matters. Drafts must not contain complete
+/// JSON objects; if they do, extraction still yields the last one.
+pub fn extract_last_json_payload(raw_output: &str) -> Option<String> {
+    let trimmed = raw_output.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        return Some(trimmed.to_string());
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut last_span: Option<(usize, usize)> = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'{' {
+            if let Some(end) = balanced_object_end(trimmed, index) {
+                last_span = Some((index, end));
+                index = end + 1;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    last_span.map(|(start, end)| trimmed[start..=end].to_string())
+}
+
+fn balanced_object_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parses a two-phase plan generation output: takes the last complete JSON
+/// object and deserializes it into the plan. Structural validation and
+/// compilation happen downstream (validator + compiler).
+pub fn parse_plan_output(raw_output: &str) -> Result<WorkflowPlanJson, WorkflowRuntimeError> {
+    let payload = extract_last_json_payload(raw_output).ok_or_else(|| {
+        WorkflowRuntimeError::Validation(
+            "计划输出中未找到完整 JSON 对象；两阶段输出的草案部分不得包含完整 JSON 对象"
+                .to_string(),
+        )
+    })?;
+    Ok(serde_json::from_str(&payload)?)
+}
+
+fn acceptance_results_schema_def() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "object",
+            "required": ["criterion", "level", "verdict", "evidence"],
+            "additionalProperties": false,
+            "properties": {
+                "criterion": { "type": "string", "minLength": 1 },
+                "level": { "enum": ["required", "partial", "recommended"] },
+                "verdict": { "enum": ["passed", "failed", "not_applicable"] },
+                "evidence": { "type": "string", "minLength": 1 }
+            }
+        }
+    })
 }
 
 pub fn workflow_step_protocol_json_schema(
@@ -311,20 +407,7 @@ pub fn workflow_step_protocol_json_schema(
     serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$defs": {
-            "acceptance_results": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "required": ["criterion", "verdict", "evidence"],
-                    "additionalProperties": false,
-                    "properties": {
-                        "criterion": { "type": "string", "minLength": 1 },
-                        "verdict": { "enum": ["passed", "failed", "not_applicable"] },
-                        "evidence": { "type": "string", "minLength": 1 }
-                    }
-                }
-            },
+            "acceptance_results": acceptance_results_schema_def(),
             "evidence": {
                 "type": "array",
                 "minItems": 1,
@@ -378,6 +461,18 @@ pub fn workflow_step_protocol_json_schema_for_step(
             .and_then(|value| value.get("enum"))
             .is_some()
     });
+    // Drop the acceptance_results $def when no remaining variant references it
+    // (e.g. task steps), so each scenario's schema only carries what it uses.
+    let references_acceptance = variants.iter().any(|variant| {
+        serde_json::to_string(variant)
+            .map(|text| text.contains("#/$defs/acceptance_results"))
+            .unwrap_or(false)
+    });
+    if !references_acceptance {
+        if let Some(defs) = schema.get_mut("$defs").and_then(|value| value.as_object_mut()) {
+            defs.remove("acceptance_results");
+        }
+    }
     serde_json::to_string_pretty(&schema).unwrap_or(base)
 }
 
@@ -399,20 +494,7 @@ pub fn workflow_review_protocol_json_schema(execution_id: Uuid, step_key: &str) 
             "unfinished_items": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] }
         },
         "$defs": {
-            "acceptance_results": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "required": ["criterion", "verdict", "evidence"],
-                    "additionalProperties": false,
-                    "properties": {
-                        "criterion": { "type": "string", "minLength": 1 },
-                        "verdict": { "enum": ["passed", "failed", "not_applicable"] },
-                        "evidence": { "type": "string", "minLength": 1 }
-                    }
-                }
-            },
+            "acceptance_results": acceptance_results_schema_def(),
             "evidence": {
                 "type": "array",
                 "minItems": 1,
@@ -551,6 +633,7 @@ pub fn parse_step_protocol_output(
             summary,
             acceptance_results,
             evidence,
+            risks,
             unfinished_items,
             ..
         } => validate_structured_review_fields(
@@ -558,6 +641,7 @@ pub fn parse_step_protocol_output(
             acceptance_results,
             evidence,
             matches!(verdict, ReviewVerdict::Approved),
+            risks,
             unfinished_items,
         )?,
         WorkflowStepProtocolMessage::ResultReviewResult {
@@ -582,11 +666,37 @@ pub fn parse_step_protocol_output(
     Ok(message)
 }
 
+/// Dedicated task parse entry (design §12.1): accepts `final_result` plus the
+/// interaction/error variants, and rejects review/result success types at
+/// deserialization time instead of filtering a shared union afterwards.
+pub fn parse_task_protocol_output(
+    execution_id: Uuid,
+    step_key: &str,
+    raw_output: &str,
+) -> Result<WorkflowStepProtocolMessage, WorkflowRuntimeError> {
+    let message = parse_step_protocol_output(execution_id, step_key, raw_output)?;
+    let valid_type = matches!(
+        &message,
+        WorkflowStepProtocolMessage::FinalResult { .. }
+            | WorkflowStepProtocolMessage::Error { .. }
+            | WorkflowStepProtocolMessage::ApprovalRequest { .. }
+            | WorkflowStepProtocolMessage::PermissionRequest { .. }
+            | WorkflowStepProtocolMessage::ContinueConfirmation { .. }
+            | WorkflowStepProtocolMessage::InputRequest { .. }
+    );
+    if !valid_type {
+        return Err(WorkflowRuntimeError::Validation(
+            "task step returned an incompatible success protocol message".to_string(),
+        ));
+    }
+    Ok(message)
+}
+
 pub fn parse_step_protocol_output_for_step(
     execution_id: Uuid,
     step_key: &str,
     step_type: &WorkflowStepType,
-    declared_acceptance: &[String],
+    declared_acceptance: &[(AcceptanceCriterionLevel, String)],
     raw_output: &str,
 ) -> Result<WorkflowStepProtocolMessage, WorkflowRuntimeError> {
     let message = parse_step_protocol_output(execution_id, step_key, raw_output)?;
@@ -685,6 +795,7 @@ fn validate_structured_review_fields(
     acceptance_results: &[WorkflowAcceptanceResult],
     evidence: &[String],
     approved: bool,
+    risks: &[String],
     unfinished_items: &[String],
 ) -> Result<(), WorkflowRuntimeError> {
     if summary.trim().is_empty() {
@@ -707,17 +818,40 @@ fn validate_structured_review_fields(
             "structured review evidence 不能为空".to_string(),
         ));
     }
-    if unfinished_items.iter().any(|item| item.trim().is_empty()) {
+    if unfinished_items.iter().any(|item| item.trim().is_empty())
+        || risks.iter().any(|item| item.trim().is_empty())
+    {
         return Err(WorkflowRuntimeError::Validation(
-            "structured review unfinished_items may not contain blank entries".to_string(),
+            "structured review risks/unfinished_items may not contain blank entries".to_string(),
         ));
     }
     let has_failed = acceptance_results
         .iter()
         .any(|item| matches!(item.verdict, WorkflowAcceptanceVerdict::Failed));
-    if approved && (has_failed || !unfinished_items.is_empty()) {
+    let has_required_failed = acceptance_results.iter().any(|item| {
+        matches!(item.verdict, WorkflowAcceptanceVerdict::Failed)
+            && item.level == AcceptanceCriterionLevel::Required
+    });
+    let has_partial_failed = acceptance_results.iter().any(|item| {
+        matches!(item.verdict, WorkflowAcceptanceVerdict::Failed)
+            && item.level == AcceptanceCriterionLevel::Partial
+    });
+    // approved：required 级必须全部通过；partial 级未通过必须在 risks 中给出外部归因；
+    // recommended 级不影响结论；不允许遗留未完成项。
+    if approved && has_required_failed {
         return Err(WorkflowRuntimeError::Validation(
-            "approved review cannot contain failed criteria or unfinished items".to_string(),
+            "approved review cannot contain failed required criteria".to_string(),
+        ));
+    }
+    if approved && has_partial_failed && risks.is_empty() {
+        return Err(WorkflowRuntimeError::Validation(
+            "approved review with failed partial criteria must record the external cause in risks"
+                .to_string(),
+        ));
+    }
+    if approved && !unfinished_items.is_empty() {
+        return Err(WorkflowRuntimeError::Validation(
+            "approved review cannot contain unfinished items".to_string(),
         ));
     }
     if !approved && !has_failed && unfinished_items.is_empty() {
@@ -737,10 +871,6 @@ fn validate_structured_result_fields(
     unfinished_items: &[String],
 ) -> Result<(), WorkflowRuntimeError> {
     if summary.trim().is_empty()
-        || acceptance_results.is_empty()
-        || acceptance_results.iter().any(|item| {
-            item.criterion.trim().is_empty() || item.evidence.trim().is_empty()
-        })
         || evidence.is_empty()
         || evidence.iter().any(|item| item.trim().is_empty())
     {
@@ -748,13 +878,26 @@ fn validate_structured_result_fields(
             "structured result fields are invalid".to_string(),
         ));
     }
+    if acceptance_results
+        .iter()
+        .any(|item| item.criterion.trim().is_empty() || item.evidence.trim().is_empty())
+    {
+        return Err(WorkflowRuntimeError::Validation(
+            "structured result acceptance_results are invalid".to_string(),
+        ));
+    }
     let has_failed = acceptance_results
         .iter()
         .any(|item| matches!(item.verdict, WorkflowAcceptanceVerdict::Failed));
+    let has_required_failed = acceptance_results.iter().any(|item| {
+        matches!(item.verdict, WorkflowAcceptanceVerdict::Failed)
+            && item.level == AcceptanceCriterionLevel::Required
+    });
     let completed = matches!(overall_status, WorkflowResultOverallStatus::Completed);
-    if completed && (has_failed || !unfinished_items.is_empty()) {
+    if completed && (has_required_failed || !unfinished_items.is_empty()) {
         return Err(WorkflowRuntimeError::Validation(
-            "overall_status=completed cannot contain failed or unfinished work".to_string(),
+            "overall_status=completed cannot contain failed required criteria or unfinished work"
+                .to_string(),
         ));
     }
     if completed && !risks.is_empty() {
@@ -792,14 +935,14 @@ fn validate_structured_result_fields(
 }
 
 fn validate_acceptance_coverage(
-    declared_acceptance: &[String],
+    declared_acceptance: &[(AcceptanceCriterionLevel, String)],
     results: &[WorkflowAcceptanceResult],
 ) -> Result<(), WorkflowRuntimeError> {
     let normalize = |value: &str| value.split_whitespace().collect::<Vec<_>>().join(" ");
     let declared = declared_acceptance
         .iter()
-        .map(|item| normalize(item))
-        .filter(|item| !item.is_empty())
+        .map(|(level, item)| (*level, normalize(item)))
+        .filter(|(_, item)| !item.is_empty())
         .collect::<Vec<_>>();
     if !declared.is_empty() && results.len() != declared.len() {
         return Err(WorkflowRuntimeError::Validation(format!(
@@ -810,9 +953,12 @@ fn validate_acceptance_coverage(
     }
     let normalized_results = results
         .iter()
-        .map(|result| normalize(&result.criterion))
+        .map(|result| (result.level, normalize(&result.criterion)))
         .collect::<Vec<_>>();
-    if normalized_results.iter().any(|criterion| criterion.is_empty()) {
+    if normalized_results
+        .iter()
+        .any(|(_, criterion)| criterion.is_empty())
+    {
         return Err(WorkflowRuntimeError::Validation(
             "acceptance result criterion may not be blank".to_string(),
         ));
@@ -826,20 +972,21 @@ fn validate_acceptance_coverage(
     if !declared.is_empty()
         && normalized_results
             .iter()
-            .any(|criterion| !declared.contains(criterion))
+            .any(|item| !declared.contains(item))
     {
         return Err(WorkflowRuntimeError::Validation(
-            "acceptance results contain an undeclared criterion".to_string(),
+            "acceptance results contain an undeclared criterion or wrong level".to_string(),
         ));
     }
     for criterion in declared {
-        let count = results
+        let count = normalized_results
             .iter()
-            .filter(|result| normalize(&result.criterion) == criterion)
+            .filter(|item| *item == &criterion)
             .count();
         if count != 1 {
             return Err(WorkflowRuntimeError::Validation(format!(
-                "declared acceptance criterion must be covered exactly once: {criterion}"
+                "declared acceptance criterion must be covered exactly once: {}",
+                criterion.1
             )));
         }
     }
@@ -849,7 +996,7 @@ fn validate_acceptance_coverage(
 pub fn parse_review_protocol_output(
     execution_id: Uuid,
     step_key: &str,
-    declared_acceptance: &[String],
+    declared_acceptance: &[(AcceptanceCriterionLevel, String)],
     raw_output: &str,
 ) -> Result<WorkflowReviewProtocolMessage, WorkflowRuntimeError> {
     tracing::debug!(
@@ -872,6 +1019,7 @@ pub fn parse_review_protocol_output(
             verdict,
             acceptance_results,
             evidence,
+            risks,
             unfinished_items,
             ..
         } => {
@@ -897,6 +1045,7 @@ pub fn parse_review_protocol_output(
                 acceptance_results,
                 evidence,
                 matches!(verdict, ReviewVerdict::Approved),
+                risks,
                 unfinished_items,
             )?;
             validate_acceptance_coverage(declared_acceptance, acceptance_results)?;

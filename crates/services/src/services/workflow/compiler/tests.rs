@@ -72,7 +72,7 @@ mod tests {
                 {
                     "id": "review", "type": "workflowStep",
                     "position": { "x": 400, "y": 0 },
-                    "data": { "stepType": "review", "title": "审核", "instructions": "审核回路结果", "reviewScope": ["draft", "revise"], "maxRetry": 2 }
+                    "data": { "stepType": "review", "title": "审核", "instructions": "审核回路结果", "acceptance": { "required": ["回路验收通过"] }, "reviewScope": ["draft", "revise"], "maxRetry": 2 }
                 },
                 {
                     "id": "result", "type": "workflowStep",
@@ -363,8 +363,8 @@ mod tests {
             "agents": { "lead": "lead-agent", "available": ["agent-1", "agent-2"] },
             "nodes": [
                 { "id": "a1", "type": "workflowStep", "position": { "x": 0, "y": 0 }, "data": task_data("agent-1", "A1", "A1") },
-                { "id": "a_review", "type": "workflowStep", "position": { "x": 0, "y": 100 }, "data": { "stepType": "review", "title": "A Review", "instructions": "review", "reviewScope": ["a1"] } },
-                { "id": "b_review", "type": "workflowStep", "position": { "x": 200, "y": 100 }, "data": { "stepType": "review", "title": "B Review", "instructions": "review", "reviewScope": ["a1"] } },
+                { "id": "a_review", "type": "workflowStep", "position": { "x": 0, "y": 100 }, "data": { "stepType": "review", "title": "A Review", "instructions": "review", "acceptance": { "required": ["A 回路验收通过"] }, "reviewScope": ["a1"] } },
+                { "id": "b_review", "type": "workflowStep", "position": { "x": 200, "y": 100 }, "data": { "stepType": "review", "title": "B Review", "instructions": "review", "acceptance": { "required": ["B 回路验收通过"] }, "reviewScope": ["a1"] } },
                 { "id": "result", "type": "workflowStep", "position": { "x": 400, "y": 50 }, "data": { "stepType": "result", "title": "Result", "instructions": "汇总" } }
             ],
             "edges": [
@@ -427,7 +427,7 @@ mod tests {
                 { "id": "draft", "type": "workflowStep", "position": { "x": 0, "y": 0 }, "data": task_data("agent-1", "Draft", "Draft") },
                 { "id": "revise", "type": "workflowStep", "position": { "x": 200, "y": 0 }, "data": task_data("agent-2", "Revise", "Revise") },
                 { "id": "side", "type": "workflowStep", "position": { "x": 200, "y": 100 }, "data": task_data("agent-2", "Side", "Side") },
-                { "id": "review", "type": "workflowStep", "position": { "x": 400, "y": 0 }, "data": { "stepType": "review", "title": "Review", "instructions": "Review", "reviewScope": ["draft", "draft", "missing", "review", "side"] } },
+                { "id": "review", "type": "workflowStep", "position": { "x": 400, "y": 0 }, "data": { "stepType": "review", "title": "Review", "instructions": "Review", "acceptance": { "required": ["回路验收通过"] }, "reviewScope": ["draft", "draft", "missing", "review", "side"] } },
                 { "id": "result", "type": "workflowStep", "position": { "x": 600, "y": 0 }, "data": { "stepType": "result", "title": "Result", "instructions": "Result" } }
             ],
             "edges": [

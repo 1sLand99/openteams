@@ -76,7 +76,7 @@
   "workflow.graph.zoomIn": "Acercar",
   "workflow.graph.zoomOut": "Alejar",
   "workflow.inspector.acceptanceHeading": "Criterios de aceptación",
-  "workflow.inspector.checklistHeading": "Lista de verificación",
+  "workflow.inspector.selfCheckHeading": "Autoverificación",
   "workflow.inspector.closeChat": "Close Chat",
   "workflow.inspector.completionEvidenceHeading": "Evidencia de finalización",
   "workflow.inspector.errorHeading": "Error",

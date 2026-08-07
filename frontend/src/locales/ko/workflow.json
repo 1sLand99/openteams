@@ -76,7 +76,7 @@
   "workflow.graph.zoomIn": "확대",
   "workflow.graph.zoomOut": "축소",
   "workflow.inspector.acceptanceHeading": "승인 기준",
-  "workflow.inspector.checklistHeading": "체크리스트",
+  "workflow.inspector.selfCheckHeading": "자기 점검",
   "workflow.inspector.closeChat": "Close Chat",
   "workflow.inspector.completionEvidenceHeading": "완료 증거",
   "workflow.inspector.errorHeading": "오류",

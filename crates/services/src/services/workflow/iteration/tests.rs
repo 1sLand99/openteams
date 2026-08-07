@@ -174,28 +174,23 @@ mod tests {
             "You MUST write human-readable JSON string values in English.",
         );
 
-        assert!(prompt.contains("Workflow Plan Generation"));
-        assert!(prompt.contains("workflow iteration round 2"));
-        assert!(prompt.contains("Iteration request: user rejected the previous round"));
-        assert!(prompt.contains("requested a revised plan for round 2"));
+        assert!(prompt.contains("# 根据用户反馈重新生成工作流计划"));
+        assert!(prompt.contains("## 输出方式（两阶段）"));
         assert!(prompt.contains("Ship a stable workflow"));
         assert!(prompt.contains("Round 1 completed without tests"));
         assert!(prompt.contains("- what_wrong: Missing tests"));
         assert!(prompt.contains("- expected: Add regression coverage"));
-        assert!(prompt.contains("Available agents JSON"));
         assert!(prompt.contains("lead-session-agent"));
         assert!(prompt.contains("worker-session-agent"));
         assert!(prompt.contains("writing-plans"));
         assert!(prompt.contains("code-guidelines"));
-        assert!(prompt.contains("Return exactly one workflow plan JSON object"));
-        assert!(prompt.contains("`globals.default_retry` and optional node `maxRetry`"));
-        assert!(prompt.contains("Use `3` as the default"));
-        assert!(prompt.contains("defaults to 3"));
-        assert!(prompt.contains("Do not output top-level `policies` or `loops`"));
-        assert!(prompt.contains("without a non-empty `reviewScope` is one independent review step"));
-        assert!(!prompt.contains("\"kind\": \"hard | soft\""));
-        assert!(!prompt.contains("\"policies\": {"));
-        assert!(prompt.contains("Final instruction: return the workflow plan JSON object only."));
+        assert!(prompt.contains("## 编译规则"));
+        assert!(prompt.contains("## 节点字段说明"));
+        assert!(prompt.contains("## 输出 JSON Schema"));
+        assert!(prompt.contains("## 上一版计划"));
+        assert!(!prompt.contains("openteams_untrusted_data"));
+        assert!(!prompt.contains("Data Boundary"));
+        assert!(prompt.trim_end().ends_with("先以 Markdown 简要说明调整内容，再在末尾输出一个匹配 Schema 的完整 JSON 对象。"));
     }
 
     #[test]
@@ -211,9 +206,12 @@ mod tests {
                     agent_id: Some("worker-session-agent".to_string()),
                     title: "Draft".to_string(),
                     instructions: "Draft the feature".to_string(),
-                    acceptance: Some(vec!["Draft accepted".to_string()]),
+                    acceptance: Some(db::models::workflow_types::AcceptanceCriteria {
+                        required: vec!["Draft accepted".to_string()],
+                        ..Default::default()
+                    }),
                     outputs: Some(vec!["out/draft.md".to_string()]),
-                    checklist: Some(vec!["Draft written".to_string()]),
+                    self_check: Some(vec!["Draft written".to_string()]),
                     verification_commands: Some(vec!["cargo test draft".to_string()]),
                     completion_evidence: Some(vec!["test output".to_string()]),
                     interruptible: true,
@@ -234,7 +232,7 @@ mod tests {
                     instructions: "Summarize".to_string(),
                     acceptance: None,
                     outputs: None,
-                    checklist: None,
+                    self_check: None,
                     verification_commands: None,
                     completion_evidence: None,
                     interruptible: true,
@@ -265,7 +263,7 @@ mod tests {
             "You MUST write human-readable JSON string values in English.",
         );
 
-        assert!(prompt.contains("### Previous Round Workflow Plan JSON"));
+        assert!(prompt.contains("## 上一版计划"));
         // Full previous plan content must be present: node ids, edges, and
         // the original acceptance/outputs contract fields.
         assert!(prompt.contains("\"id\": \"draft\""));
@@ -273,7 +271,7 @@ mod tests {
         assert!(prompt.contains("Draft accepted"));
         assert!(prompt.contains("out/draft.md"));
         assert!(prompt.contains("cargo test draft"));
-        assert!(prompt.contains("Preserve existing node ids, edge ids, and edge structure"));
-        assert!(prompt.contains("Do not discard completed work"));
+        assert!(prompt.contains("保留用户未要求变更的节点 ID"));
+        assert!(prompt.contains("## 最新用户反馈"));
     }
 }
