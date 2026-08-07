@@ -212,7 +212,7 @@ const isHiddenConfigField = (
     (fieldKey === "variant" || fieldKey === "agent"));
 
 const isAcpRunner = (runner: BaseCodingAgent): boolean =>
-  runner === ("HERMES" as BaseCodingAgent) ||
+  runner === "HERMES" ||
   runner === "GEMINI" ||
   runner === "QWEN_CODE" ||
   runner === "KIMI_CODE" ||
