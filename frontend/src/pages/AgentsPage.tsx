@@ -56,6 +56,7 @@ import copilotSchema from "../../../shared/schemas/copilot.json";
 import cursorAgentSchema from "../../../shared/schemas/cursor_agent.json";
 import droidSchema from "../../../shared/schemas/droid.json";
 import geminiSchema from "../../../shared/schemas/gemini.json";
+import hermesSchema from "../../../shared/schemas/hermes.json";
 import kimiCodeSchema from "../../../shared/schemas/kimi_code.json";
 import openTeamsCliSchema from "../../../shared/schemas/open_teams_cli.json";
 import opencodeSchema from "../../../shared/schemas/opencode.json";
@@ -178,6 +179,7 @@ const agentConfigSchemas: Record<BaseCodingAgent, AgentJsonSchema> = {
   CURSOR_AGENT: cursorAgentSchema,
   DROID: droidSchema,
   GEMINI: geminiSchema,
+  HERMES: hermesSchema,
   KIMI_CODE: kimiCodeSchema,
   OPENCODE: opencodeSchema,
   OPEN_TEAMS_CLI: openTeamsCliSchema,

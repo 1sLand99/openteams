@@ -126,6 +126,11 @@ assert.match(
 assert.match(source, /PI: piSchema,/u);
 assert.match(
   source,
+  /import hermesSchema from "..\/..\/..\/shared\/schemas\/hermes\.json";/u,
+);
+assert.match(source, /HERMES: hermesSchema,/u);
+assert.match(
+  source,
   /HERMES: \{[\s\S]*?title: "Hermes"/u,
 );
 assert.match(
