@@ -51,6 +51,7 @@ export const normalizeRunnerType = (
     "CLAUDE_CODE",
     "AMP",
     "GEMINI",
+    "HERMES",
     "CODEX",
     "OPENCODE",
     "OPEN_TEAMS_CLI",
@@ -75,6 +76,7 @@ export const normalizeRunnerType = (
  * and should be shown immediately without a loading placeholder.
  */
 export const runnerSupportsAcp = (runnerType: BaseCodingAgent): boolean =>
+  runnerType === "HERMES" ||
   runnerType === "GEMINI" ||
   runnerType === "QWEN_CODE" ||
   runnerType === "KIMI_CODE" ||

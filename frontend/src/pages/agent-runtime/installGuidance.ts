@@ -128,6 +128,18 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
       authCommands: ["copilot"],
       authFollowUpCommand: "/login",
     },
+    HERMES: {
+      requiresNode: false,
+      requiresNpm: false,
+      requiresNpx: false,
+      documentationUrl: "https://github.com/NousResearch/hermes-agent",
+      windowsSupport: "wsl_only",
+      installCommands: {
+        posix: ["pip install hermes-agent"],
+        windows: null,
+      },
+      authCommands: null,
+    },
     GEMINI: {
       requiresNode: true,
       requiresNpm: true,

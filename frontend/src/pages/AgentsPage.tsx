@@ -124,6 +124,7 @@ const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
     logoClassName: "h-8 w-8",
   },
   GEMINI: { title: "Google Gemini", path: brandIconPaths.gemini },
+  HERMES: { title: "Hermes" },
   KIMI_CODE: { title: "Kimi", logoSrc: "/logos/kimi-logo.svg" },
   OPENCODE: {
     title: "OpenCode",
@@ -211,6 +212,7 @@ const isHiddenConfigField = (
     (fieldKey === "variant" || fieldKey === "agent"));
 
 const isAcpRunner = (runner: BaseCodingAgent): boolean =>
+  runner === ("HERMES" as BaseCodingAgent) ||
   runner === "GEMINI" ||
   runner === "QWEN_CODE" ||
   runner === "KIMI_CODE" ||

@@ -244,6 +244,10 @@ check(
   "getRunnerLabel renders Pi",
   getRunnerLabel("PI") === "Pi",
 );
+check(
+  "getRunnerLabel renders Hermes",
+  getRunnerLabel("HERMES") === "Hermes",
+);
 
 check(
   "getRunnerLabel keeps the Qoder CLI acronym uppercase",

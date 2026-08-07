@@ -57,6 +57,7 @@ const guidedRunners: BaseCodingAgent[] = [
   "CURSOR_AGENT",
   "DROID",
   "GEMINI",
+  "HERMES",
   "KIMI_CODE",
   "OPENCODE",
   "PI",
@@ -167,6 +168,16 @@ check(
   "WSL-only agents reuse the posix install command on Windows",
   cursorOnWindows?.steps[0]?.commands[0] ===
     "curl https://cursor.com/install -fsS | bash",
+);
+
+const hermesOnLinux = resolveInstallGuide(makeRunner("HERMES"), "linux");
+check(
+  "Hermes has a local CLI installation guide",
+  hermesOnLinux?.steps[0]?.commands[0] === "pip install hermes-agent",
+);
+check(
+  "Hermes guide does not handle authentication secrets",
+  getInstallGuideEntry("HERMES")?.authCommands === null,
 );
 
 const kimiOnLinux = resolveInstallGuide(makeRunner("KIMI_CODE"), "linux");

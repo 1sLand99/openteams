@@ -112,7 +112,7 @@ assert.match(
 );
 assert.match(
   source,
-  /const isAcpRunner[\s\S]*?runner === "GEMINI"[\s\S]*?runner === "QWEN_CODE"[\s\S]*?runner === "KIMI_CODE"[\s\S]*?runner === "QODER_CLI"[\s\S]*?runner === "PI"/u,
+  /const isAcpRunner[\s\S]*?runner === (?:\("HERMES" as BaseCodingAgent\)|"HERMES")[\s\S]*?runner === "GEMINI"[\s\S]*?runner === "QWEN_CODE"[\s\S]*?runner === "KIMI_CODE"[\s\S]*?runner === "QODER_CLI"[\s\S]*?runner === "PI"/u,
 );
 assert.match(
   source,
@@ -124,6 +124,10 @@ assert.match(
   /import piSchema from "..\/..\/..\/shared\/schemas\/pi\.json";/u,
 );
 assert.match(source, /PI: piSchema,/u);
+assert.match(
+  source,
+  /HERMES: \{[\s\S]*?title: "Hermes"/u,
+);
 assert.match(
   source,
   /PI: \{[\s\S]*?title: "Pi"[\s\S]*?logoSrc: "\/logos\/pi-logo\.svg"/u,
