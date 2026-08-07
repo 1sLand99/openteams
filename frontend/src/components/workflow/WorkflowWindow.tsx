@@ -1019,13 +1019,22 @@ function InspectorCard({
     (items ?? [])
       .map((item) => item.trim())
       .filter((item) => item.length > 0);
+  const flattenAcceptance = (acceptance?: {
+    required?: string[] | null;
+    partial?: string[] | null;
+    recommended?: string[] | null;
+  } | null) => [
+    ...(acceptance?.required ?? []),
+    ...(acceptance?.partial ?? []),
+    ...(acceptance?.recommended ?? []),
+  ];
   const contractSections = [
     {
       key: 'acceptance',
       title: t('workflow.inspector.acceptanceHeading', {
         defaultValue: 'Acceptance Criteria',
       }),
-      items: cleanContractItems(planNode?.data.acceptance),
+      items: cleanContractItems(flattenAcceptance(planNode?.data.acceptance)),
     },
     {
       key: 'expectedOutputs',
@@ -1035,11 +1044,11 @@ function InspectorCard({
       items: cleanContractItems(planNode?.data.outputs),
     },
     {
-      key: 'checklist',
-      title: t('workflow.inspector.checklistHeading', {
-        defaultValue: 'Checklist',
+      key: 'selfCheck',
+      title: t('workflow.inspector.selfCheckHeading', {
+        defaultValue: 'Self-Check',
       }),
-      items: cleanContractItems(planNode?.data.checklist),
+      items: cleanContractItems(planNode?.data.selfCheck),
     },
     {
       key: 'verificationCommands',

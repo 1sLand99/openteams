@@ -143,9 +143,13 @@ pub(crate) static PLAN_SCHEMA_DEFINITION: &str = r#"{
         "agentId": "optional string",
         "title": "string",
         "instructions": "string",
-        "acceptance": ["string, required non-empty for task nodes"],
+        "acceptance": {
+          "required": ["string, required non-empty for task nodes"],
+          "partial": ["optional string, external-justified failures allowed"],
+          "recommended": ["optional string"]
+        },
         "outputs": ["string, required non-empty for task nodes"],
-        "checklist": ["string, required non-empty for task nodes"],
+        "selfCheck": ["string, required non-empty for task nodes"],
         "verificationCommands": ["string, required non-empty for task nodes"],
         "completionEvidence": ["string, required non-empty for task nodes"],
         "interruptible": true,
@@ -191,7 +195,7 @@ Hard requirements:
 15. Retry budgets are controlled by `globals.default_retry` and optional node `maxRetry`. Both must be integers from 0 through 10. Use `3` as the default unless the task has a concrete reason to use another value. `maxRetry` overrides the global value for that node. A retry budget counts rework after the initial execution/review: `0` means one initial attempt and no rework. For a loop review node, this gives one initial review plus at most `maxRetry` rework attempts.
 16. Every edge must use `data.kind: "hard"` or omit `data`; soft dependencies are not supported by the scheduler.
 17. Do not output top-level `policies` or `loops`; they are legacy compatibility fields with no runtime consumer. Your output is validated, compiled, and may start execution directly.
-18. Every `task` node MUST define a verifiable contract in `nodes[].data`: non-empty `acceptance` (acceptance criteria), `outputs` (expected deliverable paths), `checklist` (verifiable work items), `verificationCommands` (commands or methods that prove the work, e.g. test/build commands), and `completionEvidence` (evidence the executor must produce, e.g. test output summaries). `review` and `result` nodes are exempt from these field requirements.
+18. Every `task` node MUST define a verifiable contract in `nodes[].data`: non-empty `acceptance.required` (objective acceptance criteria; `partial` allows externally justified failures, `recommended` is optional), `outputs` (expected deliverable paths), `selfCheck` (self-check work items the executor verifies before reporting completion), `verificationCommands` (commands or methods that prove the work, e.g. test/build commands), and `completionEvidence` (evidence the executor must produce, e.g. test output summaries). `result` nodes are exempt from these field requirements. A `review` node with a non-empty `reviewScope` MUST define non-empty `acceptance.required` as the loop-level acceptance criteria.
 
 "#;
 
@@ -641,8 +645,9 @@ The `summary`, `content`, and `message` fields in your JSON output must use the 
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowStepExecutionContract {
     pub acceptance: Vec<String>,
+    pub acceptance_leveled: Vec<(AcceptanceCriterionLevel, String)>,
     pub expected_outputs: Vec<String>,
-    pub checklist: Vec<String>,
+    pub self_check: Vec<String>,
     pub verification_commands: Vec<String>,
     pub completion_evidence: Vec<String>,
 }
@@ -652,7 +657,7 @@ pub struct WorkflowStepRevisionContext {
     pub workflow_goal: String,
     pub acceptance: Vec<String>,
     pub expected_outputs: Vec<String>,
-    pub checklist: Vec<String>,
+    pub self_check: Vec<String>,
     pub verification_commands: Vec<String>,
     pub completion_evidence: Vec<String>,
     pub dependency_summaries: Vec<String>,
@@ -748,7 +753,7 @@ pub fn build_step_execution_prompt_with_contract(
         .add("predecessor_summaries", &dependency_text)
         .add("acceptance", list(&contract.acceptance))
         .add("expected_outputs", list(&contract.expected_outputs))
-        .add("checklist", list(&contract.checklist))
+        .add("self_check", list(&contract.self_check))
         .add("verification_commands", list(&contract.verification_commands))
         .add("completion_evidence", list(&contract.completion_evidence))
         .build();
@@ -790,8 +795,8 @@ Acceptance criteria:
 Expected outputs:
 {expected_outputs}
 
-Checklist:
-{checklist}
+Self-check:
+{self_check}
 
 Verification commands or methods:
 {verification_commands}
@@ -817,7 +822,7 @@ For task steps, return `final_result` with structured `status`, `verification`, 
         deps = data.get("predecessor_summaries"),
         acceptance = data.get("acceptance"),
         expected_outputs = data.get("expected_outputs"),
-        checklist = data.get("checklist"),
+        self_check = data.get("self_check"),
         verification_commands = data.get("verification_commands"),
         completion_evidence = data.get("completion_evidence"),
     ));
@@ -1140,7 +1145,7 @@ pub fn build_step_revision_prompt_with_context(
         .add("workflow_goal", &context.workflow_goal)
         .add("acceptance", list(&context.acceptance))
         .add("expected_outputs", list(&context.expected_outputs))
-        .add("checklist", list(&context.checklist))
+        .add("self_check", list(&context.self_check))
         .add("verification_commands", list(&context.verification_commands))
         .add("completion_evidence", list(&context.completion_evidence))
         .add("dependency_summaries", list(&context.dependency_summaries));
@@ -1208,8 +1213,8 @@ pub fn build_step_revision_prompt_with_context(
     prompt.push_str(data.get("acceptance"));
     prompt.push_str("\nExpected outputs:\n");
     prompt.push_str(data.get("expected_outputs"));
-    prompt.push_str("\nChecklist:\n");
-    prompt.push_str(data.get("checklist"));
+    prompt.push_str("\nSelf-check:\n");
+    prompt.push_str(data.get("self_check"));
     prompt.push_str("\nVerification commands or methods:\n");
     prompt.push_str(data.get("verification_commands"));
     prompt.push_str("\nRequired completion evidence:\n");

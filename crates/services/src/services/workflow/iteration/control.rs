@@ -145,8 +145,7 @@ impl<'a> IterationManager<'a> {
             "Raw output from workflow agent for iteration plan generation: {}",
             raw_output
         );
-        let payload = extract_json_payload(&raw_output).unwrap_or(raw_output);
-        let plan_json: WorkflowPlanJson = serde_json::from_str(&payload)?;
+        let plan_json = super::workflow_runtime::parse_plan_output(&raw_output)?;
         let valid_agent_ids = workflow_valid_agent_ids(self.session_agents);
         WorkflowCompiler::compile(&plan_json, &valid_agent_ids)?;
 

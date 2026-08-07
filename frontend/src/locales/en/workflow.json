@@ -76,7 +76,7 @@
   "workflow.graph.zoomIn": "Zoom in",
   "workflow.graph.zoomOut": "Zoom out",
   "workflow.inspector.acceptanceHeading": "Acceptance Criteria",
-  "workflow.inspector.checklistHeading": "Checklist",
+  "workflow.inspector.selfCheckHeading": "Self-Check",
   "workflow.inspector.closeChat": "Close Chat",
   "workflow.inspector.completionEvidenceHeading": "Completion Evidence",
   "workflow.inspector.errorHeading": "Error",

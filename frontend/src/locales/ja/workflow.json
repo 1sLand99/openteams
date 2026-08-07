@@ -76,7 +76,7 @@
   "workflow.graph.zoomIn": "拡大",
   "workflow.graph.zoomOut": "縮小",
   "workflow.inspector.acceptanceHeading": "受け入れ基準",
-  "workflow.inspector.checklistHeading": "チェックリスト",
+  "workflow.inspector.selfCheckHeading": "セルフチェック",
   "workflow.inspector.closeChat": "Close Chat",
   "workflow.inspector.completionEvidenceHeading": "完了エビデンス",
   "workflow.inspector.errorHeading": "エラー",

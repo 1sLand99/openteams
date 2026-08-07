@@ -1412,9 +1412,13 @@ export interface WorkflowCardPlanNode {
     agent_name?: string | null;
     instructions?: string | null;
     status?: string | null;
-    acceptance?: string[] | null;
+    acceptance?: {
+      required?: string[] | null;
+      partial?: string[] | null;
+      recommended?: string[] | null;
+    } | null;
     outputs?: string[] | null;
-    checklist?: string[] | null;
+    selfCheck?: string[] | null;
     verificationCommands?: string[] | null;
     completionEvidence?: string[] | null;
     reviewScope?: string[] | null;

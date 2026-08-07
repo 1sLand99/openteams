@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use chrono::Utc;
@@ -15,12 +15,10 @@ use db::{
         workflow_agent_session::WorkflowAgentSession,
         workflow_event::{CreateWorkflowEvent, WorkflowEvent},
         workflow_execution::WorkflowExecution,
-        workflow_loop::WorkflowLoop,
         workflow_plan::WorkflowPlan,
         workflow_step::WorkflowStep,
         workflow_step_edge::WorkflowStepEdge,
         workflow_step_review::{CreateWorkflowStepReview, WorkflowStepReview},
-        workflow_transcript::WorkflowTranscript,
         workflow_types::*,
     },
 };
@@ -32,23 +30,14 @@ use super::{
     super::{
         chat_runner::ChatRunner,
         config,
-        workflow_review::{
-            LoopRejectionPromptInput, build_loop_rejection_prompt, build_loop_user_rejection_prompt,
-        },
         workflow_runtime::{
             self, SummaryPayload, WORKFLOW_PROTOCOL_PARSE_MAX_RETRIES, WorkflowAgentRunOutput,
             WorkflowReviewProtocolMessage, WorkflowRevisionFeedbackSource, WorkflowRuntimeError,
-            WorkflowStepExecutionContract, WorkflowStepProtocolMessage,
-            WorkflowStepRevisionContext, WorkflowStepRunResult,
-            build_lead_review_prompt_with_schema,
-            build_step_execution_prompt_with_schema_and_contract,
-            build_step_revision_prompt_with_schema_and_context,
-            build_workflow_protocol_retry_prompt, parse_review_protocol_output,
-            predecessor_summaries, predecessor_summaries_with_reviews,
-            resolve_workflow_response_language_instruction, run_workflow_step_agent_follow_up,
-            run_workflow_step_agent_prompt, should_retry_workflow_protocol_parse_failure,
-            workflow_review_attempt_limit_reached, workflow_review_protocol_json_schema,
-            workflow_step_protocol_json_schema_for_step,
+            WorkflowStepExecutionContract, WorkflowStepProtocolMessage, WorkflowStepRunResult,
+            parse_review_protocol_output, prompt_builders,
+            resolve_workflow_response_language_instruction, result_aggregation,
+            run_workflow_step_agent_follow_up, run_workflow_step_agent_prompt,
+            should_retry_workflow_protocol_parse_failure, workflow_review_attempt_limit_reached,
         },
     },
     OrchestratorError, StepOutcome, WorkflowOrchestrator, resolve_step_workflow_session,
@@ -207,7 +196,10 @@ fn normalize_workspace_path(path: &Path) -> String {
 }
 
 fn inject_step_prompt_section_before_schema(prompt: &mut String, section: &str) {
-    if let Some(index) = prompt.find("\n\nRequired JSON Schema:") {
+    if let Some(index) = prompt
+        .find("\n\n## 输出 JSON Schema")
+        .or_else(|| prompt.find("\n\nRequired JSON Schema:"))
+    {
         prompt.insert_str(index, section);
     } else {
         prompt.push_str(section);
@@ -309,17 +301,11 @@ pub(super) struct PendingRevisionFeedback {
     pub(super) other_steps_feedback_summary: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-struct ResultDependencyContextFile {
-    absolute_path: PathBuf,
-    workspace_relative_path: String,
-}
-
 impl WorkflowOrchestrator {
     pub(super) fn parse_step_output_message(
         execution_id: Uuid,
         step: &WorkflowStep,
-        declared_acceptance: &[String],
+        declared_acceptance: &[(AcceptanceCriterionLevel, String)],
         raw_output: &str,
     ) -> Result<WorkflowStepProtocolMessage, OrchestratorError> {
         tracing::debug!(
@@ -349,7 +335,7 @@ impl WorkflowOrchestrator {
         workflow_session: &WorkflowAgentSession,
         prompt: &str,
         step: &WorkflowStep,
-        declared_acceptance: &[String],
+        declared_acceptance: &[(AcceptanceCriterionLevel, String)],
         first_run_is_follow_up: bool,
     ) -> Result<(WorkflowStepProtocolMessage, WorkflowAgentRunOutput), OrchestratorError> {
         let mut attempt = 0;
@@ -415,18 +401,9 @@ impl WorkflowOrchestrator {
                         error = %err,
                         "workflow step protocol parse failed; retrying"
                     );
-                    let schema = workflow_step_protocol_json_schema_for_step(
-                        step.execution_id,
-                        &step.step_key,
-                        true,
-                        &step.step_type,
-                    );
-                    prompt_to_send = build_workflow_protocol_retry_prompt(
-                        "step output",
-                        &schema,
-                        &err.to_string(),
+                    prompt_to_send = prompt_builders::common::append_protocol_error_section(
                         prompt,
-                        raw_output,
+                        &err.to_string(),
                     );
                     attempt += 1;
                     run_as_follow_up = true;
@@ -448,7 +425,7 @@ impl WorkflowOrchestrator {
         workflow_session: &WorkflowAgentSession,
         prompt: &str,
         step: &WorkflowStep,
-        declared_acceptance: &[String],
+        declared_acceptance: &[(AcceptanceCriterionLevel, String)],
     ) -> Result<(WorkflowReviewProtocolMessage, String), OrchestratorError> {
         let mut attempt = 0;
         let mut run_as_follow_up = false;
@@ -513,13 +490,9 @@ impl WorkflowOrchestrator {
                         error = %err,
                         "workflow review protocol parse failed; retrying"
                     );
-                    let schema = workflow_review_protocol_json_schema(execution.id, &step.step_key);
-                    prompt_to_send = build_workflow_protocol_retry_prompt(
-                        "step review output",
-                        &schema,
-                        &err.to_string(),
+                    prompt_to_send = prompt_builders::common::append_protocol_error_section(
                         prompt,
-                        &raw_output,
+                        &err.to_string(),
                     );
                     attempt += 1;
                     run_as_follow_up = true;
@@ -541,79 +514,149 @@ impl WorkflowOrchestrator {
         ))
     }
 
-    fn result_dependency_context_prompt(file: &ResultDependencyContextFile) -> String {
-        format!(
-            r#"## Result Dependency Context File
-
-All workflow node run results and reviewer conclusions are stored in this workspace-relative file:
-
-`{path}`
-
-Read this file before writing the final result. Do not rely on the workflow plan JSON alone; use the formal predecessor results and reviewer conclusions in that file as the source of truth."#,
-            path = file.workspace_relative_path
-        )
-    }
-
-    async fn write_result_dependency_context_file(
+    /// result 节点的确定性执行（设计 §9.4、§10.3）：聚合全部传递前驱的最新
+    /// 有效结果，构造并写入 `result_review_result`，不发起任何 agent 调用。
+    async fn run_result_step_deterministic(
         pool: &SqlitePool,
-        session: &ChatSession,
-        agent: &ChatAgent,
-        session_agent: &ChatSessionAgent,
+        chat_runner: &ChatRunner,
         execution: &WorkflowExecution,
-        step: &WorkflowStep,
-        contexts: &[String],
-    ) -> Result<ResultDependencyContextFile, OrchestratorError> {
-        let workspace_path = workflow_runtime::resolve_workspace_path(
-            &DBService { pool: pool.clone() },
-            session,
-            agent,
-            session_agent,
+        workflow_session: &WorkflowAgentSession,
+        plan: &WorkflowPlan,
+        running_step: WorkflowStep,
+        current_steps: &[WorkflowStep],
+        edges: &[WorkflowStepEdge],
+    ) -> Result<StepOutcome, OrchestratorError> {
+        let workflow_goal = plan
+            .summary_text
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| plan.title.clone());
+        let input = workflow_runtime::result_aggregation::ResultAggregationInput {
+            execution_id: execution.id,
+            step_key: running_step.step_key.clone(),
+            workflow_goal,
+            title: running_step.title.clone(),
+            instructions: running_step.instructions.clone(),
+            latest_node_results: Self::collect_result_aggregation_inputs(
+                &running_step,
+                current_steps,
+                edges,
+            ),
+        };
+        let output = workflow_runtime::result_aggregation::construct_result_review_output(&input)
+            .map_err(OrchestratorError::from)?;
+        let overall_status = output.overall_status;
+        let summary = output.summary.clone();
+        let structured_content = serde_json::json!({
+            "type": "result_review_result",
+            "overall_status": overall_status,
+            "summary": output.summary,
+            "content": output.content,
+            "deliverables": output.deliverables,
+            "acceptance_results": output.acceptance_results,
+            "evidence": output.evidence,
+            "risks": output.risks,
+            "unfinished_items": output.unfinished_items,
+        })
+        .to_string();
+        let recorded_step = WorkflowStep::record_execution_result(
+            pool,
+            running_step.id,
+            Uuid::new_v4(),
+            Some(
+                serde_json::to_string(&SummaryPayload {
+                    summary: summary.clone(),
+                    content: Some(structured_content.clone()),
+                    outputs: Vec::new(),
+                })
+                .unwrap_or_else(|_| summary.clone()),
+            ),
+            Some(structured_content.clone()),
         )
         .await?;
-        let tmp_dir = workspace_path.join(".openteams").join("tmp");
-        tokio::fs::create_dir_all(&tmp_dir)
-            .await
-            .map_err(WorkflowRuntimeError::from)?;
-
-        let filename = format!("workflow-result-context-{}-{}.md", execution.id, step.id);
-        let absolute_path = tmp_dir.join(filename);
-        let workspace_relative_path = absolute_path
-            .strip_prefix(&workspace_path)
-            .unwrap_or(absolute_path.as_path())
-            .to_string_lossy()
-            .replace('\\', "/");
-        let content = format!(
-            "# Workflow Result Dependency Context\n\nExecution: `{}`\nResult step: `{}` ({})\n\n{}",
+        let _ = Self::write_transcript(
+            pool,
             execution.id,
-            step.step_key,
-            step.title,
-            contexts.join("\n\n---\n\n")
+            recorded_step.round_id.into(),
+            Some(workflow_session.id),
+            Some(recorded_step.id),
+            "system",
+            "result_review",
+            &summary,
+            Some(
+                &serde_json::json!({
+                    "source": "workflow_result_aggregation",
+                    "structured_result": serde_json::from_str::<serde_json::Value>(&structured_content)
+                        .unwrap_or(serde_json::Value::Null),
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        let completed = !matches!(
+            overall_status,
+            workflow_runtime::WorkflowResultOverallStatus::Blocked
         );
-
-        tokio::fs::write(&absolute_path, content)
-            .await
-            .map_err(WorkflowRuntimeError::from)?;
-
-        Ok(ResultDependencyContextFile {
-            absolute_path,
-            workspace_relative_path,
-        })
+        Self::transition_step_and_sync(
+            pool,
+            chat_runner,
+            execution,
+            &recorded_step,
+            if completed {
+                WorkflowStepStatus::Completed
+            } else {
+                WorkflowStepStatus::Failed
+            },
+            if completed {
+                "result_step_completed"
+            } else {
+                "result_step_blocked"
+            },
+        )
+        .await?;
+        if completed {
+            Ok(StepOutcome::Completed)
+        } else {
+            Ok(StepOutcome::Failed(summary))
+        }
     }
 
-    async fn cleanup_result_dependency_context_file(path: Option<&Path>) {
-        let Some(path) = path else {
-            return;
-        };
-
-        match tokio::fs::remove_file(path).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!(
-                path = %path.display(),
-                %error,
-                "failed to remove workflow result dependency context file"
-            ),
+    /// 收集 result 节点全部传递前驱的最新有效结果（设计 §6.6、§13）。缺少
+    /// 有效结果的前驱以 blocked 占位项进入汇总，驱动整体阻塞结论（§14）。
+    fn collect_result_aggregation_inputs(
+        result_step: &WorkflowStep,
+        current_steps: &[WorkflowStep],
+        edges: &[WorkflowStepEdge],
+    ) -> Vec<workflow_runtime::result_aggregation::FinalNodeResultInput> {
+        let mut upstream_ids = std::collections::HashSet::new();
+        let mut stack = vec![result_step.id];
+        while let Some(step_id) = stack.pop() {
+            for edge in edges.iter().filter(|edge| edge.to_step_id == step_id) {
+                if upstream_ids.insert(edge.from_step_id) {
+                    stack.push(edge.from_step_id);
+                }
+            }
         }
+        current_steps
+            .iter()
+            .filter(|step| upstream_ids.contains(&step.id))
+            .map(|step| {
+                workflow_runtime::result_aggregation::final_node_result_from_step(step)
+                    .unwrap_or_else(
+                        || workflow_runtime::result_aggregation::FinalNodeResultInput {
+                            step_key: step.step_key.clone(),
+                            status: workflow_runtime::WorkflowTaskCompletionStatus::Blocked,
+                            summary: "缺少最新有效结果".to_string(),
+                            outputs: Vec::new(),
+                            evidence: Vec::new(),
+                            acceptance_results: Vec::new(),
+                            risks: Vec::new(),
+                            unfinished_items: Vec::new(),
+                            issues: Vec::new(),
+                        },
+                    )
+            })
+            .collect()
     }
 
     fn execution_contract_for_step(
@@ -637,12 +680,24 @@ Read this file before writing the final result. Do not rely on the workflow plan
                     .find(|node| node.id == step.step_key)
                     .map(|node| node.data)
             })
-            .map(|data| WorkflowStepExecutionContract {
-                acceptance: clean(data.acceptance),
-                expected_outputs: clean(data.outputs),
-                checklist: clean(data.checklist),
-                verification_commands: clean(data.verification_commands),
-                completion_evidence: clean(data.completion_evidence),
+            .map(|data| {
+                let acceptance = data.acceptance;
+                let acceptance_leveled = acceptance
+                    .clone()
+                    .map(|value| value.leveled())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(level, item)| (level, item.trim().to_string()))
+                    .filter(|(_, item)| !item.is_empty())
+                    .collect();
+                WorkflowStepExecutionContract {
+                    acceptance: clean(acceptance.map(|value| value.all())),
+                    acceptance_leveled,
+                    expected_outputs: clean(data.outputs),
+                    self_check: clean(data.self_check),
+                    verification_commands: clean(data.verification_commands),
+                    completion_evidence: clean(data.completion_evidence),
+                }
             })
             .unwrap_or_default()
     }
@@ -650,12 +705,185 @@ Read this file before writing the final result. Do not rely on the workflow plan
     pub(super) fn acceptance_criteria_for_step(
         plan: &WorkflowPlan,
         step: &WorkflowStep,
-    ) -> Vec<String> {
-        Self::execution_contract_for_step(plan, step).acceptance
+    ) -> Vec<(AcceptanceCriterionLevel, String)> {
+        Self::execution_contract_for_step(plan, step).acceptance_leveled
     }
 
-    fn expected_outputs_for_step(plan: &WorkflowPlan, step: &WorkflowStep) -> Vec<String> {
-        Self::execution_contract_for_step(plan, step).expected_outputs
+    /// 当前节点的分级验收标准对象（计划 JSON 直读，未经扁平化）。
+    pub(crate) fn acceptance_criteria_object_for_step(
+        plan: &WorkflowPlan,
+        step: &WorkflowStep,
+    ) -> AcceptanceCriteria {
+        serde_json::from_str::<WorkflowPlanJson>(&plan.plan_json)
+            .ok()
+            .and_then(|plan_json| {
+                plan_json
+                    .nodes
+                    .into_iter()
+                    .find(|node| node.id == step.step_key)
+            })
+            .and_then(|node| node.data.acceptance)
+            .unwrap_or_default()
+    }
+
+    /// 当前节点的必要上游结果（设计 §6.1、§13）：仅直接前驱的最新有效结果。
+    fn upstream_results_for_step(
+        step: &WorkflowStep,
+        current_steps: &[WorkflowStep],
+        edges: &[WorkflowStepEdge],
+    ) -> Vec<prompt_builders::common::UpstreamResultInput> {
+        let predecessor_ids = edges
+            .iter()
+            .filter(|edge| edge.to_step_id == step.id)
+            .map(|edge| edge.from_step_id)
+            .collect::<std::collections::HashSet<_>>();
+        current_steps
+            .iter()
+            .filter(|candidate| predecessor_ids.contains(&candidate.id))
+            .filter_map(|candidate| {
+                result_aggregation::final_node_result_from_step(candidate).map(|result| {
+                    prompt_builders::common::UpstreamResultInput {
+                        step_key: result.step_key,
+                        summary: result.summary,
+                        outputs: result.outputs,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// 普通 review 节点的"执行者最新结果"（设计 §6.4）：其直接上游最新有效
+    /// 结果的合并视图。
+    fn review_worker_result_for_step(
+        step: &WorkflowStep,
+        current_steps: &[WorkflowStep],
+        edges: &[WorkflowStepEdge],
+    ) -> prompt_builders::step_review::TaskResultInput {
+        let predecessor_ids = edges
+            .iter()
+            .filter(|edge| edge.to_step_id == step.id)
+            .map(|edge| edge.from_step_id)
+            .collect::<std::collections::HashSet<_>>();
+        let results = current_steps
+            .iter()
+            .filter(|candidate| predecessor_ids.contains(&candidate.id))
+            .filter_map(|candidate| result_aggregation::final_node_result_from_step(candidate))
+            .collect::<Vec<_>>();
+        prompt_builders::step_review::TaskResultInput {
+            status: String::new(),
+            summary: results
+                .iter()
+                .map(|result| format!("`{}`：{}", result.step_key, result.summary))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            outputs: results
+                .iter()
+                .flat_map(|result| result.outputs.clone())
+                .collect(),
+            verification: results
+                .iter()
+                .flat_map(|result| result.evidence.clone())
+                .collect(),
+            self_review: Vec::new(),
+            issues: results
+                .iter()
+                .flat_map(|result| result.issues.clone())
+                .collect(),
+        }
+    }
+
+    /// 返工 prompt 的统一构造（设计 §6.3、§11.2）：首次执行与
+    /// Lead/Reviewer/User 反馈返工共用 task builder。
+    #[allow(clippy::too_many_arguments)]
+    fn build_task_revision_prompt(
+        plan: &WorkflowPlan,
+        step: &WorkflowStep,
+        workflow_goal: &str,
+        current_steps: &[WorkflowStep],
+        edges: &[WorkflowStepEdge],
+        source: WorkflowRevisionFeedbackSource,
+        feedback: &str,
+        previous_summary: &str,
+        previous_outputs: &[String],
+        response_language: &str,
+    ) -> String {
+        let contract = Self::execution_contract_for_step(plan, step);
+        prompt_builders::task_execution::build_task_execution_prompt(
+            &prompt_builders::task_execution::TaskExecutionPromptInput {
+                identity: prompt_builders::common::PromptIdentity {
+                    execution_id: step.execution_id,
+                    step_key: step.step_key.clone(),
+                },
+                workflow_goal: workflow_goal.to_string(),
+                title: step.title.clone(),
+                instructions: step.instructions.clone(),
+                contract: prompt_builders::task_execution::TaskExecutionContractInput {
+                    outputs: contract.expected_outputs,
+                    self_check: contract.self_check,
+                    verification_methods: contract.verification_commands,
+                    completion_evidence: contract.completion_evidence,
+                },
+                upstream_results: Self::upstream_results_for_step(step, current_steps, edges),
+                revision: Some(prompt_builders::task_execution::RevisionContextInput {
+                    source,
+                    attempt: step.retry_count.saturating_add(1),
+                    feedback: feedback.to_string(),
+                    previous_summary: previous_summary.to_string(),
+                    previous_outputs: previous_outputs.to_vec(),
+                }),
+                response_language: response_language.to_string(),
+            },
+        )
+    }
+
+    /// Lead 内审的执行者结果视图（设计 §6.4）：来自持久化的结构化任务报告，
+    /// 自检结论仅作为报告的一部分呈现，审核者不得直接采信。
+    fn task_result_input_from_run_result(
+        result: &WorkflowStepRunResult,
+    ) -> prompt_builders::step_review::TaskResultInput {
+        let structured = result
+            .structured_report
+            .as_deref()
+            .and_then(|report| serde_json::from_str::<serde_json::Value>(report).ok());
+        let string_array = |key: &str| {
+            structured
+                .as_ref()
+                .and_then(|value| value.get(key))
+                .and_then(|items| serde_json::from_value::<Vec<String>>(items.clone()).ok())
+                .unwrap_or_default()
+        };
+        let status = structured
+            .as_ref()
+            .and_then(|value| value.get("status"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let verification = structured
+            .as_ref()
+            .and_then(|value| value.get("verification"))
+            .and_then(|items| items.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        let name = item.get("name")?.as_str()?;
+                        let status = item
+                            .get("status")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("not_run");
+                        Some(format!("{name}（{status}）"))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        prompt_builders::step_review::TaskResultInput {
+            status,
+            summary: result.summary.clone(),
+            outputs: result.outputs.clone(),
+            verification,
+            self_review: string_array("self_review"),
+            issues: string_array("issues"),
+        }
     }
 
     pub(super) fn merge_revision_context(
@@ -1055,24 +1283,15 @@ Read this file before writing the final result. Do not rely on the workflow plan
         initial_result: WorkflowStepRunResult,
         skip_initial_lead_review: bool,
     ) -> Result<StepOutcome, OrchestratorError> {
-        let dependency_summaries = predecessor_summaries(step, current_steps, edges, Some(plan));
         let acceptance_criteria = Self::acceptance_criteria_for_step(plan, step);
         let workflow_goal = plan
             .summary_text
             .clone()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| plan.title.clone());
-        let execution_contract = Self::execution_contract_for_step(plan, step);
-        let revision_prompt_context = WorkflowStepRevisionContext {
-            workflow_goal: workflow_goal.clone(),
-            acceptance: execution_contract.acceptance.clone(),
-            expected_outputs: execution_contract.expected_outputs.clone(),
-            checklist: execution_contract.checklist.clone(),
-            verification_commands: execution_contract.verification_commands.clone(),
-            completion_evidence: execution_contract.completion_evidence.clone(),
-            dependency_summaries: dependency_summaries.clone(),
-            loop_state: None,
-        };
+        let ui_config = config::load_config_from_file(&config_path()).await;
+        let response_language_instruction =
+            resolve_workflow_response_language_instruction(&ui_config.language);
         let (lead_workflow_session, lead_session_agent, lead_agent) =
             Self::resolve_lead_review_targets(
                 execution,
@@ -1197,13 +1416,38 @@ Read this file before writing the final result. Do not rely on the workflow plan
             )
             .await?;
 
-            let review_prompt = build_lead_review_prompt_with_schema(
-                &workflow_goal,
-                &waiting_review_step,
-                &persisted.result,
-                &dependency_summaries,
-                &acceptance_criteria,
-                review_attempt,
+            let latest_review_feedback = if review_attempt > 1 {
+                WorkflowStepReview::find_by_step(pool, waiting_review_step.id)
+                    .await?
+                    .into_iter()
+                    .max_by_key(|review| review.review_round)
+                    .map(|review| review.feedback)
+            } else {
+                None
+            };
+            let review_prompt = prompt_builders::step_review::build_step_review_prompt(
+                &prompt_builders::step_review::StepReviewPromptInput {
+                    identity: prompt_builders::common::PromptIdentity {
+                        execution_id: execution.id,
+                        step_key: waiting_review_step.step_key.clone(),
+                    },
+                    workflow_goal: workflow_goal.clone(),
+                    title: waiting_review_step.title.clone(),
+                    instructions: waiting_review_step.instructions.clone(),
+                    acceptance: Self::acceptance_criteria_object_for_step(
+                        plan,
+                        &waiting_review_step,
+                    ),
+                    review_rules: Vec::new(),
+                    worker_result: Self::task_result_input_from_run_result(&persisted.result),
+                    upstream_results: Self::upstream_results_for_step(
+                        &waiting_review_step,
+                        current_steps,
+                        edges,
+                    ),
+                    latest_review_feedback,
+                    response_language: response_language_instruction.to_string(),
+                },
             );
 
             let (review_message, _raw_review_output) =
@@ -1437,17 +1681,28 @@ Read this file before writing the final result. Do not rely on the workflow plan
                                     .iter()
                                     .map(|s| s.name.clone())
                                     .collect();
-                                let revision_prompt =
-                                    build_step_revision_prompt_with_schema_and_context(
-                                        &running_revision_step,
-                                        WorkflowRevisionFeedbackSource::User,
-                                        &feedback,
-                                        &persisted.result.summary,
-                                        Some(&persisted.result.content),
-                                        running_revision_step.retry_count,
+                                let mut revision_prompt = Self::build_task_revision_prompt(
+                                    plan,
+                                    &running_revision_step,
+                                    &workflow_goal,
+                                    current_steps,
+                                    edges,
+                                    WorkflowRevisionFeedbackSource::User,
+                                    &feedback,
+                                    &persisted.result.summary,
+                                    &persisted.result.outputs,
+                                    response_language_instruction,
+                                );
+                                if let Some(section) =
+                                    crate::services::agent_skill_policy::format_skills_prompt_section(
                                         &agent_skill_names,
-                                        &revision_prompt_context,
+                                    )
+                                {
+                                    inject_step_prompt_section_before_schema(
+                                        &mut revision_prompt,
+                                        &section,
                                     );
+                                }
 
                                 let (protocol_message, agent_output) =
                                     match Self::run_step_agent_protocol_with_retry(
@@ -1657,16 +1912,25 @@ Read this file before writing the final result. Do not rely on the workflow plan
                         .iter()
                         .map(|s| s.name.clone())
                         .collect();
-                    let revision_prompt = build_step_revision_prompt_with_schema_and_context(
+                    let mut revision_prompt = Self::build_task_revision_prompt(
+                        plan,
                         &running_revision_step,
+                        &workflow_goal,
+                        current_steps,
+                        edges,
                         WorkflowRevisionFeedbackSource::Lead,
                         &feedback,
                         &persisted.result.summary,
-                        Some(&persisted.result.content),
-                        running_revision_step.retry_count,
-                        &agent_skill_names,
-                        &revision_prompt_context,
+                        &persisted.result.outputs,
+                        response_language_instruction,
                     );
+                    if let Some(section) =
+                        crate::services::agent_skill_policy::format_skills_prompt_section(
+                            &agent_skill_names,
+                        )
+                    {
+                        inject_step_prompt_section_before_schema(&mut revision_prompt, &section);
+                    }
 
                     let (protocol_message, agent_output) =
                         match Self::run_step_agent_protocol_with_retry(
@@ -2491,47 +2755,21 @@ Before modifying files, create an isolated Git worktree for this step when Git i
             }
         };
 
-        let (dependency_summaries, result_dependency_context_file) =
-            if running_step.step_type == WorkflowStepType::Result {
-                let reviews = WorkflowStepReview::find_by_execution(pool, execution.id).await?;
-                let result_contexts = predecessor_summaries_with_reviews(
-                    &running_step,
-                    current_steps,
-                    edges,
-                    Some(plan),
-                    &reviews,
-                );
-                let context_file = Self::write_result_dependency_context_file(
-                    pool,
-                    session,
-                    agent,
-                    session_agent,
-                    execution,
-                    &running_step,
-                    &result_contexts,
-                )
-                .await?;
-                (
-                    vec![Self::result_dependency_context_prompt(&context_file)],
-                    Some(context_file),
-                )
-            } else {
-                (
-                    predecessor_summaries(&running_step, current_steps, edges, Some(plan)),
-                    None,
-                )
-            };
-        let step_transcript_context = WorkflowTranscript::find_by_step(pool, running_step.id)
-            .await?
-            .into_iter()
-            .map(|transcript| {
-                format!(
-                    "- [{}:{}] {}",
-                    transcript.sender_type, transcript.entry_type, transcript.content
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        // result 节点不调用模型：确定性聚合全部传递前驱的最新有效结果（设计 §9.4、§10.3）。
+        if running_step.step_type == WorkflowStepType::Result {
+            return Self::run_result_step_deterministic(
+                pool,
+                chat_runner,
+                execution,
+                &workflow_session,
+                plan,
+                running_step,
+                current_steps,
+                edges,
+            )
+            .await;
+        }
+
         let workflow_goal = plan
             .summary_text
             .clone()
@@ -2568,125 +2806,81 @@ Before modifying files, create an isolated Git worktree for this step when Git i
             session_agents,
             agents,
         );
-        let mut prompt = if let Some(pending_feedback) = pending_revision_feedback.as_ref() {
-            if pending_loop_revision_feedback {
-                let loop_key = pending_feedback.loop_key.as_deref().ok_or_else(|| {
-                    OrchestratorError::IllegalTransition(
-                        "loop revision feedback is missing its loop key".to_string(),
-                    )
-                })?;
-                let workflow_loop = WorkflowLoop::find_by_execution(pool, execution.id)
-                    .await?
-                    .into_iter()
-                    .find(|workflow_loop| workflow_loop.loop_key == loop_key)
-                    .ok_or_else(|| {
-                        OrchestratorError::NotFound(format!(
-                            "loop {} for revision feedback not found",
-                            loop_key
-                        ))
-                    })?;
-                let acceptance = Self::acceptance_criteria_for_step(plan, &running_step);
-                let expected_outputs = Self::expected_outputs_for_step(plan, &running_step);
-                let loop_current_state_summary = format!(
-                    "loop_key={}; status={}; retry={}/{}; review feedback round={}",
-                    workflow_loop.loop_key,
-                    to_workflow_wire_value(&workflow_loop.status),
-                    workflow_loop.retry_count,
-                    workflow_loop.max_retry,
-                    pending_feedback.review_round,
-                );
-                let ui_config = config::load_config_from_file(&config_path()).await;
-                let response_language_instruction =
-                    resolve_workflow_response_language_instruction(&ui_config.language);
-                let mut loop_prompt = match pending_feedback.source {
-                    WorkflowRevisionFeedbackSource::Lead
-                    | WorkflowRevisionFeedbackSource::Reviewer => {
-                        build_loop_rejection_prompt(LoopRejectionPromptInput {
-                            workflow_goal: &workflow_goal,
-                            loop_retry_count: workflow_loop.retry_count,
-                            loop_retry_budget: workflow_loop.max_retry,
-                            loop_current_state_summary: &loop_current_state_summary,
-                            loop_rejection_reason: pending_feedback
-                                .loop_rejection_reason
-                                .as_deref()
-                                .unwrap_or(&pending_feedback.feedback),
-                            step_specific_feedback: &pending_feedback.feedback,
-                            other_steps_feedback_summary: &pending_feedback
-                                .other_steps_feedback_summary,
-                            your_previous_summary: &pending_feedback.previous_summary,
-                            your_previous_outputs: &pending_feedback.previous_outputs,
-                            step: &running_step,
-                            acceptance: &acceptance,
-                            expected_outputs: &expected_outputs,
-                            external_dependency_text: &dependency_summaries,
-                            response_language_instruction,
-                        })
-                    }
-                    WorkflowRevisionFeedbackSource::User => build_loop_user_rejection_prompt(
-                        &workflow_goal,
-                        workflow_loop.retry_count,
-                        workflow_loop.max_retry,
-                        &pending_feedback.feedback,
-                        &loop_current_state_summary,
-                        &pending_feedback.previous_summary,
-                        &pending_feedback.previous_outputs,
-                        &running_step,
-                        &acceptance,
-                        &expected_outputs,
-                        response_language_instruction,
-                    ),
-                };
-                if let Some(section) =
-                    crate::services::agent_skill_policy::format_skills_prompt_section(
-                        &agent_skill_names,
-                    )
-                {
-                    loop_prompt.push_str(&section);
-                }
-                loop_prompt.push_str("\n\nRequired JSON Schema:\n```json\n");
-                loop_prompt.push_str(&workflow_step_protocol_json_schema_for_step(
-                    running_step.execution_id,
-                    &running_step.step_key,
-                    true,
-                    &running_step.step_type,
-                ));
-                loop_prompt.push_str("\n```\nReturn ONLY one JSON object matching this schema.\n");
-                loop_prompt
-            } else {
-                let contract = Self::execution_contract_for_step(plan, &running_step);
-                let revision_context = WorkflowStepRevisionContext {
+        let ui_config = config::load_config_from_file(&config_path()).await;
+        let response_language_instruction =
+            resolve_workflow_response_language_instruction(&ui_config.language);
+        let contract = Self::execution_contract_for_step(plan, &running_step);
+        let mut prompt = if running_step.step_type == WorkflowStepType::Review {
+            // 普通 review 节点（无 reviewScope）复用 step_review builder（设计 §6.4）。
+            prompt_builders::step_review::build_step_review_prompt(
+                &prompt_builders::step_review::StepReviewPromptInput {
+                    identity: prompt_builders::common::PromptIdentity {
+                        execution_id: running_step.execution_id,
+                        step_key: running_step.step_key.clone(),
+                    },
                     workflow_goal: workflow_goal.clone(),
-                    acceptance: contract.acceptance,
-                    expected_outputs: contract.expected_outputs,
-                    checklist: contract.checklist,
-                    verification_commands: contract.verification_commands,
-                    completion_evidence: contract.completion_evidence,
-                    dependency_summaries: dependency_summaries.clone(),
-                    loop_state: None,
-                };
-                build_step_revision_prompt_with_schema_and_context(
-                    &running_step,
-                    pending_feedback.source,
-                    &pending_feedback.feedback,
-                    &pending_feedback.previous_summary,
-                    pending_feedback.previous_content.as_deref(),
-                    running_step.retry_count,
-                    &agent_skill_names,
-                    &revision_context,
-                )
-            }
+                    title: running_step.title.clone(),
+                    instructions: running_step.instructions.clone(),
+                    acceptance: Self::acceptance_criteria_object_for_step(plan, &running_step),
+                    review_rules: Vec::new(),
+                    worker_result: Self::review_worker_result_for_step(
+                        &running_step,
+                        current_steps,
+                        edges,
+                    ),
+                    upstream_results: Self::upstream_results_for_step(
+                        &running_step,
+                        current_steps,
+                        edges,
+                    ),
+                    latest_review_feedback: pending_revision_feedback
+                        .as_ref()
+                        .map(|feedback| feedback.feedback.clone()),
+                    response_language: response_language_instruction.to_string(),
+                },
+            )
         } else {
-            let contract = Self::execution_contract_for_step(plan, &running_step);
-            build_step_execution_prompt_with_schema_and_contract(
-                execution,
-                &workflow_goal,
-                &running_step,
-                &dependency_summaries,
-                Some(&step_transcript_context),
-                &agent_skill_names,
-                &contract,
+            // task 首次执行与 Lead/Reviewer/User/Loop 反馈返工共用 task builder
+            // （设计 §6.3、§11.2）。
+            let revision = pending_revision_feedback.as_ref().map(|feedback| {
+                prompt_builders::task_execution::RevisionContextInput {
+                    source: feedback.source,
+                    attempt: running_step.retry_count.saturating_add(1),
+                    feedback: feedback.feedback.clone(),
+                    previous_summary: feedback.previous_summary.clone(),
+                    previous_outputs: feedback.previous_outputs.clone(),
+                }
+            });
+            prompt_builders::task_execution::build_task_execution_prompt(
+                &prompt_builders::task_execution::TaskExecutionPromptInput {
+                    identity: prompt_builders::common::PromptIdentity {
+                        execution_id: running_step.execution_id,
+                        step_key: running_step.step_key.clone(),
+                    },
+                    workflow_goal: workflow_goal.clone(),
+                    title: running_step.title.clone(),
+                    instructions: running_step.instructions.clone(),
+                    contract: prompt_builders::task_execution::TaskExecutionContractInput {
+                        outputs: contract.expected_outputs.clone(),
+                        self_check: contract.self_check.clone(),
+                        verification_methods: contract.verification_commands.clone(),
+                        completion_evidence: contract.completion_evidence.clone(),
+                    },
+                    upstream_results: Self::upstream_results_for_step(
+                        &running_step,
+                        current_steps,
+                        edges,
+                    ),
+                    revision,
+                    response_language: response_language_instruction.to_string(),
+                },
             )
         };
+        if let Some(section) =
+            crate::services::agent_skill_policy::format_skills_prompt_section(&agent_skill_names)
+        {
+            inject_step_prompt_section_before_schema(&mut prompt, &section);
+        }
         if let Some(section) = workspace_isolation_prompt.as_deref() {
             inject_step_prompt_section_before_schema(&mut prompt, section);
         }
@@ -2720,12 +2914,6 @@ Before modifying files, create an isolated Git worktree for this step when Git i
         {
             Ok((message, agent_output)) => (message, agent_output),
             Err(OrchestratorError::Runtime(WorkflowRuntimeError::Interrupted(reason))) => {
-                Self::cleanup_result_dependency_context_file(
-                    result_dependency_context_file
-                        .as_ref()
-                        .map(|item| item.absolute_path.as_path()),
-                )
-                .await;
                 let interrupted_step = Self::acknowledge_step_interrupted(
                     pool,
                     chat_runner,
@@ -2753,12 +2941,6 @@ Before modifying files, create an isolated Git worktree for this step when Git i
             }
             Err(err) => {
                 let err_message = err.to_string();
-                Self::cleanup_result_dependency_context_file(
-                    result_dependency_context_file
-                        .as_ref()
-                        .map(|item| item.absolute_path.as_path()),
-                )
-                .await;
                 let failed_step = WorkflowStep::record_execution_result(
                     pool,
                     running_step.id,
@@ -2798,12 +2980,6 @@ Before modifying files, create an isolated Git worktree for this step when Git i
                 return Ok(StepOutcome::Failed(err_message));
             }
         };
-        Self::cleanup_result_dependency_context_file(
-            result_dependency_context_file
-                .as_ref()
-                .map(|item| item.absolute_path.as_path()),
-        )
-        .await;
 
         let latest_running_step = WorkflowStep::find_by_id(pool, running_step.id)
             .await?

@@ -259,7 +259,7 @@ impl WorkflowCompiler {
             hasher.update(step.instructions.as_bytes());
             hasher.update(step.assigned_agent_id.as_deref().unwrap_or("").as_bytes());
             if let Some(ref acceptance) = step.acceptance {
-                for a in acceptance {
+                for a in acceptance.all() {
                     hasher.update(a.as_bytes());
                 }
             }

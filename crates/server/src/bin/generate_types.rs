@@ -226,6 +226,7 @@ fn generate_types_content() -> String {
         db::models::workflow_types::WorkflowPlanNode::decl(),
         db::models::workflow_types::WorkflowNodePosition::decl(),
         db::models::workflow_types::WorkflowNodeData::decl(),
+        db::models::workflow_types::AcceptanceCriteria::decl(),
         db::models::workflow_types::WorkflowLoopDef::decl(),
         db::models::workflow_types::WorkflowPlanEdge::decl(),
         db::models::workflow_types::WorkflowEdgeData::decl(),

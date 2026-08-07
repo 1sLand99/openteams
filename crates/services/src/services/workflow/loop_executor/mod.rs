@@ -14,8 +14,9 @@ use db::{
         workflow_step::WorkflowStep,
         workflow_transcript::{CreateWorkflowTranscript, WorkflowTranscript},
         workflow_types::{
-            CompiledLoopDef, ReviewVerdict, ReviewerType, WorkflowAgentSessionRole,
-            WorkflowEventType, WorkflowLoopStatus, WorkflowStepStatus, to_workflow_wire_value,
+            AcceptanceCriterionLevel, CompiledLoopDef, ReviewVerdict, ReviewerType,
+            WorkflowAgentSessionRole, WorkflowEventType, WorkflowLoopStatus, WorkflowStepStatus,
+            to_workflow_wire_value,
         },
     },
 };
@@ -30,11 +31,6 @@ use super::{
     workflow_orchestrator::{
         OrchestratorError, WorkflowOrchestrator, reducer, resolve_step_workflow_session,
     },
-    workflow_review::{
-        LoopReviewPromptContext, LoopReviewPromptStepInput, LoopReviewProtocolMessage,
-        build_loop_review_prompt, loop_review_protocol_json_schema, parse_loop_review_output,
-        validate_loop_review_acceptance_coverage,
-    },
     workflow_runtime::{
         SummaryPayload, WORKFLOW_PROTOCOL_PARSE_MAX_RETRIES, WorkflowRevisionFeedbackSource,
         build_workflow_protocol_retry_prompt, parse_summary_payload,
@@ -43,6 +39,35 @@ use super::{
     },
 };
 use crate::services::inbox::InboxService;
+
+pub mod prompts;
+pub mod protocol;
+
+#[derive(Debug, Clone)]
+struct LoopReviewPromptStepInput {
+    step_key: String,
+    title: String,
+    instructions: String,
+    acceptance: db::models::workflow_types::AcceptanceCriteria,
+    summary: String,
+    outputs: Vec<String>,
+    evidence: Vec<String>,
+    predecessor_handoffs: Vec<String>,
+    user_skip_waiver: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LoopReviewPromptContext {
+    reviewer_name: String,
+    reviewer_role: String,
+    review_step_instructions: String,
+    current_round: i32,
+    loop_retry_count: i32,
+    retry_budget: i32,
+    review_scope_edges: Vec<String>,
+}
+
+use protocol::LoopReviewProtocolMessage;
 
 include!("types.rs");
 include!("review.rs");

@@ -753,7 +753,7 @@ mod tests {
         );
 
         // Task contract fields are part of the shared schema and hard rules.
-        assert!(prompt.contains("checklist"));
+        assert!(prompt.contains("selfCheck"));
         assert!(prompt.contains("verificationCommands"));
         assert!(prompt.contains("completionEvidence"));
         assert!(prompt.contains("Every `task` node MUST define a verifiable contract"));
@@ -1415,8 +1415,9 @@ mod tests {
             None,
             &WorkflowStepExecutionContract {
                 acceptance: vec!["Reject malformed input".into()],
+                acceptance_leveled: vec![],
                 expected_outputs: vec!["src/handler.rs".into()],
-                checklist: vec!["Preserve existing API".into()],
+                self_check: vec!["Preserve existing API".into()],
                 verification_commands: vec!["cargo test handler".into()],
                 completion_evidence: vec!["Passing test output".into()],
             },
@@ -1752,6 +1753,7 @@ mod tests {
                 feedback: "结果满足验收标准。".to_string(),
                 acceptance_results: vec![WorkflowAcceptanceResult {
                     criterion: "验收标准".to_string(),
+                    level: AcceptanceCriterionLevel::Required,
                     verdict: WorkflowAcceptanceVerdict::Passed,
                     evidence: "cargo test passed".to_string(),
                 }],
@@ -1792,6 +1794,7 @@ mod tests {
                 feedback: "还缺少回归测试。".to_string(),
                 acceptance_results: vec![WorkflowAcceptanceResult {
                     criterion: "回归测试".to_string(),
+                    level: AcceptanceCriterionLevel::Required,
                     verdict: WorkflowAcceptanceVerdict::Failed,
                     evidence: "no test output".to_string(),
                 }],
@@ -1880,7 +1883,7 @@ mod tests {
             execution_id,
             "task",
             &WorkflowStepType::Task,
-            &["criterion".to_string()],
+            &[(AcceptanceCriterionLevel::Required, "criterion".to_string())],
             &raw,
         )
         .is_err());
@@ -1918,7 +1921,7 @@ mod tests {
             execution_id,
             "review",
             &WorkflowStepType::Review,
-            &["declared".to_string()],
+            &[(AcceptanceCriterionLevel::Required, "declared".to_string())],
             &raw,
         )
         .is_err());
