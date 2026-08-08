@@ -49,5 +49,4 @@ use super::{
 include!("types.rs");
 include!("control.rs");
 include!("aggregation.rs");
-include!("prompts.rs");
 include!("tests.rs");

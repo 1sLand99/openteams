@@ -47,8 +47,8 @@ pub struct StepReviewPromptInput {
     pub upstream_results: Vec<UpstreamResultInput>,
     /// Latest effective review feedback; attempt-level section after schema.
     pub latest_review_feedback: Option<String>,
-    /// One full language-requirement line resolved by the caller; appended
-    /// after the duty sentence when non-empty (run-level).
+    /// One full language-requirement line resolved by the caller; rendered
+    /// under a Markdown section title when non-empty (run-level).
     pub response_language: String,
 }
 
@@ -73,7 +73,7 @@ pub fn build_step_review_prompt(input: &StepReviewPromptInput) -> String {
     );
     let response_language = input.response_language.trim();
     if !response_language.is_empty() {
-        sections.push_run_level(response_language);
+        sections.push_run_level(format!("## 响应语言\n\n{response_language}"));
     }
     sections.push_run_level(format!(
         "{WORKFLOW_GOAL_SECTION_TITLE}\n\n{}",
@@ -103,7 +103,7 @@ pub fn build_step_review_prompt(input: &StepReviewPromptInput) -> String {
         sections.push_node_level(format!("{UPSTREAM_SECTION_TITLE}\n\n{upstream}"));
     }
 
-    sections.push_schema(&super::super::workflow_review_protocol_json_schema(
+    sections.push_schema(&super::super::step_review_protocol_json_schema(
         input.identity.execution_id,
         &input.identity.step_key,
     ));
@@ -224,6 +224,7 @@ mod tests {
             &prompt,
             &[
                 "# 审核当前任务",
+                "## 响应语言",
                 "人类可读内容使用简体中文。",
                 "## 工作总目标",
                 "## 当前任务",
@@ -237,6 +238,19 @@ mod tests {
                 CLOSING_JSON_ONLY,
             ],
         );
+    }
+
+    #[test]
+    fn response_language_is_wrapped_in_a_markdown_section() {
+        let mut input = sample_input();
+        input.response_language =
+            "You MUST write human-readable JSON string values in Simplified Chinese.".to_string();
+
+        let prompt = build_step_review_prompt(&input);
+
+        assert!(prompt.contains(
+            "## 响应语言\n\nYou MUST write human-readable JSON string values in Simplified Chinese."
+        ));
     }
 
     #[test]

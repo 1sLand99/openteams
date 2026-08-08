@@ -32,10 +32,10 @@ use super::{
         OrchestratorError, WorkflowOrchestrator, reducer, resolve_step_workflow_session,
     },
     workflow_runtime::{
-        SummaryPayload, WORKFLOW_PROTOCOL_PARSE_MAX_RETRIES, WorkflowRevisionFeedbackSource,
-        build_workflow_protocol_retry_prompt, parse_summary_payload,
-        resolve_workflow_response_language_instruction, run_workflow_step_agent_follow_up,
-        run_workflow_step_agent_prompt, should_retry_workflow_protocol_parse_failure,
+        self, SummaryPayload, WORKFLOW_PROTOCOL_PARSE_MAX_RETRIES, WorkflowRevisionFeedbackSource,
+        parse_summary_payload, prompt_builders, resolve_workflow_response_language_instruction,
+        run_workflow_step_agent_follow_up, run_workflow_step_agent_prompt,
+        should_retry_workflow_protocol_parse_failure,
     },
 };
 use crate::services::inbox::InboxService;
@@ -52,7 +52,6 @@ struct LoopReviewPromptStepInput {
     summary: String,
     outputs: Vec<String>,
     evidence: Vec<String>,
-    predecessor_handoffs: Vec<String>,
     user_skip_waiver: Option<String>,
 }
 
@@ -65,6 +64,7 @@ struct LoopReviewPromptContext {
     loop_retry_count: i32,
     retry_budget: i32,
     review_scope_edges: Vec<String>,
+    required_upstream_results: Vec<prompt_builders::common::UpstreamResultInput>,
 }
 
 use protocol::LoopReviewProtocolMessage;

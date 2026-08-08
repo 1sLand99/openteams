@@ -679,12 +679,7 @@ impl<'a> LoopExecutor<'a> {
                     user_skip_waiver: input.user_skip_waiver.clone(),
                 })
                 .collect(),
-            required_upstream_results: review_inputs
-                .iter()
-                .flat_map(|input| input.predecessor_handoffs.iter())
-                .enumerate()
-                .map(|(index, summary)| (format!("upstream-{}", index + 1), summary.clone()))
-                .collect(),
+            required_upstream_results: review_context.required_upstream_results.clone(),
             scope_edges: review_context.review_scope_edges.clone(),
             current_round: review_context.current_round,
             review_attempt,
@@ -1244,18 +1239,11 @@ impl<'a> LoopExecutor<'a> {
                         error = %err,
                         "workflow loop review protocol parse failed; retrying"
                     );
-                    let schema = protocol::loop_review_protocol_json_schema(
-                        self.execution.id,
-                        &workflow_loop.loop_key,
-                        allowed_step_keys,
-                    );
-                    prompt_to_send = build_workflow_protocol_retry_prompt(
-                        "loop review output",
-                        &schema,
-                        &err.to_string(),
-                        prompt,
-                        &raw_output,
-                    );
+                    prompt_to_send =
+                        prompt_builders::common::append_protocol_error_section(
+                            prompt,
+                            &err.to_string(),
+                        );
                     attempt += 1;
                     run_as_follow_up = true;
                 }
@@ -1310,34 +1298,6 @@ impl<'a> LoopExecutor<'a> {
                 let node = node_by_key.get(step.step_key.as_str()).ok_or_else(|| {
                     OrchestratorError::NotFound(format!("plan node {} not found", step.step_key))
                 })?;
-                let handoff_for = |edge: &db::models::workflow_types::WorkflowPlanEdge,
-                                   other_key: &str,
-                                   direction: &str| {
-                    let other_node = node_by_key.get(other_key).copied();
-                    let expected_outputs = other_node
-                        .and_then(|node| node.data.outputs.as_ref())
-                        .filter(|outputs| !outputs.is_empty())
-                        .map(|outputs| outputs.join(", "))
-                        .unwrap_or_else(|| "no declared outputs".to_string());
-                    let latest_summary = step_by_key
-                        .get(other_key)
-                        .and_then(|other_step| {
-                            parse_summary_payload(other_step.summary_text.as_deref())
-                                .map(|payload| payload.summary)
-                                .or_else(|| other_step.summary_text.clone())
-                        })
-                        .unwrap_or_else(|| "no execution summary available".to_string());
-                    format!(
-                        "{direction} `{other_key}` via {} edge; expected outputs: {expected_outputs}; latest summary: {latest_summary}",
-                        edge.data.as_ref().map(|data| data.kind.as_str()).unwrap_or("hard"),
-                    )
-                };
-                let predecessor_handoffs = plan_json
-                    .edges
-                    .iter()
-                    .filter(|edge| edge.target == step.step_key)
-                    .map(|edge| handoff_for(edge, &edge.source, "from predecessor"))
-                    .collect::<Vec<_>>();
                 Ok(LoopReviewPromptStepInput {
                     step_key: step.step_key.clone(),
                     title: step.title.clone(),
@@ -1352,7 +1312,6 @@ impl<'a> LoopExecutor<'a> {
                         .and_then(|value| value.get("evidence").cloned())
                         .and_then(|value| serde_json::from_value(value).ok())
                         .unwrap_or_default(),
-                    predecessor_handoffs,
                     user_skip_waiver: loop_skip_waiver(step, &loop_def.loop_key),
                 })
             })
@@ -1373,6 +1332,51 @@ impl<'a> LoopExecutor<'a> {
             })
             .collect::<Vec<_>>();
 
+        let mut seen_upstream = HashSet::new();
+        let required_upstream_results = plan_json
+            .edges
+            .iter()
+            .filter(|edge| {
+                review_scope.contains(edge.target.as_str())
+                    && !review_scope.contains(edge.source.as_str())
+                    && seen_upstream.insert(edge.source.as_str())
+            })
+            .map(|edge| {
+                let step = step_by_key.get(edge.source.as_str()).ok_or_else(|| {
+                    OrchestratorError::NotFound(format!(
+                        "Loop '{}' 的必要上游步骤 '{}' 不存在",
+                        loop_def.loop_key, edge.source
+                    ))
+                })?;
+                let result = workflow_runtime::result_aggregation::final_node_result_from_step(step)
+                    .ok_or_else(|| {
+                        OrchestratorError::Runtime(
+                            workflow_runtime::WorkflowRuntimeError::Validation(format!(
+                                "Loop '{}' 的必要上游步骤 '{}' 缺少最新有效结果",
+                                loop_def.loop_key, edge.source
+                            )),
+                        )
+                    })?;
+                if matches!(
+                    result.status,
+                    workflow_runtime::WorkflowTaskCompletionStatus::Blocked
+                        | workflow_runtime::WorkflowTaskCompletionStatus::NeedsContext
+                ) {
+                    return Err(OrchestratorError::Runtime(
+                        workflow_runtime::WorkflowRuntimeError::Validation(format!(
+                            "Loop '{}' 的必要上游步骤 '{}' 尚未形成可审核结果",
+                            loop_def.loop_key, edge.source
+                        )),
+                    ));
+                }
+                Ok(prompt_builders::common::UpstreamResultInput {
+                    step_key: result.step_key,
+                    summary: result.summary,
+                    outputs: result.outputs,
+                })
+            })
+            .collect::<Result<Vec<_>, OrchestratorError>>()?;
+
         Ok((
             inputs,
             LoopReviewPromptContext {
@@ -1387,6 +1391,7 @@ impl<'a> LoopExecutor<'a> {
                 loop_retry_count: workflow_loop.retry_count,
                 retry_budget: workflow_loop.max_retry,
                 review_scope_edges,
+                required_upstream_results,
             },
         ))
     }

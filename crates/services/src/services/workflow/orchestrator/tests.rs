@@ -1136,6 +1136,82 @@ async fn beginning_manual_retry_publishes_active_state_before_agent_execution() 
     assert_eq!(persisted_step.status, WorkflowStepStatus::Ready);
 }
 
+#[tokio::test]
+async fn manual_loop_review_retry_is_routed_back_to_loop_scheduler() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let runner = ChatRunner::new(fixture.db.clone());
+    let workflow_loop = WorkflowLoop::find_by_execution(&fixture.db.pool, fixture.execution.id)
+        .await
+        .expect("load loop")
+        .into_iter()
+        .next()
+        .expect("loop exists");
+    WorkflowLoop::update_status(
+        &fixture.db.pool,
+        workflow_loop.id,
+        WorkflowLoopStatus::Failed,
+        Some("previous loop review failed".to_string()),
+    )
+    .await
+    .expect("fail loop");
+    let member_step = WorkflowStep::update_loop_id(
+        &fixture.db.pool,
+        fixture.running_step_id,
+        Some(workflow_loop.id),
+    )
+    .await
+    .expect("attach member step to loop");
+    assert!(
+        !WorkflowOrchestrator::prepare_manual_loop_review_retry(
+            &fixture.db.pool,
+            &fixture.execution,
+            &member_step,
+        )
+        .await
+        .expect("classify loop member retry")
+    );
+    WorkflowStep::update_loop_id(
+        &fixture.db.pool,
+        fixture.review_step_id,
+        Some(workflow_loop.id),
+    )
+    .await
+    .expect("attach review step to loop");
+    WorkflowStep::update_status(
+        &fixture.db.pool,
+        fixture.review_step_id,
+        WorkflowStepStatus::Failed,
+    )
+    .await
+    .expect("fail loop review step");
+
+    let (execution, ready_step) =
+        WorkflowOrchestrator::begin_step_retry(&fixture.db, &runner, fixture.review_step_id)
+            .await
+            .expect("begin loop review retry");
+    let is_loop_review = WorkflowOrchestrator::prepare_manual_loop_review_retry(
+        &fixture.db.pool,
+        &execution,
+        &ready_step,
+    )
+    .await
+    .expect("prepare loop review retry");
+
+    assert!(is_loop_review);
+    let restored_loop = WorkflowLoop::find_by_id(&fixture.db.pool, workflow_loop.id)
+        .await
+        .expect("load restored loop")
+        .expect("restored loop exists");
+    assert_eq!(restored_loop.status, WorkflowLoopStatus::Running);
+    let events = WorkflowEvent::find_by_execution(&fixture.db.pool, execution.id)
+        .await
+        .expect("load retry events");
+    assert!(events.iter().any(|event| {
+        event.event_type == WorkflowEventType::LoopRetrying
+            && event.step_id == Some(fixture.review_step_id)
+    }));
+}
+
 #[test]
 fn completed_like_final_review_invariant_requires_only_completed_terminal_steps() {
     assert!(!WorkflowOrchestrator::all_steps_completed_like(&[]));

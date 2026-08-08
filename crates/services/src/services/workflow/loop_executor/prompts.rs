@@ -9,6 +9,9 @@ use db::models::workflow_types::AcceptanceCriteria;
 use uuid::Uuid;
 
 use super::protocol::loop_review_protocol_json_schema;
+use crate::services::workflow_runtime::prompt_builders::common::{
+    UPSTREAM_SECTION_TITLE, UpstreamResultInput, render_upstream_results,
+};
 
 /// Reviewer identity shown in the prompt header (§6.5).
 #[derive(Debug, Clone)]
@@ -46,9 +49,9 @@ pub struct LoopReviewPromptInput {
     pub loop_acceptance: AcceptanceCriteria,
     /// Exactly the compiler-produced `reviewScope`; never widened here.
     pub review_scope: Vec<LoopReviewTaskInput>,
-    /// (step_key, summary) pairs of out-of-scope upstream results required to
-    /// understand the in-scope hand-offs.
-    pub required_upstream_results: Vec<(String, String)>,
+    /// Latest valid results of direct predecessors outside `reviewScope` that
+    /// are needed to understand the in-scope hand-offs.
+    pub required_upstream_results: Vec<UpstreamResultInput>,
     /// Dependency edges inside the scope, rendered one per line.
     pub scope_edges: Vec<String>,
     pub current_round: i32,
@@ -125,14 +128,8 @@ pub fn build_loop_review_prompt(input: &LoopReviewPromptInput) -> String {
         sections.push(format!("## reviewScope 内依赖关系\n\n{edges}"));
     }
 
-    let upstreams = input
-        .required_upstream_results
-        .iter()
-        .filter(|(step_key, summary)| !step_key.trim().is_empty() && !summary.trim().is_empty())
-        .map(|(step_key, summary)| format!("- `{}`：{}", step_key.trim(), summary.trim()))
-        .collect::<Vec<_>>();
-    if !upstreams.is_empty() {
-        sections.push(format!("## 必要上游结果\n\n{}", upstreams.join("\n")));
+    if let Some(upstream) = render_upstream_results(&input.required_upstream_results) {
+        sections.push(format!("{UPSTREAM_SECTION_TITLE}\n\n{upstream}"));
     }
 
     // Category 4: the single output JSON Schema.
@@ -343,8 +340,11 @@ mod tests {
     fn sections_follow_cache_friendly_order() {
         let mut input = sample_input();
         input.response_language = "人类可读内容使用简体中文。".to_string();
-        input.required_upstream_results =
-            vec![("upstream_step".to_string(), "上游摘要".to_string())];
+        input.required_upstream_results = vec![UpstreamResultInput {
+            step_key: "upstream_step".to_string(),
+            summary: "上游摘要".to_string(),
+            outputs: vec!["upstream/output.md".to_string()],
+        }];
         input.latest_loop_feedback = Some("上轮 loop 反馈".to_string());
         let prompt = build_loop_review_prompt(&input);
         assert_ascending(

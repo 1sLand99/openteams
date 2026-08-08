@@ -118,6 +118,29 @@ mod tests {
         ]
     }
 
+    fn build_test_iteration_prompt(
+        original_goal: &str,
+        current_state_summary: &str,
+        user_feedback_json: &str,
+        lead_agent_id: &str,
+        available_agents: &[WorkflowPlanningAgent],
+        previous_plan: &WorkflowPlanJson,
+        response_language_instruction: &str,
+    ) -> String {
+        let input = build_iteration_plan_generation_input(
+            original_goal,
+            current_state_summary,
+            user_feedback_json,
+            lead_agent_id,
+            available_agents,
+            previous_plan,
+            response_language_instruction,
+        );
+        crate::services::workflow_runtime::prompt_builders::plan_generation::build_plan_generation_prompt(
+            &input,
+        )
+    }
+
     #[test]
     fn summarize_round_results_collects_steps_result_and_outputs() {
         let round = sample_round();
@@ -141,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn build_iteration_plan_prompt_includes_feedback_history_and_agents() {
+    fn iteration_plan_builder_includes_feedback_history_and_agents() {
         let round = sample_round();
         let feedback = WorkflowIterationFeedback {
             id: Uuid::new_v4(),
@@ -162,12 +185,10 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        let prompt = build_iteration_plan_prompt(
+        let prompt = build_test_iteration_prompt(
             "Ship a stable workflow",
             &feedback.current_status_summary,
             &feedback.user_feedback_json,
-            1,
-            std::slice::from_ref(&feedback),
             "lead-agent",
             &sample_planning_agents(),
             &sample_plan(),
@@ -194,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn build_iteration_plan_prompt_injects_full_previous_plan_json() {
+    fn iteration_plan_builder_injects_full_previous_plan_json() {
         let mut previous_plan = sample_plan();
         previous_plan.nodes = vec![
             db::models::workflow_types::WorkflowPlanNode {
@@ -251,12 +272,10 @@ mod tests {
             data: None,
         }];
 
-        let prompt = build_iteration_plan_prompt(
+        let prompt = build_test_iteration_prompt(
             "Ship a stable workflow",
             "Round 1 completed",
             r#"{"action":"reject","feedback":{"what_wrong":"Missing tests"}}"#,
-            1,
-            &[],
             "lead-session-agent",
             &sample_planning_agents(),
             &previous_plan,

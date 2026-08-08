@@ -54,32 +54,6 @@ pub enum WorkflowStepProtocolMessage {
         #[serde(default)]
         placeholder: Option<String>,
     },
-    ReviewResult {
-        step_key: String,
-        execution_id: String,
-        verdict: ReviewVerdict,
-        summary: String,
-        content: String,
-        acceptance_results: Vec<WorkflowAcceptanceResult>,
-        evidence: Vec<String>,
-        #[serde(default)]
-        risks: Vec<String>,
-        #[serde(default)]
-        unfinished_items: Vec<String>,
-    },
-    ResultReviewResult {
-        step_key: String,
-        execution_id: String,
-        overall_status: WorkflowResultOverallStatus,
-        summary: String,
-        content: String,
-        acceptance_results: Vec<WorkflowAcceptanceResult>,
-        evidence: Vec<String>,
-        #[serde(default)]
-        risks: Vec<String>,
-        #[serde(default)]
-        unfinished_items: Vec<String>,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -271,7 +245,7 @@ fn acceptance_results_schema_def() -> serde_json::Value {
     })
 }
 
-pub fn workflow_step_protocol_json_schema(
+pub fn task_protocol_json_schema(
     execution_id: Uuid,
     step_key: &str,
     allow_interaction_requests: bool,
@@ -312,40 +286,6 @@ pub fn workflow_step_protocol_json_schema(
                     "items": { "type": "string" },
                     "default": []
                 }
-            }
-        }),
-        serde_json::json!({
-            "type": "object",
-            "required": ["type", "step_key", "execution_id", "verdict", "summary", "content", "acceptance_results", "evidence"],
-            "additionalProperties": false,
-            "properties": {
-                "type": { "const": "review_result" },
-                "step_key": { "const": step_key },
-                "execution_id": { "const": execution_id.to_string() },
-                "verdict": { "enum": ["approved", "rejected"] },
-                "summary": { "type": "string", "minLength": 1 },
-                "content": { "type": "string" },
-                "acceptance_results": { "$ref": "#/$defs/acceptance_results" },
-                "evidence": { "$ref": "#/$defs/evidence" },
-                "risks": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] },
-                "unfinished_items": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] }
-            }
-        }),
-        serde_json::json!({
-            "type": "object",
-            "required": ["type", "step_key", "execution_id", "overall_status", "summary", "content", "acceptance_results", "evidence"],
-            "additionalProperties": false,
-            "properties": {
-                "type": { "const": "result_review_result" },
-                "step_key": { "const": step_key },
-                "execution_id": { "const": execution_id.to_string() },
-                "overall_status": { "enum": ["completed", "completed_with_concerns", "blocked"] },
-                "summary": { "type": "string", "minLength": 1 },
-                "content": { "type": "string" },
-                "acceptance_results": { "$ref": "#/$defs/acceptance_results" },
-                "evidence": { "$ref": "#/$defs/evidence" },
-                "risks": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] },
-                "unfinished_items": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] }
             }
         }),
         serde_json::json!({
@@ -407,7 +347,6 @@ pub fn workflow_step_protocol_json_schema(
     serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$defs": {
-            "acceptance_results": acceptance_results_schema_def(),
             "evidence": {
                 "type": "array",
                 "minItems": 1,
@@ -419,64 +358,7 @@ pub fn workflow_step_protocol_json_schema(
     .unwrap_or_else(|_| "{}".to_string())
 }
 
-pub fn workflow_step_protocol_json_schema_for_step(
-    execution_id: Uuid,
-    step_key: &str,
-    allow_interaction_requests: bool,
-    step_type: &WorkflowStepType,
-) -> String {
-    let base = workflow_step_protocol_json_schema(
-        execution_id,
-        step_key,
-        allow_interaction_requests,
-    );
-    let Ok(mut schema) = serde_json::from_str::<serde_json::Value>(&base) else {
-        return base;
-    };
-    let required_type = match step_type {
-        WorkflowStepType::Task => "final_result",
-        WorkflowStepType::Review => "review_result",
-        WorkflowStepType::Result => "result_review_result",
-    };
-    let Some(variants) = schema.get_mut("oneOf").and_then(|value| value.as_array_mut()) else {
-        return base;
-    };
-    variants.retain(|variant| {
-        let type_property = variant
-            .get("properties")
-            .and_then(|properties| properties.get("type"));
-        let const_type = type_property
-            .and_then(|value| value.get("const"))
-            .and_then(|value| value.as_str());
-        matches!(
-            const_type,
-            Some(value)
-                if value == required_type
-                    || matches!(
-                        value,
-                        "error" | "approval_request" | "permission_request"
-                            | "continue_confirmation" | "input_request"
-                    )
-        ) || type_property
-            .and_then(|value| value.get("enum"))
-            .is_some()
-    });
-    // Drop the acceptance_results $def when no remaining variant references it
-    // (e.g. task steps), so each scenario's schema only carries what it uses.
-    let references_acceptance = variants.iter().any(|variant| {
-        serde_json::to_string(variant)
-            .map(|text| text.contains("#/$defs/acceptance_results"))
-            .unwrap_or(false)
-    });
-    if !references_acceptance {
-        if let Some(defs) = schema.get_mut("$defs").and_then(|value| value.as_object_mut()) {
-            defs.remove("acceptance_results");
-        }
-    }
-    serde_json::to_string_pretty(&schema).unwrap_or(base)
-}
-
-pub fn workflow_review_protocol_json_schema(execution_id: Uuid, step_key: &str) -> String {
+pub fn step_review_protocol_json_schema(execution_id: Uuid, step_key: &str) -> String {
     serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -505,63 +387,52 @@ pub fn workflow_review_protocol_json_schema(execution_id: Uuid, step_key: &str) 
     .unwrap_or_else(|_| "{}".to_string())
 }
 
-pub fn build_workflow_protocol_retry_prompt(
-    protocol_name: &str,
-    schema: &str,
-    error: &str,
-    previous_input: &str,
-    previous_output: &str,
-) -> String {
-    let data = PromptDataBuilder::new()
-        .add("protocol_parse_error", error)
-        .add("previous_workflow_request", previous_input)
-        .add("previous_invalid_response", previous_output)
-        .build();
-
-    let prompt = format!(
-        r#"Your previous workflow {protocol_name} response did not match the required JSON protocol.
-Error: {parse_error}
-
-Retry the same workflow request. Respond with ONLY one JSON object. Do not include Markdown fences, prose, explanations, or extra text.
-
-Required JSON Schema:
-```json
-{schema}
-```
-
-Previous workflow request:
-{prev_input}
-
-Previous invalid response:
-{prev_output}"#,
-        prev_input = data.get("previous_workflow_request"),
-        prev_output = data.get("previous_invalid_response"),
-        parse_error = data.get("protocol_parse_error"),
-    );
-    maybe_prepend_safety_preamble(&prompt)
-}
-
 pub fn should_retry_workflow_protocol_parse_failure(raw_output: &str) -> bool {
     !raw_output.trim().is_empty()
 }
 
-pub fn parse_step_protocol_output(
+/// Dedicated task parse entry (design §12.1): accepts `final_result` plus the
+/// interaction/error variants. Review/result success discriminators fail
+/// during deserialization because they are not members of this enum.
+pub fn parse_task_protocol_output(
     execution_id: Uuid,
     step_key: &str,
     raw_output: &str,
 ) -> Result<WorkflowStepProtocolMessage, WorkflowRuntimeError> {
     let payload = extract_json_payload(raw_output).ok_or_else(|| {
-        WorkflowRuntimeError::Validation("step 输出中未找到 JSON 对象".to_string())
+        WorkflowRuntimeError::Validation("task 输出中未找到 JSON 对象".to_string())
     })?;
-
     let message: WorkflowStepProtocolMessage = serde_json::from_str(&payload)?;
+
     match &message {
         WorkflowStepProtocolMessage::FinalResult {
             step_key: actual_step_key,
             execution_id: actual_execution_id,
+            status,
+            summary,
+            verification,
+            self_review,
+            issues,
+            evidence,
             ..
+        } => {
+            validate_protocol_identity(
+                execution_id,
+                step_key,
+                actual_execution_id,
+                actual_step_key,
+                "task",
+            )?;
+            validate_task_result_fields(
+                *status,
+                summary,
+                verification,
+                self_review,
+                issues,
+                evidence,
+            )?;
         }
-        | WorkflowStepProtocolMessage::Error {
+        WorkflowStepProtocolMessage::Error {
             step_key: actual_step_key,
             execution_id: actual_execution_id,
             ..
@@ -585,166 +456,35 @@ pub fn parse_step_protocol_output(
             step_key: actual_step_key,
             execution_id: actual_execution_id,
             ..
-        }
-        | WorkflowStepProtocolMessage::ReviewResult {
-            step_key: actual_step_key,
-            execution_id: actual_execution_id,
-            ..
-        }
-        | WorkflowStepProtocolMessage::ResultReviewResult {
-            step_key: actual_step_key,
-            execution_id: actual_execution_id,
-            ..
-        } => {
-            if actual_step_key != step_key {
-                return Err(WorkflowRuntimeError::Validation(format!(
-                    "step protocol 的 step_key 非法，期望 '{}'，实际 '{}'",
-                    step_key, actual_step_key
-                )));
-            }
-            if actual_execution_id != &execution_id.to_string() {
-                return Err(WorkflowRuntimeError::Validation(format!(
-                    "step protocol 的 execution_id 非法，期望 '{}'，实际 '{}'",
-                    execution_id, actual_execution_id
-                )));
-            }
-        }
-    }
-
-    match &message {
-        WorkflowStepProtocolMessage::FinalResult {
-            status,
-            summary,
-            verification,
-            self_review,
-            issues,
-            evidence,
-            ..
-        } => validate_task_result_fields(
-            *status,
-            summary,
-            verification,
-            self_review,
-            issues,
-            evidence,
+        } => validate_protocol_identity(
+            execution_id,
+            step_key,
+            actual_execution_id,
+            actual_step_key,
+            "task",
         )?,
-        WorkflowStepProtocolMessage::ReviewResult {
-            summary,
-            acceptance_results,
-            evidence,
-            risks,
-            unfinished_items,
-            ..
-        } => validate_structured_review_fields(
-            summary,
-            acceptance_results,
-            evidence,
-            risks,
-            unfinished_items,
-        )?,
-        WorkflowStepProtocolMessage::ResultReviewResult {
-            overall_status,
-            summary,
-            acceptance_results,
-            evidence,
-            risks,
-            unfinished_items,
-            ..
-        } => validate_structured_result_fields(
-            overall_status,
-            summary,
-            acceptance_results,
-            evidence,
-            risks,
-            unfinished_items,
-        )?,
-        _ => {}
-    }
-
-    Ok(message)
-}
-
-/// Dedicated task parse entry (design §12.1): accepts `final_result` plus the
-/// interaction/error variants, and rejects review/result success types at
-/// deserialization time instead of filtering a shared union afterwards.
-pub fn parse_task_protocol_output(
-    execution_id: Uuid,
-    step_key: &str,
-    raw_output: &str,
-) -> Result<WorkflowStepProtocolMessage, WorkflowRuntimeError> {
-    let message = parse_step_protocol_output(execution_id, step_key, raw_output)?;
-    let valid_type = matches!(
-        &message,
-        WorkflowStepProtocolMessage::FinalResult { .. }
-            | WorkflowStepProtocolMessage::Error { .. }
-            | WorkflowStepProtocolMessage::ApprovalRequest { .. }
-            | WorkflowStepProtocolMessage::PermissionRequest { .. }
-            | WorkflowStepProtocolMessage::ContinueConfirmation { .. }
-            | WorkflowStepProtocolMessage::InputRequest { .. }
-    );
-    if !valid_type {
-        return Err(WorkflowRuntimeError::Validation(
-            "task step returned an incompatible success protocol message".to_string(),
-        ));
     }
     Ok(message)
 }
 
-pub fn parse_step_protocol_output_for_step(
+fn validate_protocol_identity(
     execution_id: Uuid,
     step_key: &str,
-    step_type: &WorkflowStepType,
-    declared_acceptance: &[(AcceptanceCriterionLevel, String)],
-    raw_output: &str,
-) -> Result<WorkflowStepProtocolMessage, WorkflowRuntimeError> {
-    let message = parse_step_protocol_output(execution_id, step_key, raw_output)?;
-    let valid_type = matches!(
-        (step_type, &message),
-        (WorkflowStepType::Task, WorkflowStepProtocolMessage::FinalResult { .. })
-            | (WorkflowStepType::Review, WorkflowStepProtocolMessage::ReviewResult { .. })
-            | (WorkflowStepType::Result, WorkflowStepProtocolMessage::ResultReviewResult { .. })
-            | (_, WorkflowStepProtocolMessage::Error { .. })
-            | (_, WorkflowStepProtocolMessage::ApprovalRequest { .. })
-            | (_, WorkflowStepProtocolMessage::PermissionRequest { .. })
-            | (_, WorkflowStepProtocolMessage::ContinueConfirmation { .. })
-            | (_, WorkflowStepProtocolMessage::InputRequest { .. })
-    );
-    if !valid_type {
+    actual_execution_id: &str,
+    actual_step_key: &str,
+    protocol_name: &str,
+) -> Result<(), WorkflowRuntimeError> {
+    if actual_step_key != step_key {
         return Err(WorkflowRuntimeError::Validation(format!(
-            "step type '{:?}' returned an incompatible success protocol message",
-            step_type
+            "{protocol_name} protocol 的 step_key 非法，期望 '{step_key}'，实际 '{actual_step_key}'"
         )));
     }
-    match &message {
-        WorkflowStepProtocolMessage::ReviewResult {
-            verdict,
-            summary,
-            acceptance_results,
-            evidence,
-            risks,
-            unfinished_items,
-            ..
-        } => {
-            if matches!(verdict, ReviewVerdict::Approved) {
-                validate_approved_required_acceptance_coverage(
-                    declared_acceptance,
-                    acceptance_results,
-                )?;
-            }
-            validate_structured_review_fields(
-                summary,
-                acceptance_results,
-                evidence,
-                risks,
-                unfinished_items,
-            )?;
-        }
-        WorkflowStepProtocolMessage::ResultReviewResult {
-            acceptance_results, ..
-        } => validate_acceptance_coverage(declared_acceptance, acceptance_results)?,
-        _ => {}
+    if actual_execution_id != execution_id.to_string() {
+        return Err(WorkflowRuntimeError::Validation(format!(
+            "{protocol_name} protocol 的 execution_id 非法，期望 '{execution_id}'，实际 '{actual_execution_id}'"
+        )));
     }
-    Ok(message)
+    Ok(())
 }
 
 fn validate_task_result_fields(
@@ -843,101 +583,29 @@ fn validate_structured_review_fields(
     Ok(())
 }
 
-fn validate_structured_result_fields(
-    overall_status: &WorkflowResultOverallStatus,
-    summary: &str,
-    acceptance_results: &[WorkflowAcceptanceResult],
-    evidence: &[String],
-    risks: &[String],
-    unfinished_items: &[String],
-) -> Result<(), WorkflowRuntimeError> {
-    if summary.trim().is_empty()
-        || evidence.is_empty()
-        || evidence.iter().any(|item| item.trim().is_empty())
-    {
-        return Err(WorkflowRuntimeError::Validation(
-            "structured result fields are invalid".to_string(),
-        ));
-    }
-    if acceptance_results
-        .iter()
-        .any(|item| item.criterion.trim().is_empty() || item.evidence.trim().is_empty())
-    {
-        return Err(WorkflowRuntimeError::Validation(
-            "structured result acceptance_results are invalid".to_string(),
-        ));
-    }
-    let has_failed = acceptance_results
-        .iter()
-        .any(|item| matches!(item.verdict, WorkflowAcceptanceVerdict::Failed));
-    let has_required_failed = acceptance_results.iter().any(|item| {
-        matches!(item.verdict, WorkflowAcceptanceVerdict::Failed)
-            && item.level == AcceptanceCriterionLevel::Required
-    });
-    let completed = matches!(overall_status, WorkflowResultOverallStatus::Completed);
-    if completed && (has_required_failed || !unfinished_items.is_empty()) {
-        return Err(WorkflowRuntimeError::Validation(
-            "overall_status=completed cannot contain failed required criteria or unfinished work"
-                .to_string(),
-        ));
-    }
-    if completed && !risks.is_empty() {
-        return Err(WorkflowRuntimeError::Validation(
-            "overall_status=completed cannot contain unresolved risks".to_string(),
-        ));
-    }
-    if risks.iter().any(|item| item.trim().is_empty())
-        || unfinished_items.iter().any(|item| item.trim().is_empty())
-    {
-        return Err(WorkflowRuntimeError::Validation(
-            "structured result risks and unfinished_items may not contain blank entries"
-                .to_string(),
-        ));
-    }
-    if matches!(overall_status, WorkflowResultOverallStatus::CompletedWithConcerns)
-        && risks.is_empty()
-        && unfinished_items.is_empty()
-        && !has_failed
-    {
-        return Err(WorkflowRuntimeError::Validation(
-            "overall_status=completed_with_concerns must identify a risk, failed criterion, or unfinished item"
-                .to_string(),
-        ));
-    }
-    if matches!(overall_status, WorkflowResultOverallStatus::Blocked)
-        && unfinished_items.is_empty()
-        && !has_failed
-    {
-        return Err(WorkflowRuntimeError::Validation(
-            "overall_status=blocked must identify failed or unfinished work".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_approved_required_acceptance_coverage(
-    declared_acceptance: &[(AcceptanceCriterionLevel, String)],
+fn validate_review_verdict_consistency(
+    verdict: &ReviewVerdict,
     results: &[WorkflowAcceptanceResult],
+    risks: &[String],
 ) -> Result<(), WorkflowRuntimeError> {
-    let required_acceptance = declared_acceptance
-        .iter()
-        .filter(|(level, criterion)| {
-            *level == AcceptanceCriterionLevel::Required && !criterion.trim().is_empty()
+    if *verdict == ReviewVerdict::Approved
+        && results.iter().any(|result| {
+            result.level == AcceptanceCriterionLevel::Required
+                && result.verdict == WorkflowAcceptanceVerdict::Failed
         })
-        .collect::<Vec<_>>();
-    if required_acceptance.is_empty() {
-        return Ok(());
+    {
+        return Err(WorkflowRuntimeError::Validation(
+            "approved review cannot contain a failed required criterion".to_string(),
+        ));
     }
-    let returned_required_count = results
-        .iter()
-        .filter(|result| result.level == AcceptanceCriterionLevel::Required)
-        .count();
-    if returned_required_count != required_acceptance.len() {
-        return Err(WorkflowRuntimeError::Validation(format!(
-            "approved review required acceptance result count mismatch: expected {}, actual {}",
-            required_acceptance.len(),
-            returned_required_count
-        )));
+    if results.iter().any(|result| {
+        result.level == AcceptanceCriterionLevel::Partial
+            && result.verdict == WorkflowAcceptanceVerdict::Failed
+    }) && risks.is_empty()
+    {
+        return Err(WorkflowRuntimeError::Validation(
+            "failed partial criteria require an externally attributable risk".to_string(),
+        ));
     }
     Ok(())
 }
@@ -1001,7 +669,7 @@ fn validate_acceptance_coverage(
     Ok(())
 }
 
-pub fn parse_review_protocol_output(
+pub fn parse_step_review_protocol_output(
     execution_id: Uuid,
     step_key: &str,
     declared_acceptance: &[(AcceptanceCriterionLevel, String)],
@@ -1048,12 +716,8 @@ pub fn parse_review_protocol_output(
                     "review protocol 的 feedback 不能为空".to_string(),
                 ));
             }
-            if matches!(verdict, ReviewVerdict::Approved) {
-                validate_approved_required_acceptance_coverage(
-                    declared_acceptance,
-                    acceptance_results,
-                )?;
-            }
+            validate_acceptance_coverage(declared_acceptance, acceptance_results)?;
+            validate_review_verdict_consistency(verdict, acceptance_results, risks)?;
             validate_structured_review_fields(
                 feedback,
                 acceptance_results,

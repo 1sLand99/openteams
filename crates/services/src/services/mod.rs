@@ -48,7 +48,7 @@ pub mod skill_registry;
 pub mod workflow;
 pub use workflow::{
     workflow_analytics, workflow_compiler, workflow_iteration, workflow_loop_executor,
-    workflow_orchestrator, workflow_review, workflow_runtime, workflow_validator,
+    workflow_orchestrator, workflow_runtime, workflow_validator,
 };
 pub mod workspace_change_capture;
 pub mod worktree_manager;

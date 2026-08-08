@@ -6,12 +6,10 @@
 //! rejected review may, however, supply its complete structured findings to
 //! the executor so it can address every observed issue in one revision.
 
-use db::models::workflow_types::WorkflowStepType;
-
 use super::{
     super::{
         WorkflowAcceptanceResult, WorkflowAcceptanceVerdict, WorkflowRevisionFeedbackSource,
-        workflow_step_protocol_json_schema_for_step,
+        task_protocol_json_schema,
     },
     common::{
         CLOSING_JSON_ONLY, CURRENT_TASK_SECTION_TITLE, PromptIdentity, PromptSections,
@@ -124,11 +122,10 @@ pub fn build_task_execution_prompt(input: &TaskExecutionPromptInput) -> String {
         sections.push_node_level(format!("{UPSTREAM_SECTION_TITLE}\n\n{upstream}"));
     }
 
-    sections.push_schema(&workflow_step_protocol_json_schema_for_step(
+    sections.push_schema(&task_protocol_json_schema(
         input.identity.execution_id,
         &input.identity.step_key,
         true,
-        &WorkflowStepType::Task,
     ));
 
     if let Some(revision) = &input.revision {

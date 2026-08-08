@@ -372,7 +372,6 @@ impl WorkflowOrchestrator {
                     &recompiling_execution,
                     &plan,
                     &active_revision,
-                    &from_round,
                     &iteration_feedback,
                 )
                 .await?;
