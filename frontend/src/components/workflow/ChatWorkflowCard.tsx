@@ -12,7 +12,13 @@ import { useEffect, useMemo, useState } from 'react';
 import { useAppTranslation } from '@/hooks/useAppTranslation';
 import { motion } from 'framer-motion';
 import type { WorkflowCardData } from '@/lib/api';
+import { AgentActivityPanel } from '@/components/AgentActivityPanel';
 import { AgentMarkdown } from '@/components/AgentMarkdown';
+import { useRunActivity } from '@/context/RunActivityContext';
+import {
+  planGenerationActivityLoadState,
+  shouldShowPlanGenerationActivity,
+} from './planGenerationActivity';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
 import { ChatMarkdown } from '@/components/conversation/ChatMarkdown';
 import { WorkflowIterationFeedbackCard } from './WorkflowIterationFeedbackCard';
@@ -46,6 +52,7 @@ type WorkflowPlanGenerationMeta = {
   retryable?: boolean;
   retry_endpoint?: string;
   error_message?: string | null;
+  run_id?: string;
 };
 
 const REVIEW_READY_STEP_STATUSES = new Set(['completed', 'skipped']);
@@ -399,6 +406,22 @@ export function ChatWorkflowCard({
       null
     );
   }, [defaultRoundIndex, projection, roundGraphs, selectedRoundIndex]);
+
+  const planGenerationCardMeta = (() => {
+    if (extractWorkflowCardType(message.meta) !== 'workflow_plan_generation') {
+      return undefined;
+    }
+    return extractWorkflowPlanGenerationMeta(message.meta);
+  })();
+  const planGenerationRunId = planGenerationCardMeta?.run_id;
+  // Keep the run id after a failure so already-loaded thinking lines stay
+  // visible, but disable fetching so the card stops pulling activity.
+  const planGenerationActivity = useRunActivity(planGenerationRunId, {
+    enabled:
+      Boolean(planGenerationRunId) &&
+      planGenerationCardMeta?.status !== 'failed',
+  });
+
   if (!projection) {
     return null;
   }
@@ -557,6 +580,23 @@ export function ChatWorkflowCard({
       isCompletedState);
   const shouldExpandFeedbackCard =
     canReviewCurrentRound && isViewingCurrentRound;
+  const planGenerationActivityLines = planGenerationRunId
+    ? planGenerationActivity.lines
+    : [];
+  const planGenerationPanelState = planGenerationActivityLoadState(
+    planGenerationActivity.status,
+  );
+  const showPlanGenerationActivityPanel = shouldShowPlanGenerationActivity({
+    runId: planGenerationRunId,
+    lineCount: planGenerationActivityLines.length,
+    loadState: planGenerationPanelState,
+  });
+  const planGenerationActivityLabels = {
+    loading: t('agentActivity.loading'),
+    cleaned: t('agentActivity.cleaned'),
+    error: t('agentActivity.error'),
+    empty: t('agentActivity.empty'),
+  };
 
   return (
     <div className="workflow-card-surface w-full max-w-[640px] rounded-lg px-5 py-5 flex flex-col">
@@ -669,6 +709,18 @@ export function ChatWorkflowCard({
               {emptyGraphDescription}
             </div>
           )}
+        </div>
+      )}
+
+      {showPlanGenerationActivityPanel && (
+        <div className="mt-3 rounded-lg border border-[var(--hairline)] bg-[var(--surface-1)] px-3 py-2 text-left [&_.agent-activity-scrollbar]:max-h-[220px]">
+          <AgentActivityPanel
+            lines={planGenerationActivityLines}
+            state={planGenerationPanelState}
+            labels={planGenerationActivityLabels}
+            translate={t}
+            variant="inline"
+          />
         </div>
       )}
 

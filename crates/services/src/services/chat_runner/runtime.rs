@@ -1232,7 +1232,7 @@ impl ChatRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn persist_and_notify_activity_line(
+    pub(crate) async fn persist_and_notify_activity_line(
         activity_path: &Path,
         sender: &broadcast::Sender<ChatStreamEvent>,
         session_id: Uuid,

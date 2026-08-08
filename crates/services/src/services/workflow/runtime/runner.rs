@@ -329,6 +329,40 @@ pub async fn run_workflow_agent_prompt(
         0,
         false,
         None,
+        None,
+    )
+    .await
+    .map(|run| run.output)
+}
+
+/// Run the lead agent for workflow plan generation, streaming its
+/// thinking/tool activity into the run's `activity.jsonl` and onto the chat
+/// run activity channel so the placeholder card can render live progress.
+pub async fn run_workflow_plan_agent_prompt(
+    db: &DBService,
+    chat_runner: &ChatRunner,
+    session: &ChatSession,
+    agent: &ChatAgent,
+    session_agent: &ChatSessionAgent,
+    prompt: &str,
+    card_message_id: Uuid,
+) -> Result<String, WorkflowRuntimeError> {
+    run_workflow_agent_prompt_inner(
+        db,
+        session,
+        agent,
+        session_agent,
+        None,
+        prompt,
+        Uuid::nil(),
+        0,
+        false,
+        None,
+        Some(PlanGenerationStreamContext {
+            chat_runner: chat_runner.clone(),
+            session_id: session.id,
+            card_message_id,
+        }),
     )
     .await
     .map(|run| run.output)
@@ -365,6 +399,7 @@ pub async fn run_workflow_step_agent_prompt(
             agent_id: agent.id,
             agent_name: agent.name.clone(),
         }),
+        None,
     )
     .await
 }
@@ -388,6 +423,7 @@ pub async fn run_workflow_agent_follow_up(
         step_id,
         0,
         true,
+        None,
         None,
     )
     .await
@@ -425,6 +461,7 @@ pub async fn run_workflow_step_agent_follow_up(
             agent_id: agent.id,
             agent_name: agent.name.clone(),
         }),
+        None,
     )
     .await
 }
@@ -483,6 +520,7 @@ async fn run_workflow_agent_prompt_inner(
     step_retry_count: i32,
     follow_up_requested: bool,
     stream_context: Option<WorkflowRuntimeStreamContext>,
+    plan_stream_context: Option<PlanGenerationStreamContext>,
 ) -> Result<WorkflowAgentRunOutput, WorkflowRuntimeError> {
     let refresh = refresh_session_agent_execution_config_before_run(
         &db.pool,
@@ -557,6 +595,30 @@ async fn run_workflow_agent_prompt_inner(
         stream_context.as_ref(),
     )
     .await?;
+    if let (Some(plan_context), Some(record)) =
+        (plan_stream_context.as_ref(), runtime_run_record.as_ref())
+    {
+        // The placeholder card was upserted before the run record existed, so
+        // attach the run id now that it is known. This lets the frontend
+        // subscribe to the run's activity stream.
+        if let Err(error) = plan_context
+            .chat_runner
+            .attach_plan_generation_run_id(
+                plan_context.session_id,
+                plan_context.card_message_id,
+                record.run_id,
+            )
+            .await
+        {
+            tracing::warn!(
+                session_id = %plan_context.session_id,
+                card_message_id = %plan_context.card_message_id,
+                run_id = %record.run_id,
+                %error,
+                "failed to attach plan generation run id to placeholder card"
+            );
+        }
+    }
     let io_log = WorkflowNodeIoLogContext {
         session_id: session.id,
         execution_id: runtime_run_record
@@ -733,20 +795,39 @@ async fn run_workflow_agent_prompt_inner(
         workflow_session.map(|item| item.id),
         msg_store.clone(),
     ));
-    let mut workflow_stream_task = stream_context.as_ref().map(|context| {
-        spawn_workflow_runtime_stream(
-            context.pool.clone(),
-            context.chat_runner.clone(),
-            context.session_id,
-            context.execution_id,
-            context.workflow_agent_session_id,
-            context.step_id,
-            context.step_key.clone(),
-            context.agent_id,
-            context.agent_name.clone(),
-            msg_store.clone(),
-        )
-    });
+    let mut workflow_stream_task = stream_context
+        .as_ref()
+        .map(|context| {
+            spawn_workflow_runtime_stream(
+                context.pool.clone(),
+                context.chat_runner.clone(),
+                context.session_id,
+                context.execution_id,
+                context.workflow_agent_session_id,
+                context.step_id,
+                context.step_key.clone(),
+                context.agent_id,
+                context.agent_name.clone(),
+                msg_store.clone(),
+            )
+        })
+        .or_else(|| {
+            plan_stream_context
+                .as_ref()
+                .zip(runtime_run_record.as_ref())
+                .map(|(plan_context, record)| {
+                    spawn_plan_generation_stream(
+                        plan_context.chat_runner.clone(),
+                        plan_context.session_id,
+                        effective_session_agent.id,
+                        agent.id,
+                        agent.name.clone(),
+                        record.run_id,
+                        record.run_dir.clone(),
+                        msg_store.clone(),
+                    )
+                })
+        });
 
     let mut failed_by_signal = false;
     let mut exit_signal_error: Option<String> = None;

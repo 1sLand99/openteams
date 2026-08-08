@@ -141,6 +141,7 @@ export interface WorkflowPlanGenerationMeta {
   retryable?: boolean;
   retry_endpoint?: string;
   error_message?: string | null;
+  run_id?: string;
 }
 
 export interface QuotedMessageReference {

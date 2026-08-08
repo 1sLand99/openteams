@@ -882,7 +882,7 @@ impl ChatRunner {
         let _ = sender.send(event);
     }
 
-    fn sender_for(&self, session_id: Uuid) -> broadcast::Sender<ChatStreamEvent> {
+    pub(crate) fn sender_for(&self, session_id: Uuid) -> broadcast::Sender<ChatStreamEvent> {
         if let Some(entry) = self.streams.get(&session_id) {
             return entry.clone();
         }
