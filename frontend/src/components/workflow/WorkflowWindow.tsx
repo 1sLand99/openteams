@@ -242,6 +242,20 @@ type WorkflowTranscriptSummaryPayload = {
   outputs?: string[];
 };
 
+type WorkflowReviewAcceptanceResult = {
+  criterion: string;
+  level: string;
+  verdict: string;
+  evidence: string;
+};
+
+type WorkflowReviewTranscriptDetails = {
+  acceptanceResults: WorkflowReviewAcceptanceResult[];
+  evidence: string[];
+  risks: string[];
+  unfinishedItems: string[];
+};
+
 const WORKFLOW_FAILURE_STEP_STATUSES = new Set(['failed', 'interrupted']);
 const REVIEW_READY_STEP_STATUSES = new Set(['completed', 'skipped']);
 const WORKFLOW_REVIEW_ENTRY_TYPES = new Set([
@@ -494,6 +508,87 @@ function parseTranscriptSummaryPayload(
   }
 }
 
+function readNonEmptyStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter(
+        (item): item is string => typeof item === 'string' && item.trim().length > 0
+      )
+    : [];
+}
+
+function parseWorkflowReviewTranscriptDetails(
+  metaJson: string | null | undefined
+): WorkflowReviewTranscriptDetails | null {
+  const meta = parseWorkflowTranscriptMeta(metaJson);
+  if (!meta) return null;
+
+  const acceptanceResults = Array.isArray(meta.acceptance_results)
+    ? meta.acceptance_results.flatMap((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+        const result = item as Record<string, unknown>;
+        const criterion = typeof result.criterion === 'string' ? result.criterion.trim() : '';
+        const level = typeof result.level === 'string' ? result.level.trim() : '';
+        const verdict = typeof result.verdict === 'string' ? result.verdict.trim() : '';
+        const evidence = typeof result.evidence === 'string' ? result.evidence.trim() : '';
+        return criterion && level && verdict && evidence
+          ? [{ criterion, level, verdict, evidence }]
+          : [];
+      })
+    : [];
+  const details = {
+    acceptanceResults,
+    evidence: readNonEmptyStringArray(meta.evidence),
+    risks: readNonEmptyStringArray(meta.risks),
+    unfinishedItems: readNonEmptyStringArray(meta.unfinished_items),
+  };
+  return details.acceptanceResults.length > 0 ||
+    details.evidence.length > 0 ||
+    details.risks.length > 0 ||
+    details.unfinishedItems.length > 0
+    ? details
+    : null;
+}
+
+function renderWorkflowReviewDetails(
+  details: WorkflowReviewTranscriptDetails,
+  t: (key: string, opts?: Record<string, unknown>) => string
+): string {
+  const sections: string[] = [];
+  if (details.acceptanceResults.length > 0) {
+    sections.push(
+      `### ${t('workflow.reviewDetails.acceptanceResults', {
+        defaultValue: 'Acceptance Results',
+      })}\n\n${details.acceptanceResults
+        .map(
+          (result) =>
+            `- **${result.criterion}** · ${result.level} · ${result.verdict}\n  - ${t('workflow.reviewDetails.evidence', {
+              defaultValue: 'Evidence',
+            })}: ${result.evidence}`
+        )
+        .join('\n')}`
+    );
+  }
+  const listSection = (
+    key: string,
+    defaultValue: string,
+    items: string[]
+  ) => {
+    if (items.length > 0) {
+      sections.push(
+        `### ${t(key, { defaultValue })}\n\n${items.map((item) => `- ${item}`).join('\n')}`
+      );
+    }
+  };
+  listSection('workflow.reviewDetails.evidence', 'Evidence', details.evidence);
+  listSection('workflow.reviewDetails.risks', 'Risks', details.risks);
+  listSection(
+    'workflow.reviewDetails.unfinishedItems',
+    'Unfinished Items',
+    details.unfinishedItems
+  );
+  return sections.join('\n\n');
+}
+
 function getTranscriptMarkdown(
   entry: WorkflowTranscriptEntry,
   t: (key: string, opts?: Record<string, unknown>) => string
@@ -507,6 +602,10 @@ function getTranscriptMarkdown(
   if (WORKFLOW_REVIEW_ENTRY_TYPES.has(entry.entry_type)) {
     const content = entry.content.trim();
     const verdict = getTranscriptReviewVerdict(entry);
+    const reviewDetails = parseWorkflowReviewTranscriptDetails(entry.meta_json);
+    const detailsMarkdown = reviewDetails
+      ? renderWorkflowReviewDetails(reviewDetails, t)
+      : '';
     if (verdict) {
       const localizedVerdict = t(`workflow.reviewVerdict.${verdict}`, {
         defaultValue: verdict,
@@ -515,11 +614,11 @@ function getTranscriptMarkdown(
         verdict: localizedVerdict,
         defaultValue: `Verdict: ${localizedVerdict}`,
       });
-      return content.length > 0
-        ? `${verdictLine}\n\n${content}`
-        : verdictLine;
+      return [verdictLine, content, detailsMarkdown]
+        .filter(Boolean)
+        .join('\n\n');
     }
-    return content.length > 0 ? content : null;
+    return [content, detailsMarkdown].filter(Boolean).join('\n\n') || null;
   }
 
   if (

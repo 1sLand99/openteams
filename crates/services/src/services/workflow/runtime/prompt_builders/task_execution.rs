@@ -2,13 +2,17 @@
 //!
 //! Builds the prompt for a task node's first run (`revision = None`) and for
 //! rework after Lead / Loop reviewer / user feedback (`revision = Some`).
-//! The typed contract deliberately carries no acceptance criteria, so they
-//! cannot leak into the executor prompt (§2 decision 12).
+//! The typed contract deliberately carries no plan acceptance criteria. A
+//! rejected review may, however, supply its complete structured findings to
+//! the executor so it can address every observed issue in one revision.
 
 use db::models::workflow_types::WorkflowStepType;
 
 use super::{
-    super::{WorkflowRevisionFeedbackSource, workflow_step_protocol_json_schema_for_step},
+    super::{
+        WorkflowAcceptanceResult, WorkflowAcceptanceVerdict, WorkflowRevisionFeedbackSource,
+        workflow_step_protocol_json_schema_for_step,
+    },
     common::{
         CLOSING_JSON_ONLY, CURRENT_TASK_SECTION_TITLE, PromptIdentity, PromptSections,
         UPSTREAM_SECTION_TITLE, UpstreamResultInput, WORKFLOW_GOAL_SECTION_TITLE,
@@ -45,6 +49,21 @@ pub struct RevisionContextInput {
     pub previous_summary: String,
     /// Outputs of the previous attempt.
     pub previous_outputs: Vec<String>,
+    /// Complete structured findings from the rejected automated review, when
+    /// the revision was triggered by one. This is review output, not the plan
+    /// acceptance contract.
+    pub review_outcome: Option<ReviewOutcomeInput>,
+}
+
+/// Structured details produced by a rejected review. Keeping all fields lets
+/// the executor distinguish failed validation from supporting evidence, risks,
+/// and still-open work instead of relying on a lossy feedback summary.
+#[derive(Debug, Clone, Default)]
+pub struct ReviewOutcomeInput {
+    pub acceptance_results: Vec<WorkflowAcceptanceResult>,
+    pub evidence: Vec<String>,
+    pub risks: Vec<String>,
+    pub unfinished_items: Vec<String>,
 }
 
 /// Typed input of the task execution prompt (§6.3).
@@ -131,10 +150,51 @@ fn render_revision_section(revision: &RevisionContextInput) -> String {
     if let Some(outputs) = render_inline_code_list(&revision.previous_outputs) {
         lines.push(format!("- 上次产物：{outputs}"));
     }
+    if let Some(review_outcome) = &revision.review_outcome {
+        if !review_outcome.acceptance_results.is_empty() {
+            lines.push("- 审核验收结果（acceptance_results）：".to_string());
+            lines.extend(review_outcome.acceptance_results.iter().map(|result| {
+                format!(
+                    "  - [{}] {}：{}；证据：{}",
+                    acceptance_level_label(result.level),
+                    result.criterion.trim(),
+                    acceptance_verdict_label(result.verdict),
+                    result.evidence.trim(),
+                )
+            }));
+        }
+        if let Some(evidence) = render_inline_code_list(&review_outcome.evidence) {
+            lines.push(format!("- 审核证据（evidence）：{evidence}"));
+        }
+        if let Some(risks) = render_inline_code_list(&review_outcome.risks) {
+            lines.push(format!("- 审核风险（risks）：{risks}"));
+        }
+        if let Some(items) = render_inline_code_list(&review_outcome.unfinished_items) {
+            lines.push(format!("- 未完成项（unfinished_items）：{items}"));
+        }
+    }
     format!(
         "## 本次修订\n\n{}\n\n按照审核意见完整修复：逐条解决反馈指出的全部问题，不得只修复部分问题、不得用解释代替修复；未受反馈影响的既有正确成果保持不变。",
         lines.join("\n")
     )
+}
+
+fn acceptance_level_label(
+    level: db::models::workflow_types::AcceptanceCriterionLevel,
+) -> &'static str {
+    match level {
+        db::models::workflow_types::AcceptanceCriterionLevel::Required => "required",
+        db::models::workflow_types::AcceptanceCriterionLevel::Partial => "partial",
+        db::models::workflow_types::AcceptanceCriterionLevel::Recommended => "recommended",
+    }
+}
+
+fn acceptance_verdict_label(verdict: WorkflowAcceptanceVerdict) -> &'static str {
+    match verdict {
+        WorkflowAcceptanceVerdict::Passed => "passed",
+        WorkflowAcceptanceVerdict::Failed => "failed",
+        WorkflowAcceptanceVerdict::NotApplicable => "not_applicable",
+    }
 }
 
 /// Maps the revision feedback source to its Chinese label. `Reviewer` is only
@@ -193,6 +253,7 @@ mod tests {
                 "crates/services/src/services/pi_models.rs".to_string(),
                 "crates/services/src/services/cli_config.rs".to_string(),
             ],
+            review_outcome: None,
         }
     }
 
@@ -260,12 +321,28 @@ mod tests {
     }
 
     #[test]
-    fn task_prompt_never_contains_acceptance_criteria() {
+    fn task_prompt_contains_complete_review_findings_on_revision() {
         let mut input = sample_input();
-        input.revision = Some(sample_revision(WorkflowRevisionFeedbackSource::User));
+        let mut revision = sample_revision(WorkflowRevisionFeedbackSource::User);
+        revision.review_outcome = Some(ReviewOutcomeInput {
+            acceptance_results: vec![WorkflowAcceptanceResult {
+                criterion: "类型检查通过".to_string(),
+                level: db::models::workflow_types::AcceptanceCriterionLevel::Required,
+                verdict: WorkflowAcceptanceVerdict::Failed,
+                evidence: "pnpm run frontend:check failed".to_string(),
+            }],
+            evidence: vec!["tsc output".to_string()],
+            risks: vec!["发布会失败".to_string()],
+            unfinished_items: vec!["修复生成类型".to_string()],
+        });
+        input.revision = Some(revision);
         let prompt = build_task_execution_prompt(&input);
-        assert!(!prompt.contains("验收标准"));
-        assert!(!prompt.contains("acceptance"));
+        assert!(prompt.contains("审核验收结果（acceptance_results）"));
+        assert!(prompt.contains("[required] 类型检查通过：failed"));
+        assert!(prompt.contains("审核证据（evidence）：`tsc output`"));
+        assert!(prompt.contains("审核风险（risks）：`发布会失败`"));
+        assert!(prompt.contains("未完成项（unfinished_items）：`修复生成类型`"));
+        assert!(!prompt.contains("## 验收标准"));
     }
 
     #[test]

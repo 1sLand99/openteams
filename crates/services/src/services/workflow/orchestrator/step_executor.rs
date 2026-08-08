@@ -22,6 +22,7 @@ use db::{
         workflow_types::*,
     },
 };
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use utils::assets::config_path;
 use uuid::Uuid;
@@ -295,10 +296,19 @@ pub(super) struct PendingRevisionFeedback {
     pub(super) previous_summary: String,
     pub(super) previous_content: Option<String>,
     pub(super) previous_outputs: Vec<String>,
+    pub(super) review_details: Option<RevisionReviewDetails>,
     pub(super) review_round: i32,
     pub(super) loop_key: Option<String>,
     pub(super) loop_rejection_reason: Option<String>,
     pub(super) other_steps_feedback_summary: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(super) struct RevisionReviewDetails {
+    pub(super) acceptance_results: Vec<workflow_runtime::WorkflowAcceptanceResult>,
+    pub(super) evidence: Vec<String>,
+    pub(super) risks: Vec<String>,
+    pub(super) unfinished_items: Vec<String>,
 }
 
 impl WorkflowOrchestrator {
@@ -805,6 +815,7 @@ impl WorkflowOrchestrator {
         feedback: &str,
         previous_summary: &str,
         previous_outputs: &[String],
+        review_details: Option<&RevisionReviewDetails>,
         response_language: &str,
     ) -> String {
         let contract = Self::execution_contract_for_step(plan, step);
@@ -830,6 +841,14 @@ impl WorkflowOrchestrator {
                     feedback: feedback.to_string(),
                     previous_summary: previous_summary.to_string(),
                     previous_outputs: previous_outputs.to_vec(),
+                    review_outcome: review_details.map(|details| {
+                        prompt_builders::task_execution::ReviewOutcomeInput {
+                            acceptance_results: details.acceptance_results.clone(),
+                            evidence: details.evidence.clone(),
+                            risks: details.risks.clone(),
+                            unfinished_items: details.unfinished_items.clone(),
+                        }
+                    }),
                 }),
                 response_language: response_language.to_string(),
             },
@@ -894,6 +913,7 @@ impl WorkflowOrchestrator {
         previous_content: Option<&str>,
         previous_outputs: &[String],
         review_round: i32,
+        review_details: Option<&RevisionReviewDetails>,
     ) -> String {
         let mut context = existing_revision_context
             .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
@@ -948,6 +968,7 @@ impl WorkflowOrchestrator {
                 "previous_content": previous_content.unwrap_or_default().trim(),
                 "previous_outputs": previous_outputs,
                 "review_round": review_round,
+                "review_details": review_details,
             }),
         );
 
@@ -993,6 +1014,10 @@ impl WorkflowOrchestrator {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default(),
+            review_details: pending
+                .get("review_details")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok()),
             review_round: pending
                 .get("review_round")
                 .and_then(|item| item.as_i64())
@@ -1650,6 +1675,7 @@ impl WorkflowOrchestrator {
                                     Some(&persisted.result.content),
                                     &persisted.result.outputs,
                                     revising_step.retry_count + 1,
+                                    None,
                                 );
                                 let revising_step = WorkflowStep::update_revision_context(
                                     pool,
@@ -1691,6 +1717,7 @@ impl WorkflowOrchestrator {
                                     &feedback,
                                     &persisted.result.summary,
                                     &persisted.result.outputs,
+                                    None,
                                     response_language_instruction,
                                 );
                                 if let Some(section) =
@@ -1874,6 +1901,12 @@ impl WorkflowOrchestrator {
                         "step_revising",
                     )
                     .await?;
+                    let review_details = RevisionReviewDetails {
+                        acceptance_results: acceptance_results.clone(),
+                        evidence: evidence.clone(),
+                        risks: risks.clone(),
+                        unfinished_items: unfinished_items.clone(),
+                    };
                     let merged_context = Self::merge_revision_context(
                         revising_step.revision_context.as_deref(),
                         WorkflowRevisionFeedbackSource::Lead,
@@ -1882,6 +1915,7 @@ impl WorkflowOrchestrator {
                         Some(&persisted.result.content),
                         &persisted.result.outputs,
                         revising_step.retry_count + 1,
+                        Some(&review_details),
                     );
                     let revising_step = WorkflowStep::update_revision_context(
                         pool,
@@ -1922,6 +1956,7 @@ impl WorkflowOrchestrator {
                         &feedback,
                         &persisted.result.summary,
                         &persisted.result.outputs,
+                        Some(&review_details),
                         response_language_instruction,
                     );
                     if let Some(section) =
@@ -2849,6 +2884,14 @@ Before modifying files, create an isolated Git worktree for this step when Git i
                     feedback: feedback.feedback.clone(),
                     previous_summary: feedback.previous_summary.clone(),
                     previous_outputs: feedback.previous_outputs.clone(),
+                    review_outcome: feedback.review_details.as_ref().map(|details| {
+                        prompt_builders::task_execution::ReviewOutcomeInput {
+                            acceptance_results: details.acceptance_results.clone(),
+                            evidence: details.evidence.clone(),
+                            risks: details.risks.clone(),
+                            unfinished_items: details.unfinished_items.clone(),
+                        }
+                    }),
                 }
             });
             prompt_builders::task_execution::build_task_execution_prompt(

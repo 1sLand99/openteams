@@ -931,14 +931,16 @@ everything independently by reading the actual code and output.
 
 Return exactly one JSON object — no Markdown, no comments, no prose outside the JSON.
 
+For `acceptance_results`, an `approved` review must return every displayed `required` acceptance criterion with its level, verdict, and concrete evidence. A `rejected` review may return a non-empty subset of the criteria actually checked and relevant to the rejection. Keep any returned `partial` or `recommended` result with its actual level, verdict, and evidence; do not rewrite or discard it.
+
 Approved:
 ```json
-{"type": "review_result", "step_key": "...", "execution_id": "...", "verdict": "approved", "feedback": "brief approval note", "acceptance_results": [{"criterion": "criterion", "verdict": "passed", "evidence": "file:line or test output"}], "evidence": ["independent verification evidence"], "risks": [], "unfinished_items": []}
+{"type": "review_result", "step_key": "...", "execution_id": "...", "verdict": "approved", "feedback": "brief approval note", "acceptance_results": [{"criterion": "criterion", "level": "required", "verdict": "passed", "evidence": "file:line or test output"}], "evidence": ["independent verification evidence"], "risks": [], "unfinished_items": []}
 ```
 
 Rejected:
 ```json
-{"type": "review_result", "step_key": "...", "execution_id": "...", "verdict": "rejected", "feedback": "specific issues: missing X, extra Y at file:line, wrong Z", "acceptance_results": [{"criterion": "criterion", "verdict": "failed", "evidence": "file:line or failed test output"}], "evidence": ["independent verification evidence"], "risks": ["risk"], "unfinished_items": ["missing work"]}
+{"type": "review_result", "step_key": "...", "execution_id": "...", "verdict": "rejected", "feedback": "specific issues: missing X, extra Y at file:line, wrong Z", "acceptance_results": [{"criterion": "criterion", "level": "required", "verdict": "failed", "evidence": "file:line or failed test output"}], "evidence": ["independent verification evidence"], "risks": ["risk"], "unfinished_items": ["missing work"]}
 ```
 
 ## Language Requirement

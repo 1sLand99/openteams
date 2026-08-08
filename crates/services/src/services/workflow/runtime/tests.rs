@@ -1378,6 +1378,8 @@ mod tests {
         )));
         assert!(prompt.contains("report every issue you can identify in this single response"));
         assert!(prompt.contains("acceptance_results"));
+        assert!(prompt.contains("an `approved` review must return every displayed `required` acceptance criterion"));
+        assert!(prompt.contains("\"level\": \"required\""));
         assert!(prompt.contains("independent verification evidence"));
     }
 
@@ -1774,16 +1776,26 @@ mod tests {
   "execution_id": "{}",
   "verdict": "rejected",
   "feedback": "还缺少回归测试。",
-  "acceptance_results": [{{ "criterion": "回归测试", "verdict": "failed", "evidence": "no test output" }}],
+  "acceptance_results": [{{ "criterion": "环境服务", "level": "partial", "verdict": "failed", "evidence": "service unavailable" }}, {{ "criterion": "文档", "level": "recommended", "verdict": "passed", "evidence": "docs checked" }}],
   "evidence": ["no test output"],
-  "risks": ["regression"],
-  "unfinished_items": ["add tests"]
+  "risks": ["service unavailable"],
+  "unfinished_items": ["retry after recovery"]
 }}"#,
             step.step_key, step.execution_id
         );
 
-        let message = parse_review_protocol_output(step.execution_id, &step.step_key, &[], &raw_output)
-            .expect("parse");
+        let message = parse_review_protocol_output(
+            step.execution_id,
+            &step.step_key,
+            &[
+                (AcceptanceCriterionLevel::Required, "first required".to_string()),
+                (AcceptanceCriterionLevel::Required, "second required".to_string()),
+                (AcceptanceCriterionLevel::Partial, "环境服务".to_string()),
+                (AcceptanceCriterionLevel::Recommended, "文档".to_string()),
+            ],
+            &raw_output,
+        )
+        .expect("rejected review may report a checked subset");
 
         assert_eq!(
             message,
@@ -1792,15 +1804,23 @@ mod tests {
                 execution_id: step.execution_id.to_string(),
                 verdict: ReviewVerdict::Rejected,
                 feedback: "还缺少回归测试。".to_string(),
-                acceptance_results: vec![WorkflowAcceptanceResult {
-                    criterion: "回归测试".to_string(),
-                    level: AcceptanceCriterionLevel::Required,
-                    verdict: WorkflowAcceptanceVerdict::Failed,
-                    evidence: "no test output".to_string(),
-                }],
+                acceptance_results: vec![
+                    WorkflowAcceptanceResult {
+                        criterion: "环境服务".to_string(),
+                        level: AcceptanceCriterionLevel::Partial,
+                        verdict: WorkflowAcceptanceVerdict::Failed,
+                        evidence: "service unavailable".to_string(),
+                    },
+                    WorkflowAcceptanceResult {
+                        criterion: "文档".to_string(),
+                        level: AcceptanceCriterionLevel::Recommended,
+                        verdict: WorkflowAcceptanceVerdict::Passed,
+                        evidence: "docs checked".to_string(),
+                    },
+                ],
                 evidence: vec!["no test output".to_string()],
-                risks: vec!["regression".to_string()],
-                unfinished_items: vec!["add tests".to_string()],
+                risks: vec!["service unavailable".to_string()],
+                unfinished_items: vec!["retry after recovery".to_string()],
             }
         );
     }
@@ -1912,16 +1932,169 @@ mod tests {
     }
 
     #[test]
-    fn review_protocol_rejects_extra_acceptance_criteria() {
+    fn approved_review_rejects_missing_required_acceptance_results() {
         let execution_id = Uuid::new_v4();
         let raw = format!(
-            r#"{{"type":"review_result","step_key":"review","execution_id":"{execution_id}","verdict":"approved","summary":"reviewed","content":"ok","acceptance_results":[{{"criterion":"declared","verdict":"passed","evidence":"checked"}},{{"criterion":"invented","verdict":"passed","evidence":"checked"}}],"evidence":["checked"]}}"#
+            r#"{{"type":"review_result","step_key":"review","execution_id":"{execution_id}","verdict":"approved","summary":"reviewed","content":"ok","acceptance_results":[{{"criterion":"one required criterion","level":"required","verdict":"passed","evidence":"checked"}}],"evidence":["checked"]}}"#
         );
         assert!(parse_step_protocol_output_for_step(
             execution_id,
             "review",
             &WorkflowStepType::Review,
-            &[(AcceptanceCriterionLevel::Required, "declared".to_string())],
+            &[
+                (AcceptanceCriterionLevel::Required, "first".to_string()),
+                (AcceptanceCriterionLevel::Required, "second".to_string()),
+                (AcceptanceCriterionLevel::Partial, "optional".to_string()),
+            ],
+            &raw,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejected_review_allows_partial_results_and_preserves_non_required_levels() {
+        let execution_id = Uuid::new_v4();
+        let raw = format!(
+            r#"{{"type":"review_result","step_key":"review","execution_id":"{execution_id}","verdict":"rejected","summary":"reviewed","content":"check failed","acceptance_results":[{{"criterion":"环境依赖","level":"partial","verdict":"failed","evidence":"service unavailable"}},{{"criterion":"文档补充","level":"recommended","verdict":"passed","evidence":"docs checked"}}],"evidence":["checked"],"risks":["service unavailable"],"unfinished_items":["retry after service recovery"]}}"#
+        );
+        let message = parse_step_protocol_output_for_step(
+            execution_id,
+            "review",
+            &WorkflowStepType::Review,
+            &[
+                (AcceptanceCriterionLevel::Required, "required one".to_string()),
+                (AcceptanceCriterionLevel::Required, "required two".to_string()),
+                (AcceptanceCriterionLevel::Partial, "环境依赖".to_string()),
+                (AcceptanceCriterionLevel::Recommended, "文档补充".to_string()),
+            ],
+            &raw,
+        )
+        .expect("rejected review may report a checked subset");
+        let WorkflowStepProtocolMessage::ReviewResult {
+            acceptance_results,
+            ..
+        } = message
+        else {
+            panic!("expected review result");
+        };
+        assert_eq!(
+            acceptance_results,
+            vec![
+                WorkflowAcceptanceResult {
+                    criterion: "环境依赖".to_string(),
+                    level: AcceptanceCriterionLevel::Partial,
+                    verdict: WorkflowAcceptanceVerdict::Failed,
+                    evidence: "service unavailable".to_string(),
+                },
+                WorkflowAcceptanceResult {
+                    criterion: "文档补充".to_string(),
+                    level: AcceptanceCriterionLevel::Recommended,
+                    verdict: WorkflowAcceptanceVerdict::Passed,
+                    evidence: "docs checked".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn approved_review_allows_unfinished_items_for_attributed_partial_gap() {
+        // Mirrors the reported Hermes scenario: every required criterion
+        // passes, a partial criterion fails with external attribution in
+        // `risks`, and the reviewer records the deferred follow-up in
+        // `unfinished_items`. This must be accepted, not rejected.
+        let execution_id = Uuid::new_v4();
+        let raw = format!(
+            r#"{{"type":"review_result","step_key":"review","execution_id":"{execution_id}","verdict":"approved","summary":"reviewed","content":"ok","acceptance_results":[{{"criterion":"required work","level":"required","verdict":"passed","evidence":"checked"}},{{"criterion":"lint passes","level":"partial","verdict":"failed","evidence":"6 pre-existing clippy warnings"}}],"evidence":["checked"],"risks":["warnings live in pre-existing orchestrator code"],"unfinished_items":["fix pre-existing clippy warnings in a follow-up task"]}}"#
+        );
+        let message = parse_step_protocol_output_for_step(
+            execution_id,
+            "review",
+            &WorkflowStepType::Review,
+            &[
+                (AcceptanceCriterionLevel::Required, "required work".to_string()),
+                (AcceptanceCriterionLevel::Partial, "lint passes".to_string()),
+            ],
+            &raw,
+        )
+        .expect("approved review with attributed partial gap may carry follow-up");
+        assert!(matches!(
+            message,
+            WorkflowStepProtocolMessage::ReviewResult {
+                verdict: ReviewVerdict::Approved,
+                unfinished_items,
+                ..
+            } if unfinished_items.len() == 1
+        ));
+    }
+
+    #[test]
+    fn approved_review_allows_unfinished_items_for_recommended_gap() {
+        let execution_id = Uuid::new_v4();
+        let raw = format!(
+            r#"{{"type":"review_result","step_key":"review","execution_id":"{execution_id}","verdict":"approved","summary":"reviewed","content":"ok","acceptance_results":[{{"criterion":"required work","level":"required","verdict":"passed","evidence":"checked"}},{{"criterion":"attach screenshot","level":"recommended","verdict":"failed","evidence":"no screenshot"}}],"evidence":["checked"],"risks":[],"unfinished_items":["add screenshot later"]}}"#
+        );
+        assert!(parse_step_protocol_output_for_step(
+            execution_id,
+            "review",
+            &WorkflowStepType::Review,
+            &[
+                (AcceptanceCriterionLevel::Required, "required work".to_string()),
+                (AcceptanceCriterionLevel::Recommended, "attach screenshot".to_string()),
+            ],
+            &raw,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn approved_review_allows_unfinished_items() {
+        let execution_id = Uuid::new_v4();
+        let raw = format!(
+            r#"{{"type":"review_result","step_key":"review","execution_id":"{execution_id}","verdict":"approved","summary":"reviewed","content":"ok","acceptance_results":[{{"criterion":"required work","level":"required","verdict":"passed","evidence":"checked"}}],"evidence":["checked"],"risks":[],"unfinished_items":["add more tests later"]}}"#
+        );
+        assert!(parse_step_protocol_output_for_step(
+            execution_id,
+            "review",
+            &WorkflowStepType::Review,
+            &[(AcceptanceCriterionLevel::Required, "required work".to_string())],
+            &raw,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn approved_review_allows_partial_failure_without_risks() {
+        let execution_id = Uuid::new_v4();
+        let raw = format!(
+            r#"{{"type":"review_result","step_key":"review","execution_id":"{execution_id}","verdict":"approved","summary":"reviewed","content":"ok","acceptance_results":[{{"criterion":"required work","level":"required","verdict":"passed","evidence":"checked"}},{{"criterion":"lint passes","level":"partial","verdict":"failed","evidence":"6 clippy warnings"}}],"evidence":["checked"],"risks":[],"unfinished_items":["fix clippy warnings later"]}}"#
+        );
+        assert!(parse_step_protocol_output_for_step(
+            execution_id,
+            "review",
+            &WorkflowStepType::Review,
+            &[
+                (AcceptanceCriterionLevel::Required, "required work".to_string()),
+                (AcceptanceCriterionLevel::Partial, "lint passes".to_string()),
+            ],
+            &raw,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn result_review_still_requires_full_declared_acceptance_coverage() {
+        let execution_id = Uuid::new_v4();
+        let raw = format!(
+            r#"{{"type":"result_review_result","step_key":"result","execution_id":"{execution_id}","overall_status":"blocked","summary":"blocked","content":"required work missing","acceptance_results":[{{"criterion":"first","level":"required","verdict":"failed","evidence":"missing"}}],"evidence":["missing"],"unfinished_items":["complete second"]}}"#
+        );
+        assert!(parse_step_protocol_output_for_step(
+            execution_id,
+            "result",
+            &WorkflowStepType::Result,
+            &[
+                (AcceptanceCriterionLevel::Required, "first".to_string()),
+                (AcceptanceCriterionLevel::Partial, "second".to_string()),
+            ],
             &raw,
         )
         .is_err());

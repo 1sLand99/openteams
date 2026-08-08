@@ -22,8 +22,10 @@ use uuid::Uuid;
 
 use super::{
     super::workflow_runtime::{
-        WorkflowRevisionFeedbackSource, workflow_review_attempt_limit_reached,
+        WorkflowAcceptanceResult, WorkflowAcceptanceVerdict, WorkflowRevisionFeedbackSource,
+        workflow_review_attempt_limit_reached,
     },
+    step_executor::RevisionReviewDetails,
     step_input::StepFollowUpMode,
     *,
 };
@@ -1222,6 +1224,7 @@ fn revision_context_round_trips_pending_user_feedback() {
         Some("Current full result"),
         &["src/main.rs".to_string()],
         2,
+        None,
     );
 
     let pending = WorkflowOrchestrator::parse_pending_revision_feedback(Some(&context))
@@ -1242,6 +1245,50 @@ fn revision_context_round_trips_pending_user_feedback() {
 }
 
 #[test]
+fn revision_context_round_trips_complete_lead_review_findings() {
+    let review_details = RevisionReviewDetails {
+        acceptance_results: vec![WorkflowAcceptanceResult {
+            criterion: "类型检查通过".to_string(),
+            level: AcceptanceCriterionLevel::Required,
+            verdict: WorkflowAcceptanceVerdict::Failed,
+            evidence: "pnpm run frontend:check failed".to_string(),
+        }],
+        evidence: vec!["tsc output".to_string()],
+        risks: vec!["无法发布".to_string()],
+        unfinished_items: vec!["修复生成类型".to_string()],
+    };
+    let context = WorkflowOrchestrator::merge_revision_context(
+        None,
+        WorkflowRevisionFeedbackSource::Lead,
+        "类型检查失败。",
+        "Current summary",
+        None,
+        &[],
+        2,
+        Some(&review_details),
+    );
+
+    let pending = WorkflowOrchestrator::parse_pending_revision_feedback(Some(&context))
+        .expect("pending feedback");
+    assert_eq!(
+        pending.review_details.as_ref().unwrap().acceptance_results,
+        review_details.acceptance_results
+    );
+    assert_eq!(
+        pending.review_details.as_ref().unwrap().evidence,
+        review_details.evidence
+    );
+    assert_eq!(
+        pending.review_details.as_ref().unwrap().risks,
+        review_details.risks
+    );
+    assert_eq!(
+        pending.review_details.as_ref().unwrap().unfinished_items,
+        review_details.unfinished_items
+    );
+}
+
+#[test]
 fn clear_pending_revision_feedback_removes_resume_payload() {
     let context = WorkflowOrchestrator::merge_revision_context(
         None,
@@ -1251,6 +1298,7 @@ fn clear_pending_revision_feedback_removes_resume_payload() {
         None,
         &[],
         1,
+        None,
     );
 
     let cleared = WorkflowOrchestrator::clear_pending_revision_feedback(Some(&context))
@@ -1282,6 +1330,7 @@ fn pending_revision_feedback_identifies_loop_scope() {
         None,
         &[],
         1,
+        None,
     );
 
     assert!(WorkflowOrchestrator::pending_revision_feedback_is_loop(

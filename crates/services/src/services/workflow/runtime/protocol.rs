@@ -629,7 +629,6 @@ pub fn parse_step_protocol_output(
             evidence,
         )?,
         WorkflowStepProtocolMessage::ReviewResult {
-            verdict,
             summary,
             acceptance_results,
             evidence,
@@ -640,7 +639,6 @@ pub fn parse_step_protocol_output(
             summary,
             acceptance_results,
             evidence,
-            matches!(verdict, ReviewVerdict::Approved),
             risks,
             unfinished_items,
         )?,
@@ -719,12 +717,30 @@ pub fn parse_step_protocol_output_for_step(
     }
     match &message {
         WorkflowStepProtocolMessage::ReviewResult {
+            verdict,
+            summary,
             acceptance_results,
+            evidence,
+            risks,
+            unfinished_items,
             ..
+        } => {
+            if matches!(verdict, ReviewVerdict::Approved) {
+                validate_approved_required_acceptance_coverage(
+                    declared_acceptance,
+                    acceptance_results,
+                )?;
+            }
+            validate_structured_review_fields(
+                summary,
+                acceptance_results,
+                evidence,
+                risks,
+                unfinished_items,
+            )?;
         }
-        | WorkflowStepProtocolMessage::ResultReviewResult {
-            acceptance_results,
-            ..
+        WorkflowStepProtocolMessage::ResultReviewResult {
+            acceptance_results, ..
         } => validate_acceptance_coverage(declared_acceptance, acceptance_results)?,
         _ => {}
     }
@@ -794,7 +810,6 @@ fn validate_structured_review_fields(
     summary: &str,
     acceptance_results: &[WorkflowAcceptanceResult],
     evidence: &[String],
-    approved: bool,
     risks: &[String],
     unfinished_items: &[String],
 ) -> Result<(), WorkflowRuntimeError> {
@@ -823,40 +838,6 @@ fn validate_structured_review_fields(
     {
         return Err(WorkflowRuntimeError::Validation(
             "structured review risks/unfinished_items may not contain blank entries".to_string(),
-        ));
-    }
-    let has_failed = acceptance_results
-        .iter()
-        .any(|item| matches!(item.verdict, WorkflowAcceptanceVerdict::Failed));
-    let has_required_failed = acceptance_results.iter().any(|item| {
-        matches!(item.verdict, WorkflowAcceptanceVerdict::Failed)
-            && item.level == AcceptanceCriterionLevel::Required
-    });
-    let has_partial_failed = acceptance_results.iter().any(|item| {
-        matches!(item.verdict, WorkflowAcceptanceVerdict::Failed)
-            && item.level == AcceptanceCriterionLevel::Partial
-    });
-    // approved：required 级必须全部通过；partial 级未通过必须在 risks 中给出外部归因；
-    // recommended 级不影响结论；不允许遗留未完成项。
-    if approved && has_required_failed {
-        return Err(WorkflowRuntimeError::Validation(
-            "approved review cannot contain failed required criteria".to_string(),
-        ));
-    }
-    if approved && has_partial_failed && risks.is_empty() {
-        return Err(WorkflowRuntimeError::Validation(
-            "approved review with failed partial criteria must record the external cause in risks"
-                .to_string(),
-        ));
-    }
-    if approved && !unfinished_items.is_empty() {
-        return Err(WorkflowRuntimeError::Validation(
-            "approved review cannot contain unfinished items".to_string(),
-        ));
-    }
-    if !approved && !has_failed && unfinished_items.is_empty() {
-        return Err(WorkflowRuntimeError::Validation(
-            "rejected review must contain a failed criterion or unfinished item".to_string(),
         ));
     }
     Ok(())
@@ -930,6 +911,33 @@ fn validate_structured_result_fields(
         return Err(WorkflowRuntimeError::Validation(
             "overall_status=blocked must identify failed or unfinished work".to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_approved_required_acceptance_coverage(
+    declared_acceptance: &[(AcceptanceCriterionLevel, String)],
+    results: &[WorkflowAcceptanceResult],
+) -> Result<(), WorkflowRuntimeError> {
+    let required_acceptance = declared_acceptance
+        .iter()
+        .filter(|(level, criterion)| {
+            *level == AcceptanceCriterionLevel::Required && !criterion.trim().is_empty()
+        })
+        .collect::<Vec<_>>();
+    if required_acceptance.is_empty() {
+        return Ok(());
+    }
+    let returned_required_count = results
+        .iter()
+        .filter(|result| result.level == AcceptanceCriterionLevel::Required)
+        .count();
+    if returned_required_count != required_acceptance.len() {
+        return Err(WorkflowRuntimeError::Validation(format!(
+            "approved review required acceptance result count mismatch: expected {}, actual {}",
+            required_acceptance.len(),
+            returned_required_count
+        )));
     }
     Ok(())
 }
@@ -1040,15 +1048,19 @@ pub fn parse_review_protocol_output(
                     "review protocol 的 feedback 不能为空".to_string(),
                 ));
             }
+            if matches!(verdict, ReviewVerdict::Approved) {
+                validate_approved_required_acceptance_coverage(
+                    declared_acceptance,
+                    acceptance_results,
+                )?;
+            }
             validate_structured_review_fields(
                 feedback,
                 acceptance_results,
                 evidence,
-                matches!(verdict, ReviewVerdict::Approved),
                 risks,
                 unfinished_items,
             )?;
-            validate_acceptance_coverage(declared_acceptance, acceptance_results)?;
         }
     }
 

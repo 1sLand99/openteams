@@ -53,11 +53,10 @@ pub struct StepReviewPromptInput {
 }
 
 /// Default review rules (§11.3) used when the caller supplies no custom rules.
-pub const DEFAULT_REVIEW_RULES: [&str; 5] = [
+pub const DEFAULT_REVIEW_RULES: [&str; 4] = [
     "阅读实际变更文件并与任务说明逐项比较；独立运行或检查适合本任务的验证命令。",
-    "每条验收标准必须恰好返回一个结论、级别和证据。",
-    "approved 要求所有 required 级验收项 passed（或 not_applicable 且证据充分）；partial 级未通过必须存在可验证的外部归因并记入 risks；recommended 级不影响结论。",
-    "任一 required 级未通过，或 partial 级未通过且无正当外部归因，必须 rejected。",
+    "返回非空的 summary、acceptance_results 和 evidence；每条验收结果都必须包含非空的 criterion 和 evidence，并使用 JSON Schema 中定义的枚举值。",
+    "approved 时必须返回所有 required 级验收标准；rejected 时返回本轮已检查且与结论有关的结果即可。risks 和 unfinished_items 仅记录实际存在的事项，不影响 verdict。",
     "如需驳回，在 feedback 中一次性列出本轮能发现的全部问题和具体修改方向。",
 ];
 
@@ -257,7 +256,7 @@ mod tests {
         assert!(prompt.contains("建议满足（recommended）"));
         assert!(prompt.contains("cargo test -p executors --features qa-mode pi 通过"));
         assert!(prompt.contains("1. 阅读实际变更文件"));
-        assert!(prompt.contains("5. 如需驳回"));
+        assert!(prompt.contains("4. 如需驳回"));
     }
 
     #[test]
