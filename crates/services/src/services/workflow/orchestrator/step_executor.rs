@@ -480,7 +480,7 @@ impl WorkflowOrchestrator {
         workflow_session: &WorkflowAgentSession,
         prompt: &str,
         step: &WorkflowStep,
-        declared_acceptance: &[(AcceptanceCriterionLevel, String)],
+        declared_acceptance: &[workflow_runtime::WorkflowReviewCriterion],
     ) -> Result<(WorkflowReviewProtocolMessage, WorkflowAgentRunOutput), OrchestratorError> {
         let mut attempt = 0;
         let mut run_as_follow_up = false;
@@ -1406,7 +1406,10 @@ impl WorkflowOrchestrator {
         initial_result: WorkflowStepRunResult,
         skip_initial_lead_review: bool,
     ) -> Result<StepOutcome, OrchestratorError> {
-        let acceptance_criteria = Self::acceptance_criteria_for_step(plan, step);
+        let acceptance_criteria = workflow_runtime::build_workflow_review_criteria(
+            &Self::acceptance_criteria_for_step(plan, step),
+            None,
+        );
         let workflow_goal = plan
             .summary_text
             .clone()
@@ -1557,10 +1560,7 @@ impl WorkflowOrchestrator {
                     workflow_goal: workflow_goal.clone(),
                     title: waiting_review_step.title.clone(),
                     instructions: waiting_review_step.instructions.clone(),
-                    acceptance: Self::acceptance_criteria_object_for_step(
-                        plan,
-                        &waiting_review_step,
-                    ),
+                    acceptance_criteria: acceptance_criteria.clone(),
                     review_rules: Vec::new(),
                     worker_result: Self::task_result_input_from_run_result(&persisted.result),
                     upstream_results: Self::upstream_results_for_step(
@@ -1646,14 +1646,17 @@ impl WorkflowOrchestrator {
                 };
 
             let WorkflowReviewProtocolMessage::ReviewResult {
-                verdict,
-                feedback,
-                acceptance_results,
-                evidence,
-                risks,
-                unfinished_items,
+                summary: feedback,
+                results,
                 ..
             } = review_message;
+            let derived_review =
+                workflow_runtime::derive_workflow_review(&acceptance_criteria, &results);
+            let verdict = derived_review.verdict;
+            let acceptance_results = derived_review.acceptance_results;
+            let evidence = derived_review.evidence;
+            let risks = derived_review.risks;
+            let unfinished_items = derived_review.unfinished_items;
 
             Self::save_step_review(
                 pool,
@@ -2165,17 +2168,20 @@ impl WorkflowOrchestrator {
         running_step: &WorkflowStep,
         workflow_session: &WorkflowAgentSession,
         review_message: WorkflowReviewProtocolMessage,
+        review_criteria: &[workflow_runtime::WorkflowReviewCriterion],
         run_id: Option<Uuid>,
     ) -> Result<StepOutcome, OrchestratorError> {
         let WorkflowReviewProtocolMessage::ReviewResult {
-            verdict,
-            feedback,
-            acceptance_results,
-            evidence,
-            risks,
-            unfinished_items,
+            summary: feedback,
+            results,
             ..
         } = review_message;
+        let derived_review = workflow_runtime::derive_workflow_review(review_criteria, &results);
+        let verdict = derived_review.verdict;
+        let acceptance_results = derived_review.acceptance_results;
+        let evidence = derived_review.evidence;
+        let risks = derived_review.risks;
+        let unfinished_items = derived_review.unfinished_items;
         if running_step.step_type != WorkflowStepType::Review {
             return Err(OrchestratorError::IllegalTransition(format!(
                 "step {} returned review_result but is not a Review node",
@@ -2839,6 +2845,14 @@ impl WorkflowOrchestrator {
         let response_language_instruction =
             resolve_workflow_response_language_instruction(&ui_config.language);
         let contract = Self::execution_contract_for_step(plan, &running_step);
+        let review_criteria = (running_step.step_type == WorkflowStepType::Review)
+            .then(|| {
+                workflow_runtime::build_workflow_review_criteria(
+                    &contract.acceptance_leveled,
+                    Some(&running_step.instructions),
+                )
+            })
+            .unwrap_or_default();
         let mut prompt = if running_step.step_type == WorkflowStepType::Review {
             // 普通 review 节点（无 reviewScope）复用 step_review builder（设计 §6.4）。
             prompt_builders::step_review::build_step_review_prompt(
@@ -2850,7 +2864,7 @@ impl WorkflowOrchestrator {
                     workflow_goal: workflow_goal.clone(),
                     title: running_step.title.clone(),
                     instructions: running_step.instructions.clone(),
-                    acceptance: Self::acceptance_criteria_object_for_step(plan, &running_step),
+                    acceptance_criteria: review_criteria.clone(),
                     review_rules: Vec::new(),
                     worker_result: Self::review_worker_result_for_step(
                         &running_step,
@@ -2933,7 +2947,6 @@ impl WorkflowOrchestrator {
         };
 
         if running_step.step_type == WorkflowStepType::Review {
-            let declared_acceptance = Self::acceptance_criteria_for_step(plan, &running_step);
             let (review_message, review_agent_output) =
                 match Self::run_step_review_protocol_with_retry(
                     db,
@@ -2946,7 +2959,7 @@ impl WorkflowOrchestrator {
                     workflow_session,
                     &prompt,
                     &running_step,
-                    &declared_acceptance,
+                    &review_criteria,
                 )
                 .await
                 {
@@ -3013,6 +3026,7 @@ impl WorkflowOrchestrator {
                 &running_step,
                 workflow_session,
                 review_message,
+                &review_criteria,
                 review_agent_output.run_id,
             )
             .await;

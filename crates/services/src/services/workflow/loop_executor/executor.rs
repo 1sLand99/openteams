@@ -656,6 +656,17 @@ impl<'a> LoopExecutor<'a> {
             self.plan,
             &running_review_step,
         );
+        let declared_acceptance = loop_acceptance
+            .leveled()
+            .into_iter()
+            .filter(|(_, criterion)| !criterion.trim().is_empty())
+            .enumerate()
+            .map(|(index, (level, criterion))| protocol::LoopReviewCriterion {
+                id: format!("c{}", index + 1),
+                level,
+                criterion,
+            })
+            .collect::<Vec<_>>();
         let prompt = prompts::build_loop_review_prompt(&prompts::LoopReviewPromptInput {
             execution_id: self.execution.id,
             loop_key: loop_def.loop_key.clone(),
@@ -665,14 +676,13 @@ impl<'a> LoopExecutor<'a> {
                 role: review_context.reviewer_role.clone(),
             },
             review_instructions: review_context.review_step_instructions.clone(),
-            loop_acceptance: loop_acceptance.clone(),
+            acceptance_criteria: declared_acceptance.clone(),
             review_scope: review_inputs
                 .iter()
                 .map(|input| prompts::LoopReviewTaskInput {
                     step_key: input.step_key.clone(),
                     title: input.title.clone(),
                     instructions: input.instructions.clone(),
-                    acceptance: input.acceptance.clone(),
                     summary: input.summary.clone(),
                     outputs: input.outputs.clone(),
                     evidence: input.evidence.clone(),
@@ -692,20 +702,6 @@ impl<'a> LoopExecutor<'a> {
             .iter()
             .map(|input| input.step_key.clone())
             .collect::<Vec<_>>();
-        let mut declared_acceptance = review_inputs
-            .iter()
-            .flat_map(|input| {
-                input.acceptance.leveled().into_iter().map(|(level, criterion)| {
-                    (input.step_key.clone(), level, criterion)
-                })
-            })
-            .collect::<Vec<_>>();
-        declared_acceptance.extend(
-            loop_acceptance
-                .leveled()
-                .into_iter()
-                .map(|(level, criterion)| (running_review_step.step_key.clone(), level, criterion)),
-        );
         let (review_message, raw_output) = self
             .run_loop_review_protocol_with_retry(
                 agent,
@@ -714,19 +710,34 @@ impl<'a> LoopExecutor<'a> {
                 workflow_loop,
                 &running_review_step,
                 &prompt,
-                &allowed_step_keys,
                 &declared_acceptance,
+                &allowed_step_keys,
             )
             .await?;
         let LoopReviewProtocolMessage::LoopReviewResult {
-            verdict,
-            feedback,
-            issue_id,
-            step_feedbacks,
-            acceptance_results,
-            evidence,
+            summary: feedback,
+            results,
+            rework,
             ..
         } = review_message;
+        let verdict = protocol::derive_loop_review_verdict(&declared_acceptance, &results);
+        let acceptance_results = declared_acceptance
+            .iter()
+            .map(|criterion| {
+                let result = &results[&criterion.id];
+                serde_json::json!({
+                    "step_key": running_review_step.step_key,
+                    "criterion": criterion.criterion,
+                    "level": criterion.level,
+                    "verdict": if result.passed { "passed" } else { "failed" },
+                    "evidence": result.evidence,
+                })
+            })
+            .collect::<Vec<_>>();
+        let evidence = declared_acceptance
+            .iter()
+            .map(|criterion| results[&criterion.id].evidence.clone())
+            .collect::<Vec<_>>();
         let result_summary = SummaryPayload {
             summary: feedback.clone(),
             content: Some(raw_output.clone()),
@@ -777,8 +788,7 @@ impl<'a> LoopExecutor<'a> {
                         "feedback": feedback,
                         "acceptance_results": acceptance_results,
                         "evidence": evidence,
-                        "issue_id": issue_id,
-                        "step_feedbacks": step_feedbacks,
+                        "rework": rework,
                     },
                 })
                 .to_string(),
@@ -817,14 +827,27 @@ impl<'a> LoopExecutor<'a> {
                 if let Some(analytics) = self.chat_runner.analytics_service() {
                     analytics.record_event(event);
                 }
-                let overall_issue_id = issue_id.unwrap_or_else(|| feedback_issue_id(&feedback));
+                let failed_required = declared_acceptance
+                    .iter()
+                    .filter(|criterion| {
+                        criterion.level == AcceptanceCriterionLevel::Required
+                            && !results[&criterion.id].passed
+                    })
+                    .collect::<Vec<_>>();
+                let overall_issue_id = format!(
+                    "criteria-{}",
+                    failed_required
+                        .iter()
+                        .map(|criterion| criterion.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join("-")
+                );
+                let step_feedbacks = rework.into_iter().collect::<HashMap<_, _>>();
                 let step_issue_ids = step_feedbacks
                     .iter()
-                    .map(|item| (item.step_key.clone(), item.issue_id.clone()))
-                    .collect::<HashMap<_, _>>();
-                let step_feedbacks = step_feedbacks
-                    .into_iter()
-                    .map(|item| (item.step_key, item.feedback))
+                    .map(|(step_key, feedback)| {
+                        (step_key.clone(), feedback_issue_id(feedback))
+                    })
                     .collect::<HashMap<_, _>>();
                 let feedback_targets = loop_feedback_targets(
                     self.pool,
@@ -1172,8 +1195,8 @@ impl<'a> LoopExecutor<'a> {
         workflow_loop: &WorkflowLoop,
         review_step: &WorkflowStep,
         prompt: &str,
+        declared_acceptance: &[protocol::LoopReviewCriterion],
         allowed_step_keys: &[String],
-        declared_acceptance: &[(String, AcceptanceCriterionLevel, String)],
     ) -> Result<(LoopReviewProtocolMessage, String), OrchestratorError> {
         let mut attempt = 0;
         let mut run_as_follow_up = false;
@@ -1223,8 +1246,8 @@ impl<'a> LoopExecutor<'a> {
             match protocol::parse_loop_review_protocol_output(
                 self.execution.id,
                 &workflow_loop.loop_key,
-                allowed_step_keys,
                 declared_acceptance,
+                allowed_step_keys,
                 &raw_output,
             ) {
                 Ok(message) => return Ok((message, raw_output)),
@@ -1268,11 +1291,6 @@ impl<'a> LoopExecutor<'a> {
         let plan_json: db::models::workflow_types::WorkflowPlanJson =
             serde_json::from_str(&self.plan.plan_json)?;
 
-        let node_by_key = plan_json
-            .nodes
-            .iter()
-            .map(|node| (node.id.as_str(), node))
-            .collect::<HashMap<_, _>>();
         let review_scope = loop_def
             .review_scope_step_keys
             .iter()
@@ -1295,14 +1313,10 @@ impl<'a> LoopExecutor<'a> {
                         content: step.content.clone(),
                         outputs: Vec::new(),
                     });
-                let node = node_by_key.get(step.step_key.as_str()).ok_or_else(|| {
-                    OrchestratorError::NotFound(format!("plan node {} not found", step.step_key))
-                })?;
                 Ok(LoopReviewPromptStepInput {
                     step_key: step.step_key.clone(),
                     title: step.title.clone(),
                     instructions: step.instructions.clone(),
-                    acceptance: node.data.acceptance.clone().unwrap_or_default(),
                     summary: payload.summary,
                     outputs: payload.outputs,
                     evidence: step

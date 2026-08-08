@@ -1,14 +1,13 @@
 //! Loop review typed input and prompt rendering (design §6.5、§11.4).
 //!
-//! The Loop review prompt audits the tasks inside `reviewScope` as a whole.
-//! Its overall acceptance criteria come from the review node's plan-declared
-//! tiered `acceptance` (§2 decision 14); the builder never invents criteria.
-//! Self-check lists of scoped tasks are never included (§2 decision 12).
+//! The Loop review prompt evaluates the review node's own acceptance cases.
+//! Task results inside `reviewScope` are context only. The backend-provided
+//! criterion list is the single source used by both this prompt and parser.
 
-use db::models::workflow_types::AcceptanceCriteria;
+use db::models::workflow_types::AcceptanceCriterionLevel;
 use uuid::Uuid;
 
-use super::protocol::loop_review_protocol_json_schema;
+use super::protocol::{LoopReviewCriterion, loop_review_protocol_json_schema};
 use crate::services::workflow_runtime::prompt_builders::common::{
     UPSTREAM_SECTION_TITLE, UpstreamResultInput, render_upstream_results,
 };
@@ -26,8 +25,6 @@ pub struct LoopReviewTaskInput {
     pub step_key: String,
     pub title: String,
     pub instructions: String,
-    /// The task's plan-declared tiered acceptance (at least `required`).
-    pub acceptance: AcceptanceCriteria,
     pub summary: String,
     pub outputs: Vec<String>,
     /// Verification evidence lines reported by the worker.
@@ -45,8 +42,8 @@ pub struct LoopReviewPromptInput {
     pub reviewer: ReviewerInput,
     /// The review node's instructions (audit focus and scope notes).
     pub review_instructions: String,
-    /// Loop-level overall acceptance declared by the review node in the plan.
-    pub loop_acceptance: AcceptanceCriteria,
+    /// The sole acceptance contract shared with the protocol parser.
+    pub acceptance_criteria: Vec<LoopReviewCriterion>,
     /// Exactly the compiler-produced `reviewScope`; never widened here.
     pub review_scope: Vec<LoopReviewTaskInput>,
     /// Latest valid results of direct predecessors outside `reviewScope` that
@@ -69,12 +66,11 @@ const CLOSING_LINE: &str = "只返回一个匹配 Schema 的 JSON 对象。";
 /// Fixed review rules appended to 审核要求 (byte-stable builder copy).
 const LOOP_REVIEW_RULES: &str = "审核规则：
 1. 独立检查实际产物和任务间交接，不直接相信执行者总结或测试声明。
-2. 每条验收标准必须恰好返回一个结论、级别和证据；覆盖 Loop 整体验收与 scope 内各 task 的验收项。
-3. approved 要求所有 required 级验收项 passed（或 not_applicable 且证据充分）；partial 级未通过必须在 feedback 中给出明确外部归因；recommended 级不影响结论。
-4. 任一 required 级未通过，或 partial 级未通过且无正当外部归因，必须 rejected。
-5. 驳回时一次性列出本轮能发现的全部问题和具体修改方向；同一问题在后续审核中复用同一 issue_id。
-6. step_feedbacks 只列需要返工的 task；空数组或省略表示整个 reviewScope 返工。
-7. 用户批准的 skip waiver 是明确豁免，不得因被豁免步骤未重新执行而单独驳回。";
+2. results 必须恰好包含验收清单中的每个 id，不得遗漏或添加 id。
+3. 只有实际验证通过才返回 passed=true；每项 evidence 必须说明判断依据。
+4. required 的失败会由后端自动驳回；partial 和 recommended 只记录结果，不影响总结论。
+5. 通过时 rework 必须是空对象；驳回时只把确实需要修改的 reviewScope step_key 写入 rework，值为该步骤的具体返工要求。
+6. 用户批准的 skip waiver 是明确豁免，不得因被豁免步骤未重新执行而判定失败。";
 
 /// Builds the Loop review prompt following the §11.4 example and the §7.1
 /// cache-friendly layout.
@@ -83,7 +79,7 @@ pub fn build_loop_review_prompt(input: &LoopReviewPromptInput) -> String {
 
     // Category 1-2: fixed duty copy and run-level content.
     sections.push(
-        "# 审核任务闭环\n\n将 reviewScope 内任务的最新有效结果作为一个整体进行审核。独立检查实际产物和任务间交接，不直接相信执行者总结。"
+        "# 审核任务闭环\n\n只验证当前 Loop Review 节点的验收清单。reviewScope 内任务的最新有效结果仅作为判断上下文，不重复验收任务节点自己的验收项。"
             .to_string(),
     );
     let response_language = input.response_language.trim();
@@ -109,11 +105,22 @@ pub fn build_loop_review_prompt(input: &LoopReviewPromptInput) -> String {
     review_requirements.push_str(LOOP_REVIEW_RULES);
     sections.push(review_requirements);
 
-    if let Some(tiers) = render_acceptance_tiers(&input.loop_acceptance) {
-        sections.push(format!(
-            "## Loop 整体验收标准\n\n以下来自计划中 review 节点声明的验收标准，逐条审核，不得自创额外标准。\n\n{tiers}"
-        ));
-    }
+    sections.push(format!(
+        "## 验收清单\n\n这是唯一验收清单。`results` 必须使用下列 id 作为 key，每个 id 恰好一次。\n\n{}",
+        input
+            .acceptance_criteria
+            .iter()
+            .map(|item| {
+                let level = match item.level {
+                    AcceptanceCriterionLevel::Required => "required",
+                    AcceptanceCriterionLevel::Partial => "partial",
+                    AcceptanceCriterionLevel::Recommended => "recommended",
+                };
+                format!("- `{}` | `{}` | {}", item.id, level, item.criterion)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    ));
 
     let mut scope_sections: Vec<String> = Vec::new();
     for task in &input.review_scope {
@@ -133,15 +140,19 @@ pub fn build_loop_review_prompt(input: &LoopReviewPromptInput) -> String {
     }
 
     // Category 4: the single output JSON Schema.
-    let allowed_step_keys = input
-        .review_scope
-        .iter()
-        .map(|task| task.step_key.clone())
-        .collect::<Vec<_>>();
     sections.push(format!(
         "## 输出 JSON Schema\n\n```json\n{}\n```",
-        loop_review_protocol_json_schema(input.execution_id, &input.loop_key, &allowed_step_keys)
-            .trim()
+        loop_review_protocol_json_schema(
+            input.execution_id,
+            &input.loop_key,
+            &input.acceptance_criteria,
+            &input
+                .review_scope
+                .iter()
+                .map(|task| task.step_key.clone())
+                .collect::<Vec<_>>(),
+        )
+        .trim()
     ));
 
     // Category 5: attempt-level content, after the schema.
@@ -156,13 +167,10 @@ pub fn build_loop_review_prompt(input: &LoopReviewPromptInput) -> String {
     format!("{}\n\n{CLOSING_LINE}\n", sections.join("\n\n"))
 }
 
-/// Renders one scoped task sub-section (§11.4): 任务说明、验收标准（分级）、
-/// 最新结果、实际产物、验证证据、豁免说明。自检列表不出现。
+/// Renders one scoped task as context. Task acceptance is intentionally absent
+/// because it was already evaluated by the task node.
 fn render_scope_task(task: &LoopReviewTaskInput) -> String {
     let mut lines = vec![format!("- 任务说明：{}", task.instructions.trim())];
-    if let Some(tiers) = render_task_acceptance(&task.acceptance) {
-        lines.push(format!("- 验收标准：\n{tiers}"));
-    }
     lines.push(format!("- 最新结果：{}", task.summary.trim()));
     let outputs = render_inline_code_list(&task.outputs);
     if !outputs.is_empty() {
@@ -184,61 +192,6 @@ fn render_scope_task(task: &LoopReviewTaskInput) -> String {
         task.title.trim(),
         lines.join("\n")
     )
-}
-
-/// Renders a task's acceptance with tier labels (§11.4 shows required 级为主，
-/// partial/recommended 标注级别）。
-fn render_task_acceptance(acceptance: &AcceptanceCriteria) -> Option<String> {
-    let mut lines = Vec::new();
-    for item in &acceptance.required {
-        if !item.trim().is_empty() {
-            lines.push(format!("  - （required）{}", item.trim()));
-        }
-    }
-    for item in &acceptance.partial {
-        if !item.trim().is_empty() {
-            lines.push(format!("  - （partial）{}", item.trim()));
-        }
-    }
-    for item in &acceptance.recommended {
-        if !item.trim().is_empty() {
-            lines.push(format!("  - （recommended）{}", item.trim()));
-        }
-    }
-    if lines.is_empty() {
-        None
-    } else {
-        Some(lines.join("\n"))
-    }
-}
-
-/// Renders the three acceptance tier groups for the loop-level criteria;
-/// empty groups are omitted. Returns `None` when every tier is empty.
-fn render_acceptance_tiers(acceptance: &AcceptanceCriteria) -> Option<String> {
-    let mut groups: Vec<String> = Vec::new();
-    let required = render_bullet_lines(&acceptance.required);
-    if !required.is_empty() {
-        groups.push(format!(
-            "必须满足（required）——全部通过才能 approved：\n\n{required}"
-        ));
-    }
-    let partial = render_bullet_lines(&acceptance.partial);
-    if !partial.is_empty() {
-        groups.push(format!(
-            "允许外部归因（partial）——未通过时凭明确、可验证的外部归因放行并在 feedback 中记录：\n\n{partial}"
-        ));
-    }
-    let recommended = render_bullet_lines(&acceptance.recommended);
-    if !recommended.is_empty() {
-        groups.push(format!(
-            "建议满足（recommended）——不影响结论：\n\n{recommended}"
-        ));
-    }
-    if groups.is_empty() {
-        None
-    } else {
-        Some(groups.join("\n\n"))
-    }
 }
 
 fn render_bullet_lines(items: &[String]) -> String {
@@ -267,14 +220,6 @@ mod tests {
 
     const EXECUTION_ID: &str = "03f1e4a4-8745-4db7-a69c-1f4d09dcc8ca";
 
-    fn acceptance(required: &[&str], partial: &[&str], recommended: &[&str]) -> AcceptanceCriteria {
-        AcceptanceCriteria {
-            required: required.iter().map(|item| item.to_string()).collect(),
-            partial: partial.iter().map(|item| item.to_string()).collect(),
-            recommended: recommended.iter().map(|item| item.to_string()).collect(),
-        }
-    }
-
     fn sample_input() -> LoopReviewPromptInput {
         LoopReviewPromptInput {
             execution_id: Uuid::parse_str(EXECUTION_ID).unwrap(),
@@ -285,17 +230,23 @@ mod tests {
                 role: "负责后端审核".to_string(),
             },
             review_instructions: "对照设计审核前三项后端交付。".to_string(),
-            loop_acceptance: acceptance(
-                &["cargo test -p executors --features qa-mode pi 通过"],
-                &["真实冒烟缺凭据可记录为外部阻塞"],
-                &[],
-            ),
+            acceptance_criteria: vec![
+                LoopReviewCriterion {
+                    id: "c1".to_string(),
+                    level: AcceptanceCriterionLevel::Required,
+                    criterion: "cargo test -p executors --features qa-mode pi 通过".to_string(),
+                },
+                LoopReviewCriterion {
+                    id: "c2".to_string(),
+                    level: AcceptanceCriterionLevel::Partial,
+                    criterion: "真实冒烟缺凭据可记录为外部阻塞".to_string(),
+                },
+            ],
             review_scope: vec![
                 LoopReviewTaskInput {
                     step_key: "backend_pi_types_runtime".to_string(),
                     title: "建立 Pi 强类型".to_string(),
                     instructions: "注册强类型与默认 profile。".to_string(),
-                    acceptance: acceptance(&["cargo test pi 通过"], &[], &[]),
                     summary: "已完成 Pi 强类型 executor。".to_string(),
                     outputs: vec!["crates/executors/src/executors/pi.rs".to_string()],
                     evidence: vec!["20 项测试通过".to_string()],
@@ -305,7 +256,6 @@ mod tests {
                     step_key: "backend_pi_provider_sync".to_string(),
                     title: "实现 models.json 同步".to_string(),
                     instructions: "原子写入并防泄密。".to_string(),
-                    acceptance: acceptance(&["cargo test pi_models 通过"], &[], &[]),
                     summary: "已完成协调与原子写入。".to_string(),
                     outputs: vec!["crates/services/src/services/pi_models.rs".to_string()],
                     evidence: vec![],
@@ -355,7 +305,7 @@ mod tests {
                 "## 工作总目标",
                 "## Loop 状态",
                 "## 审核要求",
-                "## Loop 整体验收标准",
+                "## 验收清单",
                 "## reviewScope",
                 "## reviewScope 内依赖关系",
                 "## 必要上游结果",
@@ -378,20 +328,20 @@ mod tests {
     }
 
     #[test]
-    fn loop_acceptance_comes_from_review_node_declaration() {
+    fn acceptance_contract_is_rendered_once_with_ids() {
         let prompt = build_loop_review_prompt(&sample_input());
-        assert!(prompt.contains("以下来自计划中 review 节点声明的验收标准"));
-        assert!(prompt.contains("必须满足（required）"));
+        assert!(prompt.contains("这是唯一验收清单"));
+        assert!(prompt.contains("`c1` | `required`"));
+        assert!(prompt.contains("`c2` | `partial`"));
         assert!(prompt.contains("cargo test -p executors --features qa-mode pi 通过"));
-        assert!(prompt.contains("允许外部归因（partial）"));
-        assert!(!prompt.contains("建议满足（recommended）"));
     }
 
     #[test]
-    fn scope_tasks_show_acceptance_without_self_check() {
+    fn scope_tasks_show_results_without_repeating_acceptance() {
         let prompt = build_loop_review_prompt(&sample_input());
         assert!(prompt.contains("### backend_pi_types_runtime：建立 Pi 强类型"));
-        assert!(prompt.contains("（required）cargo test pi 通过"));
+        assert!(!prompt.contains("cargo test pi 通过"));
+        assert!(!prompt.contains("cargo test pi_models 通过"));
         assert!(!prompt.contains("自检"));
         assert!(prompt.contains("- 用户豁免：用户批准保留跳过。"));
     }
@@ -424,16 +374,16 @@ mod tests {
         assert!(!prompt.contains("Output Protocol"));
         assert_eq!(prompt.matches("```json").count(), 1);
         assert!(prompt.contains("\"loop_review_result\""));
-        assert!(prompt.contains("\"level\""));
+        assert!(prompt.contains("\"passed\""));
+        assert!(prompt.contains("\"rework\""));
+        assert!(!prompt.contains("\"verdict\""));
     }
 
     #[test]
     fn empty_optional_sections_are_fully_omitted() {
         let mut input = sample_input();
-        input.loop_acceptance = AcceptanceCriteria::default();
         input.scope_edges = vec![];
         let prompt = build_loop_review_prompt(&input);
-        assert!(!prompt.contains("## Loop 整体验收标准"));
         assert!(!prompt.contains("## reviewScope 内依赖关系"));
         assert!(!prompt.contains("## 必要上游结果"));
         assert!(!prompt.contains("## 最近一次 Loop 反馈"));

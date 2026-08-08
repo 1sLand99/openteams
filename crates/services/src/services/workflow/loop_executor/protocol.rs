@@ -1,58 +1,48 @@
-//! Loop review protocol types, JSON schema and parsing (design §9.3).
+//! Loop review protocol types, JSON schema and parsing.
 //!
-//! Split out of `workflow/review.rs` so the Loop domain is owned by
-//! `loop_executor`. Compared with the legacy version, every
-//! `acceptance_results` item carries a `level` tier, and the parse entry
-//! performs declared-acceptance coverage and tier-aware verdict consistency
-//! checks in one place.
+//! The backend owns the acceptance contract. The reviewer returns only one
+//! boolean result and one evidence string for each backend-assigned criterion
+//! id. The reviewer separately names only the review-scope steps that need
+//! rework; the backend derives the verdict and validates those targets.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use db::models::workflow_types::{AcceptanceCriterionLevel, ReviewVerdict};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::super::workflow_runtime::{
-    WorkflowAcceptanceVerdict, WorkflowRuntimeError, extract_json_payload,
-};
+use super::super::workflow_runtime::WorkflowRuntimeError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LoopReviewStepFeedback {
-    pub step_key: String,
-    pub issue_id: String,
-    pub feedback: String,
+pub struct LoopReviewCriterion {
+    pub id: String,
+    pub level: AcceptanceCriterionLevel,
+    pub criterion: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LoopReviewAcceptanceResult {
-    pub step_key: String,
-    pub criterion: String,
-    /// Tier declared in the plan. Defaults to `required` so loop review JSON
-    /// persisted before tiers existed still deserializes.
-    #[serde(default)]
-    pub level: AcceptanceCriterionLevel,
-    pub verdict: WorkflowAcceptanceVerdict,
+#[serde(deny_unknown_fields)]
+pub struct LoopReviewCriterionResult {
+    pub passed: bool,
     pub evidence: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LoopReviewProtocolMessage {
     LoopReviewResult {
         loop_key: String,
         execution_id: String,
-        verdict: ReviewVerdict,
-        feedback: String,
-        acceptance_results: Vec<LoopReviewAcceptanceResult>,
-        evidence: Vec<String>,
-        #[serde(default)]
-        issue_id: Option<String>,
-        #[serde(default)]
-        step_feedbacks: Vec<LoopReviewStepFeedback>,
+        summary: String,
+        results: BTreeMap<String, LoopReviewCriterionResult>,
+        rework: BTreeMap<String, String>,
     },
 }
 
 pub fn loop_review_protocol_json_schema(
     execution_id: Uuid,
     loop_key: &str,
+    criteria: &[LoopReviewCriterion],
     allowed_step_keys: &[String],
 ) -> String {
     let execution_id_schema = if execution_id.is_nil() {
@@ -63,85 +53,80 @@ pub fn loop_review_protocol_json_schema(
     } else {
         serde_json::json!({ "const": execution_id.to_string() })
     };
+    let result_ids = criteria
+        .iter()
+        .map(|criterion| criterion.id.clone())
+        .collect::<Vec<_>>();
+    let result_properties = criteria
+        .iter()
+        .map(|criterion| {
+            (
+                criterion.id.clone(),
+                serde_json::json!({
+                    "type": "object",
+                    "required": ["passed", "evidence"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "passed": { "type": "boolean" },
+                        "evidence": { "type": "string", "pattern": "\\S" }
+                    }
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let rework_properties = allowed_step_keys
+        .iter()
+        .map(|step_key| {
+            (
+                step_key.clone(),
+                serde_json::json!({ "type": "string", "pattern": "\\S" }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
 
     serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
-        "required": ["type", "loop_key", "execution_id", "verdict", "feedback", "acceptance_results", "evidence"],
+        "required": ["type", "loop_key", "execution_id", "summary", "results", "rework"],
         "additionalProperties": false,
         "properties": {
             "type": { "const": "loop_review_result" },
             "loop_key": { "const": loop_key },
             "execution_id": execution_id_schema,
-            "verdict": { "enum": ["approved", "rejected"] },
-            "feedback": { "type": "string", "minLength": 1 },
-            "acceptance_results": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "required": ["step_key", "criterion", "level", "verdict", "evidence"],
-                    "additionalProperties": false,
-                    "properties": {
-                        "step_key": { "enum": allowed_step_keys },
-                        "criterion": { "type": "string", "minLength": 1 },
-                        "level": { "enum": ["required", "partial", "recommended"] },
-                        "verdict": { "enum": ["passed", "failed", "not_applicable"] },
-                        "evidence": { "type": "string", "minLength": 1 }
-                    }
-                }
+            "summary": { "type": "string", "pattern": "\\S" },
+            "results": {
+                "type": "object",
+                "required": result_ids,
+                "additionalProperties": false,
+                "properties": result_properties
             },
-            "evidence": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
-            "issue_id": { "type": "string", "minLength": 1, "maxLength": 160 },
-            "step_feedbacks": {
-                "type": "array",
-                "default": [],
-                "items": {
-                    "type": "object",
-                    "required": ["step_key", "issue_id", "feedback"],
-                    "additionalProperties": false,
-                    "properties": {
-                        "step_key": { "enum": allowed_step_keys },
-                        "issue_id": { "type": "string", "minLength": 1, "maxLength": 160 },
-                        "feedback": { "type": "string", "minLength": 1 }
-                    }
-                }
+            "rework": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": rework_properties
             }
-        },
-        "allOf": [{
-            "if": { "properties": { "verdict": { "const": "rejected" } } },
-            "then": { "required": ["issue_id"] }
-        }]
+        }
     }))
     .unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Parse and validate a `loop_review_result` model output.
-///
-/// Validation order: fixed ids → feedback non-empty → rejection requirements
-/// (issue_id, step_feedbacks) → declared-acceptance coverage → tier-aware
-/// verdict consistency.
+/// Parses one strict JSON object and validates the acceptance and rework
+/// contract. The overall verdict is always derived by the backend.
 pub fn parse_loop_review_protocol_output(
     execution_id: Uuid,
     loop_key: &str,
+    criteria: &[LoopReviewCriterion],
     allowed_step_keys: &[String],
-    declared_acceptance: &[(String, AcceptanceCriterionLevel, String)],
     raw_output: &str,
 ) -> Result<LoopReviewProtocolMessage, WorkflowRuntimeError> {
-    let payload = extract_json_payload(raw_output).ok_or_else(|| {
-        WorkflowRuntimeError::Validation("loop review 输出中未找到 JSON 对象".to_string())
-    })?;
-    let message: LoopReviewProtocolMessage = serde_json::from_str(&payload)?;
+    let message: LoopReviewProtocolMessage = serde_json::from_str(raw_output.trim())?;
 
     let LoopReviewProtocolMessage::LoopReviewResult {
         loop_key: actual_loop_key,
         execution_id: actual_execution_id,
-        verdict,
-        feedback,
-        acceptance_results,
-        issue_id,
-        step_feedbacks,
-        ..
+        summary,
+        results,
+        rework,
     } = &message;
 
     if actual_loop_key != loop_key {
@@ -154,467 +139,341 @@ pub fn parse_loop_review_protocol_output(
             "loop review 的 execution_id 非法，期望 '{execution_id}'，实际 '{actual_execution_id}'"
         )));
     }
-    if feedback.trim().is_empty() {
+    if summary.trim().is_empty() {
         return Err(WorkflowRuntimeError::Validation(
-            "loop review 的 feedback 不能为空".to_string(),
+            "loop review 的 summary 不能为空".to_string(),
         ));
     }
 
-    let rejected = matches!(verdict, ReviewVerdict::Rejected);
-    if rejected {
-        if issue_id.as_deref().map(str::trim).is_none_or(str::is_empty) {
-            return Err(WorkflowRuntimeError::Validation(
-                "loop review rejected 时 issue_id 不能为空".to_string(),
-            ));
-        }
-        if let Some(item) = step_feedbacks
-            .iter()
-            .find(|item| !allowed_step_keys.contains(&item.step_key))
-        {
-            return Err(WorkflowRuntimeError::Validation(format!(
-                "loop review 的 step_feedbacks 引用了 reviewScope 外的 step_key '{}'",
-                item.step_key
-            )));
-        }
-        if step_feedbacks
-            .iter()
-            .any(|item| item.issue_id.trim().is_empty() || item.feedback.trim().is_empty())
-        {
-            return Err(WorkflowRuntimeError::Validation(
-                "loop review rejected 时 step_feedbacks.issue_id/feedback 不能为空".to_string(),
-            ));
-        }
-    }
-
-    validate_acceptance_coverage(declared_acceptance, acceptance_results)?;
-
-    let has_failed = acceptance_results
+    let expected_ids = criteria
         .iter()
-        .any(|item| matches!(item.verdict, WorkflowAcceptanceVerdict::Failed));
-    let has_required_failed = acceptance_results.iter().any(|item| {
-        matches!(item.verdict, WorkflowAcceptanceVerdict::Failed)
-            && matches!(item.level, AcceptanceCriterionLevel::Required)
-    });
-    if matches!(verdict, ReviewVerdict::Approved) && has_required_failed {
+        .map(|criterion| criterion.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let actual_ids = results.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    if actual_ids != expected_ids {
+        let missing = expected_ids
+            .difference(&actual_ids)
+            .copied()
+            .collect::<Vec<_>>();
+        let extra = actual_ids
+            .difference(&expected_ids)
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(WorkflowRuntimeError::Validation(format!(
+            "loop review results 与验收清单不一致（缺少 {missing:?}，多余 {extra:?}）"
+        )));
+    }
+    if let Some((id, _)) = results
+        .iter()
+        .find(|(_, result)| result.evidence.trim().is_empty())
+    {
+        return Err(WorkflowRuntimeError::Validation(format!(
+            "loop review result '{id}' 的 evidence 不能为空"
+        )));
+    }
+
+    let allowed_step_keys = allowed_step_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if let Some(step_key) = rework
+        .keys()
+        .find(|key| !allowed_step_keys.contains(key.as_str()))
+    {
+        return Err(WorkflowRuntimeError::Validation(format!(
+            "loop review rework 包含 reviewScope 外的 step_key '{step_key}'"
+        )));
+    }
+    if let Some((step_key, _)) = rework
+        .iter()
+        .find(|(_, feedback)| feedback.trim().is_empty())
+    {
+        return Err(WorkflowRuntimeError::Validation(format!(
+            "loop review rework '{step_key}' 的反馈不能为空"
+        )));
+    }
+    let verdict = derive_loop_review_verdict(criteria, results);
+    if verdict == ReviewVerdict::Rejected && rework.is_empty() {
         return Err(WorkflowRuntimeError::Validation(
-            "approved loop review 不允许存在 required 级 failed 验收项".to_string(),
+            "loop review 驳回时 rework 必须至少指定一个 reviewScope step".to_string(),
         ));
     }
-    // The loop protocol has no `risks` field: partial-level failures are
-    // attributed through the non-empty feedback, so no extra check here.
-    if rejected
-        && !has_failed
-        && step_feedbacks.is_empty()
-        && issue_id.as_deref().map(str::trim).is_none_or(str::is_empty)
-    {
+    if verdict == ReviewVerdict::Approved && !rework.is_empty() {
         return Err(WorkflowRuntimeError::Validation(
-            "rejected loop review 必须至少包含一个 failed 验收项、step_feedbacks 或 issue_id"
-                .to_string(),
+            "loop review 通过时 rework 必须为空".to_string(),
         ));
     }
 
     Ok(message)
 }
 
-/// Declared criteria must be covered exactly once, no more, no less, each at
-/// the declared tier. Criteria compare after whitespace collapsing.
-fn validate_acceptance_coverage(
-    declared_acceptance: &[(String, AcceptanceCriterionLevel, String)],
-    acceptance_results: &[LoopReviewAcceptanceResult],
-) -> Result<(), WorkflowRuntimeError> {
-    let normalize = |value: &str| value.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    let mut expected: Vec<(&str, AcceptanceCriterionLevel, String)> = Vec::new();
-    for (step_key, level, criterion) in declared_acceptance {
-        let criterion = normalize(criterion);
-        if criterion.is_empty() {
-            continue;
-        }
-        let entry = (step_key.as_str(), *level, criterion);
-        if !expected.contains(&entry) {
-            expected.push(entry);
-        }
+pub(super) fn derive_loop_review_verdict(
+    criteria: &[LoopReviewCriterion],
+    results: &BTreeMap<String, LoopReviewCriterionResult>,
+) -> ReviewVerdict {
+    if criteria.iter().any(|criterion| {
+        criterion.level == AcceptanceCriterionLevel::Required
+            && results
+                .get(&criterion.id)
+                .is_none_or(|result| !result.passed)
+    }) {
+        ReviewVerdict::Rejected
+    } else {
+        ReviewVerdict::Approved
     }
-
-    let mut seen: Vec<(&str, AcceptanceCriterionLevel, String)> = Vec::new();
-    for result in acceptance_results {
-        let entry = (
-            result.step_key.as_str(),
-            result.level,
-            normalize(&result.criterion),
-        );
-        if seen.contains(&entry) {
-            return Err(WorkflowRuntimeError::Validation(format!(
-                "loop review acceptance_results 重复覆盖验收标准 '{}'",
-                entry.2
-            )));
-        }
-        if !expected.contains(&entry) {
-            return Err(WorkflowRuntimeError::Validation(format!(
-                "loop review acceptance_results 包含未声明的验收标准或 level 与声明不符：{} / '{}'",
-                entry.0, entry.2
-            )));
-        }
-        seen.push(entry);
-    }
-    if seen.len() != expected.len() {
-        return Err(WorkflowRuntimeError::Validation(format!(
-            "loop review acceptance_results 必须恰好覆盖每条已声明验收标准一次（声明 {} 条，实际 {} 条）",
-            expected.len(),
-            seen.len()
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn allowed_step_keys() -> Vec<String> {
-        vec!["draft".to_string(), "revise".to_string()]
-    }
-
-    fn declared_acceptance() -> Vec<(String, AcceptanceCriterionLevel, String)> {
+    fn criteria() -> Vec<LoopReviewCriterion> {
         vec![
-            (
-                "draft".to_string(),
-                AcceptanceCriterionLevel::Required,
-                "cargo test 全部通过".to_string(),
-            ),
-            (
-                "draft".to_string(),
-                AcceptanceCriterionLevel::Partial,
-                "外部服务冒烟可用".to_string(),
-            ),
-            (
-                "revise".to_string(),
-                AcceptanceCriterionLevel::Required,
-                "格式符合规范".to_string(),
-            ),
-            (
-                "revise".to_string(),
-                AcceptanceCriterionLevel::Recommended,
-                "附带截图".to_string(),
-            ),
+            LoopReviewCriterion {
+                id: "c1".to_string(),
+                level: AcceptanceCriterionLevel::Required,
+                criterion: "cargo test 通过".to_string(),
+            },
+            LoopReviewCriterion {
+                id: "c2".to_string(),
+                level: AcceptanceCriterionLevel::Partial,
+                criterion: "完成外部冒烟".to_string(),
+            },
         ]
     }
 
-    /// Criteria cover the declared set exactly once; the first one uses
-    /// collapsed-whitespace variants on purpose.
-    fn valid_acceptance_results() -> &'static str {
-        r#"[
-    { "step_key": "draft", "criterion": "cargo   test\n全部通过", "level": "required", "verdict": "passed", "evidence": "cargo test 输出正常" },
-    { "step_key": "draft", "criterion": "外部服务冒烟可用", "level": "partial", "verdict": "failed", "evidence": "沙箱缺少凭据，归因外部" },
-    { "step_key": "revise", "criterion": "格式符合规范", "level": "required", "verdict": "passed", "evidence": "lint 通过" },
-    { "step_key": "revise", "criterion": "附带截图", "level": "recommended", "verdict": "failed", "evidence": "未附截图" }
-  ]"#
-    }
-
-    fn raw_output(
-        execution_id: Uuid,
-        verdict: &str,
-        acceptance_results: &str,
-        extra_fields: &str,
-    ) -> String {
+    fn raw_output(execution_id: Uuid, results: &str, rework: &str) -> String {
         format!(
-            r#"{{
-  "type": "loop_review_result",
-  "loop_key": "loop-a",
-  "execution_id": "{execution_id}",
-  "verdict": "{verdict}",
-  "feedback": "整体审核反馈",
-  "acceptance_results": {acceptance_results},
-  "evidence": ["已检查 docs/draft.md"]{extra_fields}
-}}"#
+            r#"{{"type":"loop_review_result","loop_key":"loop-a","execution_id":"{execution_id}","summary":"审核完成","results":{results},"rework":{rework}}}"#
         )
     }
 
-    #[test]
-    fn parse_accepts_approved_with_partial_level_failure() {
-        let execution_id = Uuid::new_v4();
-        let raw = raw_output(execution_id, "approved", valid_acceptance_results(), "");
-        let parsed = parse_loop_review_protocol_output(
-            execution_id,
-            "loop-a",
-            &allowed_step_keys(),
-            &declared_acceptance(),
-            &raw,
-        )
-        .expect("approved with attributed partial/recommended failures is allowed");
-        let LoopReviewProtocolMessage::LoopReviewResult {
-            verdict,
-            acceptance_results,
-            issue_id,
-            step_feedbacks,
-            ..
-        } = parsed;
-        assert_eq!(verdict, ReviewVerdict::Approved);
-        assert_eq!(acceptance_results.len(), 4);
-        assert_eq!(
-            acceptance_results[1].level,
-            AcceptanceCriterionLevel::Partial
-        );
-        assert_eq!(
-            acceptance_results[3].level,
-            AcceptanceCriterionLevel::Recommended
-        );
-        assert_eq!(issue_id, None);
-        assert!(step_feedbacks.is_empty());
+    fn allowed_step_keys() -> Vec<String> {
+        vec!["draft".to_string(), "implement".to_string()]
     }
 
     #[test]
-    fn parse_accepts_rejected_with_or_without_step_feedbacks() {
-        let execution_id = Uuid::new_v4();
-        let extra = r#",
-  "issue_id": "loop-quality-gate",
-  "step_feedbacks": [
-    { "step_key": "draft", "issue_id": "draft-missing-background", "feedback": "请补充背景" }
-  ]"#;
-        let parsed = parse_loop_review_protocol_output(
-            execution_id,
+    fn schema_requires_the_exact_criterion_ids() {
+        let schema: serde_json::Value = serde_json::from_str(&loop_review_protocol_json_schema(
+            Uuid::new_v4(),
             "loop-a",
+            &criteria(),
             &allowed_step_keys(),
-            &declared_acceptance(),
-            &raw_output(execution_id, "rejected", valid_acceptance_results(), extra),
-        )
-        .expect("rejected with step_feedbacks is accepted");
-        let LoopReviewProtocolMessage::LoopReviewResult {
-            verdict,
-            issue_id,
-            step_feedbacks,
-            ..
-        } = parsed;
-        assert_eq!(verdict, ReviewVerdict::Rejected);
-        assert_eq!(issue_id.as_deref(), Some("loop-quality-gate"));
-        assert_eq!(step_feedbacks.len(), 1);
-        assert_eq!(step_feedbacks[0].step_key, "draft");
+        ))
+        .unwrap();
 
-        // Empty step_feedbacks means the whole reviewScope is reworked.
+        assert_eq!(
+            schema["properties"]["results"]["required"],
+            serde_json::json!(["c1", "c2"])
+        );
+        assert_eq!(
+            schema["properties"]["results"]["additionalProperties"],
+            false
+        );
+        assert!(schema["properties"]["rework"]["properties"]["draft"].is_object());
+    }
+
+    #[test]
+    fn parse_accepts_exact_results() {
+        let execution_id = Uuid::new_v4();
         let parsed = parse_loop_review_protocol_output(
             execution_id,
             "loop-a",
+            &criteria(),
             &allowed_step_keys(),
-            &declared_acceptance(),
             &raw_output(
                 execution_id,
-                "rejected",
-                valid_acceptance_results(),
-                ",\n  \"issue_id\": \"loop-quality-gate\"",
+                r#"{"c1":{"passed":true,"evidence":"tests passed"},"c2":{"passed":false,"evidence":"missing credentials"}}"#,
+                "{}",
             ),
         )
-        .expect("rejected without step_feedbacks is accepted");
-        let LoopReviewProtocolMessage::LoopReviewResult { step_feedbacks, .. } = parsed;
-        assert!(step_feedbacks.is_empty());
+        .unwrap();
+
+        let LoopReviewProtocolMessage::LoopReviewResult { results, .. } = parsed;
+        assert!(results["c1"].passed);
+        assert!(!results["c2"].passed);
     }
 
     #[test]
-    fn parse_rejects_mismatched_fixed_ids() {
-        let execution_id = Uuid::new_v4();
-        let raw = raw_output(execution_id, "approved", valid_acceptance_results(), "")
-            .replace("\"loop_key\": \"loop-a\"", "\"loop_key\": \"other-loop\"");
-        let error = parse_loop_review_protocol_output(
-            execution_id,
-            "loop-a",
-            &allowed_step_keys(),
-            &declared_acceptance(),
-            &raw,
-        )
-        .expect_err("mismatched loop_key must fail");
-        assert!(error.to_string().contains("loop_key"));
-
-        let other_execution = Uuid::new_v4();
-        let error = parse_loop_review_protocol_output(
-            other_execution,
-            "loop-a",
-            &allowed_step_keys(),
-            &declared_acceptance(),
-            &raw_output(execution_id, "approved", valid_acceptance_results(), ""),
-        )
-        .expect_err("mismatched execution_id must fail");
-        assert!(error.to_string().contains("execution_id"));
-    }
-
-    #[test]
-    fn parse_rejects_rejection_without_issue_id() {
-        let execution_id = Uuid::new_v4();
-        let error = parse_loop_review_protocol_output(
-            execution_id,
-            "loop-a",
-            &allowed_step_keys(),
-            &declared_acceptance(),
-            &raw_output(execution_id, "rejected", valid_acceptance_results(), ""),
-        )
-        .expect_err("missing issue_id must fail");
-        assert!(error.to_string().contains("issue_id"));
-    }
-
-    #[test]
-    fn parse_rejects_step_feedbacks_with_unknown_step_key() {
-        let execution_id = Uuid::new_v4();
-        let extra = r#",
-  "issue_id": "loop-quality-gate",
-  "step_feedbacks": [
-    { "step_key": "ghost", "issue_id": "ghost-issue", "feedback": "越界反馈" }
-  ]"#;
-        let error = parse_loop_review_protocol_output(
-            execution_id,
-            "loop-a",
-            &allowed_step_keys(),
-            &declared_acceptance(),
-            &raw_output(execution_id, "rejected", valid_acceptance_results(), extra),
-        )
-        .expect_err("step_feedbacks outside the review scope must fail");
-        assert!(error.to_string().contains("step_feedbacks"));
-    }
-
-    #[test]
-    fn coverage_rejects_missing_criterion() {
-        let execution_id = Uuid::new_v4();
-        let results = r#"[
-    { "step_key": "draft", "criterion": "cargo test 全部通过", "level": "required", "verdict": "passed", "evidence": "通过" },
-    { "step_key": "draft", "criterion": "外部服务冒烟可用", "level": "partial", "verdict": "passed", "evidence": "通过" },
-    { "step_key": "revise", "criterion": "格式符合规范", "level": "required", "verdict": "passed", "evidence": "通过" }
-  ]"#;
-        let error = parse_loop_review_protocol_output(
-            execution_id,
-            "loop-a",
-            &allowed_step_keys(),
-            &declared_acceptance(),
-            &raw_output(execution_id, "approved", results, ""),
-        )
-        .expect_err("a missing declared criterion must fail");
-        assert!(error.to_string().contains("acceptance_results"));
-    }
-
-    #[test]
-    fn coverage_rejects_undeclared_criterion_or_step_key() {
-        let execution_id = Uuid::new_v4();
-        let extra_criterion = r#"[
-    { "step_key": "draft", "criterion": "cargo test 全部通过", "level": "required", "verdict": "passed", "evidence": "通过" },
-    { "step_key": "draft", "criterion": "外部服务冒烟可用", "level": "partial", "verdict": "passed", "evidence": "通过" },
-    { "step_key": "revise", "criterion": "格式符合规范", "level": "required", "verdict": "passed", "evidence": "通过" },
-    { "step_key": "revise", "criterion": "附带截图", "level": "recommended", "verdict": "passed", "evidence": "通过" },
-    { "step_key": "revise", "criterion": "现场自创的标准", "level": "required", "verdict": "passed", "evidence": "通过" }
-  ]"#;
-        let error = parse_loop_review_protocol_output(
-            execution_id,
-            "loop-a",
-            &allowed_step_keys(),
-            &declared_acceptance(),
-            &raw_output(execution_id, "approved", extra_criterion, ""),
-        )
-        .expect_err("an undeclared criterion must fail");
-        assert!(error.to_string().contains("未声明"));
-
-        let undeclared_step = extra_criterion.replace("现场自创的标准", "附带截图2");
-        let undeclared_step = undeclared_step.replace(
-            "{ \"step_key\": \"revise\", \"criterion\": \"附带截图2\"",
-            "{ \"step_key\": \"ghost\", \"criterion\": \"附带截图2\"",
-        );
-        let error = parse_loop_review_protocol_output(
-            execution_id,
-            "loop-a",
-            &allowed_step_keys(),
-            &declared_acceptance(),
-            &raw_output(execution_id, "approved", &undeclared_step, ""),
-        )
-        .expect_err("an undeclared step_key must fail");
-        assert!(error.to_string().contains("未声明"));
-    }
-
-    #[test]
-    fn coverage_rejects_duplicate_coverage() {
-        let execution_id = Uuid::new_v4();
-        let results = r#"[
-    { "step_key": "draft", "criterion": "cargo test 全部通过", "level": "required", "verdict": "passed", "evidence": "通过" },
-    { "step_key": "draft", "criterion": "cargo test 全部通过", "level": "required", "verdict": "passed", "evidence": "再次报告" },
-    { "step_key": "draft", "criterion": "外部服务冒烟可用", "level": "partial", "verdict": "passed", "evidence": "通过" },
-    { "step_key": "revise", "criterion": "格式符合规范", "level": "required", "verdict": "passed", "evidence": "通过" },
-    { "step_key": "revise", "criterion": "附带截图", "level": "recommended", "verdict": "passed", "evidence": "通过" }
-  ]"#;
-        let error = parse_loop_review_protocol_output(
-            execution_id,
-            "loop-a",
-            &allowed_step_keys(),
-            &declared_acceptance(),
-            &raw_output(execution_id, "approved", results, ""),
-        )
-        .expect_err("duplicate coverage must fail");
-        assert!(error.to_string().contains("重复"));
-    }
-
-    #[test]
-    fn coverage_rejects_level_mismatch() {
-        let execution_id = Uuid::new_v4();
-        let results = valid_acceptance_results().replace(
-            "{ \"step_key\": \"draft\", \"criterion\": \"cargo   test\\n全部通过\", \"level\": \"required\"",
-            "{ \"step_key\": \"draft\", \"criterion\": \"cargo   test\\n全部通过\", \"level\": \"partial\"",
-        );
-        let error = parse_loop_review_protocol_output(
-            execution_id,
-            "loop-a",
-            &allowed_step_keys(),
-            &declared_acceptance(),
-            &raw_output(execution_id, "approved", &results, ""),
-        )
-        .expect_err("level different from the declaration must fail");
-        assert!(error.to_string().contains("level"));
-    }
-
-    #[test]
-    fn parse_rejects_approved_with_required_level_failure() {
-        let execution_id = Uuid::new_v4();
-        let results = valid_acceptance_results().replace(
-            "\"criterion\": \"cargo   test\\n全部通过\", \"level\": \"required\", \"verdict\": \"passed\"",
-            "\"criterion\": \"cargo   test\\n全部通过\", \"level\": \"required\", \"verdict\": \"failed\"",
-        );
-        let error = parse_loop_review_protocol_output(
-            execution_id,
-            "loop-a",
-            &allowed_step_keys(),
-            &declared_acceptance(),
-            &raw_output(execution_id, "approved", &results, ""),
-        )
-        .expect_err("approved with a required-level failure must fail");
-        assert!(error.to_string().contains("required"));
-    }
-
-    #[test]
-    fn missing_level_defaults_to_required_for_legacy_json() {
-        let execution_id = Uuid::new_v4();
-        let declared = vec![
+    fn verdict_is_derived_only_from_required_results() {
+        let criteria = criteria();
+        let partial_failed = BTreeMap::from([
             (
-                "draft".to_string(),
-                AcceptanceCriterionLevel::Required,
-                "cargo test 全部通过".to_string(),
+                "c1".to_string(),
+                LoopReviewCriterionResult {
+                    passed: true,
+                    evidence: "ok".to_string(),
+                },
             ),
             (
-                "revise".to_string(),
-                AcceptanceCriterionLevel::Required,
-                "格式符合规范".to_string(),
+                "c2".to_string(),
+                LoopReviewCriterionResult {
+                    passed: false,
+                    evidence: "external service unavailable".to_string(),
+                },
             ),
-        ];
-        // Legacy stored shape: acceptance_results items carry no `level`.
-        let results = r#"[
-    { "step_key": "draft", "criterion": "cargo test 全部通过", "verdict": "passed", "evidence": "通过" },
-    { "step_key": "revise", "criterion": "格式符合规范", "verdict": "passed", "evidence": "通过" }
-  ]"#;
-        let parsed = parse_loop_review_protocol_output(
+        ]);
+        assert_eq!(
+            derive_loop_review_verdict(&criteria, &partial_failed),
+            ReviewVerdict::Approved
+        );
+
+        let required_failed = BTreeMap::from([
+            (
+                "c1".to_string(),
+                LoopReviewCriterionResult {
+                    passed: false,
+                    evidence: "test failed".to_string(),
+                },
+            ),
+            (
+                "c2".to_string(),
+                LoopReviewCriterionResult {
+                    passed: true,
+                    evidence: "ok".to_string(),
+                },
+            ),
+        ]);
+        assert_eq!(
+            derive_loop_review_verdict(&criteria, &required_failed),
+            ReviewVerdict::Rejected
+        );
+    }
+
+    #[test]
+    fn parse_rejects_missing_or_extra_ids() {
+        let execution_id = Uuid::new_v4();
+        let error = parse_loop_review_protocol_output(
             execution_id,
             "loop-a",
+            &criteria(),
             &allowed_step_keys(),
-            &declared,
-            &raw_output(execution_id, "approved", results, ""),
+            &raw_output(
+                execution_id,
+                r#"{"c1":{"passed":true,"evidence":"ok"},"c3":{"passed":true,"evidence":"extra"}}"#,
+                "{}",
+            ),
         )
-        .expect("legacy items without level default to required");
-        let LoopReviewProtocolMessage::LoopReviewResult {
-            acceptance_results, ..
-        } = parsed;
+        .unwrap_err();
+
+        assert!(error.to_string().contains("缺少"));
+        assert!(error.to_string().contains("c2"));
+        assert!(error.to_string().contains("c3"));
+    }
+
+    #[test]
+    fn parse_rejects_blank_evidence_and_extra_fields() {
+        let execution_id = Uuid::new_v4();
+        let blank = raw_output(
+            execution_id,
+            r#"{"c1":{"passed":true,"evidence":" "},"c2":{"passed":true,"evidence":"ok"}}"#,
+            "{}",
+        );
         assert!(
-            acceptance_results
-                .iter()
-                .all(|item| item.level == AcceptanceCriterionLevel::Required)
+            parse_loop_review_protocol_output(
+                execution_id,
+                "loop-a",
+                &criteria(),
+                &allowed_step_keys(),
+                &blank,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("evidence")
+        );
+
+        let extra = raw_output(
+            execution_id,
+            r#"{"c1":{"passed":true,"evidence":"ok","verdict":"passed"},"c2":{"passed":true,"evidence":"ok"}}"#,
+            "{}",
+        );
+        assert!(
+            parse_loop_review_protocol_output(
+                execution_id,
+                "loop-a",
+                &criteria(),
+                &allowed_step_keys(),
+                &extra,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parse_rejects_wrapping_text() {
+        let execution_id = Uuid::new_v4();
+        let raw = format!(
+            "```json\n{}\n```",
+            raw_output(
+                execution_id,
+                r#"{"c1":{"passed":true,"evidence":"ok"},"c2":{"passed":true,"evidence":"ok"}}"#,
+                "{}",
+            )
+        );
+
+        assert!(
+            parse_loop_review_protocol_output(
+                execution_id,
+                "loop-a",
+                &criteria(),
+                &allowed_step_keys(),
+                &raw,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejected_result_requires_only_valid_explicit_rework_targets() {
+        let execution_id = Uuid::new_v4();
+        let rejected_results = r#"{"c1":{"passed":false,"evidence":"integration failed"},"c2":{"passed":true,"evidence":"ok"}}"#;
+
+        let missing = raw_output(execution_id, rejected_results, "{}");
+        assert!(
+            parse_loop_review_protocol_output(
+                execution_id,
+                "loop-a",
+                &criteria(),
+                &allowed_step_keys(),
+                &missing,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("至少指定一个")
+        );
+
+        let outside = raw_output(
+            execution_id,
+            rejected_results,
+            r#"{"outside":"修复集成问题"}"#,
+        );
+        assert!(
+            parse_loop_review_protocol_output(
+                execution_id,
+                "loop-a",
+                &criteria(),
+                &allowed_step_keys(),
+                &outside,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("reviewScope 外")
+        );
+
+        let targeted = raw_output(
+            execution_id,
+            rejected_results,
+            r#"{"implement":"修复集成问题"}"#,
+        );
+        assert!(
+            parse_loop_review_protocol_output(
+                execution_id,
+                "loop-a",
+                &criteria(),
+                &allowed_step_keys(),
+                &targeted,
+            )
+            .is_ok()
         );
     }
 }

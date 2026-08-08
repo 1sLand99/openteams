@@ -7,13 +7,16 @@
 //! rendered only as part of the worker's report and are explicitly marked as
 //! not directly trustworthy.
 
-use db::models::workflow_types::AcceptanceCriteria;
+use db::models::workflow_types::AcceptanceCriterionLevel;
 
-use super::common::{
-    CLOSING_JSON_ONLY, CURRENT_TASK_SECTION_TITLE, PromptIdentity, PromptSections,
-    UPSTREAM_SECTION_TITLE, UpstreamResultInput, WORKFLOW_GOAL_SECTION_TITLE,
-    render_acceptance_tiers, render_bullet_list, render_inline_code_list, render_numbered_section,
-    render_upstream_results,
+use super::{
+    super::WorkflowReviewCriterion,
+    common::{
+        CLOSING_JSON_ONLY, CURRENT_TASK_SECTION_TITLE, PromptIdentity, PromptSections,
+        UPSTREAM_SECTION_TITLE, UpstreamResultInput, WORKFLOW_GOAL_SECTION_TITLE,
+        render_bullet_list, render_inline_code_list, render_numbered_section,
+        render_upstream_results,
+    },
 };
 
 /// Worker's latest result as report lines (§6.4). The reviewer is instructed
@@ -39,8 +42,8 @@ pub struct StepReviewPromptInput {
     pub workflow_goal: String,
     pub title: String,
     pub instructions: String,
-    /// Tiered acceptance criteria; the only acceptance source for the review.
-    pub acceptance: AcceptanceCriteria,
+    /// The sole acceptance contract shared with the protocol parser.
+    pub acceptance_criteria: Vec<WorkflowReviewCriterion>,
     /// Numbered review rules; `DEFAULT_REVIEW_RULES` applies when empty.
     pub review_rules: Vec<String>,
     pub worker_result: TaskResultInput,
@@ -55,9 +58,9 @@ pub struct StepReviewPromptInput {
 /// Default review rules (§11.3) used when the caller supplies no custom rules.
 pub const DEFAULT_REVIEW_RULES: [&str; 4] = [
     "阅读实际变更文件并与任务说明逐项比较；独立运行或检查适合本任务的验证命令。",
-    "返回非空的 summary、acceptance_results 和 evidence；每条验收结果都必须包含非空的 criterion 和 evidence，并使用 JSON Schema 中定义的枚举值。",
-    "approved 时必须返回所有 required 级验收标准；rejected 时返回本轮已检查且与结论有关的结果即可。risks 和 unfinished_items 仅记录实际存在的事项，不影响 verdict。",
-    "如需驳回，在 feedback 中一次性列出本轮能发现的全部问题和具体修改方向。",
+    "results 必须恰好包含验收清单中的每个 id，不得遗漏或添加 id。",
+    "只有实际验证通过才返回 passed=true；每项 evidence 必须说明判断依据。",
+    "required 的失败会由后端自动驳回；partial 和 recommended 只记录结果，不影响总结论。",
 ];
 
 /// Builds the step review prompt following the §11.3 example and the §7.1
@@ -84,9 +87,22 @@ pub fn build_step_review_prompt(input: &StepReviewPromptInput) -> String {
         input.title.trim(),
         input.instructions.trim()
     ));
-    if let Some(tiers) = render_acceptance_tiers(&input.acceptance) {
-        sections.push_node_level(format!("## 验收标准\n\n{tiers}"));
-    }
+    sections.push_node_level(format!(
+        "## 验收清单\n\n这是唯一验收清单。`results` 必须使用下列 id 作为 key，每个 id 恰好一次。\n\n{}",
+        input
+            .acceptance_criteria
+            .iter()
+            .map(|item| {
+                let level = match item.level {
+                    AcceptanceCriterionLevel::Required => "required",
+                    AcceptanceCriterionLevel::Partial => "partial",
+                    AcceptanceCriterionLevel::Recommended => "recommended",
+                };
+                format!("- `{}` | `{}` | {}", item.id, level, item.criterion)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    ));
     let review_rules: Vec<String> = if input.review_rules.is_empty() {
         DEFAULT_REVIEW_RULES
             .iter()
@@ -106,6 +122,7 @@ pub fn build_step_review_prompt(input: &StepReviewPromptInput) -> String {
     sections.push_schema(&super::super::step_review_protocol_json_schema(
         input.identity.execution_id,
         &input.identity.step_key,
+        &input.acceptance_criteria,
     ));
 
     if let Some(feedback) = &input.latest_review_feedback {
@@ -165,12 +182,24 @@ mod tests {
 
     const EXECUTION_ID: &str = "03f1e4a4-8745-4db7-a69c-1f4d09dcc8ca";
 
-    fn sample_acceptance() -> AcceptanceCriteria {
-        AcceptanceCriteria {
-            required: vec!["cargo test -p executors --features qa-mode pi 通过".to_string()],
-            partial: vec!["真实探测依赖本机环境，缺失时凭归因不阻断".to_string()],
-            recommended: vec!["诊断区分三种失败情形".to_string()],
-        }
+    fn sample_acceptance() -> Vec<WorkflowReviewCriterion> {
+        vec![
+            WorkflowReviewCriterion {
+                id: "c1".to_string(),
+                level: AcceptanceCriterionLevel::Required,
+                criterion: "cargo test -p executors --features qa-mode pi 通过".to_string(),
+            },
+            WorkflowReviewCriterion {
+                id: "c2".to_string(),
+                level: AcceptanceCriterionLevel::Partial,
+                criterion: "真实探测依赖本机环境，缺失时凭归因不阻断".to_string(),
+            },
+            WorkflowReviewCriterion {
+                id: "c3".to_string(),
+                level: AcceptanceCriterionLevel::Recommended,
+                criterion: "诊断区分三种失败情形".to_string(),
+            },
+        ]
     }
 
     fn sample_input() -> StepReviewPromptInput {
@@ -182,7 +211,7 @@ mod tests {
             workflow_goal: "将 Pi 注册为完整一等 Agent。".to_string(),
             title: "建立 Pi 强类型、固定启动描述和运行时 API".to_string(),
             instructions: "注册 Pi 强类型和默认 profile；集中固定版本。".to_string(),
-            acceptance: sample_acceptance(),
+            acceptance_criteria: sample_acceptance(),
             review_rules: vec![],
             worker_result: TaskResultInput {
                 status: "done".to_string(),
@@ -228,7 +257,7 @@ mod tests {
                 "人类可读内容使用简体中文。",
                 "## 工作总目标",
                 "## 当前任务",
-                "## 验收标准",
+                "## 验收清单",
                 "## 审核标准",
                 "## 执行者最新结果",
                 "## 必要上游结果",
@@ -263,14 +292,15 @@ mod tests {
     }
 
     #[test]
-    fn acceptance_tiers_rendered_and_default_rules_applied() {
+    fn acceptance_contract_rendered_and_default_rules_applied() {
         let prompt = build_step_review_prompt(&sample_input());
-        assert!(prompt.contains("必须满足（required）"));
-        assert!(prompt.contains("允许外部归因（partial）"));
-        assert!(prompt.contains("建议满足（recommended）"));
+        assert!(prompt.contains("这是唯一验收清单"));
+        assert!(prompt.contains("`c1` | `required`"));
+        assert!(prompt.contains("`c2` | `partial`"));
+        assert!(prompt.contains("`c3` | `recommended`"));
         assert!(prompt.contains("cargo test -p executors --features qa-mode pi 通过"));
         assert!(prompt.contains("1. 阅读实际变更文件"));
-        assert!(prompt.contains("4. 如需驳回"));
+        assert!(prompt.contains("4. required 的失败"));
     }
 
     #[test]
@@ -308,6 +338,8 @@ mod tests {
         assert!(prompt.contains("\"review_result\""));
         assert!(prompt.contains("backend_pi_types_runtime"));
         assert!(prompt.contains(EXECUTION_ID));
+        assert!(prompt.contains("\"passed\""));
+        assert!(!prompt.contains("\"verdict\""));
         assert!(!prompt.contains("final_result"));
         assert!(!prompt.contains("result_review_result"));
         assert!(!prompt.contains("loop_review_result"));
@@ -316,9 +348,8 @@ mod tests {
     #[test]
     fn empty_optional_sections_are_fully_omitted() {
         let mut input = sample_input();
-        input.acceptance = AcceptanceCriteria::default();
+        input.upstream_results = vec![];
         let prompt = build_step_review_prompt(&input);
-        assert!(!prompt.contains("## 验收标准"));
         assert!(!prompt.contains("## 必要上游结果"));
         assert!(!prompt.contains("## 最近一次审核反馈"));
         assert!(prompt.contains("## 审核标准"));

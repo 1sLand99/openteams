@@ -110,20 +110,37 @@ pub enum WorkflowResultOverallStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowReviewProtocolMessage {
     ReviewResult {
         step_key: String,
         execution_id: String,
-        verdict: ReviewVerdict,
-        feedback: String,
-        acceptance_results: Vec<WorkflowAcceptanceResult>,
-        evidence: Vec<String>,
-        #[serde(default)]
-        risks: Vec<String>,
-        #[serde(default)]
-        unfinished_items: Vec<String>,
+        summary: String,
+        results: std::collections::BTreeMap<String, WorkflowReviewCriterionResult>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowReviewCriterion {
+    pub id: String,
+    pub level: AcceptanceCriterionLevel,
+    pub criterion: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowReviewCriterionResult {
+    pub passed: bool,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DerivedWorkflowReview {
+    pub verdict: ReviewVerdict,
+    pub acceptance_results: Vec<WorkflowAcceptanceResult>,
+    pub evidence: Vec<String>,
+    pub risks: Vec<String>,
+    pub unfinished_items: Vec<String>,
 }
 
 pub fn extract_json_payload(raw_output: &str) -> Option<String> {
@@ -225,24 +242,6 @@ pub fn parse_plan_output(raw_output: &str) -> Result<WorkflowPlanJson, WorkflowR
         )
     })?;
     Ok(serde_json::from_str(&payload)?)
-}
-
-fn acceptance_results_schema_def() -> serde_json::Value {
-    serde_json::json!({
-        "type": "array",
-        "minItems": 1,
-        "items": {
-            "type": "object",
-            "required": ["criterion", "level", "verdict", "evidence"],
-            "additionalProperties": false,
-            "properties": {
-                "criterion": { "type": "string", "minLength": 1 },
-                "level": { "enum": ["required", "partial", "recommended"] },
-                "verdict": { "enum": ["passed", "failed", "not_applicable"] },
-                "evidence": { "type": "string", "minLength": 1 }
-            }
-        }
-    })
 }
 
 pub fn task_protocol_json_schema(
@@ -358,29 +357,48 @@ pub fn task_protocol_json_schema(
     .unwrap_or_else(|_| "{}".to_string())
 }
 
-pub fn step_review_protocol_json_schema(execution_id: Uuid, step_key: &str) -> String {
+pub fn step_review_protocol_json_schema(
+    execution_id: Uuid,
+    step_key: &str,
+    criteria: &[WorkflowReviewCriterion],
+) -> String {
+    let result_ids = criteria
+        .iter()
+        .map(|criterion| criterion.id.clone())
+        .collect::<Vec<_>>();
+    let result_properties = criteria
+        .iter()
+        .map(|criterion| {
+            (
+                criterion.id.clone(),
+                serde_json::json!({
+                    "type": "object",
+                    "required": ["passed", "evidence"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "passed": { "type": "boolean" },
+                        "evidence": { "type": "string", "pattern": "\\S" }
+                    }
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+
     serde_json::to_string_pretty(&serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
-        "required": ["type", "step_key", "execution_id", "verdict", "feedback", "acceptance_results", "evidence"],
+        "required": ["type", "step_key", "execution_id", "summary", "results"],
         "additionalProperties": false,
         "properties": {
             "type": { "const": "review_result" },
             "step_key": { "const": step_key },
             "execution_id": { "const": execution_id.to_string() },
-            "verdict": { "enum": ["approved", "rejected"] },
-            "feedback": { "type": "string", "minLength": 1 },
-            "acceptance_results": { "$ref": "#/$defs/acceptance_results" },
-            "evidence": { "$ref": "#/$defs/evidence" },
-            "risks": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] },
-            "unfinished_items": { "type": "array", "items": { "type": "string", "minLength": 1 }, "default": [] }
-        },
-        "$defs": {
-            "acceptance_results": acceptance_results_schema_def(),
-            "evidence": {
-                "type": "array",
-                "minItems": 1,
-                "items": { "type": "string", "minLength": 1 }
+            "summary": { "type": "string", "pattern": "\\S" },
+            "results": {
+                "type": "object",
+                "required": result_ids,
+                "additionalProperties": false,
+                "properties": result_properties
             }
         }
     }))
@@ -546,133 +564,96 @@ fn validate_task_result_fields(
     Ok(())
 }
 
-fn validate_structured_review_fields(
-    summary: &str,
-    acceptance_results: &[WorkflowAcceptanceResult],
-    evidence: &[String],
-    risks: &[String],
-    unfinished_items: &[String],
-) -> Result<(), WorkflowRuntimeError> {
-    if summary.trim().is_empty() {
-        return Err(WorkflowRuntimeError::Validation(
-            "structured review summary 不能为空".to_string(),
-        ));
-    }
-    if acceptance_results.is_empty()
-        || acceptance_results.iter().any(|item| {
-            item.criterion.trim().is_empty()
-                || item.evidence.trim().is_empty()
-        })
-    {
-        return Err(WorkflowRuntimeError::Validation(
-            "structured review acceptance_results 非法".to_string(),
-        ));
-    }
-    if evidence.is_empty() || evidence.iter().any(|item| item.trim().is_empty()) {
-        return Err(WorkflowRuntimeError::Validation(
-            "structured review evidence 不能为空".to_string(),
-        ));
-    }
-    if unfinished_items.iter().any(|item| item.trim().is_empty())
-        || risks.iter().any(|item| item.trim().is_empty())
-    {
-        return Err(WorkflowRuntimeError::Validation(
-            "structured review risks/unfinished_items may not contain blank entries".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_review_verdict_consistency(
-    verdict: &ReviewVerdict,
-    results: &[WorkflowAcceptanceResult],
-    risks: &[String],
-) -> Result<(), WorkflowRuntimeError> {
-    if *verdict == ReviewVerdict::Approved
-        && results.iter().any(|result| {
-            result.level == AcceptanceCriterionLevel::Required
-                && result.verdict == WorkflowAcceptanceVerdict::Failed
-        })
-    {
-        return Err(WorkflowRuntimeError::Validation(
-            "approved review cannot contain a failed required criterion".to_string(),
-        ));
-    }
-    if results.iter().any(|result| {
-        result.level == AcceptanceCriterionLevel::Partial
-            && result.verdict == WorkflowAcceptanceVerdict::Failed
-    }) && risks.is_empty()
-    {
-        return Err(WorkflowRuntimeError::Validation(
-            "failed partial criteria require an externally attributable risk".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_acceptance_coverage(
+pub fn build_workflow_review_criteria(
     declared_acceptance: &[(AcceptanceCriterionLevel, String)],
-    results: &[WorkflowAcceptanceResult],
-) -> Result<(), WorkflowRuntimeError> {
-    let normalize = |value: &str| value.split_whitespace().collect::<Vec<_>>().join(" ");
-    let declared = declared_acceptance
+    fallback_criterion: Option<&str>,
+) -> Vec<WorkflowReviewCriterion> {
+    let mut criteria = declared_acceptance
         .iter()
-        .map(|(level, item)| (*level, normalize(item)))
-        .filter(|(_, item)| !item.is_empty())
+        .filter(|(_, criterion)| !criterion.trim().is_empty())
+        .enumerate()
+        .map(|(index, (level, criterion))| WorkflowReviewCriterion {
+            id: format!("c{}", index + 1),
+            level: *level,
+            criterion: criterion.clone(),
+        })
         .collect::<Vec<_>>();
-    if !declared.is_empty() && results.len() != declared.len() {
-        return Err(WorkflowRuntimeError::Validation(format!(
-            "acceptance result count mismatch: expected {}, actual {}",
-            declared.len(),
-            results.len()
-        )));
+    if criteria.is_empty()
+        && let Some(criterion) = fallback_criterion.filter(|value| !value.trim().is_empty())
+    {
+        criteria.push(WorkflowReviewCriterion {
+            id: "c1".to_string(),
+            level: AcceptanceCriterionLevel::Required,
+            criterion: criterion.trim().to_string(),
+        });
     }
-    let normalized_results = results
+    criteria
+}
+
+pub fn derive_workflow_review(
+    criteria: &[WorkflowReviewCriterion],
+    results: &std::collections::BTreeMap<String, WorkflowReviewCriterionResult>,
+) -> DerivedWorkflowReview {
+    let acceptance_results = criteria
         .iter()
-        .map(|result| (result.level, normalize(&result.criterion)))
+        .map(|criterion| {
+            let result = &results[&criterion.id];
+            WorkflowAcceptanceResult {
+                criterion: criterion.criterion.clone(),
+                level: criterion.level,
+                verdict: if result.passed {
+                    WorkflowAcceptanceVerdict::Passed
+                } else {
+                    WorkflowAcceptanceVerdict::Failed
+                },
+                evidence: result.evidence.clone(),
+            }
+        })
         .collect::<Vec<_>>();
-    if normalized_results
+    let verdict = if criteria.iter().any(|criterion| {
+        criterion.level == AcceptanceCriterionLevel::Required
+            && results
+                .get(&criterion.id)
+                .is_none_or(|result| !result.passed)
+    }) {
+        ReviewVerdict::Rejected
+    } else {
+        ReviewVerdict::Approved
+    };
+    let evidence = criteria
         .iter()
-        .any(|(_, criterion)| criterion.is_empty())
-    {
-        return Err(WorkflowRuntimeError::Validation(
-            "acceptance result criterion may not be blank".to_string(),
-        ));
+        .map(|criterion| results[&criterion.id].evidence.clone())
+        .collect::<Vec<_>>();
+    let risks = criteria
+        .iter()
+        .filter(|criterion| {
+            criterion.level == AcceptanceCriterionLevel::Partial
+                && !results[&criterion.id].passed
+        })
+        .map(|criterion| results[&criterion.id].evidence.clone())
+        .collect::<Vec<_>>();
+    let unfinished_items = criteria
+        .iter()
+        .filter(|criterion| {
+            criterion.level == AcceptanceCriterionLevel::Required
+                && !results[&criterion.id].passed
+        })
+        .map(|criterion| criterion.criterion.clone())
+        .collect::<Vec<_>>();
+
+    DerivedWorkflowReview {
+        verdict,
+        acceptance_results,
+        evidence,
+        risks,
+        unfinished_items,
     }
-    let unique_results = normalized_results.iter().collect::<std::collections::HashSet<_>>();
-    if unique_results.len() != normalized_results.len() {
-        return Err(WorkflowRuntimeError::Validation(
-            "acceptance results contain duplicate criteria".to_string(),
-        ));
-    }
-    if !declared.is_empty()
-        && normalized_results
-            .iter()
-            .any(|item| !declared.contains(item))
-    {
-        return Err(WorkflowRuntimeError::Validation(
-            "acceptance results contain an undeclared criterion or wrong level".to_string(),
-        ));
-    }
-    for criterion in declared {
-        let count = normalized_results
-            .iter()
-            .filter(|item| *item == &criterion)
-            .count();
-        if count != 1 {
-            return Err(WorkflowRuntimeError::Validation(format!(
-                "declared acceptance criterion must be covered exactly once: {}",
-                criterion.1
-            )));
-        }
-    }
-    Ok(())
 }
 
 pub fn parse_step_review_protocol_output(
     execution_id: Uuid,
     step_key: &str,
-    declared_acceptance: &[(AcceptanceCriterionLevel, String)],
+    criteria: &[WorkflowReviewCriterion],
     raw_output: &str,
 ) -> Result<WorkflowReviewProtocolMessage, WorkflowRuntimeError> {
     tracing::debug!(
@@ -682,22 +663,13 @@ pub fn parse_step_review_protocol_output(
         raw_output
     );
 
-    let payload = extract_json_payload(raw_output).ok_or_else(|| {
-        WorkflowRuntimeError::Validation("review 输出中未找到 JSON 对象".to_string())
-    })?;
-
-    let message: WorkflowReviewProtocolMessage = serde_json::from_str(&payload)?;
+    let message: WorkflowReviewProtocolMessage = serde_json::from_str(raw_output.trim())?;
     match &message {
         WorkflowReviewProtocolMessage::ReviewResult {
             step_key: actual_step_key,
             execution_id: actual_execution_id,
-            feedback,
-            verdict,
-            acceptance_results,
-            evidence,
-            risks,
-            unfinished_items,
-            ..
+            summary,
+            results,
         } => {
             if actual_step_key != step_key {
                 return Err(WorkflowRuntimeError::Validation(format!(
@@ -711,20 +683,40 @@ pub fn parse_step_review_protocol_output(
                     execution_id, actual_execution_id
                 )));
             }
-            if feedback.trim().is_empty() {
+            if summary.trim().is_empty() {
                 return Err(WorkflowRuntimeError::Validation(
-                    "review protocol 的 feedback 不能为空".to_string(),
+                    "review protocol 的 summary 不能为空".to_string(),
                 ));
             }
-            validate_acceptance_coverage(declared_acceptance, acceptance_results)?;
-            validate_review_verdict_consistency(verdict, acceptance_results, risks)?;
-            validate_structured_review_fields(
-                feedback,
-                acceptance_results,
-                evidence,
-                risks,
-                unfinished_items,
-            )?;
+            let expected_ids = criteria
+                .iter()
+                .map(|criterion| criterion.id.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            let actual_ids = results
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>();
+            if actual_ids != expected_ids {
+                let missing = expected_ids
+                    .difference(&actual_ids)
+                    .copied()
+                    .collect::<Vec<_>>();
+                let extra = actual_ids
+                    .difference(&expected_ids)
+                    .copied()
+                    .collect::<Vec<_>>();
+                return Err(WorkflowRuntimeError::Validation(format!(
+                    "review results 与验收清单不一致（缺少 {missing:?}，多余 {extra:?}）"
+                )));
+            }
+            if let Some((id, _)) = results
+                .iter()
+                .find(|(_, result)| result.evidence.trim().is_empty())
+            {
+                return Err(WorkflowRuntimeError::Validation(format!(
+                    "review result '{id}' 的 evidence 不能为空"
+                )));
+            }
         }
     }
 

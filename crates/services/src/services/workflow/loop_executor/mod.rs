@@ -48,7 +48,6 @@ struct LoopReviewPromptStepInput {
     step_key: String,
     title: String,
     instructions: String,
-    acceptance: db::models::workflow_types::AcceptanceCriteria,
     summary: String,
     outputs: Vec<String>,
     evidence: Vec<String>,
