@@ -127,6 +127,8 @@ pub enum ExecutorError {
     SetupHelperNotSupported,
     #[error("Auth required: {0}")]
     AuthRequired(String),
+    #[error("Configuration error: {0}")]
+    Configuration(String),
 }
 
 #[enum_dispatch]
@@ -413,6 +415,15 @@ pub trait StandardCodingAgentExecutor {
     }
 
     fn normalize_logs(&self, _raw_logs_event_store: Arc<MsgStore>, _worktree_path: &Path);
+
+    /// Primary runner settings file shown by runtime diagnostics.
+    ///
+    /// Most runners keep their MCP servers in the primary settings file, so
+    /// the compatibility default matches the MCP path. Runners with a separate
+    /// MCP file override this independently.
+    fn default_runtime_config_path(&self) -> Option<std::path::PathBuf> {
+        self.default_mcp_config_path()
+    }
 
     // MCP configuration methods
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf>;

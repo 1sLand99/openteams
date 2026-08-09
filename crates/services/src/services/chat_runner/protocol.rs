@@ -1353,6 +1353,45 @@ impl ChatRunner {
         Ok(message)
     }
 
+    /// Attach the plan generation run id to an existing placeholder card so
+    /// the frontend can subscribe to the run's activity stream. The card is
+    /// upserted before the run record exists, so this runs once the run id is
+    /// known. Best-effort: a missing/foreign card is ignored.
+    pub async fn attach_plan_generation_run_id(
+        &self,
+        session_id: Uuid,
+        message_id: Uuid,
+        run_id: Uuid,
+    ) -> Result<(), ChatRunnerError> {
+        use db::models::chat_message::ChatMessage as DbChatMessage;
+
+        let Some(message) = DbChatMessage::find_by_id(&self.db.pool, message_id).await? else {
+            return Ok(());
+        };
+        if message.session_id != session_id {
+            return Ok(());
+        }
+
+        let mut meta = message.meta.0.clone();
+        let Some(generation_meta) = meta
+            .get_mut("workflow_plan_generation")
+            .and_then(|value| value.as_object_mut())
+        else {
+            return Ok(());
+        };
+        generation_meta.insert("run_id".to_string(), serde_json::json!(run_id));
+
+        let updated = DbChatMessage::update_content_and_meta(
+            &self.db.pool,
+            message_id,
+            &message.content,
+            meta,
+        )
+        .await?;
+        self.emit_message_updated(session_id, updated);
+        Ok(())
+    }
+
     async fn persist_active_workflow_plan_generation_notice(
         &self,
         session_id: Uuid,
@@ -1431,9 +1470,13 @@ impl ChatRunner {
                 WorkflowOrchestrator, workflow_plan_agent_id, workflow_valid_agent_ids,
             },
             workflow_runtime::{
-                WorkflowCardAgent, WorkflowCardState, build_plan_generation_prompt,
-                build_workflow_planning_agents, extract_json_payload, resolve_lead_agent,
-                resolve_workflow_response_language_instruction, run_workflow_agent_prompt,
+                WorkflowCardAgent, WorkflowCardState, build_workflow_planning_agents,
+                prompt_builders::plan_generation::{
+                    PlanGenerationMode, PlanGenerationPromptInput, PlanningMemberInput,
+                    build_plan_generation_prompt,
+                },
+                resolve_lead_agent, resolve_workflow_response_language_instruction,
+                run_workflow_plan_agent_prompt,
             },
             workflow_validator,
         };
@@ -1603,17 +1646,38 @@ impl ChatRunner {
         let ui_config = config::load_config_from_file(&config_path()).await;
         let response_language_instruction =
             resolve_workflow_response_language_instruction(&ui_config.language);
-        let prompt = build_plan_generation_prompt(
-            plan_goal,
-            &lead_agent_id,
-            &planning_agents,
-            previous_failure_reason,
-            previous_plan_context
-                .as_ref()
-                .map(|context| context.plan_json.as_str()),
-            response_language_instruction,
-            design_doc_paths,
-        );
+        let previous_plan = previous_plan_context
+            .as_ref()
+            .and_then(|context| serde_json::from_str::<WorkflowPlanJson>(&context.plan_json).ok());
+        let mode = if let Some(failure_reason) = previous_failure_reason {
+            PlanGenerationMode::Regeneration {
+                failure_reason: failure_reason.to_string(),
+                previous_plan,
+            }
+        } else {
+            PlanGenerationMode::Initial
+        };
+        let prompt = build_plan_generation_prompt(&PlanGenerationPromptInput {
+            summary: plan_goal.to_string(),
+            design_doc_paths: design_doc_paths.unwrap_or_default().to_vec(),
+            lead_agent_id: lead_agent_id.clone(),
+            members: planning_agents
+                .iter()
+                .map(|agent| PlanningMemberInput {
+                    agent_id: agent.agent_id.clone(),
+                    name: agent.name.clone(),
+                    role: agent
+                        .member_role
+                        .clone()
+                        .unwrap_or_else(|| agent.workflow_role.clone()),
+                    responsibilities: agent.responsibilities.clone(),
+                    skills: agent.skills.clone(),
+                    tools: agent.tools_enabled.clone(),
+                })
+                .collect(),
+            response_language: response_language_instruction.to_string(),
+            mode,
+        });
 
         tracing::debug!(
             prompt = %prompt,
@@ -1625,14 +1689,14 @@ impl ChatRunner {
             "[plan_generation] built plan generation prompt",
         );
 
-        let raw_plan_output = match run_workflow_agent_prompt(
+        let raw_plan_output = match run_workflow_plan_agent_prompt(
             &self.db,
+            self,
             &session,
             lead_agent,
             &lead_session_agent,
-            None,
             &prompt,
-            Uuid::nil(),
+            placeholder.id,
         )
         .await
         {
@@ -1663,28 +1727,7 @@ impl ChatRunner {
             "[plan_generation] raw output from lead agent"
         );
 
-        let plan_json = match extract_json_payload(&raw_plan_output) {
-            Some(json) => json,
-            None => {
-                tracing::error!(
-                    session_id = %session_id,
-                    "[plan_generation] lead agent did not return a JSON object"
-                );
-                self.mark_plan_generation_failed(
-                    session_id,
-                    placeholder.id,
-                    plan_goal,
-                    &lead_agent_id,
-                    &available_agents,
-                    "Lead agent did not return a workflow JSON object.",
-                    previous_plan_context.as_ref(),
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-
-        let parsed_plan: WorkflowPlanJson = match serde_json::from_str(&plan_json) {
+        let parsed_plan: WorkflowPlanJson = match super::super::workflow_runtime::parse_plan_output(&raw_plan_output) {
             Ok(plan) => plan,
             Err(err) => {
                 tracing::error!(
@@ -1740,7 +1783,7 @@ impl ChatRunner {
                 &session,
                 source_msg_id,
                 &lead_session_agent,
-                &plan_json,
+                &serde_json::to_string(&parsed_plan)?,
                 Some(placeholder.id),
             )
             .await

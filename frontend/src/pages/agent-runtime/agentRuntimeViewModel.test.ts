@@ -11,6 +11,7 @@ import {
   getRuntimeDisplayState,
   parseEnvText,
   parseRuntimeErrorDetails,
+  RUNTIME_TOOL_LABELS,
 } from "./agentRuntimeViewModel";
 
 let failures = 0;
@@ -36,6 +37,8 @@ const baseRunner = {
   availability: { type: "INSTALLATION_FOUND" },
   auth_state: "authenticated",
   node_available: true,
+  npm_available: true,
+  npx_available: true,
   discovered_models: ["gpt-5.2-codex"],
   model_source: "runner",
   version: "1.2.3",
@@ -249,6 +252,46 @@ check(
 check(
   "getRunnerLabel title-cases other runners",
   getRunnerLabel("KIMI_CODE") === "Kimi Code",
+);
+
+// --- Missing npm/npx dependency display -----------------------------------
+
+check(
+  "runtime tool labels render Node.js/npm/npx",
+  same(RUNTIME_TOOL_LABELS, { node: "Node.js", npm: "npm", npx: "npx" }),
+);
+
+const geminiMissingNpm: AgentRuntimeStatus = {
+  ...baseRunner,
+  runner_type: "GEMINI",
+  executable: false,
+  npm_available: false,
+};
+check(
+  "npm executor without npm stays installed but shows an error",
+  geminiMissingNpm.installed &&
+    getRuntimeDisplayState(geminiMissingNpm) === "error",
+);
+
+const claudeMissingNpx: AgentRuntimeStatus = {
+  ...baseRunner,
+  runner_type: "CLAUDE_CODE",
+  executable: false,
+  npx_available: false,
+};
+check(
+  "npx executor without npx stays installed but shows an error",
+  claudeMissingNpx.installed &&
+    getRuntimeDisplayState(claudeMissingNpx) === "error",
+);
+check(
+  "missing-dependency runners surface through the error filter",
+  same(
+    filterRuntimeRunners([geminiMissingNpm, claudeMissingNpx], "", "error").map(
+      (runner) => runner.runner_type,
+    ),
+    ["GEMINI", "CLAUDE_CODE"],
+  ),
 );
 
 if (failures > 0) {

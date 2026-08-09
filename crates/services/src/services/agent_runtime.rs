@@ -163,6 +163,10 @@ pub struct AgentRuntimeStatus {
     /// Whether a Node.js runtime was detected on this machine. Drives the
     /// "install Node.js" guidance for Node-based runners.
     pub node_available: bool,
+    /// Whether the npm CLI was detected through the login-shell PATH.
+    pub npm_available: bool,
+    /// Whether the npx CLI was detected through the login-shell PATH.
+    pub npx_available: bool,
     pub discovered_models: Vec<String>,
     pub model_source: AgentRuntimeModelSource,
     pub version: Option<String>,
@@ -216,6 +220,8 @@ pub struct AgentRuntimeDiagnostics {
     pub availability: AvailabilityInfo,
     pub auth_state: AgentRuntimeAuthState,
     pub node_available: bool,
+    pub npm_available: bool,
+    pub npx_available: bool,
     pub config_path: String,
     pub install_indicator_path: Option<String>,
     pub resolved_command: Option<String>,
@@ -585,11 +591,11 @@ pub async fn runtime_diagnostics(
         return Err(AgentRuntimeError::UnknownRunner(runner.to_string()));
     };
 
-    let cli_config_path = base
-        .default_mcp_config_path()
+    let runtime_config_path = base
+        .default_runtime_config_path()
         .map(|path| path.display().to_string());
-    let node_available = detect_node_available();
-    let status = build_status(runner, config, base, &store, node_available);
+    let dependency_availability = detect_runtime_dependency_availability();
+    let status = build_status(runner, config, base, &store, dependency_availability);
     let mut runtime_executor = base.clone();
     let mut env = ExecutionEnv::new(Default::default(), false, String::new());
     apply_config_to_executor_and_env(runner, &mut runtime_executor, &mut env, &store)?;
@@ -662,6 +668,7 @@ pub async fn runtime_diagnostics(
     } else {
         (None, None, false)
     };
+    let acp_probe_models = acp_probe.as_ref().and_then(|probe| probe.model_ids());
     let latest_store = if detected_version.is_some() || acp_probe_succeeded {
         update_store(&path, |latest| {
             if let Some(version) = detected_version.as_deref() {
@@ -669,6 +676,9 @@ pub async fn runtime_diagnostics(
             }
             if acp_probe_succeeded {
                 clear_cached_authentication_required_error(latest, runner);
+                if let Some(models) = acp_probe_models.as_ref() {
+                    cache_runner_acp_models(latest, runner, models.clone());
+                }
             }
             Ok(())
         })?
@@ -676,7 +686,7 @@ pub async fn runtime_diagnostics(
     } else {
         read_store(&path)?
     };
-    let latest_status = build_status(runner, config, base, &latest_store, node_available);
+    let latest_status = build_status(runner, config, base, &latest_store, dependency_availability);
     let version = detected_version.or(latest_status.version.clone());
     let last_error = merge_status_error_details([
         latest_status.last_error.clone(),
@@ -694,9 +704,9 @@ pub async fn runtime_diagnostics(
         availability: latest_status.availability,
         auth_state: latest_status.auth_state,
         node_available: latest_status.node_available,
-        config_path: cli_config_path
-            .clone()
-            .unwrap_or_else(|| path.display().to_string()),
+        npm_available: latest_status.npm_available,
+        npx_available: latest_status.npx_available,
+        config_path: runtime_config_path.unwrap_or_else(|| path.display().to_string()),
         install_indicator_path,
         resolved_command,
         command_source,
@@ -1089,6 +1099,35 @@ fn cache_runner_version(store: &mut AgentRuntimeStore, runner: BaseCodingAgent, 
         });
 }
 
+/// Persists the model list discovered through an ACP capability probe so the
+/// next lightweight `list_runtime_statuses` call can populate the model
+/// dropdown immediately instead of waiting for another probe.
+fn cache_runner_acp_models(
+    store: &mut AgentRuntimeStore,
+    runner: BaseCodingAgent,
+    models: Vec<String>,
+) {
+    if models.is_empty() {
+        return;
+    }
+    let now = Utc::now();
+    store
+        .discoveries
+        .entry(runner)
+        .and_modify(|entry| {
+            entry.models = models.clone();
+            entry.last_checked_at = now;
+            entry.last_error =
+                remove_status_error_stage(entry.last_error.as_deref(), "model_discovery");
+        })
+        .or_insert_with(|| AgentRuntimeDiscovery {
+            models,
+            version: None,
+            last_checked_at: now,
+            last_error: None,
+        });
+}
+
 fn cache_version_only_discovery(
     store: &mut AgentRuntimeStore,
     runner: BaseCodingAgent,
@@ -1375,7 +1414,7 @@ fn build_statuses(
     profiles: &ExecutorConfigs,
     store: &AgentRuntimeStore,
 ) -> Vec<AgentRuntimeStatus> {
-    let node_available = detect_node_available();
+    let dependency_availability = detect_runtime_dependency_availability();
     let mut runners = profiles
         .executors
         .iter()
@@ -1383,7 +1422,13 @@ fn build_statuses(
             let base = config
                 .get_default()
                 .or_else(|| config.configurations.values().next())?;
-            Some(build_status(*runner, config, base, store, node_available))
+            Some(build_status(
+                *runner,
+                config,
+                base,
+                store,
+                dependency_availability,
+            ))
         })
         .collect::<Vec<_>>();
     runners.sort_by_key(|status| status.runner_type.to_string());
@@ -1395,7 +1440,7 @@ fn build_status(
     executor_config: &ExecutorConfig,
     base: &CodingAgent,
     store: &AgentRuntimeStore,
-    node_available: bool,
+    dependency_availability: RuntimeDependencyAvailability,
 ) -> AgentRuntimeStatus {
     let config = store
         .configs
@@ -1417,7 +1462,7 @@ fn build_status(
         None
     };
     let availability = if runner == BaseCodingAgent::Pi {
-        if node_available {
+        if dependency_availability.node {
             AvailabilityInfo::InstallationFound
         } else {
             AvailabilityInfo::NotFound
@@ -1426,7 +1471,9 @@ fn build_status(
         configured_base.get_availability_info()
     };
     let installed = availability.is_available();
-    let executable = installed && config.run_mode != AgentRunMode::Disabled;
+    let executable = installed
+        && config.run_mode != AgentRunMode::Disabled
+        && runtime_dependencies_available(runner, dependency_availability);
     let mut auth_env = ExecutionEnv::new(Default::default(), false, String::new());
     auth_env.merge(&config.env_json);
     let auth_state = if configured_base.is_authenticated(&auth_env) {
@@ -1441,7 +1488,9 @@ fn build_status(
         executable,
         availability,
         auth_state,
-        node_available,
+        node_available: dependency_availability.node,
+        npm_available: dependency_availability.npm,
+        npx_available: dependency_availability.npx,
         discovered_models: models_for_runner(runner, executor_config, store),
         model_source: model_source_for_runner(runner, executor_config, store),
         version: discovery.and_then(|entry| entry.version.clone()),
@@ -1510,11 +1559,55 @@ fn split_probe_result<T>(result: Result<Option<T>, String>) -> (Option<T>, Optio
     }
 }
 
-/// Whether a `node` executable resolves on this machine. Resolution
-/// refreshes the login-shell PATH, so Node installed from a regular
-/// terminal is found without restarting the app.
-fn detect_node_available() -> bool {
-    utils::shell::resolve_executable_path_blocking("node").is_some()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeDependencyAvailability {
+    node: bool,
+    npm: bool,
+    npx: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeDependencyRequirement {
+    None,
+    NodeAndNpm,
+    NodeNpmAndNpx,
+}
+
+/// Resolve runtime prerequisites through the refreshed login-shell PATH so
+/// commands installed from a regular terminal are found without an app restart.
+fn detect_runtime_dependency_availability() -> RuntimeDependencyAvailability {
+    RuntimeDependencyAvailability {
+        node: utils::shell::resolve_executable_path_blocking("node").is_some(),
+        npm: utils::shell::resolve_executable_path_blocking("npm").is_some(),
+        npx: utils::shell::resolve_executable_path_blocking("npx").is_some(),
+    }
+}
+
+fn runtime_dependency_requirement(runner: BaseCodingAgent) -> RuntimeDependencyRequirement {
+    match runner {
+        BaseCodingAgent::ClaudeCode
+        | BaseCodingAgent::Codex
+        | BaseCodingAgent::Opencode
+        | BaseCodingAgent::Pi => RuntimeDependencyRequirement::NodeNpmAndNpx,
+        BaseCodingAgent::Amp
+        | BaseCodingAgent::Copilot
+        | BaseCodingAgent::Gemini
+        | BaseCodingAgent::QwenCode => RuntimeDependencyRequirement::NodeAndNpm,
+        _ => RuntimeDependencyRequirement::None,
+    }
+}
+
+fn runtime_dependencies_available(
+    runner: BaseCodingAgent,
+    availability: RuntimeDependencyAvailability,
+) -> bool {
+    match runtime_dependency_requirement(runner) {
+        RuntimeDependencyRequirement::None => true,
+        RuntimeDependencyRequirement::NodeAndNpm => availability.node && availability.npm,
+        RuntimeDependencyRequirement::NodeNpmAndNpx => {
+            availability.node && availability.npm && availability.npx
+        }
+    }
 }
 
 fn reasoning_capability_for_runner(
@@ -1743,18 +1836,184 @@ mod tests {
         CodingAgent::Pi(Pi::default())
     }
 
+    fn dependencies(node: bool, npm: bool, npx: bool) -> RuntimeDependencyAvailability {
+        RuntimeDependencyAvailability { node, npm, npx }
+    }
+
     #[test]
-    fn pi_runtime_requires_node_only() {
+    fn runtime_config_paths_are_separate_from_mcp_paths_where_required() {
+        let profiles = ExecutorConfigs::from_defaults();
+        let separate_paths = [
+            (BaseCodingAgent::Copilot, "settings.json", "mcp-config.json"),
+            (BaseCodingAgent::CursorAgent, "cli-config.json", "mcp.json"),
+            (BaseCodingAgent::KimiCode, "config.toml", "mcp.json"),
+            (BaseCodingAgent::Pi, "settings.json", "mcp.json"),
+            (BaseCodingAgent::Droid, "settings.json", "mcp.json"),
+        ];
+
+        for (runner, runtime_file_name, mcp_file_name) in separate_paths {
+            let executor = profiles
+                .executors
+                .get(&runner)
+                .and_then(|config| {
+                    config
+                        .get_default()
+                        .or_else(|| config.configurations.values().next())
+                })
+                .unwrap_or_else(|| panic!("missing default executor for {runner}"));
+            let runtime_path = executor
+                .default_runtime_config_path()
+                .unwrap_or_else(|| panic!("missing runtime config path for {runner}"));
+            let mcp_path = executor
+                .default_mcp_config_path()
+                .unwrap_or_else(|| panic!("missing MCP config path for {runner}"));
+
+            assert_eq!(
+                runtime_path.file_name().and_then(|name| name.to_str()),
+                Some(runtime_file_name),
+                "{runner}"
+            );
+            assert_eq!(
+                mcp_path.file_name().and_then(|name| name.to_str()),
+                Some(mcp_file_name),
+                "{runner}"
+            );
+            assert_ne!(runtime_path, mcp_path, "{runner}");
+        }
+
+        for (runner, config) in &profiles.executors {
+            if separate_paths
+                .iter()
+                .any(|(separate_runner, _, _)| separate_runner == runner)
+            {
+                continue;
+            }
+            let executor = config
+                .get_default()
+                .or_else(|| config.configurations.values().next())
+                .unwrap_or_else(|| panic!("missing default executor for {runner}"));
+
+            assert_eq!(
+                executor.default_runtime_config_path(),
+                executor.default_mcp_config_path(),
+                "{runner} should retain its existing diagnostic config path"
+            );
+        }
+    }
+
+    #[test]
+    fn pi_installation_status_tracks_node_without_absorbing_cli_dependencies() {
         let runner = BaseCodingAgent::Pi;
         let executor_config = ExecutorConfig::new_with_default(pi_agent());
         let base = executor_config.get_default().unwrap();
         let store = AgentRuntimeStore::default();
 
         for (node, expected) in [(false, false), (true, true)] {
-            let status = build_status(runner, &executor_config, base, &store, node);
+            let status = build_status(
+                runner,
+                &executor_config,
+                base,
+                &store,
+                dependencies(node, true, true),
+            );
             assert_eq!(status.installed, expected);
+            assert_eq!(status.executable, expected);
             assert_eq!(status.node_available, node);
         }
+
+        let missing_npm = build_status(
+            runner,
+            &executor_config,
+            base,
+            &store,
+            dependencies(true, false, true),
+        );
+        assert!(missing_npm.installed);
+        assert!(!missing_npm.executable);
+        assert!(!missing_npm.npm_available);
+    }
+
+    #[test]
+    fn runtime_dependency_requirements_follow_default_executor_families() {
+        for runner in [
+            BaseCodingAgent::ClaudeCode,
+            BaseCodingAgent::Codex,
+            BaseCodingAgent::Opencode,
+            BaseCodingAgent::Pi,
+        ] {
+            assert_eq!(
+                runtime_dependency_requirement(runner),
+                RuntimeDependencyRequirement::NodeNpmAndNpx,
+                "{runner}"
+            );
+        }
+
+        for runner in [
+            BaseCodingAgent::Amp,
+            BaseCodingAgent::Copilot,
+            BaseCodingAgent::Gemini,
+            BaseCodingAgent::QwenCode,
+        ] {
+            assert_eq!(
+                runtime_dependency_requirement(runner),
+                RuntimeDependencyRequirement::NodeAndNpm,
+                "{runner}"
+            );
+        }
+
+        for runner in [
+            BaseCodingAgent::OpenTeamsCli,
+            BaseCodingAgent::CursorAgent,
+            BaseCodingAgent::Droid,
+            BaseCodingAgent::KimiCode,
+            BaseCodingAgent::QoderCli,
+        ] {
+            assert_eq!(
+                runtime_dependency_requirement(runner),
+                RuntimeDependencyRequirement::None,
+                "{runner}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_runtime_dependencies_block_only_their_executor_families() {
+        let all = dependencies(true, true, true);
+        let no_node = dependencies(false, true, true);
+        let no_npm = dependencies(true, false, true);
+        let no_npx = dependencies(true, true, false);
+
+        assert!(runtime_dependencies_available(BaseCodingAgent::Codex, all));
+        assert!(!runtime_dependencies_available(
+            BaseCodingAgent::Codex,
+            no_node
+        ));
+        assert!(!runtime_dependencies_available(
+            BaseCodingAgent::Codex,
+            no_npm
+        ));
+        assert!(!runtime_dependencies_available(
+            BaseCodingAgent::Codex,
+            no_npx
+        ));
+
+        assert!(runtime_dependencies_available(
+            BaseCodingAgent::Gemini,
+            no_npx
+        ));
+        assert!(!runtime_dependencies_available(
+            BaseCodingAgent::Gemini,
+            no_node
+        ));
+        assert!(!runtime_dependencies_available(
+            BaseCodingAgent::Gemini,
+            no_npm
+        ));
+
+        assert!(runtime_dependencies_available(
+            BaseCodingAgent::KimiCode,
+            dependencies(false, false, false)
+        ));
     }
 
     #[test]
@@ -1847,7 +2106,13 @@ mod tests {
                 preserved_models: preserved_models.clone(),
             }],
         );
-        let status = build_status(runner, &executor_config, base, &store, true);
+        let status = build_status(
+            runner,
+            &executor_config,
+            base,
+            &store,
+            dependencies(true, true, true),
+        );
 
         assert!(status.installed);
         assert!(status.executable);
@@ -2281,6 +2546,77 @@ mod tests {
     }
 
     #[test]
+    fn acp_probe_models_are_cached_for_runtime_status() {
+        let runner = BaseCodingAgent::Pi;
+        let mut store = AgentRuntimeStore::default();
+        cache_runner_acp_models(
+            &mut store,
+            runner,
+            vec![
+                "provider/model-a".to_string(),
+                "provider/model-b".to_string(),
+            ],
+        );
+
+        let discovery = store
+            .discoveries
+            .get(&runner)
+            .expect("ACP probe models should be cached");
+        assert_eq!(
+            discovery.models,
+            vec!["provider/model-a", "provider/model-b"]
+        );
+    }
+
+    #[test]
+    fn acp_probe_models_clear_stale_model_discovery_error() {
+        let runner = BaseCodingAgent::Pi;
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: Vec::new(),
+                version: Some("pi 0.83.0".to_string()),
+                last_checked_at: Utc::now(),
+                last_error: Some(
+                    "[model_discovery] ACP initialize failed: timeout\n[version_check] temporary warning"
+                        .to_string(),
+                ),
+            },
+        );
+
+        cache_runner_acp_models(&mut store, runner, vec!["provider/model-a".to_string()]);
+
+        let discovery = store.discoveries.get(&runner).unwrap();
+        assert_eq!(discovery.models, vec!["provider/model-a"]);
+        assert_eq!(discovery.version.as_deref(), Some("pi 0.83.0"));
+        assert_eq!(
+            discovery.last_error.as_deref(),
+            Some("[version_check] temporary warning")
+        );
+    }
+
+    #[test]
+    fn acp_probe_empty_models_are_not_cached() {
+        let runner = BaseCodingAgent::Pi;
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: vec!["existing-model".to_string()],
+                version: None,
+                last_checked_at: Utc::now(),
+                last_error: None,
+            },
+        );
+
+        cache_runner_acp_models(&mut store, runner, Vec::new());
+
+        let discovery = store.discoveries.get(&runner).unwrap();
+        assert_eq!(discovery.models, vec!["existing-model"]);
+    }
+
+    #[test]
     fn status_error_details_preserve_each_failed_stage() {
         let merged = merge_status_error_details([
             Some(status_error_detail(
@@ -2442,7 +2778,13 @@ mod tests {
         store.configs.insert(runner, runtime);
         let base = executor_config.get_default().expect("Qoder default config");
 
-        let status = build_status(runner, &executor_config, base, &store, true);
+        let status = build_status(
+            runner,
+            &executor_config,
+            base,
+            &store,
+            dependencies(true, true, true),
+        );
 
         assert_eq!(status.auth_state, AgentRuntimeAuthState::Authenticated);
     }
@@ -2457,7 +2799,13 @@ mod tests {
         store.configs.insert(runner, runtime);
         let base = executor_config.get_default().unwrap();
 
-        let status = build_status(runner, &executor_config, base, &store, true);
+        let status = build_status(
+            runner,
+            &executor_config,
+            base,
+            &store,
+            dependencies(true, true, true),
+        );
 
         let error = status
             .last_error
@@ -2648,6 +2996,8 @@ mod tests {
             availability: AvailabilityInfo::InstallationFound,
             auth_state: AgentRuntimeAuthState::Authenticated,
             node_available: true,
+            npm_available: true,
+            npx_available: false,
             discovered_models: vec!["gpt-5.2-codex".to_string()],
             model_source: AgentRuntimeModelSource::Runner,
             version: None,
@@ -2663,8 +3013,45 @@ mod tests {
         assert!(value.get("model_override").is_none());
         assert!(value.get("reasoning_level").is_none());
         assert!(value.get("model_reasoning_effort").is_none());
-        assert!(value.get("npx_available").is_none());
+        assert_eq!(value["node_available"], true);
+        assert_eq!(value["npm_available"], true);
+        assert_eq!(value["npx_available"], false);
         assert_eq!(value["executor_options"]["ask_for_approval"], "never");
+    }
+
+    #[test]
+    fn serialized_runtime_diagnostics_exposes_all_dependency_availability() {
+        let diagnostics = AgentRuntimeDiagnostics {
+            runner_type: BaseCodingAgent::Codex,
+            installed: true,
+            executable: false,
+            availability: AvailabilityInfo::InstallationFound,
+            auth_state: AgentRuntimeAuthState::Authenticated,
+            node_available: true,
+            npm_available: false,
+            npx_available: true,
+            config_path: "/tmp/config".to_string(),
+            install_indicator_path: None,
+            resolved_command: None,
+            command_source: None,
+            acp_probe: None,
+            acp_probe_error: None,
+            discovered_models: Vec::new(),
+            model_source: AgentRuntimeModelSource::None,
+            version: None,
+            last_checked_at: None,
+            last_error: None,
+            run_mode: AgentRunMode::Auto,
+            env_summary: Vec::new(),
+            executor_options: serde_json::json!({}),
+            pi_models_sync: None,
+        };
+
+        let value = serde_json::to_value(diagnostics).unwrap();
+
+        assert_eq!(value["node_available"], true);
+        assert_eq!(value["npm_available"], false);
+        assert_eq!(value["npx_available"], true);
     }
 
     #[test]

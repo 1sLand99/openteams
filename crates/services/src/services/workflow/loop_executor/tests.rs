@@ -119,6 +119,39 @@ mod tests {
     }
 
     #[test]
+    fn current_loop_rework_requirement_uses_only_the_current_retry() {
+        let context = serde_json::json!({
+            "feedback_history": [
+                {
+                    "scope": "loop",
+                    "loop_key": "loop-a",
+                    "round": 1,
+                    "feedback": "旧返工要求"
+                },
+                {
+                    "scope": "loop",
+                    "loop_key": "loop-b",
+                    "round": 2,
+                    "feedback": "其他 Loop 要求"
+                },
+                {
+                    "scope": "loop",
+                    "loop_key": "loop-a",
+                    "round": 2,
+                    "feedback": "当前返工要求"
+                }
+            ]
+        })
+        .to_string();
+
+        assert_eq!(
+            current_loop_rework_requirement(Some(&context), "loop-a", 2).as_deref(),
+            Some("当前返工要求")
+        );
+        assert!(current_loop_rework_requirement(Some(&context), "loop-a", 3).is_none());
+    }
+
+    #[test]
     fn review_scope_steps_are_ordered_by_internal_dag_edges() {
         let review_scope = vec!["publish".to_string(), "draft".to_string(), "review".to_string()];
         let edges = vec![

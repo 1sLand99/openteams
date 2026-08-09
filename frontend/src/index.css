@@ -3963,8 +3963,8 @@ body[data-mode="light"] .workflow-window-root [class~="bg-[#18181B]"] {
 
 /* Workflow node styles applied via data attribute */
 .workflow-graph-board [data-workflow-node] {
-  background: #1a1d23 !important;
-  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  background: #22262f !important;
+  border: 1px solid rgba(255, 255, 255, 0.16) !important;
   border-left: none !important;
   border-radius: 8px !important;
   box-shadow: none !important;
@@ -3972,57 +3972,74 @@ body[data-mode="light"] .workflow-window-root [class~="bg-[#18181B]"] {
 }
 
 .workflow-graph-board [data-workflow-node]:hover {
-  background: #20242c !important;
-  border-color: rgba(255, 255, 255, 0.16) !important;
+  background: #292e39 !important;
+  border-color: rgba(255, 255, 255, 0.24) !important;
   transform: none !important;
 }
 
 /* Status: Pending — dim, low priority */
 .workflow-graph-board .wf-node-pending {
-  background: #181b21 !important;
-  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  background: #1e222b !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
   box-shadow: none !important;
 }
 
 /* Status: Ready */
 .workflow-graph-board .wf-node-ready {
-  background: #1a1d23 !important;
-  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  background: #22262f !important;
+  border: 1px solid rgba(255, 255, 255, 0.16) !important;
   box-shadow: none !important;
 }
 
 /* Status: Running — slightly brighter border + left accent line */
 .workflow-graph-board .wf-node-running {
-  background: #1c2030 !important;
-  border: 1px solid rgba(139, 170, 247, 0.32) !important;
-  box-shadow: inset 2px 0 0 #6e8de8, 0 1px 3px rgba(0, 0, 0, 0.4) !important;
+  background: #252b42 !important;
+  border: 1px solid rgba(139, 170, 247, 0.5) !important;
+  box-shadow: inset 2px 0 0 #7d9bf0, 0 1px 3px rgba(0, 0, 0, 0.4) !important;
 }
 
 /* Status: Completed — same background, no emphasis */
 .workflow-graph-board .wf-node-completed {
-  background: #181b21 !important;
-  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  background: #1e222b !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
   box-shadow: none !important;
 }
 
 /* Status: Interrupted/Failed — left red accent line */
 .workflow-graph-board .wf-node-interrupted {
-  background: #20191d !important;
-  border: 1px solid rgba(229, 72, 77, 0.24) !important;
+  background: #2c2126 !important;
+  border: 1px solid rgba(229, 72, 77, 0.42) !important;
   box-shadow: inset 2px 0 0 #E5484D !important;
 }
 
 /* Status: Waiting (review/input) — left purple accent line */
 .workflow-graph-board .wf-node-waiting {
-  background: #1c1b2a !important;
-  border: 1px solid rgba(167, 139, 250, 0.24) !important;
+  background: #282640 !important;
+  border: 1px solid rgba(167, 139, 250, 0.42) !important;
   box-shadow: inset 2px 0 0 #8B5CF6 !important;
 }
 
 /* Selected node */
 .workflow-graph-board .wf-node-selected {
-  border-color: rgba(255, 255, 255, 0.25) !important;
+  border-color: rgba(255, 255, 255, 0.45) !important;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5) !important;
+}
+
+/* Dark mode: brighten node text for readability (light mode overrides below) */
+.workflow-graph-board [data-workflow-node] [class*="text-[#4F5156]"] {
+  color: #a9aeb6 !important;
+}
+
+.workflow-graph-board [data-workflow-node] [class*="text-[#8A8F98]"] {
+  color: #c9cdd4 !important;
+}
+
+.workflow-graph-board [data-workflow-node] [class*="text-[#5E6AD2]"] {
+  color: #93a5f0 !important;
+}
+
+.workflow-graph-board [data-workflow-node] [class*="text-[rgba(255,255,255,0.15)]"] {
+  color: rgba(255, 255, 255, 0.32) !important;
 }
 
 /* Override old data-workflow-node status selectors */

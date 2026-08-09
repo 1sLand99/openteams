@@ -40,6 +40,11 @@ const QWEN_AUTH_ENV_VARS: &[&str] = &[
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
 ];
+const QWEN_STREAM_IDLE_TIMEOUT_MS_ENV: &str = "QWEN_STREAM_IDLE_TIMEOUT_MS";
+// ACP agents can legitimately be quiet while a tool runs. The workflow runtime
+// still detects genuinely stalled runs, so leave Qwen's shorter transport-level
+// idle timer disabled unless the user has explicitly configured one.
+const DEFAULT_QWEN_STREAM_IDLE_TIMEOUT_MS: &str = "0";
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
@@ -232,6 +237,19 @@ impl QwenCode {
         )
         .await?;
         let mut runtime_env = env.clone();
+        if !runtime_env.contains_key(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV)
+            && !self
+                .cmd
+                .env
+                .as_ref()
+                .is_some_and(|values| values.contains_key(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV))
+            && std::env::var_os(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV).is_none()
+        {
+            runtime_env.insert(
+                QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+                DEFAULT_QWEN_STREAM_IDLE_TIMEOUT_MS,
+            );
+        }
         runtime_env.insert(
             "QWEN_CODE_SYSTEM_SETTINGS_PATH",
             path.to_string_lossy().to_string(),
@@ -584,11 +602,45 @@ mod tests {
         .expect("parse Qwen system settings");
 
         assert_eq!(settings["model"]["reasoningEffort"], json!("high"));
+        assert_eq!(
+            runtime_env
+                .get(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV)
+                .map(String::as_str),
+            Some(DEFAULT_QWEN_STREAM_IDLE_TIMEOUT_MS)
+        );
         assert!(
             settings["mcpServers"]
                 .as_object()
                 .expect("server map")
                 .is_empty()
+        );
+
+        tokio::fs::remove_dir_all(workspace)
+            .await
+            .expect("remove workspace");
+    }
+
+    #[tokio::test]
+    async fn explicit_qwen_stream_idle_timeout_is_preserved() {
+        let workspace =
+            std::env::temp_dir().join(format!("openteams-qwen-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+        let qwen = qwen_with_approval(None);
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, "900000");
+
+        let runtime_env = qwen
+            .acp_runtime_env(&workspace, &env)
+            .await
+            .expect("ACP runtime environment");
+
+        assert_eq!(
+            runtime_env
+                .get(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV)
+                .map(String::as_str),
+            Some("900000")
         );
 
         tokio::fs::remove_dir_all(workspace)

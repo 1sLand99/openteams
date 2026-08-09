@@ -22,8 +22,10 @@ use uuid::Uuid;
 
 use super::{
     super::workflow_runtime::{
-        WorkflowRevisionFeedbackSource, workflow_review_attempt_limit_reached,
+        WorkflowAcceptanceResult, WorkflowAcceptanceVerdict, WorkflowRevisionFeedbackSource,
+        workflow_review_attempt_limit_reached,
     },
+    step_executor::RevisionReviewDetails,
     step_input::StepFollowUpMode,
     *,
 };
@@ -111,6 +113,55 @@ fn review_node_assignment_projects_non_lead_member_as_reviewer() {
             &review_assignment,
         ),
         WorkflowAgentSessionRole::Reviewer
+    );
+}
+
+#[test]
+fn lead_assigned_task_skips_default_lead_review() {
+    let lead_session_agent_id = Uuid::new_v4();
+    let worker_session_agent_id = Uuid::new_v4();
+    let lead_assignment = lead_session_agent_id.to_string();
+    let worker_assignment = worker_session_agent_id.to_string();
+    let agent_id_map = HashMap::from([
+        (lead_assignment.clone(), lead_session_agent_id),
+        (worker_assignment.clone(), worker_session_agent_id),
+    ]);
+
+    assert_eq!(
+        default_step_review_requirements(
+            &WorkflowStepType::Task,
+            Some(&lead_assignment),
+            Some(lead_session_agent_id),
+            &agent_id_map,
+        ),
+        (false, true)
+    );
+    assert_eq!(
+        default_step_review_requirements(
+            &WorkflowStepType::Task,
+            None,
+            Some(lead_session_agent_id),
+            &agent_id_map,
+        ),
+        (false, true)
+    );
+    assert_eq!(
+        default_step_review_requirements(
+            &WorkflowStepType::Task,
+            Some(&worker_assignment),
+            Some(lead_session_agent_id),
+            &agent_id_map,
+        ),
+        (true, true)
+    );
+    assert_eq!(
+        default_step_review_requirements(
+            &WorkflowStepType::Review,
+            Some(&worker_assignment),
+            Some(lead_session_agent_id),
+            &agent_id_map,
+        ),
+        (false, false)
     );
 }
 
@@ -1134,6 +1185,82 @@ async fn beginning_manual_retry_publishes_active_state_before_agent_execution() 
     assert_eq!(persisted_step.status, WorkflowStepStatus::Ready);
 }
 
+#[tokio::test]
+async fn manual_loop_review_retry_is_routed_back_to_loop_scheduler() {
+    let fixture = seed_workflow_stop_fixture().await;
+    let runner = ChatRunner::new(fixture.db.clone());
+    let workflow_loop = WorkflowLoop::find_by_execution(&fixture.db.pool, fixture.execution.id)
+        .await
+        .expect("load loop")
+        .into_iter()
+        .next()
+        .expect("loop exists");
+    WorkflowLoop::update_status(
+        &fixture.db.pool,
+        workflow_loop.id,
+        WorkflowLoopStatus::Failed,
+        Some("previous loop review failed".to_string()),
+    )
+    .await
+    .expect("fail loop");
+    let member_step = WorkflowStep::update_loop_id(
+        &fixture.db.pool,
+        fixture.running_step_id,
+        Some(workflow_loop.id),
+    )
+    .await
+    .expect("attach member step to loop");
+    assert!(
+        !WorkflowOrchestrator::prepare_manual_loop_review_retry(
+            &fixture.db.pool,
+            &fixture.execution,
+            &member_step,
+        )
+        .await
+        .expect("classify loop member retry")
+    );
+    WorkflowStep::update_loop_id(
+        &fixture.db.pool,
+        fixture.review_step_id,
+        Some(workflow_loop.id),
+    )
+    .await
+    .expect("attach review step to loop");
+    WorkflowStep::update_status(
+        &fixture.db.pool,
+        fixture.review_step_id,
+        WorkflowStepStatus::Failed,
+    )
+    .await
+    .expect("fail loop review step");
+
+    let (execution, ready_step) =
+        WorkflowOrchestrator::begin_step_retry(&fixture.db, &runner, fixture.review_step_id)
+            .await
+            .expect("begin loop review retry");
+    let is_loop_review = WorkflowOrchestrator::prepare_manual_loop_review_retry(
+        &fixture.db.pool,
+        &execution,
+        &ready_step,
+    )
+    .await
+    .expect("prepare loop review retry");
+
+    assert!(is_loop_review);
+    let restored_loop = WorkflowLoop::find_by_id(&fixture.db.pool, workflow_loop.id)
+        .await
+        .expect("load restored loop")
+        .expect("restored loop exists");
+    assert_eq!(restored_loop.status, WorkflowLoopStatus::Running);
+    let events = WorkflowEvent::find_by_execution(&fixture.db.pool, execution.id)
+        .await
+        .expect("load retry events");
+    assert!(events.iter().any(|event| {
+        event.event_type == WorkflowEventType::LoopRetrying
+            && event.step_id == Some(fixture.review_step_id)
+    }));
+}
+
 #[test]
 fn completed_like_final_review_invariant_requires_only_completed_terminal_steps() {
     assert!(!WorkflowOrchestrator::all_steps_completed_like(&[]));
@@ -1222,6 +1349,7 @@ fn revision_context_round_trips_pending_user_feedback() {
         Some("Current full result"),
         &["src/main.rs".to_string()],
         2,
+        None,
     );
 
     let pending = WorkflowOrchestrator::parse_pending_revision_feedback(Some(&context))
@@ -1242,6 +1370,50 @@ fn revision_context_round_trips_pending_user_feedback() {
 }
 
 #[test]
+fn revision_context_round_trips_complete_lead_review_findings() {
+    let review_details = RevisionReviewDetails {
+        acceptance_results: vec![WorkflowAcceptanceResult {
+            criterion: "类型检查通过".to_string(),
+            level: AcceptanceCriterionLevel::Required,
+            verdict: WorkflowAcceptanceVerdict::Failed,
+            evidence: "pnpm run frontend:check failed".to_string(),
+        }],
+        evidence: vec!["tsc output".to_string()],
+        risks: vec!["无法发布".to_string()],
+        unfinished_items: vec!["修复生成类型".to_string()],
+    };
+    let context = WorkflowOrchestrator::merge_revision_context(
+        None,
+        WorkflowRevisionFeedbackSource::Lead,
+        "类型检查失败。",
+        "Current summary",
+        None,
+        &[],
+        2,
+        Some(&review_details),
+    );
+
+    let pending = WorkflowOrchestrator::parse_pending_revision_feedback(Some(&context))
+        .expect("pending feedback");
+    assert_eq!(
+        pending.review_details.as_ref().unwrap().acceptance_results,
+        review_details.acceptance_results
+    );
+    assert_eq!(
+        pending.review_details.as_ref().unwrap().evidence,
+        review_details.evidence
+    );
+    assert_eq!(
+        pending.review_details.as_ref().unwrap().risks,
+        review_details.risks
+    );
+    assert_eq!(
+        pending.review_details.as_ref().unwrap().unfinished_items,
+        review_details.unfinished_items
+    );
+}
+
+#[test]
 fn clear_pending_revision_feedback_removes_resume_payload() {
     let context = WorkflowOrchestrator::merge_revision_context(
         None,
@@ -1251,6 +1423,7 @@ fn clear_pending_revision_feedback_removes_resume_payload() {
         None,
         &[],
         1,
+        None,
     );
 
     let cleared = WorkflowOrchestrator::clear_pending_revision_feedback(Some(&context))
@@ -1282,6 +1455,7 @@ fn pending_revision_feedback_identifies_loop_scope() {
         None,
         &[],
         1,
+        None,
     );
 
     assert!(WorkflowOrchestrator::pending_revision_feedback_is_loop(

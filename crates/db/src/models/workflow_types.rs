@@ -280,6 +280,107 @@ pub enum WorkflowEventType {
 }
 
 // ---------------------------------------------------------------------------
+// Acceptance criteria
+// ---------------------------------------------------------------------------
+
+/// Tiered acceptance criteria for plan nodes.
+///
+/// - `required`: objective, externally verifiable items that must all pass.
+/// - `partial`: items that may fail for external reasons (environment,
+///   credentials, third-party outages) given a documented justification.
+/// - `recommended`: nice-to-have items that never block approval.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, TS)]
+pub struct AcceptanceCriteria {
+    #[serde(default)]
+    pub required: Vec<String>,
+    #[serde(default)]
+    pub partial: Vec<String>,
+    #[serde(default)]
+    pub recommended: Vec<String>,
+}
+
+impl AcceptanceCriteria {
+    /// All criteria flattened in tier order (required, partial, recommended).
+    pub fn all(&self) -> Vec<String> {
+        self.required
+            .iter()
+            .chain(self.partial.iter())
+            .chain(self.recommended.iter())
+            .cloned()
+            .collect()
+    }
+
+    /// All criteria with their tier, in tier order.
+    pub fn leveled(&self) -> Vec<(AcceptanceCriterionLevel, String)> {
+        self.required
+            .iter()
+            .map(|item| (AcceptanceCriterionLevel::Required, item.clone()))
+            .chain(
+                self.partial
+                    .iter()
+                    .map(|item| (AcceptanceCriterionLevel::Partial, item.clone())),
+            )
+            .chain(
+                self.recommended
+                    .iter()
+                    .map(|item| (AcceptanceCriterionLevel::Recommended, item.clone())),
+            )
+            .collect()
+    }
+
+    /// Whether `required` contains at least one non-blank item.
+    pub fn has_non_empty_required(&self) -> bool {
+        self.required.iter().any(|item| !item.trim().is_empty())
+    }
+}
+
+/// Acceptance criterion tier, mirroring the [`AcceptanceCriteria`] structure.
+/// Review protocols carry this on every `acceptance_results` item so verdict
+/// consistency can be checked mechanically.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptanceCriterionLevel {
+    /// Must pass for approval.
+    #[default]
+    Required,
+    /// May fail with a documented external justification.
+    Partial,
+    /// Nice to have; never blocks approval.
+    Recommended,
+}
+
+/// Legacy plans stored `acceptance` as a flat string array; new plans use the
+/// tiered object. Both forms deserialize into [`AcceptanceCriteria`]; only the
+/// tiered form is written back out.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AcceptanceCriteriaWire {
+    Tiered(AcceptanceCriteria),
+    Legacy(Vec<String>),
+}
+
+impl From<AcceptanceCriteriaWire> for AcceptanceCriteria {
+    fn from(wire: AcceptanceCriteriaWire) -> Self {
+        match wire {
+            AcceptanceCriteriaWire::Tiered(criteria) => criteria,
+            AcceptanceCriteriaWire::Legacy(items) => Self {
+                required: items,
+                ..Self::default()
+            },
+        }
+    }
+}
+
+fn deserialize_acceptance_compat<'de, D>(
+    deserializer: D,
+) -> Result<Option<AcceptanceCriteria>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<AcceptanceCriteriaWire>::deserialize(deserializer)?.map(Into::into))
+}
+
+// ---------------------------------------------------------------------------
 // Workflow Plan JSON types (React Flow compatible)
 // ---------------------------------------------------------------------------
 
@@ -399,7 +500,7 @@ impl Default for WorkflowNodePosition {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Debug, Clone, Serialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowNodeData {
     pub step_type: String,
@@ -408,12 +509,13 @@ pub struct WorkflowNodeData {
     pub title: String,
     pub instructions: String,
     #[serde(default)]
-    pub acceptance: Option<Vec<String>>,
+    pub acceptance: Option<AcceptanceCriteria>,
     #[serde(default)]
     pub outputs: Option<Vec<String>>,
-    /// Verifiable checklist items the task must satisfy (task nodes only).
+    /// Self-check items the executor must verify before reporting completion
+    /// (task nodes only). Replaces the legacy `checklist` field.
     #[serde(default)]
-    pub checklist: Option<Vec<String>>,
+    pub self_check: Option<Vec<String>>,
     /// Verification/test commands or methods used to prove the task is done
     /// (task nodes only).
     #[serde(default)]
@@ -431,6 +533,80 @@ pub struct WorkflowNodeData {
     pub loop_key: Option<String>,
     #[serde(default)]
     pub review_scope: Option<Vec<String>>,
+}
+
+/// Wire shape kept for backward-compatible deserialization: legacy plans may
+/// still carry a flat string-array `acceptance` and a `checklist` field. The
+/// legacy array maps into `acceptance.required`; `checklist` items merge into
+/// `self_check`. Neither legacy form is written back out.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowNodeDataWire {
+    step_type: String,
+    #[serde(default)]
+    agent_id: Option<String>,
+    title: String,
+    instructions: String,
+    #[serde(default)]
+    acceptance: Option<AcceptanceCriteriaWire>,
+    #[serde(default)]
+    outputs: Option<Vec<String>>,
+    #[serde(default)]
+    checklist: Option<Vec<String>>,
+    #[serde(default)]
+    self_check: Option<Vec<String>>,
+    #[serde(default)]
+    verification_commands: Option<Vec<String>>,
+    #[serde(default)]
+    completion_evidence: Option<Vec<String>>,
+    #[serde(default = "default_true")]
+    interruptible: bool,
+    #[serde(default)]
+    max_retry: Option<u32>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    loop_key: Option<String>,
+    #[serde(default)]
+    review_scope: Option<Vec<String>>,
+}
+
+impl From<WorkflowNodeDataWire> for WorkflowNodeData {
+    fn from(wire: WorkflowNodeDataWire) -> Self {
+        let self_check = match (wire.self_check, wire.checklist) {
+            (Some(mut self_check), Some(legacy)) => {
+                self_check.extend(legacy);
+                Some(self_check)
+            }
+            (Some(self_check), None) => Some(self_check),
+            (None, legacy) => legacy,
+        };
+        Self {
+            step_type: wire.step_type,
+            agent_id: wire.agent_id,
+            title: wire.title,
+            instructions: wire.instructions,
+            acceptance: wire.acceptance.map(Into::into),
+            outputs: wire.outputs,
+            self_check,
+            verification_commands: wire.verification_commands,
+            completion_evidence: wire.completion_evidence,
+            interruptible: wire.interruptible,
+            max_retry: wire.max_retry,
+            status: wire.status,
+            loop_key: wire.loop_key,
+            review_scope: wire.review_scope,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkflowNodeData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        WorkflowNodeDataWire::deserialize(deserializer).map(Into::into)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
@@ -500,7 +676,10 @@ pub struct CompiledStep {
     pub title: String,
     pub instructions: String,
     pub assigned_agent_id: Option<String>,
-    pub acceptance: Option<Vec<String>>,
+    /// Tiered acceptance criteria. Legacy compiled graphs stored this as a
+    /// flat string array; deserialization maps that form into `required`.
+    #[serde(default, deserialize_with = "deserialize_acceptance_compat")]
+    pub acceptance: Option<AcceptanceCriteria>,
     pub outputs: Option<Vec<String>>,
     pub interruptible: bool,
     pub max_retry: u32,

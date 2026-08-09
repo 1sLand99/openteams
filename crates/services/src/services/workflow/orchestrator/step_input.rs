@@ -5,8 +5,7 @@ use db::{
     models::{
         chat_session::ChatSession, chat_session_agent::ChatSessionAgent,
         workflow_agent_session::WorkflowAgentSession, workflow_execution::WorkflowExecution,
-        workflow_plan::WorkflowPlan, workflow_step::WorkflowStep,
-        workflow_transcript::WorkflowTranscript, workflow_types::*,
+        workflow_step::WorkflowStep, workflow_transcript::WorkflowTranscript, workflow_types::*,
     },
 };
 use sqlx::SqlitePool;
@@ -18,7 +17,7 @@ use super::{
         workflow_analytics,
         workflow_runtime::{
             PromptDataBuilder, SummaryPayload, WorkflowRuntimeError, maybe_prepend_safety_preamble,
-            parse_summary_payload, workflow_step_protocol_json_schema_for_step,
+            parse_summary_payload, task_protocol_json_schema,
         },
     },
     OrchestratorError, ResolvedTranscriptAction, WorkflowOrchestrator, load_agents_for_session,
@@ -159,6 +158,13 @@ impl WorkflowOrchestrator {
             ));
         }
 
+        if step.step_type != WorkflowStepType::Task {
+            return Err(OrchestratorError::IllegalTransition(format!(
+                "only task steps can resume through agent follow-up input; step {} is {:?}",
+                step.id, step.step_type
+            )));
+        }
+
         if Self::is_step_ready_input(&step.status) {
             let (ready_step, input_transcript, previous_message_content, retry_execution, mode) =
                 if step.status == WorkflowStepStatus::Failed {
@@ -290,17 +296,6 @@ impl WorkflowOrchestrator {
                 follow_up_prompt = follow_up_prompt,
                 "submit step input for following up prompt"
             );
-            let active_plan = WorkflowPlan::find_by_id(pool, active_execution.plan_id)
-                .await?
-                .ok_or_else(|| {
-                    OrchestratorError::NotFound(format!(
-                        "workflow plan {} 未找到",
-                        active_execution.plan_id
-                    ))
-                })?;
-            let declared_acceptance =
-                Self::acceptance_criteria_for_step(&active_plan, &running_step);
-
             let protocol_message = match Self::run_step_agent_protocol_with_retry(
                 db,
                 pool,
@@ -311,7 +306,6 @@ impl WorkflowOrchestrator {
                 workflow_session,
                 &follow_up_prompt,
                 &running_step,
-                &declared_acceptance,
                 true,
             )
             .await
@@ -629,12 +623,7 @@ impl WorkflowOrchestrator {
                 "Do not restart the whole task from scratch unless required. Resume from the failed point and fix the issue that caused the failure."
             }
         };
-        let json_schema = workflow_step_protocol_json_schema_for_step(
-            step.execution_id,
-            &step.step_key,
-            true,
-            &step.step_type,
-        );
+        let json_schema = task_protocol_json_schema(step.execution_id, &step.step_key, true);
         let data = PromptDataBuilder::new()
             .add("step_title", &step.title)
             .add("previous_agent_message", previous_message_content.trim())

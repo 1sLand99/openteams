@@ -71,7 +71,19 @@ assert.match(
   /<AgentInstallGuide[\s\S]*?runner=\{runner\}[\s\S]*?rechecking=\{rechecking\}[\s\S]*?onRecheck=\{onRecheck\}/u,
 );
 assert.doesNotMatch(source, /npx --|npx -y|install -g pi\b/iu);
-assert.doesNotMatch(source, /npx_available/u);
+// Runtime status/diagnostics merges must carry the npm/npx probes so the
+// install guide and error toasts see fresh dependency state.
+assert.match(
+  source,
+  /node_available: runner\.node_available,[\s\S]*?npm_available: runner\.npm_available,[\s\S]*?npx_available: runner\.npx_available,/u,
+);
+assert.match(
+  source,
+  /node_available: diagnostics\.node_available,[\s\S]*?npm_available: diagnostics\.npm_available,[\s\S]*?npx_available: diagnostics\.npx_available,/u,
+);
+// Installed-but-not-executable runners explain which tools are missing.
+assert.match(source, /getMissingRuntimeTools\(runner\)/u);
+assert.match(source, /t\("agents\.status\.missingDependencies"/u);
 assert.match(source, /const envSummary = runner\.env_summary;/u);
 assert.doesNotMatch(
   source,

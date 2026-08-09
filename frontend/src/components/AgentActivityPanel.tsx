@@ -28,6 +28,7 @@ import { AgentMarkdown } from "@/components/AgentMarkdown";
 import {
   formatAgentActivityLines,
   isThinkingHeaderContent,
+  truncatePathMiddle,
   type AgentActivityDisplayRow,
   type AgentActivityToolKind,
   type AgentActivityToolStatus,
@@ -321,9 +322,17 @@ const ToolLineItem: React.FC<{
   const hasLongDetail =
     (line.detail?.length ?? 0) > TOOL_DETAIL_EXPAND_THRESHOLD;
   const expandable = Boolean(line.resultDetail) || hasLongDetail;
-  // Successful rows rely on the status icon alone; only failures and other
-  // noteworthy statuses keep the text label.
-  const showLabel = Boolean(line.title) && status !== "completed";
+  // Successful rows rely on the status icon alone, but only when the target
+  // detail is present — otherwise the row degenerates to bare icons.
+  const showLabel =
+    Boolean(line.title) && (status !== "completed" || !line.detail);
+  // Path-like targets truncate in the middle so the file name stays visible;
+  // the full path remains available via the tooltip and the disclosure.
+  const displayDetail =
+    line.detail &&
+    (line.toolKind === "file_edit" || line.toolKind === "file_read")
+      ? truncatePathMiddle(line.detail)
+      : line.detail;
   const rowClass = `wf-log-task-row${status ? ` wf-log-task-row--${status}` : ""}`;
 
   const row = (
@@ -339,9 +348,9 @@ const ToolLineItem: React.FC<{
         <ToolIcon className="w-3 h-3" />
       </span>
       {showLabel && <span className="wf-log-task-label">{line.title}</span>}
-      {line.detail && (
+      {displayDetail && (
         <span className="wf-log-task-target" title={line.detail}>
-          {line.detail}
+          {displayDetail}
         </span>
       )}
       {typeof line.durationMs === "number" &&

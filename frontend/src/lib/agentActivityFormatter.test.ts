@@ -7,6 +7,7 @@ import type { ChatRunActivityLine } from "@/types";
 import {
   formatAgentActivityLines,
   isThinkingHeaderContent,
+  truncatePathMiddle,
 } from "./agentActivityFormatter";
 
 let failures = 0;
@@ -284,6 +285,99 @@ console.log("agentActivityFormatter");
     "leaves duration undefined when timestamps are unparseable",
     rows[0]?.durationMs === undefined,
     rows,
+  );
+}
+
+{
+  const rows = formatAgentActivityLines([
+    line(1, "tool", "Started file edit: frontend/src/App.tsx"),
+    line(2, "tool", "Completed file edit: frontend/src/App.tsx (1 edit)"),
+  ]);
+
+  check(
+    "merges file edit when only the completed line carries a change summary",
+    rows.length === 1,
+    rows,
+  );
+  check(
+    "strips the change summary so the path stays the row target",
+    rows[0]?.toolKind === "file_edit" &&
+      rows[0]?.title === "File edit completed" &&
+      rows[0]?.detail === "frontend/src/App.tsx",
+    rows,
+  );
+}
+
+{
+  const rows = formatAgentActivityLines([
+    line(1, "tool", "Started file edit: crates/a.rs (1 write)"),
+    line(2, "tool", "Completed file edit: crates/a.rs (1 write)"),
+  ]);
+
+  check(
+    "merges file edit lines that both carry a change summary",
+    rows.length === 1 && rows[0]?.detail === "crates/a.rs",
+    rows,
+  );
+}
+
+{
+  // Persisted before the ACP/Kimi path recovery fix: the path never reached
+  // the activity line, so the content ends right after the colon.
+  const rows = formatAgentActivityLines([
+    line(1, "tool", "Started file edit: "),
+    line(2, "tool", "Completed file edit: "),
+  ]);
+
+  check("merges empty-path file edit history into one row", rows.length === 1, rows);
+  check(
+    "keeps a visible title for empty-path file edit history",
+    rows[0]?.toolKind === "file_edit" &&
+      rows[0]?.toolStatus === "completed" &&
+      rows[0]?.title === "File edit completed",
+    rows,
+  );
+  check(
+    "leaves the detail empty so the panel falls back to the title",
+    rows[0]?.detail === undefined && rows[0]?.content === "File edit completed",
+    rows,
+  );
+}
+
+{
+  const rows = formatAgentActivityLines([
+    line(1, "tool", "Completed file edit:  (1 edit)"),
+    line(2, "tool", "Completed file read: "),
+  ]);
+
+  check(
+    "treats a summary-only file edit target as an empty path",
+    rows[0]?.title === "File edit completed" && rows[0]?.detail === undefined,
+    rows,
+  );
+  check(
+    "keeps a visible title for empty-path file read history",
+    rows[1]?.toolKind === "file_read" &&
+      rows[1]?.title === "File read" &&
+      rows[1]?.detail === undefined,
+    rows,
+  );
+}
+
+{
+  check(
+    "keeps short paths untouched by middle truncation",
+    truncatePathMiddle("frontend/src/App.tsx") === "frontend/src/App.tsx",
+  );
+  const longPath =
+    "frontend/src/components/very/deeply/nested/folder/structure/AgentActivityPanel.tsx";
+  const truncated = truncatePathMiddle(longPath, 40);
+  check(
+    "truncates long paths in the middle so the file name stays visible",
+    truncated.length === 40 &&
+      truncated.includes("…") &&
+      truncated.endsWith("AgentActivityPanel.tsx"),
+    truncated,
   );
 }
 

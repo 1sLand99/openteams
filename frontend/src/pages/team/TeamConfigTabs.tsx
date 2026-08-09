@@ -10,6 +10,7 @@ import {
   CircleAlert,
   FileText,
   FolderGit2,
+  Loader2,
   PackagePlus,
   RefreshCw,
   Server,
@@ -41,6 +42,7 @@ import {
   cx,
   effectiveAcpConfigValue,
   findAcpSelectConfigOption,
+  runnerSupportsAcp,
   type ProjectMemberWithExecution,
 } from "./teamUtils";
 
@@ -65,6 +67,7 @@ type TeamConfigTabsProps = {
   acpAuthMethodId: string;
   acpConfigOptions: AcpConfigOptionSnapshot[];
   acpConfigOverrides: AcpConfigOverride[];
+  acpProbeLoading: boolean;
   reasoningUnsupported: boolean;
   allowedSkillIds: string[];
   capability: AgentRuntimeReasoningCapability | null;
@@ -528,6 +531,7 @@ function SkillMarkdownPanel({
 function ConfigTab({
   acpConfigOptions,
   acpConfigOverrides,
+  acpProbeLoading,
   reasoningUnsupported,
   capability,
   isLeader,
@@ -675,6 +679,23 @@ function ConfigTab({
                     value,
                   })
                 }
+              />
+            ) : acpProbeLoading && runnerSupportsAcp(runnerType) ? (
+              <DropdownSelect
+                value="__openteams_model_loading__"
+                options={[
+                  {
+                    id: "__openteams_model_loading__",
+                    label: t("teamPage.form.modelLoading"),
+                  },
+                ]}
+                disabled
+                showSearch={false}
+                triggerIcon={
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--ink-tertiary)]" />
+                }
+                className="[&>button]:h-9 [&>button]:bg-[var(--surface-1)] [&>button]:font-mono [&>button]:text-[13px]"
+                onChange={() => undefined}
               />
             ) : (
               <DropdownSelect
@@ -1241,12 +1262,7 @@ function TeamProtocolTab({
 export function TeamConfigTabs(props: TeamConfigTabsProps) {
   const [activeTab, setActiveTab] = useState<MemberConfigTab>("config");
   const { selectedMember, t } = props;
-  const supportsAcpPermissions =
-    props.runnerType === "GEMINI" ||
-    props.runnerType === "QWEN_CODE" ||
-    props.runnerType === "KIMI_CODE" ||
-    props.runnerType === "QODER_CLI" ||
-    props.runnerType === "PI";
+  const supportsAcpPermissions = runnerSupportsAcp(props.runnerType);
   const effectiveActiveTab = selectedMember
     ? activeTab === "permissions" && !supportsAcpPermissions
       ? "config"

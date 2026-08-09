@@ -641,3 +641,42 @@ body[data-mode="light"] .workflow-window-root .wf-log-run-disclosure {
   max-height: 320px;
   padding-top: 0;
 }
+
+/* ---------------------------------------------------------------------------
+ * Workflow window log tab — slightly larger type for readability.
+ * Scoped to .wf-log-panel so the inline chat variant keeps its compact size.
+ * --------------------------------------------------------------------------- */
+
+.wf-log-panel .wf-log-task-row {
+  font-size: 15px;
+}
+
+.wf-log-panel .wf-log-task-row--content .wf-log-task-label,
+.wf-log-panel .wf-log-task-row--content .wf-log-task-target {
+  font-size: 15px;
+}
+
+.wf-log-panel .wf-log-task-content-text,
+.wf-log-panel .wf-log-error-block,
+.wf-log-panel .wf-log-thinking-text,
+.wf-log-panel .wf-log-collapsed-label,
+.wf-log-panel .wf-log-collapsed-failures {
+  font-size: 15px;
+}
+
+.wf-log-panel .wf-log-group-agent {
+  font-size: 14px;
+}
+
+.wf-log-panel .wf-log-panel-message {
+  font-size: 15px;
+}
+
+.wf-log-panel .wf-log-markdown {
+  font-size: 13px;
+}
+
+.wf-log-panel .wf-log-markdown code,
+.wf-log-panel .wf-log-markdown pre code {
+  font-size: 12px;
+}

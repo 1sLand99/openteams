@@ -553,6 +553,10 @@ impl StandardCodingAgentExecutor for CursorAgent {
         });
     }
 
+    fn default_runtime_config_path(&self) -> Option<std::path::PathBuf> {
+        dirs::home_dir().map(|home| home.join(".cursor").join("cli-config.json"))
+    }
+
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf> {
         dirs::home_dir().map(|home| home.join(".cursor").join("mcp.json"))
     }

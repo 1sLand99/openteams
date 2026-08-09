@@ -24,7 +24,7 @@ impl<'a> IterationManager<'a> {
             .collect_user_feedback(execution, from_round, &user_feedback)
             .await?;
         let new_plan_json = self
-            .generate_new_plan(execution, plan, active_revision, from_round, &feedback)
+            .generate_new_plan(execution, plan, active_revision, &feedback)
             .await?;
         let result = self
             .create_new_round(
@@ -88,7 +88,6 @@ impl<'a> IterationManager<'a> {
         execution: &WorkflowExecution,
         plan: &WorkflowPlan,
         active_revision: &WorkflowPlanRevision,
-        from_round: &WorkflowRound,
         feedback: &WorkflowIterationFeedback,
     ) -> Result<WorkflowPlanJson, OrchestratorError> {
         let workflow_sessions =
@@ -107,12 +106,11 @@ impl<'a> IterationManager<'a> {
             lead_session_agent.id,
         )
         .await?;
-        let history = WorkflowIterationFeedback::find_by_execution(self.pool, execution.id).await?;
         let original_plan: WorkflowPlanJson = serde_json::from_str(&active_revision.plan_json)?;
         let ui_config = config::load_config_from_file(&config_path()).await;
         let response_language_instruction =
             resolve_workflow_response_language_instruction(&ui_config.language);
-        let prompt = build_iteration_plan_prompt(
+        let prompt_input = build_iteration_plan_generation_input(
             &plan
                 .summary_text
                 .clone()
@@ -120,13 +118,15 @@ impl<'a> IterationManager<'a> {
                 .unwrap_or_else(|| plan.title.clone()),
             &feedback.current_status_summary,
             &feedback.user_feedback_json,
-            from_round.round_index,
-            &history,
             &workflow_plan_agent_id(lead_session_agent),
             &available_agents,
             &original_plan,
             response_language_instruction,
         );
+        let prompt =
+            super::workflow_runtime::prompt_builders::plan_generation::build_plan_generation_prompt(
+                &prompt_input,
+            );
 
         tracing::debug!("Generated iteration plan prompt: {}", prompt);
 
@@ -145,8 +145,7 @@ impl<'a> IterationManager<'a> {
             "Raw output from workflow agent for iteration plan generation: {}",
             raw_output
         );
-        let payload = extract_json_payload(&raw_output).unwrap_or(raw_output);
-        let plan_json: WorkflowPlanJson = serde_json::from_str(&payload)?;
+        let plan_json = super::workflow_runtime::parse_plan_output(&raw_output)?;
         let valid_agent_ids = workflow_valid_agent_ids(self.session_agents);
         WorkflowCompiler::compile(&plan_json, &valid_agent_ids)?;
 
@@ -295,12 +294,12 @@ impl<'a> IterationManager<'a> {
                 })
                 .copied()
                 .or(lead_workflow_session_id);
-            let (lead_review_required, user_review_required) =
-                if compiled_step.step_type == WorkflowStepType::Review {
-                    (Some(false), Some(false))
-                } else {
-                    (None, None)
-                };
+            let (lead_review_required, user_review_required) = default_step_review_requirements(
+                &compiled_step.step_type,
+                compiled_step.assigned_agent_id.as_deref(),
+                execution.lead_session_agent_id,
+                &agent_id_map,
+            );
             let step = WorkflowStep::create(
                 self.pool,
                 &CreateWorkflowStep {
@@ -316,8 +315,8 @@ impl<'a> IterationManager<'a> {
                     round_index: round.round_index,
                     display_order: compiled_step.display_order,
                     loop_id: None,
-                    lead_review_required,
-                    user_review_required,
+                    lead_review_required: Some(lead_review_required),
+                    user_review_required: Some(user_review_required),
                     revision_context: None,
                 },
                 step_id,
@@ -497,6 +496,75 @@ impl<'a> IterationManager<'a> {
             loops: created_loops,
             feedback,
         })
+    }
+}
+
+fn build_iteration_plan_generation_input(
+    original_goal: &str,
+    current_state_summary: &str,
+    user_feedback_json: &str,
+    lead_agent_id: &str,
+    available_agents: &[WorkflowPlanningAgent],
+    previous_plan: &WorkflowPlanJson,
+    response_language_instruction: &str,
+) -> super::workflow_runtime::prompt_builders::plan_generation::PlanGenerationPromptInput {
+    use super::workflow_runtime::prompt_builders::plan_generation::{
+        PlanGenerationMode, PlanGenerationPromptInput, PlanningMemberInput,
+    };
+
+    PlanGenerationPromptInput {
+        summary: original_goal.trim().to_string(),
+        design_doc_paths: Vec::new(),
+        lead_agent_id: lead_agent_id.to_string(),
+        members: available_agents
+            .iter()
+            .map(|agent| PlanningMemberInput {
+                agent_id: agent.agent_id.clone(),
+                name: agent.name.clone(),
+                role: agent
+                    .member_role
+                    .clone()
+                    .unwrap_or_else(|| agent.workflow_role.clone()),
+                responsibilities: agent.responsibilities.clone(),
+                skills: agent.skills.clone(),
+                tools: agent.tools_enabled.clone(),
+            })
+            .collect(),
+        response_language: response_language_instruction.trim().to_string(),
+        mode: PlanGenerationMode::Iteration {
+            previous_plan: previous_plan.clone(),
+            current_state_summary: current_state_summary.trim().to_string(),
+            latest_user_feedback: format_iteration_feedback(user_feedback_json),
+        },
+    }
+}
+
+fn format_iteration_feedback(user_feedback_json: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(user_feedback_json) else {
+        return user_feedback_json.trim().to_string();
+    };
+    let Some(feedback) = value.get("feedback").and_then(|item| item.as_object()) else {
+        return serde_json::to_string_pretty(&value)
+            .unwrap_or_else(|_| user_feedback_json.trim().to_string());
+    };
+
+    let lines = ["what_wrong", "expected", "priority", "additional_notes"]
+        .into_iter()
+        .filter_map(|key| {
+            feedback
+                .get(key)
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(|text| format!("- {key}: {text}"))
+        })
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        serde_json::to_string_pretty(&value)
+            .unwrap_or_else(|_| user_feedback_json.trim().to_string())
+    } else {
+        lines.join("\n")
     }
 }
 

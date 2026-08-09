@@ -42,9 +42,11 @@ import {
   getRuntimeDisplayState,
   parseEnvText,
   parseRuntimeErrorDetails,
+  RUNTIME_TOOL_LABELS,
   type AgentRuntimeFilter,
   type RuntimeDisplayState,
 } from "./agent-runtime/agentRuntimeViewModel";
+import { getMissingRuntimeTools } from "./agent-runtime/installGuidance";
 import { AgentInstallGuide } from "./agent-runtime/AgentInstallGuide";
 import { findAcpSelectConfigOption } from "./team/teamUtils";
 import ampSchema from "../../../shared/schemas/amp.json";
@@ -268,7 +270,17 @@ const getRuntimeErrorMessage = (
 ): string => {
   const lastError = runner.last_error?.trim();
   if (lastError) return lastError;
-  if (runner.installed && !runner.executable) return t("agents.status.error");
+  if (runner.installed && !runner.executable) {
+    const missingTools = getMissingRuntimeTools(runner);
+    if (missingTools.length > 0) {
+      return t("agents.status.missingDependencies", {
+        tools: missingTools
+          .map((tool) => RUNTIME_TOOL_LABELS[tool])
+          .join(", "),
+      });
+    }
+    return t("agents.status.error");
+  }
   return "";
 };
 
@@ -1310,6 +1322,8 @@ function AgentConfigSidebar({
             availability: runner.availability,
             auth_state: runner.auth_state,
             node_available: runner.node_available,
+            npm_available: runner.npm_available,
+            npx_available: runner.npx_available,
             discovered_models: runner.discovered_models,
             model_source: runner.model_source,
             last_checked_at: runner.last_checked_at,
@@ -1941,6 +1955,8 @@ export function AgentsPage() {
               availability: diagnostics.availability,
               auth_state: diagnostics.auth_state,
               node_available: diagnostics.node_available,
+              npm_available: diagnostics.npm_available,
+              npx_available: diagnostics.npx_available,
               discovered_models: diagnostics.discovered_models,
               model_source: diagnostics.model_source,
               version: diagnostics.version,
