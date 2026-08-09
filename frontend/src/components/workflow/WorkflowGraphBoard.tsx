@@ -760,14 +760,14 @@ export function WorkflowGraphBoard({
                 >
                   <div className="flex items-center gap-1.5">
                     <ArrowsClockwiseIcon
-                      className="size-3 text-slate-400"
+                      className="size-3 text-[var(--ink-tertiary)]"
                       weight="bold"
                     />
-                    <span className="text-[10px] font-bold tracking-tight text-slate-800 uppercase">
+                    <span className="text-[10px] font-bold tracking-tight text-[var(--ink)] uppercase">
                       {child.id}
                     </span>
                   </div>
-                  <div className="w-px h-3 bg-slate-200 mx-0.5" />
+                  <div className="w-px h-3 bg-[var(--hairline)] mx-0.5" />
                   <span
                     className={cn(
                       'rounded-full px-2 py-0.5 text-[9px] font-bold whitespace-nowrap',

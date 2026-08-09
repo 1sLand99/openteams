@@ -48,6 +48,7 @@ struct LoopReviewPromptStepInput {
     step_key: String,
     title: String,
     instructions: String,
+    rework_requirement: Option<String>,
     summary: String,
     outputs: Vec<String>,
     evidence: Vec<String>,

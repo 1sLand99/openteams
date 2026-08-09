@@ -20,7 +20,7 @@ use db::{
         workflow_step_edge::{CreateWorkflowStepEdge, WorkflowStepEdge},
         workflow_types::{
             WorkflowEventType, WorkflowPlanJson, WorkflowRevisionEditor, WorkflowRoundStatus,
-            WorkflowStepStatus, WorkflowStepType, WorkflowValidationStatus, to_workflow_wire_value,
+            WorkflowStepStatus, WorkflowValidationStatus, to_workflow_wire_value,
         },
     },
 };
@@ -35,8 +35,8 @@ use super::{
     config,
     workflow_compiler::WorkflowCompiler,
     workflow_orchestrator::{
-        OrchestratorError, WorkflowOrchestrator, reducer, workflow_agent_id_map,
-        workflow_agent_session_role_for_assignment, workflow_plan_agent_id,
+        OrchestratorError, WorkflowOrchestrator, default_step_review_requirements, reducer,
+        workflow_agent_id_map, workflow_agent_session_role_for_assignment, workflow_plan_agent_id,
         workflow_valid_agent_ids,
     },
     workflow_runtime::{

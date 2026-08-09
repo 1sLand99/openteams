@@ -116,6 +116,55 @@ fn review_node_assignment_projects_non_lead_member_as_reviewer() {
     );
 }
 
+#[test]
+fn lead_assigned_task_skips_default_lead_review() {
+    let lead_session_agent_id = Uuid::new_v4();
+    let worker_session_agent_id = Uuid::new_v4();
+    let lead_assignment = lead_session_agent_id.to_string();
+    let worker_assignment = worker_session_agent_id.to_string();
+    let agent_id_map = HashMap::from([
+        (lead_assignment.clone(), lead_session_agent_id),
+        (worker_assignment.clone(), worker_session_agent_id),
+    ]);
+
+    assert_eq!(
+        default_step_review_requirements(
+            &WorkflowStepType::Task,
+            Some(&lead_assignment),
+            Some(lead_session_agent_id),
+            &agent_id_map,
+        ),
+        (false, true)
+    );
+    assert_eq!(
+        default_step_review_requirements(
+            &WorkflowStepType::Task,
+            None,
+            Some(lead_session_agent_id),
+            &agent_id_map,
+        ),
+        (false, true)
+    );
+    assert_eq!(
+        default_step_review_requirements(
+            &WorkflowStepType::Task,
+            Some(&worker_assignment),
+            Some(lead_session_agent_id),
+            &agent_id_map,
+        ),
+        (true, true)
+    );
+    assert_eq!(
+        default_step_review_requirements(
+            &WorkflowStepType::Review,
+            Some(&worker_assignment),
+            Some(lead_session_agent_id),
+            &agent_id_map,
+        ),
+        (false, false)
+    );
+}
+
 #[tokio::test]
 async fn scheduler_recovery_retries_transient_failure_then_succeeds() {
     use std::sync::{

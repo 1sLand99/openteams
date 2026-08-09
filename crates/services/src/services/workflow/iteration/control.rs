@@ -294,12 +294,12 @@ impl<'a> IterationManager<'a> {
                 })
                 .copied()
                 .or(lead_workflow_session_id);
-            let (lead_review_required, user_review_required) =
-                if compiled_step.step_type == WorkflowStepType::Review {
-                    (Some(false), Some(false))
-                } else {
-                    (None, None)
-                };
+            let (lead_review_required, user_review_required) = default_step_review_requirements(
+                &compiled_step.step_type,
+                compiled_step.assigned_agent_id.as_deref(),
+                execution.lead_session_agent_id,
+                &agent_id_map,
+            );
             let step = WorkflowStep::create(
                 self.pool,
                 &CreateWorkflowStep {
@@ -315,8 +315,8 @@ impl<'a> IterationManager<'a> {
                     round_index: round.round_index,
                     display_order: compiled_step.display_order,
                     loop_id: None,
-                    lead_review_required,
-                    user_review_required,
+                    lead_review_required: Some(lead_review_required),
+                    user_review_required: Some(user_review_required),
                     revision_context: None,
                 },
                 step_id,

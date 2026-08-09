@@ -281,6 +281,26 @@ pub fn workflow_agent_name_lookup(session_agents: &[ChatSessionAgent]) -> HashMa
     lookup
 }
 
+pub(super) fn default_step_review_requirements(
+    step_type: &WorkflowStepType,
+    assigned_agent_id: Option<&str>,
+    lead_session_agent_id: Option<Uuid>,
+    agent_id_map: &HashMap<String, Uuid>,
+) -> (bool, bool) {
+    if *step_type == WorkflowStepType::Review {
+        return (false, false);
+    }
+
+    let assigned_session_agent_id = assigned_agent_id
+        .and_then(|agent_id| agent_id_map.get(agent_id).copied())
+        .or(lead_session_agent_id);
+    let assigned_to_lead = lead_session_agent_id
+        .map(|lead_id| assigned_session_agent_id == Some(lead_id))
+        .unwrap_or(false);
+
+    (!assigned_to_lead, true)
+}
+
 impl WorkflowOrchestrator {
     // -----------------------------------------------------------------------
     // Command Handler: bootstrap
@@ -443,12 +463,12 @@ impl WorkflowOrchestrator {
                 .and_then(|aid| agent_session_map.get(aid))
                 .copied()
                 .or(lead_workflow_agent_session_id);
-            let (lead_review_required, user_review_required) =
-                if compiled_step.step_type == WorkflowStepType::Review {
-                    (Some(false), Some(false))
-                } else {
-                    (None, None)
-                };
+            let (lead_review_required, user_review_required) = default_step_review_requirements(
+                &compiled_step.step_type,
+                compiled_step.assigned_agent_id.as_deref(),
+                lead_session_agent_id,
+                agent_id_map,
+            );
 
             let step = WorkflowStep::create(
                 pool,
@@ -465,8 +485,8 @@ impl WorkflowOrchestrator {
                     round_index: 1,
                     display_order: compiled_step.display_order,
                     loop_id: None,
-                    lead_review_required,
-                    user_review_required,
+                    lead_review_required: Some(lead_review_required),
+                    user_review_required: Some(user_review_required),
                     revision_context: None,
                 },
                 step_id,

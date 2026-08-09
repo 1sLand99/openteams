@@ -689,6 +689,21 @@ impl<'a> LoopExecutor<'a> {
                     user_skip_waiver: input.user_skip_waiver.clone(),
                 })
                 .collect(),
+            rework_acceptance: review_inputs
+                .iter()
+                .filter_map(|input| {
+                    input.rework_requirement.as_ref().map(|requirement| {
+                        prompts::LoopReworkAcceptanceInput {
+                            step_key: input.step_key.clone(),
+                            title: input.title.clone(),
+                            requirement: requirement.clone(),
+                            summary: input.summary.clone(),
+                            outputs: input.outputs.clone(),
+                            evidence: input.evidence.clone(),
+                        }
+                    })
+                })
+                .collect(),
             required_upstream_results: review_context.required_upstream_results.clone(),
             scope_edges: review_context.review_scope_edges.clone(),
             current_round: review_context.current_round,
@@ -1317,6 +1332,11 @@ impl<'a> LoopExecutor<'a> {
                     step_key: step.step_key.clone(),
                     title: step.title.clone(),
                     instructions: step.instructions.clone(),
+                    rework_requirement: current_loop_rework_requirement(
+                        step.revision_context.as_deref(),
+                        &loop_def.loop_key,
+                        workflow_loop.retry_count,
+                    ),
                     summary: payload.summary,
                     outputs: payload.outputs,
                     evidence: step
@@ -1951,6 +1971,36 @@ fn loop_feedback_by_step_id(
                 .map(|feedback| (step.id, feedback.clone()))
         })
         .collect()
+}
+
+fn current_loop_rework_requirement(
+    revision_context: Option<&str>,
+    loop_key: &str,
+    retry_count: i32,
+) -> Option<String> {
+    revision_context
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|context| context.get("feedback_history").cloned())
+        .and_then(|history| history.as_array().cloned())
+        .and_then(|history| {
+            history.into_iter().rev().find_map(|entry| {
+                let matches_current_retry = entry.get("scope").and_then(|value| value.as_str())
+                    == Some("loop")
+                    && entry.get("loop_key").and_then(|value| value.as_str()) == Some(loop_key)
+                    && entry.get("round").and_then(|value| value.as_i64())
+                        == Some(i64::from(retry_count));
+                matches_current_retry
+                    .then(|| {
+                        entry
+                            .get("feedback")
+                            .and_then(|value| value.as_str())
+                            .map(str::trim)
+                            .filter(|feedback| !feedback.is_empty())
+                            .map(str::to_string)
+                    })
+                    .flatten()
+            })
+        })
 }
 
 #[allow(clippy::too_many_arguments)]

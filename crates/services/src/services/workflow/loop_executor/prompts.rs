@@ -33,6 +33,17 @@ pub struct LoopReviewTaskInput {
     pub user_skip_waiver: Option<String>,
 }
 
+/// Latest result of a step explicitly reworked in the current Loop round.
+#[derive(Debug, Clone)]
+pub struct LoopReworkAcceptanceInput {
+    pub step_key: String,
+    pub title: String,
+    pub requirement: String,
+    pub summary: String,
+    pub outputs: Vec<String>,
+    pub evidence: Vec<String>,
+}
+
 /// Typed input of the Loop review prompt (§6.5).
 #[derive(Debug, Clone)]
 pub struct LoopReviewPromptInput {
@@ -46,6 +57,9 @@ pub struct LoopReviewPromptInput {
     pub acceptance_criteria: Vec<LoopReviewCriterion>,
     /// Exactly the compiler-produced `reviewScope`; never widened here.
     pub review_scope: Vec<LoopReviewTaskInput>,
+    /// Steps reworked in the current Loop retry, with their current requirement
+    /// and latest post-rework result.
+    pub rework_acceptance: Vec<LoopReworkAcceptanceInput>,
     /// Latest valid results of direct predecessors outside `reviewScope` that
     /// are needed to understand the in-scope hand-offs.
     pub required_upstream_results: Vec<UpstreamResultInput>,
@@ -98,6 +112,18 @@ pub fn build_loop_review_prompt(input: &LoopReviewPromptInput) -> String {
         input.retry_count,
         input.retry_budget,
     ));
+
+    if !input.rework_acceptance.is_empty() {
+        sections.push(format!(
+            "## 当前返工验收\n\n当前为返工验收环节。以下步骤是本轮返工目标，请依据返工要求和返工后的最新结果进行验收。\n\n{}",
+            input
+                .rework_acceptance
+                .iter()
+                .map(render_rework_acceptance)
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        ));
+    }
 
     let mut review_requirements = String::from("## 审核要求\n\n");
     review_requirements.push_str(input.review_instructions.trim());
@@ -194,6 +220,25 @@ fn render_scope_task(task: &LoopReviewTaskInput) -> String {
     )
 }
 
+fn render_rework_acceptance(item: &LoopReworkAcceptanceInput) -> String {
+    let mut lines = vec![format!("- 当前返工要求：{}", item.requirement.trim())];
+    lines.push(format!("- 返工后的最新结果：{}", item.summary.trim()));
+    let outputs = render_inline_code_list(&item.outputs);
+    if !outputs.is_empty() {
+        lines.push(format!("- 返工后的实际产物：{outputs}"));
+    }
+    let evidence = render_bullet_lines(&item.evidence);
+    if !evidence.is_empty() {
+        lines.push(format!("- 返工后的验证证据：\n{evidence}"));
+    }
+    format!(
+        "### {}：{}\n\n{}",
+        item.step_key.trim(),
+        item.title.trim(),
+        lines.join("\n")
+    )
+}
+
 fn render_bullet_lines(items: &[String]) -> String {
     items
         .iter()
@@ -262,6 +307,7 @@ mod tests {
                     user_skip_waiver: Some("用户批准保留跳过。".to_string()),
                 },
             ],
+            rework_acceptance: vec![],
             required_upstream_results: vec![],
             scope_edges: vec![
                 "`backend_pi_types_runtime` → `backend_pi_provider_sync`".to_string(),
@@ -334,6 +380,26 @@ mod tests {
         assert!(prompt.contains("`c1` | `required`"));
         assert!(prompt.contains("`c2` | `partial`"));
         assert!(prompt.contains("cargo test -p executors --features qa-mode pi 通过"));
+    }
+
+    #[test]
+    fn current_rework_acceptance_is_rendered_in_a_dedicated_section() {
+        let mut input = sample_input();
+        input.rework_acceptance = vec![LoopReworkAcceptanceInput {
+            step_key: "backend_pi_provider_sync".to_string(),
+            title: "实现 models.json 同步".to_string(),
+            requirement: "补充原子写入失败回滚".to_string(),
+            summary: "已补充临时文件清理和回滚".to_string(),
+            outputs: vec!["crates/services/src/services/pi_models.rs".to_string()],
+            evidence: vec!["pi_models 回滚测试通过".to_string()],
+        }];
+
+        let prompt = build_loop_review_prompt(&input);
+        assert!(prompt.contains("## 当前返工验收"));
+        assert!(prompt.contains("当前为返工验收环节"));
+        assert!(prompt.contains("- 当前返工要求：补充原子写入失败回滚"));
+        assert!(prompt.contains("- 返工后的最新结果：已补充临时文件清理和回滚"));
+        assert!(prompt.contains("- 返工后的验证证据：\n- pi_models 回滚测试通过"));
     }
 
     #[test]
