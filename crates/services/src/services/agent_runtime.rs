@@ -1394,7 +1394,6 @@ async fn discover_models_for_executor(
         Err(error) => Some(error.clone()),
     };
 
-
     if model_fallback == AcpModelFallback::Disabled {
         return match acp_error {
             Some(error) => Err(format!("ACP initialize failed: {error}")),
