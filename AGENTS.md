@@ -105,6 +105,10 @@ and prefer a shared resolver over adding another copy.
   existing operation. Prefer updating the existing function and its call sites
   directly; introduce a wrapper only when it represents a real abstraction,
   compatibility boundary, or independently reusable behavior.
+- Shared services and runtimes must not branch on a concrete adapter or runner
+  to add adapter-specific behavior. Express adapter differences through a
+  public executor capability contract implemented by the adapter, and consume
+  that contract generically.
 - Preserve existing service boundaries and compatibility paths unless the task
   explicitly changes them.
 - Do not commit secrets or local `.env` values.

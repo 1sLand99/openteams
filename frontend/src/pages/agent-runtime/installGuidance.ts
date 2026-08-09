@@ -138,7 +138,7 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
         posix: ["pip install hermes-agent"],
         windows: null,
       },
-      authCommands: null,
+      authCommands: ["hermes acp --setup"],
     },
     GEMINI: {
       requiresNode: true,

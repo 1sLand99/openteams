@@ -20,7 +20,7 @@ pub use config::{
     AcpAccessMode, AcpApprovalMode, AcpApprovalPolicy, AcpAuthMethodInfo, AcpAuthSelection,
     AcpCapabilityProbe, AcpClientServicePolicy, AcpConfigChoice, AcpConfigOptionKind,
     AcpConfigOptionSnapshot, AcpConfigOverride, AcpConfigSelection, AcpConfigSource,
-    AcpConfigValue, AcpExecutionOptions, AcpRunConfig, AcpSessionPreferences,
+    AcpConfigValue, AcpExecutionOptions, AcpResumePolicy, AcpRunConfig, AcpSessionPreferences,
 };
 pub use harness::AcpAgentHarness;
 pub use normalize_logs::*;

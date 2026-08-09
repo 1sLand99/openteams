@@ -119,6 +119,8 @@ pub enum ExecutorError {
     #[error(transparent)]
     TomlDeserialize(#[from] toml::de::Error),
     #[error(transparent)]
+    Yaml(#[from] serde_yaml::Error),
+    #[error(transparent)]
     ExecutorApprovalError(#[from] crate::approvals::ExecutorApprovalError),
     #[error(transparent)]
     CommandBuild(#[from] CommandBuildError),
@@ -229,6 +231,14 @@ impl CodingAgent {
                 self.preconfigured_mcp(),
                 false,
             ),
+            Self::Hermes(_) => McpConfig::new(
+                vec!["mcp_servers".to_string()],
+                serde_json::json!({
+                    "mcp_servers": {}
+                }),
+                self.preconfigured_mcp(),
+                false,
+            ),
             _ => McpConfig::new(
                 vec!["mcpServers".to_string()],
                 serde_json::json!({
@@ -268,6 +278,7 @@ impl CodingAgent {
                 BaseAgentCapability::SessionFork,
                 BaseAgentCapability::SetupHelper,
             ],
+            Self::Hermes(_) => vec![BaseAgentCapability::ContextUsage],
             #[cfg(feature = "qa-mode")]
             Self::QaMock(_) | Self::AcpQa(_) => vec![],
         }
@@ -304,6 +315,36 @@ fn authentication_detected(
         })
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AcpModelFallback {
+    #[default]
+    Allowed,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcpProbeAuthState {
+    Authenticated,
+    Unauthenticated,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcpProbeInterpretation {
+    pub models: Option<Vec<String>>,
+    pub auth_state: Option<AcpProbeAuthState>,
+    pub model_fallback: AcpModelFallback,
+}
+
+impl AcpProbeInterpretation {
+    pub fn from_probe(probe: &acp::AcpCapabilityProbe) -> Self {
+        Self {
+            models: probe.model_ids(),
+            auth_state: None,
+            model_fallback: AcpModelFallback::Allowed,
+        }
+    }
+}
+
 #[async_trait]
 #[enum_dispatch(CodingAgent)]
 pub trait StandardCodingAgentExecutor {
@@ -333,6 +374,16 @@ pub trait StandardCodingAgentExecutor {
         _auth_method_id: Option<&str>,
     ) -> Result<Option<acp::AcpCapabilityProbe>, ExecutorError> {
         Ok(None)
+    }
+
+    fn acp_model_fallback(&self) -> AcpModelFallback {
+        AcpModelFallback::Allowed
+    }
+
+    fn interpret_acp_probe(&self, probe: &acp::AcpCapabilityProbe) -> AcpProbeInterpretation {
+        let mut interpretation = AcpProbeInterpretation::from_probe(probe);
+        interpretation.model_fallback = self.acp_model_fallback();
+        interpretation
     }
 
     /// Report whether this CLI can currently authenticate model requests.

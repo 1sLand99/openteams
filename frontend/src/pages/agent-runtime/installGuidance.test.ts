@@ -176,8 +176,24 @@ check(
   hermesOnLinux?.steps[0]?.commands[0] === "pip install hermes-agent",
 );
 check(
-  "Hermes guide does not handle authentication secrets",
-  getInstallGuideEntry("HERMES")?.authCommands === null,
+  "Hermes guide directs provider setup through its terminal command",
+  getInstallGuideEntry("HERMES")?.authCommands?.[0] === "hermes acp --setup",
+);
+const hermesNeedsSetup = resolveInstallGuide(
+  makeRunner("HERMES", {
+    installed: true,
+    executable: true,
+    availability: { type: "INSTALLATION_FOUND" },
+    auth_state: "unauthenticated",
+    version: "Hermes Agent v0.20.0",
+  }),
+  "linux",
+);
+check(
+  "installed Hermes preserves availability while offering provider setup",
+  hermesNeedsSetup?.steps.length === 1 &&
+    hermesNeedsSetup.steps[0]?.kind === "auth" &&
+    hermesNeedsSetup.steps[0]?.commands[0] === "hermes acp --setup",
 );
 
 const kimiOnLinux = resolveInstallGuide(makeRunner("KIMI_CODE"), "linux");

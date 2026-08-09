@@ -829,6 +829,7 @@ function PermissionsTab({
   acpApprovalMode,
   acpAuthMode,
   acpAuthMethodId,
+  runnerType,
   setAcpAccessMode,
   setAcpAdditionalDirectories,
   setAcpAdditionalDirectoriesOverride,
@@ -844,6 +845,7 @@ function PermissionsTab({
   | "acpApprovalMode"
   | "acpAuthMode"
   | "acpAuthMethodId"
+  | "runnerType"
   | "setAcpAccessMode"
   | "setAcpAdditionalDirectories"
   | "setAcpAdditionalDirectoriesOverride"
@@ -870,14 +872,24 @@ function PermissionsTab({
       >
         <DropdownSelect
           value={acpAccessMode}
-          options={[
-            { id: "", label: "继承全局设置" },
-            { id: "workspace_only", label: "仅工作区" },
-            {
-              id: "full_access",
-              label: t("permissions.fullAccessHighRisk"),
-            },
-          ]}
+          options={
+            runnerType === "HERMES"
+              ? [
+                  { id: "", label: "继承全局设置" },
+                  {
+                    id: "full_access",
+                    label: t("permissions.fullAccessHighRisk"),
+                  },
+                ]
+              : [
+                  { id: "", label: "继承全局设置" },
+                  { id: "workspace_only", label: "仅工作区" },
+                  {
+                    id: "full_access",
+                    label: t("permissions.fullAccessHighRisk"),
+                  },
+                ]
+          }
           showSearch={false}
           className={dropdownClassName}
           onChange={(value) => {
@@ -941,33 +953,35 @@ function PermissionsTab({
         </div>
       </SettingRow>
 
-      <SettingRow
-        title="附加目录"
-        description="启用覆盖后，每行一个绝对目录；空列表会显式清除全局附加目录。"
-      >
-        <div className="space-y-2">
-          <label className="flex items-center gap-2 text-xs text-[var(--ink-subtle)]">
-            <input
-              type="checkbox"
-              checked={acpAdditionalDirectoriesOverride}
+      {runnerType !== "HERMES" && (
+        <SettingRow
+          title="附加目录"
+          description="启用覆盖后，每行一个绝对目录；空列表会显式清除全局附加目录。"
+        >
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-xs text-[var(--ink-subtle)]">
+              <input
+                type="checkbox"
+                checked={acpAdditionalDirectoriesOverride}
+                onChange={(event) =>
+                  setAcpAdditionalDirectoriesOverride(event.target.checked)
+                }
+              />
+              覆盖全局附加目录
+            </label>
+            <textarea
+              value={acpAdditionalDirectories}
+              disabled={!acpAdditionalDirectoriesOverride}
               onChange={(event) =>
-                setAcpAdditionalDirectoriesOverride(event.target.checked)
+                setAcpAdditionalDirectories(event.target.value)
               }
+              rows={4}
+              placeholder={"/absolute/path/one\n/absolute/path/two"}
+              className={`${inputClassName} h-auto resize-y font-mono text-xs disabled:opacity-50`}
             />
-            覆盖全局附加目录
-          </label>
-          <textarea
-            value={acpAdditionalDirectories}
-            disabled={!acpAdditionalDirectoriesOverride}
-            onChange={(event) =>
-              setAcpAdditionalDirectories(event.target.value)
-            }
-            rows={4}
-            placeholder={"/absolute/path/one\n/absolute/path/two"}
-            className={`${inputClassName} h-auto resize-y font-mono text-xs disabled:opacity-50`}
-          />
-        </div>
-      </SettingRow>
+          </div>
+        </SettingRow>
+      )}
       </ConfigSection>
       {pendingRiskyChange && (
         <ConfirmationDialog

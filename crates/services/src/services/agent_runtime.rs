@@ -13,8 +13,8 @@ use executors::{
     command::{CmdOverrides, CommandBuilder, redacted_command},
     env::ExecutionEnv,
     executors::{
-        AvailabilityInfo, BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor,
-        acp::AcpCapabilityProbe, opencode::Opencode, pi::Pi,
+        AcpModelFallback, AcpProbeAuthState, AvailabilityInfo, BaseCodingAgent, CodingAgent,
+        StandardCodingAgentExecutor, acp::AcpCapabilityProbe, opencode::Opencode, pi::Pi,
     },
     profile::{ExecutorConfig, ExecutorConfigs, ProfileError},
 };
@@ -245,6 +245,8 @@ pub struct AgentRuntimeDiagnostics {
 struct AgentRuntimeDiscovery {
     models: Vec<String>,
     version: Option<String>,
+    #[serde(default)]
+    auth_state: Option<AgentRuntimeAuthState>,
     last_checked_at: DateTime<Utc>,
     last_error: Option<String>,
 }
@@ -342,16 +344,12 @@ async fn refresh_runtime_discovery_unlocked(
 
 enum RunnerDiscoveryOutcome {
     Skipped,
-    ModelsDiscovered {
+    Discovered {
         runner: BaseCodingAgent,
-        models: Vec<String>,
+        models: Option<Vec<String>>,
         detected_version: Option<String>,
         version_error: Option<String>,
-    },
-    VersionOnly {
-        runner: BaseCodingAgent,
-        detected_version: Option<String>,
-        version_error: Option<String>,
+        auth_state: Option<AgentRuntimeAuthState>,
     },
     Failed {
         runner: BaseCodingAgent,
@@ -369,12 +367,20 @@ fn apply_discovery_outcomes(
     for outcome in outcomes {
         match outcome {
             RunnerDiscoveryOutcome::Skipped => {}
-            RunnerDiscoveryOutcome::ModelsDiscovered {
+            RunnerDiscoveryOutcome::Discovered {
                 runner,
                 models,
                 detected_version,
                 version_error,
+                auth_state,
             } => {
+                let previous = store.discoveries.get(&runner);
+                let models = models.unwrap_or_else(|| {
+                    previous
+                        .map(|entry| entry.models.clone())
+                        .unwrap_or_default()
+                });
+                let auth_state = auth_state.or_else(|| previous.and_then(|entry| entry.auth_state));
                 let version = version_for_discovery_update(store, runner, detected_version);
                 let last_error =
                     version_error.map(|error| status_error_detail("version_check", error));
@@ -390,32 +396,11 @@ fn apply_discovery_outcomes(
                     AgentRuntimeDiscovery {
                         models,
                         version,
+                        auth_state,
                         last_checked_at: Utc::now(),
                         last_error,
                     },
                 );
-            }
-            RunnerDiscoveryOutcome::VersionOnly {
-                runner,
-                detected_version,
-                version_error,
-            } => {
-                let preserved_models = store
-                    .discoveries
-                    .get(&runner)
-                    .map(|entry| entry.models.clone())
-                    .unwrap_or_default();
-                if let Some(message) = version_error
-                    .clone()
-                    .map(|error| status_error_detail("version_check", error))
-                {
-                    errors.push(AgentRuntimeRefreshError {
-                        runner_type: runner,
-                        message,
-                        preserved_models,
-                    });
-                }
-                cache_version_only_discovery(store, runner, detected_version, version_error);
             }
             RunnerDiscoveryOutcome::Failed {
                 runner,
@@ -436,6 +421,7 @@ fn apply_discovery_outcomes(
                     .or_insert_with(|| AgentRuntimeDiscovery {
                         models: Vec::new(),
                         version: detected_version.clone(),
+                        auth_state: None,
                         last_checked_at: Utc::now(),
                         last_error: Some(message.clone()),
                     });
@@ -491,16 +477,12 @@ async fn discover_runner_runtime(
     let (detected_version, version_error) = split_probe_result(version_result);
 
     match discovered_models {
-        Ok(Some(models)) => RunnerDiscoveryOutcome::ModelsDiscovered {
+        Ok((models, auth_state)) => RunnerDiscoveryOutcome::Discovered {
             runner,
             models,
             detected_version,
             version_error,
-        },
-        Ok(None) => RunnerDiscoveryOutcome::VersionOnly {
-            runner,
-            detected_version,
-            version_error,
+            auth_state,
         },
         Err(message) => RunnerDiscoveryOutcome::Failed {
             runner,
@@ -669,16 +651,30 @@ pub async fn runtime_diagnostics(
     } else {
         (None, None, false)
     };
-    let acp_probe_models = acp_probe.as_ref().and_then(|probe| probe.model_ids());
+    let acp_interpretation = acp_probe
+        .as_ref()
+        .map(|probe| runtime_executor.interpret_acp_probe(probe));
+    let acp_probe_models = acp_interpretation
+        .as_ref()
+        .and_then(|interpretation| interpretation.models.clone());
+    let acp_auth_state = acp_interpretation
+        .as_ref()
+        .and_then(|interpretation| interpretation.auth_state)
+        .map(agent_runtime_auth_state);
     let latest_store = if detected_version.is_some() || acp_probe_succeeded {
         update_store(&path, |latest| {
             if let Some(version) = detected_version.as_deref() {
                 cache_runner_version(latest, runner, version.to_string());
             }
             if acp_probe_succeeded {
-                clear_cached_authentication_required_error(latest, runner);
+                if acp_auth_state != Some(AgentRuntimeAuthState::Unauthenticated) {
+                    clear_cached_authentication_required_error(latest, runner);
+                }
                 if let Some(models) = acp_probe_models.as_ref() {
                     cache_runner_acp_models(latest, runner, models.clone());
+                }
+                if let Some(auth_state) = acp_auth_state {
+                    cache_runner_auth_state(latest, runner, auth_state);
                 }
             }
             Ok(())
@@ -1097,6 +1093,7 @@ fn cache_runner_version(store: &mut AgentRuntimeStore, runner: BaseCodingAgent, 
         .or_insert_with(|| AgentRuntimeDiscovery {
             models: Vec::new(),
             version: Some(version),
+            auth_state: None,
             last_checked_at: now,
             last_error: None,
         });
@@ -1126,34 +1123,36 @@ fn cache_runner_acp_models(
         .or_insert_with(|| AgentRuntimeDiscovery {
             models,
             version: None,
+            auth_state: None,
             last_checked_at: now,
             last_error: None,
         });
 }
 
-fn cache_version_only_discovery(
+fn cache_runner_auth_state(
     store: &mut AgentRuntimeStore,
     runner: BaseCodingAgent,
-    detected_version: Option<String>,
-    version_error: Option<String>,
+    auth_state: AgentRuntimeAuthState,
 ) {
     let now = Utc::now();
-    let last_error = version_error.map(|error| status_error_detail("version_check", error));
     store
         .discoveries
         .entry(runner)
         .and_modify(|entry| {
+            entry.auth_state = Some(auth_state);
             entry.last_checked_at = now;
-            entry.last_error.clone_from(&last_error);
-            if let Some(version) = detected_version.clone() {
-                entry.version = Some(version);
-            }
+            entry.last_error = remove_status_error_stage(
+                remove_status_error_stage(entry.last_error.as_deref(), "model_discovery")
+                    .as_deref(),
+                "acp_probe",
+            );
         })
         .or_insert_with(|| AgentRuntimeDiscovery {
             models: Vec::new(),
-            version: detected_version,
+            version: None,
+            auth_state: Some(auth_state),
             last_checked_at: now,
-            last_error,
+            last_error: None,
         });
 }
 
@@ -1369,7 +1368,7 @@ async fn discover_models_for_executor(
     executor: &CodingAgent,
     current_dir: &Path,
     env: &ExecutionEnv,
-) -> Result<Option<Vec<String>>, String> {
+) -> Result<(Option<Vec<String>>, Option<AgentRuntimeAuthState>), String> {
     let acp_result = coordinated_probe_acp(
         runner,
         executor,
@@ -1379,16 +1378,27 @@ async fn discover_models_for_executor(
         CliProbeCachePolicy::Refresh,
     )
     .await;
-    if let Ok(Some(probe)) = &acp_result
-        && let Some(models) = probe.model_ids()
-    {
-        return Ok(Some(models));
-    }
+    let mut auth_state = None;
+    let mut model_fallback = executor.acp_model_fallback();
+    let acp_error = match &acp_result {
+        Ok(Some(probe)) => {
+            let interpretation = executor.interpret_acp_probe(probe);
+            auth_state = interpretation.auth_state.map(agent_runtime_auth_state);
+            model_fallback = interpretation.model_fallback;
+            if let Some(models) = interpretation.models {
+                return Ok((Some(models), auth_state));
+            }
+            None
+        }
+        Ok(None) => None,
+        Err(error) => Some(error.clone()),
+    };
 
-    if runner == BaseCodingAgent::Pi || runner == BaseCodingAgent::Hermes {
-        return match acp_result {
-            Ok(_) => Ok(None),
-            Err(error) => Err(format!("ACP initialize failed: {error}")),
+
+    if model_fallback == AcpModelFallback::Disabled {
+        return match acp_error {
+            Some(error) => Err(format!("ACP initialize failed: {error}")),
+            None => Ok((None, auth_state)),
         };
     }
 
@@ -1402,11 +1412,14 @@ async fn discover_models_for_executor(
     )
     .await
     {
-        Ok(Some(models)) => Ok(Some(models)),
-        Ok(None) => acp_result.map(|_| None),
-        Err(model_error) => Err(match acp_result {
-            Ok(_) => model_error,
-            Err(acp_error) => {
+        Ok(Some(models)) => Ok((Some(models), auth_state)),
+        Ok(None) => match acp_error {
+            Some(error) => Err(error),
+            None => Ok((None, auth_state)),
+        },
+        Err(model_error) => Err(match acp_error {
+            None => model_error,
+            Some(acp_error) => {
                 format!("ACP probe failed: {acp_error}; model listing failed: {model_error}")
             }
         }),
@@ -1479,7 +1492,9 @@ fn build_status(
         && runtime_dependencies_available(runner, dependency_availability);
     let mut auth_env = ExecutionEnv::new(Default::default(), false, String::new());
     auth_env.merge(&config.env_json);
-    let auth_state = if configured_base.is_authenticated(&auth_env) {
+    let auth_state = if let Some(auth_state) = discovery.and_then(|entry| entry.auth_state) {
+        auth_state
+    } else if configured_base.is_authenticated(&auth_env) {
         AgentRuntimeAuthState::Authenticated
     } else {
         AgentRuntimeAuthState::Unauthenticated
@@ -1505,6 +1520,13 @@ fn build_status(
         run_mode: config.run_mode,
         env_summary: summarize_env(&config.env_json),
         executor_options: config.executor_options,
+    }
+}
+
+fn agent_runtime_auth_state(state: AcpProbeAuthState) -> AgentRuntimeAuthState {
+    match state {
+        AcpProbeAuthState::Authenticated => AgentRuntimeAuthState::Authenticated,
+        AcpProbeAuthState::Unauthenticated => AgentRuntimeAuthState::Unauthenticated,
     }
 }
 
@@ -2098,6 +2120,7 @@ mod tests {
             AgentRuntimeDiscovery {
                 models: preserved_models.clone(),
                 version: Some("pi 0.83.0".to_string()),
+                auth_state: None,
                 last_checked_at: Utc::now(),
                 last_error: None,
             },
@@ -2405,6 +2428,7 @@ mod tests {
             AgentRuntimeDiscovery {
                 models: vec!["openai/gpt-5.2-codex".to_string()],
                 version: Some("opencode 1.2.23".to_string()),
+                auth_state: None,
                 last_checked_at: Utc::now(),
                 last_error: None,
             },
@@ -2430,16 +2454,21 @@ mod tests {
             AgentRuntimeDiscovery {
                 models: vec!["openai/gpt-5.2-codex".to_string()],
                 version: Some("opencode 1.2.23".to_string()),
+                auth_state: None,
                 last_checked_at: Utc::now(),
                 last_error: Some("temporary provider failure".to_string()),
             },
         );
 
-        cache_version_only_discovery(
+        let errors = apply_discovery_outcomes(
             &mut store,
-            runner,
-            Some("opencode 1.2.24".to_string()),
-            None,
+            vec![RunnerDiscoveryOutcome::Discovered {
+                runner,
+                models: None,
+                detected_version: Some("opencode 1.2.24".to_string()),
+                version_error: None,
+                auth_state: None,
+            }],
         );
 
         let discovery = store
@@ -2449,6 +2478,7 @@ mod tests {
         assert_eq!(discovery.models, vec!["openai/gpt-5.2-codex"]);
         assert_eq!(discovery.version.as_deref(), Some("opencode 1.2.24"));
         assert_eq!(discovery.last_error, None);
+        assert!(errors.is_empty());
     }
 
     #[test]
@@ -2456,11 +2486,17 @@ mod tests {
         let runner = BaseCodingAgent::Opencode;
         let mut store = AgentRuntimeStore::default();
 
-        cache_version_only_discovery(
+        let errors = apply_discovery_outcomes(
             &mut store,
-            runner,
-            None,
-            Some("failed to resolve version executable: opencode not found".to_string()),
+            vec![RunnerDiscoveryOutcome::Discovered {
+                runner,
+                models: None,
+                detected_version: None,
+                version_error: Some(
+                    "failed to resolve version executable: opencode not found".to_string(),
+                ),
+                auth_state: None,
+            }],
         );
 
         let discovery = store
@@ -2471,6 +2507,7 @@ mod tests {
             discovery.last_error.as_deref(),
             Some("[version_check] failed to resolve version executable: opencode not found")
         );
+        assert_eq!(errors.len(), 1);
     }
 
     #[test]
@@ -2480,10 +2517,12 @@ mod tests {
 
         let errors = apply_discovery_outcomes(
             &mut store,
-            vec![RunnerDiscoveryOutcome::VersionOnly {
+            vec![RunnerDiscoveryOutcome::Discovered {
                 runner,
+                models: None,
                 detected_version: None,
                 version_error: Some("version command timed out after 12 seconds".to_string()),
+                auth_state: None,
             }],
         );
 
@@ -2508,6 +2547,7 @@ mod tests {
             AgentRuntimeDiscovery {
                 models: Vec::new(),
                 version: None,
+                auth_state: None,
                 last_checked_at: Utc::now(),
                 last_error: Some(
                     "[model_discovery] provider unavailable\n[version_check] executable not found"
@@ -2535,6 +2575,7 @@ mod tests {
             AgentRuntimeDiscovery {
                 models: Vec::new(),
                 version: Some("qodercli 1.2.3".to_string()),
+                auth_state: None,
                 last_checked_at: Utc::now(),
                 last_error: Some(
                     "[model_discovery] I/O error: Authentication required: Authentication is required\n[version_check] temporary warning"
@@ -2583,6 +2624,7 @@ mod tests {
             AgentRuntimeDiscovery {
                 models: Vec::new(),
                 version: Some("pi 0.83.0".to_string()),
+                auth_state: None,
                 last_checked_at: Utc::now(),
                 last_error: Some(
                     "[model_discovery] ACP initialize failed: timeout\n[version_check] temporary warning"
@@ -2611,6 +2653,7 @@ mod tests {
             AgentRuntimeDiscovery {
                 models: vec!["existing-model".to_string()],
                 version: None,
+                auth_state: None,
                 last_checked_at: Utc::now(),
                 last_error: None,
             },
@@ -2681,6 +2724,7 @@ mod tests {
             AgentRuntimeDiscovery {
                 models: vec!["gemini-old".to_string()],
                 version: Some("gemini 1.0.0".to_string()),
+                auth_state: None,
                 last_checked_at: Utc::now(),
                 last_error: None,
             },
@@ -2688,11 +2732,12 @@ mod tests {
 
         let errors = apply_discovery_outcomes(
             &mut store,
-            vec![RunnerDiscoveryOutcome::ModelsDiscovered {
+            vec![RunnerDiscoveryOutcome::Discovered {
                 runner,
-                models: vec!["gemini-new".to_string()],
+                models: Some(vec!["gemini-new".to_string()]),
                 detected_version: Some("gemini 1.1.0".to_string()),
                 version_error: None,
+                auth_state: None,
             }],
         );
 
@@ -2711,6 +2756,7 @@ mod tests {
             AgentRuntimeDiscovery {
                 models: vec!["openai/gpt-5.2-codex".to_string()],
                 version: None,
+                auth_state: None,
                 last_checked_at: Utc::now(),
                 last_error: None,
             },
@@ -2830,6 +2876,7 @@ mod tests {
             AgentRuntimeDiscovery {
                 models: vec!["opencode/free-model".to_string()],
                 version: None,
+                auth_state: None,
                 last_checked_at: Utc::now(),
                 last_error: None,
             },
@@ -2920,11 +2967,12 @@ mod tests {
             update_store(&discovery_path, |store| {
                 Ok(apply_discovery_outcomes(
                     store,
-                    vec![RunnerDiscoveryOutcome::ModelsDiscovered {
+                    vec![RunnerDiscoveryOutcome::Discovered {
                         runner,
-                        models: vec!["kimi-k2.6".to_string()],
+                        models: Some(vec!["kimi-k2.6".to_string()]),
                         detected_version: Some("kimi 1.0.0".to_string()),
                         version_error: None,
+                        auth_state: None,
                     }],
                 ))
             })
@@ -3123,6 +3171,268 @@ mod tests {
                 executors::executors::hermes::Hermes::default()
             )),
             Some("hermes".to_string())
+        );
+    }
+
+    fn hermes_agent() -> CodingAgent {
+        CodingAgent::Hermes(executors::executors::hermes::Hermes::default())
+    }
+
+    #[test]
+    fn hermes_version_command_appends_version_flag_to_base() {
+        let executor = hermes_agent();
+        let base = version_command_base(&executor).expect("version base");
+        let parts = CommandBuilder::new(base)
+            .extend_params(["--version"])
+            .build_initial()
+            .expect("build version command");
+        let display = parts.redacted_display();
+        assert_eq!(display, "hermes --version");
+    }
+
+    #[test]
+    fn hermes_default_profile_reports_not_found_without_cli() {
+        let runner = BaseCodingAgent::Hermes;
+        let mut executor = executors::executors::hermes::Hermes::default();
+        executor.cmd.base_command_override =
+            Some("openteams-hermes-cli-not-installed-never-real".to_string());
+        let executor_config = ExecutorConfig::new_with_default(CodingAgent::Hermes(executor));
+        let base = executor_config.get_default().unwrap();
+        let store = AgentRuntimeStore::default();
+        let status = build_status(
+            runner,
+            &executor_config,
+            base,
+            &store,
+            dependencies(false, false, false),
+        );
+        assert!(!status.installed);
+        assert!(!status.executable);
+        assert!(
+            matches!(status.availability, AvailabilityInfo::NotFound),
+            "Hermes must be NotFound when `hermes` is not on PATH"
+        );
+        assert_eq!(status.discovered_models, Vec::<String>::new());
+        assert_eq!(
+            status.model_source,
+            crate::services::agent_runtime::AgentRuntimeModelSource::None
+        );
+    }
+
+    #[test]
+    fn hermes_executor_options_merge_model_and_command_override() {
+        let runner = BaseCodingAgent::Hermes;
+        let mut executor = hermes_agent();
+        let options = serde_json::json!({
+            "model": "hermes-pro",
+            "base_command_override": "/opt/hermes/bin/hermes"
+        });
+        apply_executor_options(runner, &mut executor, &options).expect("apply options");
+        let CodingAgent::Hermes(config) = executor else {
+            panic!("expected Hermes after merge");
+        };
+        assert_eq!(config.model.as_deref(), Some("hermes-pro"));
+        assert_eq!(
+            config.cmd.base_command_override.as_deref(),
+            Some("/opt/hermes/bin/hermes")
+        );
+    }
+
+    #[test]
+    fn hermes_executor_options_merge_acp_approval_mode() {
+        let runner = BaseCodingAgent::Hermes;
+        let mut executor = hermes_agent();
+        let options = serde_json::json!({
+            "acp": { "approval_mode": "auto_allow" }
+        });
+        apply_executor_options(runner, &mut executor, &options).expect("apply acp options");
+        let CodingAgent::Hermes(config) = executor else {
+            panic!("expected Hermes after acp merge");
+        };
+        let acp = config.acp.expect("acp options present");
+        assert_eq!(
+            acp.approval_mode,
+            Some(executors::executors::acp::AcpApprovalMode::AutoAllow)
+        );
+    }
+
+    #[test]
+    fn hermes_acp_probe_caches_models_and_clears_auth_error() {
+        let runner = BaseCodingAgent::Hermes;
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: Vec::new(),
+                version: None,
+                auth_state: None,
+                last_checked_at: Utc::now(),
+                last_error: Some(status_error_detail(
+                    "acp_probe",
+                    "Auth required: ACP authentication method was not advertised",
+                )),
+            },
+        );
+        let probe_models = vec!["hermes-pro".to_string(), "hermes-flash".to_string()];
+        cache_runner_acp_models(&mut store, runner, probe_models.clone());
+        clear_cached_authentication_required_error(&mut store, runner);
+        let entry = store.discoveries.get(&runner).expect("discovery entry");
+        assert_eq!(entry.models, probe_models);
+        assert!(
+            !entry
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .contains("authentication required"),
+            "successful ACP probe must clear the cached authentication required error"
+        );
+    }
+
+    #[test]
+    fn hermes_acp_probe_failure_preserves_installed_state_and_cached_models() {
+        let runner = BaseCodingAgent::Hermes;
+        let mut executor = executors::executors::hermes::Hermes::default();
+        executor.cmd.base_command_override = Some("/usr/bin/true".to_string());
+        let executor_config = ExecutorConfig::new_with_default(CodingAgent::Hermes(executor));
+        let base = executor_config.get_default().unwrap();
+        let preserved_models = vec!["provider/hermes-pro".to_string()];
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: preserved_models.clone(),
+                version: Some("hermes 1.0.0".to_string()),
+                auth_state: None,
+                last_checked_at: Utc::now(),
+                last_error: None,
+            },
+        );
+
+        let errors = apply_discovery_outcomes(
+            &mut store,
+            vec![RunnerDiscoveryOutcome::Failed {
+                runner,
+                message: "[model_discovery] ACP initialize failed: hermes exited".to_string(),
+                detected_version: None,
+                preserved_models: preserved_models.clone(),
+            }],
+        );
+        let status = build_status(
+            runner,
+            &executor_config,
+            base,
+            &store,
+            dependencies(false, false, false),
+        );
+
+        assert!(status.installed);
+        assert_eq!(status.discovered_models, preserved_models);
+        assert_eq!(errors[0].preserved_models, status.discovered_models);
+        assert!(status.last_error.unwrap().contains("ACP initialize failed"));
+    }
+
+    #[test]
+    fn hermes_cached_probe_auth_state_controls_installed_status() {
+        let runner = BaseCodingAgent::Hermes;
+        let mut executor = executors::executors::hermes::Hermes::default();
+        executor.cmd.base_command_override = Some("/usr/bin/true".to_string());
+        let executor_config = ExecutorConfig::new_with_default(CodingAgent::Hermes(executor));
+        let base = executor_config.get_default().expect("Hermes executor");
+
+        for auth_state in [
+            AgentRuntimeAuthState::Unauthenticated,
+            AgentRuntimeAuthState::Authenticated,
+        ] {
+            let mut store = AgentRuntimeStore::default();
+            store.discoveries.insert(
+                runner,
+                AgentRuntimeDiscovery {
+                    models: Vec::new(),
+                    version: Some("Hermes Agent v0.20.0".to_string()),
+                    auth_state: Some(auth_state),
+                    last_checked_at: Utc::now(),
+                    last_error: None,
+                },
+            );
+            let status = build_status(
+                runner,
+                &executor_config,
+                base,
+                &store,
+                dependencies(false, false, false),
+            );
+            assert!(status.installed);
+            assert!(status.executable);
+            assert_eq!(status.auth_state, auth_state);
+            assert_eq!(status.version.as_deref(), Some("Hermes Agent v0.20.0"));
+        }
+    }
+
+    #[test]
+    fn hermes_discovery_auth_state_is_backward_compatible() {
+        let discovery: AgentRuntimeDiscovery = serde_json::from_value(serde_json::json!({
+            "models": [],
+            "version": "Hermes Agent v0.20.0",
+            "last_checked_at": Utc::now(),
+            "last_error": null
+        }))
+        .expect("legacy discovery JSON");
+        assert_eq!(discovery.auth_state, None);
+    }
+
+    #[test]
+    fn hermes_run_mode_disabled_blocks_executable_while_reporting_installed() {
+        let runner = BaseCodingAgent::Hermes;
+        let executor_config = ExecutorConfig::new_with_default(hermes_agent());
+        let base = executor_config.get_default().unwrap();
+        let mut store = AgentRuntimeStore::default();
+        store.configs.insert(
+            runner,
+            AgentRuntimeConfig {
+                runner_type: runner,
+                run_mode: crate::services::agent_runtime::AgentRunMode::Disabled,
+                env_json: HashMap::new(),
+                executor_options: serde_json::json!({}),
+                updated_at: Utc::now(),
+            },
+        );
+        let status = build_status(
+            runner,
+            &executor_config,
+            base,
+            &store,
+            dependencies(false, false, false),
+        );
+        assert!(!status.executable);
+        assert_eq!(
+            status.run_mode,
+            crate::services::agent_runtime::AgentRunMode::Disabled
+        );
+    }
+
+    #[test]
+    fn hermes_default_profile_has_empty_model_so_probe_is_authoritative() {
+        let profiles = ExecutorConfigs::from_defaults();
+        let executor = profiles
+            .executors
+            .get(&BaseCodingAgent::Hermes)
+            .and_then(|config| {
+                config
+                    .get_default()
+                    .or_else(|| config.configurations.values().next())
+            })
+            .expect("Hermes default profile");
+        let CodingAgent::Hermes(config) = executor else {
+            panic!("expected Hermes default profile");
+        };
+        assert!(
+            config.model.is_none(),
+            "default Hermes profile must not pin a model so the ACP probe stays authoritative"
+        );
+        assert!(
+            config.acp.is_none(),
+            "default Hermes profile must not carry ACP options so member overlays apply cleanly"
         );
     }
 }
