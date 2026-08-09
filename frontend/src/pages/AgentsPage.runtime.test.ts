@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 
 const source = readFileSync(new URL('./AgentsPage.tsx', import.meta.url), 'utf8');
 const apiSource = readFileSync(new URL('../lib/api.ts', import.meta.url), 'utf8');
+const hermesSchema = JSON.parse(
+  readFileSync(new URL('../../../shared/schemas/hermes.json', import.meta.url), 'utf8'),
+) as { properties?: Record<string, { properties?: Record<string, unknown> }> };
 
 assert.match(source, /useEffect\(\(\) => \{[\s\S]*?agentRuntimeApi[\s\S]*?\.getDiagnostics\(runner\.runner_type\)[\s\S]*?\}, \[refreshRevision, runner\.runner_type\]\);/u);
 assert.doesNotMatch(source, /diagnosticsRefreshKey|refreshKey/iu);
@@ -112,6 +115,18 @@ assert.match(
 );
 assert.match(
   source,
+  /const discoveredCliVersion = currentDiagnostics\?\.version;/u,
+);
+assert.match(
+  source,
+  /const acpVersion =[\s\S]*?currentDiagnostics\?\.acp_probe\?\.agent_version/u,
+);
+assert.match(
+  source,
+  /label=\{t\("agents\.details\.acpVersion"\)\}[\s\S]*?value=\{acpVersion\}/u,
+);
+assert.match(
+  source,
   /const isAcpRunner[\s\S]*?runner === (?:\("HERMES" as BaseCodingAgent\)|"HERMES")[\s\S]*?runner === "GEMINI"[\s\S]*?runner === "QWEN_CODE"[\s\S]*?runner === "KIMI_CODE"[\s\S]*?runner === "QODER_CLI"[\s\S]*?runner === "PI"/u,
 );
 assert.match(
@@ -133,6 +148,22 @@ assert.match(
   source,
   /HERMES: \{[\s\S]*?title: "Hermes"/u,
 );
+assert.deepEqual(Object.keys(hermesSchema.properties ?? {}).sort(), [
+  'acp',
+  'additional_params',
+  'append_prompt',
+  'base_command_override',
+  'env',
+  'model',
+]);
+assert.deepEqual(Object.keys(hermesSchema.properties?.acp?.properties ?? {}).sort(), [
+  'access_mode',
+  'additional_directories',
+  'approval_mode',
+  'auth',
+  'config_overrides',
+]);
+assert.doesNotMatch(source, /hermes[_-]?(auth|token|api[_-]?key|config)/iu);
 assert.match(
   source,
   /PI: \{[\s\S]*?title: "Pi"[\s\S]*?logoSrc: "\/logos\/pi-logo\.svg"/u,

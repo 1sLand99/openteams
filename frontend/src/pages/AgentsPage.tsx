@@ -602,16 +602,19 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 }
 
 function AcpRuntimeConfigField({
+  runner,
   value,
   onChange,
   onCommit,
   t,
 }: {
+  runner: BaseCodingAgent;
   value: JsonValue | undefined;
   onChange: (key: string, value: JsonValue | undefined) => void;
   onCommit: () => void | Promise<void>;
   t: TranslateFn;
 }) {
+  const isHermes = runner === "HERMES";
   const [pendingRiskyChange, setPendingRiskyChange] = useState<
     "full_access" | "auto_allow" | null
   >(null);
@@ -655,16 +658,25 @@ function AcpRuntimeConfigField({
         <span className={labelClass}>{t("agents.acp.accessMode.label")}</span>
         <DropdownSelect
           value={accessMode}
-          options={[
-            {
-              id: "workspace_only",
-              label: t("agents.acp.accessMode.workspaceOnly"),
-            },
-            {
-              id: "full_access",
-              label: t("permissions.fullAccessHighRisk"),
-            },
-          ]}
+          options={
+            isHermes
+              ? [
+                  {
+                    id: "full_access",
+                    label: t("permissions.fullAccessHighRisk"),
+                  },
+                ]
+              : [
+                  {
+                    id: "workspace_only",
+                    label: t("agents.acp.accessMode.workspaceOnly"),
+                  },
+                  {
+                    id: "full_access",
+                    label: t("permissions.fullAccessHighRisk"),
+                  },
+                ]
+          }
           showSearch={false}
           className={dropdownClass}
           onChange={(next) => {
@@ -740,29 +752,31 @@ function AcpRuntimeConfigField({
           />
         </label>
       )}
-      <label className="grid grid-cols-[128px_minmax(0,1fr)] items-start gap-3 py-1.5">
-        <span className={`${labelClass} pt-1`}>
-          {t("agents.acp.directories.label")}
-        </span>
-        <textarea
-          value={directories.join("\n")}
-          rows={3}
-          className={`${inputClass} h-auto resize-y py-1.5`}
-          placeholder={t("agents.acp.directories.placeholder")}
-          onChange={(event) =>
-            onChange(
-              "acp",
-              merge({
-                additional_directories: event.target.value
-                  .split(/\r?\n/u)
-                  .map((path) => path.trim())
-                  .filter(Boolean),
-              }),
-            )
-          }
-          onBlur={() => void onCommit()}
-        />
-      </label>
+      {!isHermes && (
+        <label className="grid grid-cols-[128px_minmax(0,1fr)] items-start gap-3 py-1.5">
+          <span className={`${labelClass} pt-1`}>
+            {t("agents.acp.directories.label")}
+          </span>
+          <textarea
+            value={directories.join("\n")}
+            rows={3}
+            className={`${inputClass} h-auto resize-y py-1.5`}
+            placeholder={t("agents.acp.directories.placeholder")}
+            onChange={(event) =>
+              onChange(
+                "acp",
+                merge({
+                  additional_directories: event.target.value
+                    .split(/\r?\n/u)
+                    .map((path) => path.trim())
+                    .filter(Boolean),
+                }),
+              )
+            }
+            onBlur={() => void onCommit()}
+          />
+        </label>
+      )}
       {pendingRiskyChange && (
         <ConfirmationDialog
           idPrefix="agent-acp-permission-confirmation"
@@ -1171,12 +1185,14 @@ function AgentConfigSidebar({
     (diagnosticsLoading
       ? t("agents.details.loading")
       : t("agents.details.notReported"));
-  const discoveredCliVersion = isAcpRunner(runner.runner_type)
-    ? currentDiagnostics?.acp_probe?.agent_version
-    : currentDiagnostics?.version;
+  const discoveredCliVersion = currentDiagnostics?.version;
   const cliVersion = diagnosticsLoading
     ? t("agents.details.checking")
     : (discoveredCliVersion?.trim() || t("agents.details.notReported"));
+  const acpVersion = diagnosticsLoading
+    ? t("agents.details.checking")
+    : (currentDiagnostics?.acp_probe?.agent_version?.trim() ||
+      t("agents.details.notReported"));
   const commandSource = diagnosticsLoading
     ? t("agents.details.loading")
     : currentDiagnostics?.command_source
@@ -1531,6 +1547,12 @@ function AgentConfigSidebar({
               label={t("agents.details.cliVersion")}
               value={cliVersion}
             />
+            {isAcpRunner(runner.runner_type) && (
+              <DetailRow
+                label={t("agents.details.acpVersion")}
+                value={acpVersion}
+              />
+            )}
             <DetailRow
               label={t("agents.details.commandSource")}
               value={commandSource}
@@ -1618,6 +1640,7 @@ function AgentConfigSidebar({
                 />
                 {isAcpRunner(runner.runner_type) && (
                   <AcpRuntimeConfigField
+                    runner={runner.runner_type}
                     value={formData.acp}
                     onChange={handleConfigFieldChange}
                     onCommit={runAutoSave}

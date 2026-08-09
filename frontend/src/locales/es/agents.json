@@ -113,6 +113,7 @@
   "agents.details.baseCommand": "Comando base",
   "agents.details.checking": "Comprobando...",
   "agents.details.cliVersion": "Versión de CLI",
+  "agents.details.acpVersion": "Versión de ACP",
   "agents.details.commandSource": "Origen del comando",
   "agents.details.commandSourceDefault": "Predeterminado",
   "agents.details.commandSourceNative": "Nativo",

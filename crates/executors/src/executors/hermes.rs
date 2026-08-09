@@ -17,11 +17,13 @@ use crate::{
     command::{CmdOverrides, CommandBuilder, apply_overrides, command_is_available},
     env::ExecutionEnv,
     executors::{
-        AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorPrompt, SpawnedChild,
-        StandardCodingAgentExecutor,
+        AcpModelFallback, AcpProbeAuthState, AcpProbeInterpretation, AppendPrompt,
+        AvailabilityInfo, ExecutorError, ExecutorPrompt, SpawnedChild, StandardCodingAgentExecutor,
     },
     mcp_config::{McpConfig, read_canonical_mcp_config},
 };
+
+mod probe;
 
 #[derive(Derivative, Clone, Default, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
@@ -47,6 +49,7 @@ pub struct Hermes {
 
 impl Hermes {
     const BASE_COMMAND: &'static str = "hermes";
+    const SKIP_CONFIGURED_MCP_ENV: &'static str = "HERMES_ACP_SKIP_CONFIGURED_MCP";
 
     fn build_command_builder(&self) -> Result<CommandBuilder, crate::command::CommandBuildError> {
         apply_overrides(
@@ -57,6 +60,21 @@ impl Hermes {
 
     async fn acp_harness(&self) -> Result<AcpAgentHarness, ExecutorError> {
         let options = self.acp.clone().unwrap_or_default();
+        if options.access_mode == Some(AcpAccessMode::WorkspaceOnly) {
+            return Err(ExecutorError::Configuration(
+                "Hermes native tools cannot enforce ACP workspace-only access; use full access in a trusted workspace"
+                    .to_string(),
+            ));
+        }
+        if options
+            .additional_directories
+            .as_ref()
+            .is_some_and(|directories| !directories.is_empty())
+        {
+            return Err(ExecutorError::Configuration(
+                "Hermes ACP does not support additional directories".to_string(),
+            ));
+        }
         let approval_policy = match options.approval_mode.unwrap_or_default() {
             AcpApprovalMode::Ask => AcpApprovalPolicy::Ask,
             AcpApprovalMode::AutoAllow => AcpApprovalPolicy::AutoAllow,
@@ -78,6 +96,12 @@ impl Hermes {
                 ..AcpClientServicePolicy::default()
             });
         if let Some(AcpAuthSelection::MethodId { method_id }) = options.auth {
+            if method_id == probe::HERMES_SETUP_AUTH_METHOD_ID {
+                return Err(ExecutorError::AuthRequired(
+                    "Hermes provider setup is required; run `hermes acp --setup` in a terminal"
+                        .to_string(),
+                ));
+            }
             harness = harness.with_auth_method_id(method_id);
         }
         let config_overrides = options.config_overrides.as_deref().unwrap_or_default();
@@ -109,10 +133,32 @@ impl Hermes {
         );
         Ok(harness.with_mcp_servers(effective.servers))
     }
+
+    fn isolated_env(&self, env: &ExecutionEnv) -> ExecutionEnv {
+        let mut isolated = env.clone();
+        isolated.insert(Self::SKIP_CONFIGURED_MCP_ENV, "1");
+        isolated
+    }
 }
 
 #[async_trait]
 impl StandardCodingAgentExecutor for Hermes {
+    fn acp_model_fallback(&self) -> AcpModelFallback {
+        AcpModelFallback::Disabled
+    }
+
+    fn interpret_acp_probe(&self, probe: &AcpCapabilityProbe) -> AcpProbeInterpretation {
+        AcpProbeInterpretation {
+            models: probe.model_ids(),
+            auth_state: Some(if probe::provider_needs_setup(probe) {
+                AcpProbeAuthState::Unauthenticated
+            } else {
+                AcpProbeAuthState::Authenticated
+            }),
+            model_fallback: self.acp_model_fallback(),
+        }
+    }
+
     fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
         let env = env.clone().with_profile(&self.cmd);
         self.authentication_detected(&env, &[], false)
@@ -143,11 +189,12 @@ impl StandardCodingAgentExecutor for Hermes {
             Some(AcpAuthSelection::MethodId { method_id }) => Some(method_id.clone()),
             _ => None,
         });
+        let isolated_env = self.isolated_env(env);
         Ok(Some(
-            super::acp::runtime::probe_acp_command(
+            probe::probe_hermes_acp_command(
                 self.build_command_builder()?.build_initial()?,
                 current_dir,
-                env,
+                &isolated_env,
                 &self.cmd,
                 auth_method_id
                     .map(str::to_string)
@@ -166,12 +213,13 @@ impl StandardCodingAgentExecutor for Hermes {
         let harness = self.acp_harness().await?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
         let command = self.build_command_builder()?.build_initial()?;
+        let isolated_env = self.isolated_env(env);
         harness
             .spawn_with_command(
                 current_dir,
                 combined_prompt,
                 command,
-                env,
+                &isolated_env,
                 &self.cmd,
                 self.approvals.clone(),
             )
@@ -189,13 +237,14 @@ impl StandardCodingAgentExecutor for Hermes {
         let harness = self.acp_harness().await?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
         let command = self.build_command_builder()?.build_follow_up(&[])?;
+        let isolated_env = self.isolated_env(env);
         harness
             .spawn_follow_up_with_command(
                 current_dir,
                 combined_prompt,
                 session_id,
                 command,
-                env,
+                &isolated_env,
                 &self.cmd,
                 self.approvals.clone(),
             )
@@ -212,12 +261,13 @@ impl StandardCodingAgentExecutor for Hermes {
         let command = self.build_command_builder()?.build_initial()?;
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
+        let isolated_env = self.isolated_env(env);
         harness
             .spawn_structured_with_command(
                 current_dir,
                 prompt,
                 command,
-                env,
+                &isolated_env,
                 &self.cmd,
                 self.approvals.clone(),
             )
@@ -236,13 +286,14 @@ impl StandardCodingAgentExecutor for Hermes {
         let command = self.build_command_builder()?.build_follow_up(&[])?;
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
+        let isolated_env = self.isolated_env(env);
         harness
             .spawn_follow_up_structured_with_command(
                 current_dir,
                 prompt,
                 session_id,
                 command,
-                env,
+                &isolated_env,
                 &self.cmd,
                 self.approvals.clone(),
             )
@@ -346,6 +397,14 @@ mod tests {
                 .and_then(|parent| parent.file_name())
                 .and_then(|name| name.to_str()),
             Some(".hermes")
+        );
+    }
+
+    #[test]
+    fn capabilities_only_advertise_implemented_hermes_features() {
+        assert_eq!(
+            crate::executors::CodingAgent::Hermes(hermes()).capabilities(),
+            vec![crate::executors::BaseAgentCapability::ContextUsage]
         );
     }
 }

@@ -31,7 +31,8 @@ use std::{
 use executors::{
     env::{ExecutionEnv, RepoContext},
     executors::{
-        ExecutorExitResult, ExecutorPrompt, StandardCodingAgentExecutor,
+        AcpProbeAuthState, ExecutorExitResult, ExecutorPrompt, ExecutorPromptImage,
+        StandardCodingAgentExecutor,
         acp::{
             AcpEvent, AcpExecutionOptions,
             events::AcpRuntimeEvent,
@@ -148,7 +149,7 @@ fn make_hermes_and_env(
     let home_guard = HomeIsolationGuard::acquire(&env_info.home);
     let mut hermes = Hermes::default();
     let hermes_path = env_info.bin.join("hermes");
-    hermes.cmd.base_command_override = Some(format!("{} acp", hermes_path.display()));
+    hermes.cmd.base_command_override = Some(hermes_path.display().to_string());
     let mut env = ExecutionEnv::new(
         RepoContext::new(root.to_path_buf(), Vec::new()),
         false,
@@ -326,7 +327,7 @@ async fn offline_hermes_lifecycle_new_prompt_follow_up_cancel_and_startup_failur
     let fail_env_info = install_offline_hermes_fixture(fail_temp.path(), false);
     let mut fail_hermes = Hermes::default();
     let fail_hermes_path = fail_env_info.bin.join("hermes");
-    fail_hermes.cmd.base_command_override = Some(format!("{} acp", fail_hermes_path.display()));
+    fail_hermes.cmd.base_command_override = Some(fail_hermes_path.display().to_string());
     let mut fail_env = ExecutionEnv::new(
         RepoContext::new(fail_temp.path().to_path_buf(), Vec::new()),
         false,
@@ -371,11 +372,95 @@ async fn offline_hermes_probe_initializes_and_reports_protocol_and_models() {
     assert_eq!(probe.agent_name.as_deref(), Some("hermes-fake-acp"));
     assert!(probe.supports_session_resume);
     assert!(probe.supports_session_load);
-    assert!(probe.supports_session_close);
-    assert!(probe.supports_session_delete);
+    assert!(!probe.supports_session_close);
+    assert!(!probe.supports_session_delete);
+    assert!(!probe.supports_additional_directories);
     let model_ids = probe.model_ids().expect("model ids");
-    assert!(model_ids.contains(&"hermes-pro".to_string()));
-    assert!(model_ids.contains(&"hermes-flash".to_string()));
+    assert!(model_ids.contains(&"openrouter:hermes-pro".to_string()));
+    assert!(model_ids.contains(&"nous:hermes-flash".to_string()));
+}
+
+#[tokio::test]
+async fn offline_hermes_probe_reports_setup_without_creating_a_session() {
+    let temp = tempfile::tempdir().expect("setup workspace");
+    let (hermes, mut env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
+    env.insert("OPENTEAMS_FAKE_HERMES_NEEDS_SETUP", "1");
+    let probe = hermes
+        .probe_acp(temp.path(), &env, None)
+        .await
+        .expect("probe")
+        .expect("probe result");
+    assert_eq!(
+        hermes.interpret_acp_probe(&probe).auth_state,
+        Some(AcpProbeAuthState::Unauthenticated)
+    );
+    assert!(probe.model_ids().is_none());
+
+    let log = fs::read_to_string(temp.path().join("protocol.jsonl")).expect("protocol log");
+    assert!(log.contains("hermes-setup"));
+    assert!(!log.contains("session/new"));
+    assert!(log.contains(r#""argv":["acp"]"#), "exact argv: {log}");
+    assert!(
+        log.contains(r#""skip_configured_mcp":"1""#),
+        "ambient MCP opt-out must be set: {log}"
+    );
+}
+
+#[tokio::test]
+async fn offline_hermes_session_metadata_failure_keeps_initialize_metadata() {
+    let temp = tempfile::tempdir().expect("metadata failure workspace");
+    let (hermes, mut env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
+    env.insert("OPENTEAMS_FAKE_HERMES_SESSION_PROBE_FAIL", "1");
+    let probe = hermes
+        .probe_acp(temp.path(), &env, None)
+        .await
+        .expect("initialize must remain successful")
+        .expect("probe result");
+    assert_eq!(probe.agent_version.as_deref(), Some("0.0.1-fixture"));
+    assert_eq!(
+        hermes.interpret_acp_probe(&probe).auth_state,
+        Some(AcpProbeAuthState::Authenticated)
+    );
+    assert!(probe.model_ids().is_none());
+}
+
+#[tokio::test]
+async fn offline_hermes_rejects_unsupported_security_options_and_setup_auth() {
+    use executors::executors::acp::{AcpAccessMode, AcpAuthSelection};
+
+    let temp = tempfile::tempdir().expect("unsupported options workspace");
+    let (mut hermes, env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
+    hermes.acp = Some(AcpExecutionOptions {
+        access_mode: Some(AcpAccessMode::WorkspaceOnly),
+        ..Default::default()
+    });
+    let error = hermes
+        .spawn(temp.path(), "workspace-only", &env)
+        .await
+        .expect_err("workspace-only must be rejected");
+    assert!(error.to_string().contains("workspace-only"));
+
+    hermes.acp = Some(AcpExecutionOptions {
+        additional_directories: Some(vec![temp.path().join("extra").display().to_string()]),
+        ..Default::default()
+    });
+    let error = hermes
+        .spawn(temp.path(), "additional-directory", &env)
+        .await
+        .expect_err("additional directories must be rejected");
+    assert!(error.to_string().contains("additional directories"));
+
+    hermes.acp = Some(AcpExecutionOptions {
+        auth: Some(AcpAuthSelection::MethodId {
+            method_id: "hermes-setup".to_string(),
+        }),
+        ..Default::default()
+    });
+    let error = hermes
+        .spawn(temp.path(), "setup", &env)
+        .await
+        .expect_err("setup marker must not be authenticated over ACP");
+    assert!(error.to_string().contains("hermes acp --setup"));
 }
 
 #[tokio::test]
@@ -395,20 +480,15 @@ async fn offline_hermes_probe_model_and_dynamic_option_mapping_is_exact() {
     match &model_option.kind {
         executors::executors::acp::AcpConfigOptionKind::Select { options, .. } => {
             let values: Vec<&str> = options.iter().map(|c| c.value.as_str()).collect();
-            assert_eq!(values, vec!["hermes-pro", "hermes-flash"]);
+            assert_eq!(values, vec!["openrouter:hermes-pro", "nous:hermes-flash"]);
             let names: Vec<&str> = options.iter().map(|c| c.name.as_str()).collect();
             assert_eq!(names, vec!["Hermes Pro", "Hermes Flash"]);
         }
         other => panic!("expected select model option, got {other:?}"),
     }
-    assert_eq!(model_option.id, "session-model");
+    assert_eq!(model_option.id, "model");
     assert_eq!(model_option.name, "Model");
-    assert!(
-        probe
-            .config_options
-            .iter()
-            .any(|o| o.category.as_deref() == Some("thought_level"))
-    );
+    assert_eq!(probe.config_options.len(), 1);
 }
 
 #[tokio::test]
@@ -422,7 +502,10 @@ async fn offline_hermes_list_models_returns_acp_probe_models() {
         .expect("models present");
     assert_eq!(
         models,
-        vec!["hermes-pro".to_string(), "hermes-flash".to_string()]
+        vec![
+            "openrouter:hermes-pro".to_string(),
+            "nous:hermes-flash".to_string(),
+        ]
     );
 }
 
@@ -438,6 +521,14 @@ async fn offline_hermes_token_usage_is_projected() {
     assert!(matches!(exit, ExecutorExitResult::Success));
     assert!(events.iter().any(|e| matches!(e, AcpEvent::Usage(_))));
     assert!(events.iter().any(|e| matches!(e, AcpEvent::TokenUsage(_))));
+    assert!(events.iter().any(|e| matches!(e, AcpEvent::Thought(_))));
+    assert!(events.iter().any(|e| matches!(e, AcpEvent::Plan(_))));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AcpEvent::AvailableCommands(_)))
+    );
+    assert!(events.iter().any(|e| matches!(e, AcpEvent::SessionInfo(_))));
 }
 
 #[tokio::test]
@@ -465,7 +556,11 @@ async fn offline_hermes_structured_prompt_completes_and_echoes() {
     let (hermes, env, env_info, _home_guard) = make_hermes_and_env(temp.path(), true);
     let prompt = ExecutorPrompt {
         text: "structured-turn".to_string(),
-        images: Vec::new(),
+        images: vec![ExecutorPromptImage {
+            data: "aGVybWVzLWltYWdl".to_string(),
+            mime_type: "image/png".to_string(),
+            uri: Some("fixture://hermes-image".to_string()),
+        }],
     };
     let spawned = hermes
         .spawn_structured(temp.path(), &prompt, &env)
@@ -480,6 +575,11 @@ async fn offline_hermes_structured_prompt_completes_and_echoes() {
             .expect("prompts")
             .trim(),
         "structured-turn"
+    );
+    let log = fs::read_to_string(temp.path().join("protocol.jsonl")).expect("protocol log");
+    assert!(
+        log.contains(r#""prompt_types":["text","image"]"#),
+        "structured prompt must retain its image block: {log}"
     );
 }
 
@@ -549,7 +649,7 @@ async fn offline_hermes_probe_timeout_is_reported_when_fixture_hangs() {
         ),
     );
     let error = tokio::time::timeout(
-        Duration::from_secs(20),
+        Duration::from_secs(25),
         hermes.probe_acp(temp.path(), &hang_env, None),
     )
     .await
@@ -956,16 +1056,16 @@ async fn offline_hermes_protocol_log_records_all_methods() {
 }
 
 #[tokio::test]
-async fn offline_hermes_config_override_applies_session_set_config_option() {
+async fn offline_hermes_config_override_applies_legacy_session_model() {
     use executors::executors::acp::{AcpConfigOverride, AcpConfigValue};
 
     let temp = tempfile::tempdir().expect("override workspace");
     let (mut hermes, env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
     hermes.acp = Some(AcpExecutionOptions {
         config_overrides: Some(vec![AcpConfigOverride {
-            option_id: "session-model".to_string(),
+            option_id: "model".to_string(),
             value: AcpConfigValue::ValueId {
-                value: "hermes-flash".to_string(),
+                value: "nous:hermes-flash".to_string(),
             },
             label_snapshot: Some("Model".to_string()),
             category_snapshot: Some("model".to_string()),
@@ -985,8 +1085,8 @@ async fn offline_hermes_config_override_applies_session_set_config_option() {
     if protocol_log.exists() {
         let log = fs::read_to_string(&protocol_log).expect("protocol log");
         assert!(
-            log.contains("session/set_config_option"),
-            "config override must drive session/set_config_option: {log}"
+            log.contains("session/set_model"),
+            "config override must drive session/set_model: {log}"
         );
     }
 }
@@ -1020,7 +1120,7 @@ async fn offline_hermes_isolated_home_reads_per_test_mcp_config_not_host() {
 
     let mut hermes = Hermes::default();
     let hermes_path = env_info.bin.join("hermes");
-    hermes.cmd.base_command_override = Some(format!("{} acp", hermes_path.display()));
+    hermes.cmd.base_command_override = Some(hermes_path.display().to_string());
     let mut env = ExecutionEnv::new(
         RepoContext::new(temp.path().to_path_buf(), Vec::new()),
         false,

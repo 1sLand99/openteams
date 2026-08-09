@@ -113,6 +113,7 @@
   "agents.details.baseCommand": "ベースコマンド",
   "agents.details.checking": "確認中...",
   "agents.details.cliVersion": "CLI バージョン",
+  "agents.details.acpVersion": "ACP バージョン",
   "agents.details.commandSource": "コマンドのソース",
   "agents.details.commandSourceDefault": "デフォルト",
   "agents.details.commandSourceNative": "ネイティブ",
