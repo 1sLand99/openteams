@@ -274,7 +274,7 @@ impl CodingAgent {
             }
             Self::CursorAgent(_) => vec![BaseAgentCapability::SetupHelper],
             Self::Copilot(_) => vec![],
-            Self::KimiCode(_) | Self::QoderCli(_) | Self::Pi(_) | Self::Hermes(_) => vec![
+            Self::KimiCode(_) | Self::QoderCli(_) | Self::Pi(_) => vec![
                 BaseAgentCapability::SessionFork,
                 BaseAgentCapability::SetupHelper,
             ],
