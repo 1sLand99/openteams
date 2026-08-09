@@ -335,12 +335,24 @@ impl Default for AcpClientServicePolicy {
     }
 }
 
+/// How the generic ACP runtime classifies a refusal after session recovery.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AcpResumePolicy {
+    /// Preserve the Agent's refusal as a normal turn result.
+    #[default]
+    PreserveRefusal,
+    /// If recovery had to reuse the requested ID because the response omitted
+    /// `sessionId`, classify a refusal as an invalid session.
+    RefusalMeansInvalidSession,
+}
+
 /// Per-run inputs for the generic ACP runtime.
 #[derive(Debug, Clone)]
 pub struct AcpRunConfig {
     pub approval_policy: AcpApprovalPolicy,
     pub auth_method_id: Option<String>,
     pub session: AcpSessionPreferences,
+    pub resume_policy: AcpResumePolicy,
     pub client_services: AcpClientServicePolicy,
     pub additional_directories: Vec<PathBuf>,
     pub mcp_servers: Vec<McpServer>,
@@ -352,6 +364,7 @@ impl Default for AcpRunConfig {
             approval_policy: AcpApprovalPolicy::Ask,
             auth_method_id: None,
             session: AcpSessionPreferences::default(),
+            resume_policy: AcpResumePolicy::default(),
             client_services: AcpClientServicePolicy::default(),
             additional_directories: Vec::new(),
             mcp_servers: Vec::new(),

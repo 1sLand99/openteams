@@ -23,8 +23,8 @@ use crate::{
     command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
     env::ExecutionEnv,
     executors::{
-        AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorPrompt, ExecutorRunCleanup,
-        SpawnedChild, StandardCodingAgentExecutor,
+        AcpModelFallback, AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorPrompt,
+        ExecutorRunCleanup, SpawnedChild, StandardCodingAgentExecutor,
     },
     mcp_config::{McpConfig, read_canonical_mcp_config},
 };
@@ -593,6 +593,10 @@ fn filter_pi_thinking_options(
 
 #[async_trait]
 impl StandardCodingAgentExecutor for Pi {
+    fn acp_model_fallback(&self) -> AcpModelFallback {
+        AcpModelFallback::Disabled
+    }
+
     fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
         let env = env.clone().with_profile(&self.cmd);
         let auth_file_exists = dirs::home_dir()
