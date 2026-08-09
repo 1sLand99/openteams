@@ -125,7 +125,11 @@ const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
     logoClassName: "h-8 w-8",
   },
   GEMINI: { title: "Google Gemini", path: brandIconPaths.gemini },
-  HERMES: { title: "Hermes" },
+  HERMES: {
+    title: "Hermes",
+    logoSrc: "/logos/hermes-logo.png",
+    logoClassName: "h-[22px] w-[22px]",
+  },
   KIMI_CODE: { title: "Kimi", logoSrc: "/logos/kimi-logo.svg" },
   OPENCODE: {
     title: "OpenCode",

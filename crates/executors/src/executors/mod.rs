@@ -119,6 +119,8 @@ pub enum ExecutorError {
     #[error(transparent)]
     TomlDeserialize(#[from] toml::de::Error),
     #[error(transparent)]
+    Yaml(#[from] serde_yaml::Error),
+    #[error(transparent)]
     ExecutorApprovalError(#[from] crate::approvals::ExecutorApprovalError),
     #[error(transparent)]
     CommandBuild(#[from] CommandBuildError),
@@ -225,6 +227,14 @@ impl CodingAgent {
                 vec!["mcpServers".to_string()],
                 serde_json::json!({
                     "mcpServers": {}
+                }),
+                self.preconfigured_mcp(),
+                false,
+            ),
+            Self::Hermes(_) => McpConfig::new(
+                vec!["mcp_servers".to_string()],
+                serde_json::json!({
+                    "mcp_servers": {}
                 }),
                 self.preconfigured_mcp(),
                 false,

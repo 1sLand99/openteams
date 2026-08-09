@@ -98,7 +98,7 @@ impl Hermes {
             harness = harness.with_config_override(selection);
         }
         let canonical = match self.default_mcp_config_path() {
-            Some(path) => read_canonical_mcp_config(&path, &McpConfig::canonical_acp()).await?,
+            Some(path) => read_canonical_mcp_config(&path, &McpConfig::hermes()).await?,
             None => serde_json::json!({ "mcpServers": {} }),
         };
         let effective = resolve_effective_mcp_config(&canonical, &self.acp_mcp_policy)?;
@@ -254,7 +254,7 @@ impl StandardCodingAgentExecutor for Hermes {
     }
 
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf> {
-        dirs::home_dir().map(|home| home.join(".hermes").join("mcp.json"))
+        dirs::home_dir().map(|home| home.join(".hermes").join("config.yaml"))
     }
 
     fn get_availability_info(&self) -> AvailabilityInfo {
@@ -329,5 +329,23 @@ mod tests {
     fn hermes_is_not_authenticated_by_default() {
         let env = ExecutionEnv::new(Default::default(), false, String::new());
         assert!(!hermes().is_authenticated(&env));
+    }
+
+    #[test]
+    fn default_mcp_config_path_is_hermes_config_yaml() {
+        let path = hermes()
+            .default_mcp_config_path()
+            .expect("hermes must expose a default MCP config path");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("config.yaml"),
+            "Hermes stores MCP servers under mcp_servers in ~/.hermes/config.yaml, not mcp.json"
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str()),
+            Some(".hermes")
+        );
     }
 }
