@@ -370,9 +370,7 @@ fn structured_acceptance_results(
         .iter()
         .filter_map(|item| {
             let mut result: WorkflowAcceptanceResult = serde_json::from_value(item.clone()).ok()?;
-            if is_loop
-                && let Some(step_key) = item.get("step_key").and_then(|raw| raw.as_str())
-            {
+            if is_loop && let Some(step_key) = item.get("step_key").and_then(|raw| raw.as_str()) {
                 result.criterion = format!("[{step_key}] {}", result.criterion);
             }
             Some(result)
