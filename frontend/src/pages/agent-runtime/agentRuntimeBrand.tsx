@@ -51,7 +51,7 @@ export const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
   HERMES: {
     title: "Hermes",
     logoSrc: "/logos/hermes-logo.png",
-    logoClassName: "h-[22px] w-[22px]",
+    logoClassName: "h-[26px] w-[26px]",
   },
   KIMI_CODE: { title: "Kimi", logoSrc: "/logos/kimi-logo.svg" },
   OPENCODE: {
