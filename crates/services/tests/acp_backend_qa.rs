@@ -750,6 +750,7 @@ async fn verify_workflow(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_free_chat_prompt(
     db: &DBService,
     session: &ChatSession,
