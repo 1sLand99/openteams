@@ -218,6 +218,7 @@ fn fake_hermes_fixture_files_are_present_and_secret_safe() {
     assert!(hermes_acp.contains("session/resume"));
     assert!(hermes_acp.contains("session/load"));
     assert!(hermes_acp.contains("STALE_RESUME_REJECT"));
+    assert!(hermes_acp.contains("STALE_RESUME_REFUSAL"));
     assert!(!hermes_acp.contains("API_KEY"));
     assert!(!hermes_acp.contains("SECRET"));
     assert!(!hermes_acp.contains("TOKEN"));
@@ -754,6 +755,49 @@ async fn offline_hermes_stale_session_follow_up_is_classified_as_configuration_e
         log.contains("stale_session_rejected"),
         "protocol log must record the stale session rejection: {log}"
     );
+}
+
+#[tokio::test]
+async fn offline_hermes_stale_resume_refusal_is_not_reported_as_success() {
+    // Hermes can acknowledge session/resume without a sessionId and only
+    // reveal that the session is invalid when the following prompt is refused.
+    // The adapter must preserve the old ID only for the wire request, never as
+    // evidence that the follow-up succeeded.
+    let temp = tempfile::tempdir().expect("stale refusal workspace");
+    let (hermes, mut env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
+    env.insert("OPENTEAMS_FAKE_HERMES_STALE_RESUME_REFUSAL", "1");
+    let stale_session_id = "hermes-session-that-was-expired";
+    let spawned = hermes
+        .spawn_follow_up(
+            temp.path(),
+            "follow-up-stale-refusal",
+            stale_session_id,
+            None,
+            &env,
+        )
+        .await
+        .expect("ACP startup must complete before the prompt reveals the stale session");
+    let (events, exit) = finish_turn(spawned).await;
+    assert!(matches!(
+        exit,
+        ExecutorExitResult::FailureWithError(ref message)
+            if message.contains("session recovery") && message.contains("session is invalid")
+    ));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AcpEvent::Error(message)
+            if message.contains("session recovery") && message.contains("session is invalid")
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AcpEvent::Done(_)))
+    );
+
+    let protocol_log = temp.path().join("protocol.jsonl");
+    let log = fs::read_to_string(protocol_log).expect("protocol log");
+    assert!(log.contains("stale_session_resumed_without_id"));
+    assert!(log.contains("stale_session_prompt_refused"));
 }
 
 #[tokio::test]

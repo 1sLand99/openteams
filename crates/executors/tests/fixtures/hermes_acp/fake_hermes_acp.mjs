@@ -64,6 +64,8 @@ const mcpToolCallTrigger = process.env.OPENTEAMS_FAKE_HERMES_MCP_TOOL_CALL;
 const staleSessionMode = process.env.OPENTEAMS_FAKE_HERMES_STALE_SESSION === "1";
 const staleResumeRejectMode =
   process.env.OPENTEAMS_FAKE_HERMES_STALE_RESUME_REJECT === "1";
+const staleResumeRefusalMode =
+  process.env.OPENTEAMS_FAKE_HERMES_STALE_RESUME_REFUSAL === "1";
 const KNOWN_SESSION_IDS = new Set([SESSION_ID]);
 const sessionMcpNames = new Map();
 
@@ -436,6 +438,18 @@ rl.on("line", (line) => {
         });
         break;
       }
+      if (staleResumeRefusalMode && !KNOWN_SESSION_IDS.has(sid)) {
+        logProtocol({
+          event: "stale_session_resumed_without_id",
+          method,
+          session_id: sid,
+        });
+        respond(id, {
+          models: makeLegacyModels(MODEL_ID),
+          modes: makeLegacyModes(),
+        });
+        break;
+      }
       rememberSessionMcpNames(sid, params);
       respond(id, {
         sessionId: sid,
@@ -458,6 +472,14 @@ rl.on("line", (line) => {
         } catch {}
       }
       if (hangMode || text.includes("[qa:sleep]")) {
+        break;
+      }
+      if (staleResumeRefusalMode && !KNOWN_SESSION_IDS.has(sid)) {
+        logProtocol({
+          event: "stale_session_prompt_refused",
+          session_id: sid,
+        });
+        respond(id, { stopReason: "refusal" });
         break;
       }
       if (

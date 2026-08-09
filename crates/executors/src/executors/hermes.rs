@@ -9,7 +9,7 @@ use workspace_utils::msg_store::MsgStore;
 
 use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
-    AcpCapabilityProbe, AcpClientServicePolicy, AcpExecutionOptions,
+    AcpCapabilityProbe, AcpClientServicePolicy, AcpExecutionOptions, AcpResumePolicy,
     mcp::{AcpMcpPolicy, resolve_effective_mcp_config},
 };
 use crate::{
@@ -87,6 +87,7 @@ impl Hermes {
         let full_access = options.access_mode.unwrap_or_default() == AcpAccessMode::FullAccess;
         let mut harness = AcpAgentHarness::new()
             .with_approval_policy(approval_policy)
+            .with_resume_policy(AcpResumePolicy::RefusalMeansInvalidSession)
             .with_additional_directories(additional_directories)
             .with_client_services(AcpClientServicePolicy {
                 read_text_file: true,
