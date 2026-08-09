@@ -279,7 +279,7 @@ pub fn final_node_result_from_step(
 
     let status = structured
         .as_ref()
-        .and_then(|value| structured_status(value))
+        .and_then(structured_status)
         .unwrap_or_else(|| fallback_status(step));
 
     let outputs = if payload.outputs.is_empty() {
@@ -370,10 +370,10 @@ fn structured_acceptance_results(
         .iter()
         .filter_map(|item| {
             let mut result: WorkflowAcceptanceResult = serde_json::from_value(item.clone()).ok()?;
-            if is_loop {
-                if let Some(step_key) = item.get("step_key").and_then(|raw| raw.as_str()) {
-                    result.criterion = format!("[{step_key}] {}", result.criterion);
-                }
+            if is_loop
+                && let Some(step_key) = item.get("step_key").and_then(|raw| raw.as_str())
+            {
+                result.criterion = format!("[{step_key}] {}", result.criterion);
             }
             Some(result)
         })

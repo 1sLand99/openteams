@@ -2792,7 +2792,7 @@ impl WorkflowOrchestrator {
                 pool,
                 chat_runner,
                 execution,
-                &workflow_session,
+                workflow_session,
                 plan,
                 running_step,
                 current_steps,
@@ -2845,14 +2845,14 @@ impl WorkflowOrchestrator {
         let response_language_instruction =
             resolve_workflow_response_language_instruction(&ui_config.language);
         let contract = Self::execution_contract_for_step(plan, &running_step);
-        let review_criteria = (running_step.step_type == WorkflowStepType::Review)
-            .then(|| {
-                workflow_runtime::build_workflow_review_criteria(
-                    &contract.acceptance_leveled,
-                    Some(&running_step.instructions),
-                )
-            })
-            .unwrap_or_default();
+        let review_criteria = if running_step.step_type == WorkflowStepType::Review {
+            workflow_runtime::build_workflow_review_criteria(
+                &contract.acceptance_leveled,
+                Some(&running_step.instructions),
+            )
+        } else {
+            Default::default()
+        };
         let mut prompt = if running_step.step_type == WorkflowStepType::Review {
             // 普通 review 节点（无 reviewScope）复用 step_review builder（设计 §6.4）。
             prompt_builders::step_review::build_step_review_prompt(

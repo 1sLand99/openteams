@@ -188,12 +188,12 @@ pub fn extract_last_json_payload(raw_output: &str) -> Option<String> {
     let mut last_span: Option<(usize, usize)> = None;
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'{' {
-            if let Some(end) = balanced_object_end(trimmed, index) {
-                last_span = Some((index, end));
-                index = end + 1;
-                continue;
-            }
+        if bytes[index] == b'{'
+            && let Some(end) = balanced_object_end(trimmed, index)
+        {
+            last_span = Some((index, end));
+            index = end + 1;
+            continue;
         }
         index += 1;
     }
