@@ -1634,7 +1634,7 @@ rl.on("close", () => {
             .expect("first runtime files")
             .map(|entry| entry.expect("runtime entry").path())
             .collect::<Vec<_>>();
-        assert_eq!(first_runtime_files.len(), 4);
+        assert_eq!(first_runtime_files.len(), 5);
         assert!(first_runtime_files.iter().all(|path| path.exists()));
         let (first_events, first_exit) = finish_turn(first).await;
         assert!(matches!(

@@ -211,7 +211,7 @@ async fn offline_pi_lifecycle_new_prompt_follow_up_cancel_and_startup_failure() 
         .expect("runtime files")
         .map(|e| e.expect("entry").path())
         .collect();
-    assert_eq!(first_files.len(), 4);
+    assert_eq!(first_files.len(), 5);
     let (first_events, first_exit) = finish_turn(first).await;
     assert!(matches!(first_exit, ExecutorExitResult::Success));
     let session_id = first_events
