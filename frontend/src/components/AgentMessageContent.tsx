@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { ThinkingOrb } from "thinking-orbs";
 import { AgentActivityPanel } from "@/components/AgentActivityPanel";
 import { AgentArtifactFileList } from "@/components/AgentArtifactFileList";
 import { AgentMarkdown } from "@/components/AgentMarkdown";
@@ -29,6 +30,24 @@ const runFileRowsCacheKey = (
   sessionId: string | undefined,
   runId: string | undefined,
 ): string | null => (runId ? `${sessionId ?? "unknown"}:${runId}` : null);
+
+/**
+ * Activity pulses inside this window drive the thinking-orb speed: more log
+ * lines per second → faster animation (clamped to [1, 3]).
+ */
+const ORB_SPEED_WINDOW_MS = 5000;
+const ORB_SPEED_MIN = 1;
+const ORB_SPEED_MAX = 3;
+
+/**
+ * thinking-orbs ships no error-state variant, so a failed run keeps the orb
+ * frozen and tints it red with a CSS filter (works for both light- and
+ * dark-theme ink).
+ */
+const ORB_ERROR_STYLE: React.CSSProperties = {
+  filter:
+    "invert(32%) sepia(83%) saturate(3200%) hue-rotate(338deg) brightness(96%)",
+};
 
 interface AgentMessageContentProps {
   message: Message;
@@ -84,6 +103,52 @@ export const AgentMessageContent: React.FC<AgentMessageContentProps> = ({
   const hasVisibleActivityLines = visibleActivityLines.length > 0;
   const hasActivityPanelState =
     loadState === "pruned" || loadState === "error";
+  // Stderr noise from a healthy run is also logged as error lines, so only a
+  // run that *ends* on an error line (or fails to load) counts as failed.
+  const lastActivityLineType =
+    activity.lines[activity.lines.length - 1]?.line_type;
+  const hasActivityError =
+    loadState === "error" || lastActivityLineType === "error";
+
+  // ---- Thinking-orb speed ----------------------------------------------------
+  // Each activity update (new line or streamed content growth) counts as one
+  // pulse; a 1s ticker turns the recent pulse rate into a clamped speed
+  // multiplier for the running orb. The idle orb stays frozen (`paused`).
+  const activityPulseRef = useRef<number[]>([]);
+  const [orbSpeed, setOrbSpeed] = useState(ORB_SPEED_MIN);
+  const lastActivityLine = activity.lines[activity.lines.length - 1];
+  const activitySignature = `${activity.lines.length}:${lastActivityLine?.content.length ?? 0}`;
+
+  useEffect(() => {
+    if (!isRunning) return;
+    activityPulseRef.current.push(Date.now());
+  }, [activitySignature, isRunning]);
+
+  useEffect(() => {
+    if (!isRunning) {
+      activityPulseRef.current = [];
+      setOrbSpeed(ORB_SPEED_MIN);
+      return;
+    }
+    const updateOrbSpeed = () => {
+      const now = Date.now();
+      const pulses = activityPulseRef.current.filter(
+        (ts) => now - ts <= ORB_SPEED_WINDOW_MS,
+      );
+      activityPulseRef.current = pulses;
+      const rate = pulses.length / (ORB_SPEED_WINDOW_MS / 1000);
+      const next = Math.min(
+        ORB_SPEED_MAX,
+        Math.max(ORB_SPEED_MIN, ORB_SPEED_MIN + rate * 0.5),
+      );
+      setOrbSpeed((current) =>
+        Math.abs(current - next) >= 0.25 ? next : current,
+      );
+    };
+    updateOrbSpeed();
+    const timer = window.setInterval(updateOrbSpeed, 1000);
+    return () => window.clearInterval(timer);
+  }, [isRunning]);
 
   // ---- Per-run changed files ------------------------------------------------
   // The file list pinned to the message bottom is sourced from the run's own
@@ -173,6 +238,7 @@ export const AgentMessageContent: React.FC<AgentMessageContentProps> = ({
     <div className="min-w-0 max-w-full space-y-2">
       {isRunning && (
         <AgentRunStatusPill
+          speed={orbSpeed}
           label={t(
             message.runId
               ? "agentActivity.running"
@@ -198,10 +264,17 @@ export const AgentMessageContent: React.FC<AgentMessageContentProps> = ({
           aria-expanded={expanded}
         >
           {expanded ? (
-            <ChevronDown className="h-3.5 w-3.5" />
+            <ChevronDown className="h-3.5 w-3.5 shrink-0" />
           ) : (
-            <ChevronRight className="h-3.5 w-3.5" />
+            <ChevronRight className="h-3.5 w-3.5 shrink-0" />
           )}
+          <ThinkingOrb
+            state="solving"
+            size={20}
+            paused
+            className="shrink-0"
+            style={hasActivityError ? ORB_ERROR_STYLE : undefined}
+          />
           <span>{t("agentActivity.toggle")}</span>
         </button>
       )}
