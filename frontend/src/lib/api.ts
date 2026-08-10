@@ -561,8 +561,13 @@ export const agentRuntimeApi = {
     const r = await makeRequest("/api/agents/runtime", { cache: "no-store" });
     return handleApiResponse<AgentRuntimeListResponse>(r);
   },
-  refresh: async (): Promise<AgentRuntimeRefreshResponse> => {
-    const r = await makeRequest("/api/agents/runtime/refresh", {
+  refresh: async (workspacePath?: string): Promise<AgentRuntimeRefreshResponse> => {
+    const query = new URLSearchParams();
+    if (workspacePath?.trim()) {
+      query.set("workspace_path", workspacePath);
+    }
+    const suffix = query.size > 0 ? `?${query.toString()}` : "";
+    const r = await makeRequest(`/api/agents/runtime/refresh${suffix}`, {
       method: "POST",
     });
     const result = await handleApiResponse<AgentRuntimeRefreshResponse>(r);

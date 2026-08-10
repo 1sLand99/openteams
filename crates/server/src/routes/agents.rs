@@ -12,7 +12,7 @@ use services::services::agent_runtime::{
     AgentRuntimeDiagnostics, AgentRuntimeError, AgentRuntimeListResponse,
     AgentRuntimeRefreshResponse, AgentRuntimeStatus, UpdateAgentRuntimeConfig,
     list_runtime_statuses, refresh_runtime_discovery, refresh_runtime_statuses,
-    runtime_diagnostics, update_runtime_config,
+    resolve_runtime_probe_dir, runtime_diagnostics, update_runtime_config,
 };
 use utils::response::ApiResponse;
 
@@ -37,6 +37,11 @@ struct RuntimeDiagnosticsQuery {
     auth_method_id: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct RuntimeRefreshQuery {
+    workspace_path: Option<PathBuf>,
+}
+
 async fn get_runtime() -> Result<ResponseJson<ApiResponse<AgentRuntimeListResponse>>, ApiError> {
     let response = list_runtime_statuses()
         .await
@@ -44,10 +49,12 @@ async fn get_runtime() -> Result<ResponseJson<ApiResponse<AgentRuntimeListRespon
     Ok(ResponseJson(ApiResponse::success(response)))
 }
 
-async fn refresh_runtime_heavy()
--> Result<ResponseJson<ApiResponse<AgentRuntimeRefreshResponse>>, ApiError> {
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let response = refresh_runtime_discovery(&current_dir)
+async fn refresh_runtime_heavy(
+    Query(query): Query<RuntimeRefreshQuery>,
+) -> Result<ResponseJson<ApiResponse<AgentRuntimeRefreshResponse>>, ApiError> {
+    let probe_dir = resolve_runtime_probe_dir(query.workspace_path.as_deref())
+        .map_err(api_error_from_runtime)?;
+    let response = refresh_runtime_discovery(&probe_dir)
         .await
         .map_err(api_error_from_runtime)?;
     Ok(ResponseJson(ApiResponse::success(response)))
@@ -73,9 +80,8 @@ async fn get_runtime_diagnostics(
     Path(runner): Path<BaseCodingAgent>,
     Query(query): Query<RuntimeDiagnosticsQuery>,
 ) -> Result<ResponseJson<ApiResponse<AgentRuntimeDiagnostics>>, ApiError> {
-    let probe_dir = query
-        .workspace_path
-        .unwrap_or(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let probe_dir = resolve_runtime_probe_dir(query.workspace_path.as_deref())
+        .map_err(api_error_from_runtime)?;
     let response = runtime_diagnostics(runner, &probe_dir, query.auth_method_id.as_deref())
         .await
         .map_err(api_error_from_runtime)?;
@@ -84,9 +90,9 @@ async fn get_runtime_diagnostics(
 
 fn api_error_from_runtime(err: AgentRuntimeError) -> ApiError {
     match err {
-        AgentRuntimeError::InvalidEnvKey(_) | AgentRuntimeError::UnknownRunner(_) => {
-            ApiError::BadRequest(err.to_string())
-        }
+        AgentRuntimeError::InvalidEnvKey(_)
+        | AgentRuntimeError::UnknownRunner(_)
+        | AgentRuntimeError::InvalidWorkspacePath(_) => ApiError::BadRequest(err.to_string()),
         AgentRuntimeError::Io(err) => ApiError::Io(err),
         AgentRuntimeError::Json(err) => ApiError::BadRequest(err.to_string()),
         AgentRuntimeError::Profile(executors::profile::ProfileError::Io(err)) => ApiError::Io(err),

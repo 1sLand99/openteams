@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 const source = readFileSync(new URL('./AgentsPage.tsx', import.meta.url), 'utf8');
 const apiSource = readFileSync(new URL('../lib/api.ts', import.meta.url), 'utf8');
 
-assert.match(source, /useEffect\(\(\) => \{[\s\S]*?agentRuntimeApi[\s\S]*?\.getDiagnostics\(runner\.runner_type\)[\s\S]*?\}, \[refreshRevision, runner\.runner_type\]\);/u);
+assert.match(source, /useEffect\(\(\) => \{[\s\S]*?agentRuntimeApi[\s\S]*?\.getDiagnostics\(runner\.runner_type, \{ workspacePath \}\)[\s\S]*?\}, \[refreshRevision, runner\.runner_type, workspacePath\]\);/u);
 assert.doesNotMatch(source, /diagnosticsRefreshKey|refreshKey/iu);
 assert.match(
   source,
@@ -122,12 +122,12 @@ assert.match(
 );
 assert.match(
   source,
-  /agentRuntimeApi[\s\S]*?\.getDiagnostics\(runner\.runner_type\)[\s\S]*?\[refreshRevision, runner\.runner_type\]/u,
+  /agentRuntimeApi[\s\S]*?\.getDiagnostics\(runner\.runner_type, \{ workspacePath \}\)[\s\S]*?\[refreshRevision, runner\.runner_type, workspacePath\]/u,
 );
 assert.doesNotMatch(source, /\[\.\.\.models, selectedModel\]/u);
 assert.match(
   source,
-  /const handleRefreshConfig = async \(\) => \{[\s\S]*?await agentRuntimeApi\.refresh\(\)[\s\S]*?setRefreshRevision/u,
+  /const handleRefreshConfig = async \(\) => \{[\s\S]*?await agentRuntimeApi\.refresh\(activeWorkspacePath\)[\s\S]*?setRefreshRevision/u,
 );
 const focusEffect = source.slice(
   source.indexOf('const handleWindowFocus'),
@@ -136,11 +136,16 @@ const focusEffect = source.slice(
 assert.match(focusEffect, /agentRuntimeApi\.refreshLight\(\)/u);
 assert.doesNotMatch(focusEffect, /agentRuntimeApi\.refresh\(\)/u);
 assert.doesNotMatch(focusEffect, /setRefreshRevision/u);
-assert.match(source, /sidebarDiagnosticsStore\.get\(runner\.runner_type\)/u);
+assert.match(source, /sidebarDiagnosticsStore\.get\(diagnosticsKey\)/u);
 assert.match(
   source,
-  /sidebarDiagnosticsStore\.set\(runner\.runner_type, result\)/u,
+  /sidebarDiagnosticsStore\.set\(diagnosticsKey, result\)/u,
 );
+assert.match(
+  source,
+  /const activeWorkspacePath = useMemo\([\s\S]*?default_workspace_path\?\.trim\(\)/u,
+);
+assert.match(source, /workspacePath=\{activeWorkspacePath\}/u);
 const explicitRefreshHandler = source.slice(
   source.indexOf('const handleRefreshConfig'),
   source.indexOf('const handleDiagnosticsLoaded'),
@@ -158,7 +163,7 @@ const headerRefreshButton = source.slice(
 assert.match(headerRefreshButton, /t\("agents\.refreshConfig"\)/u);
 assert.match(headerRefreshButton, /data-tooltip-nowrap/u);
 assert.doesNotMatch(headerRefreshButton, /agents\.model\.refresh/u);
-assert.match(apiSource, /"\/api\/agents\/runtime\/refresh"/u);
+assert.match(apiSource, /\/api\/agents\/runtime\/refresh\$\{suffix\}/u);
 assert.doesNotMatch(apiSource, /\/agents\/runtime\/\$\{[^}]+\}\/models/u);
 
 // --- Pi agent surface -----------------------------------------------------

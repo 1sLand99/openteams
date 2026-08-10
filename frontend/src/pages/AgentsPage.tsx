@@ -1069,14 +1069,19 @@ function ModelConfigField({
 // of the session; only an explicit refresh or a config save invalidates the
 // stored snapshot and allows a new probe. Applies uniformly to every CLI
 // runner, independent of protocol.
-const sidebarDiagnosticsStore = new Map<
-  BaseCodingAgent,
-  AgentRuntimeDiagnostics
->();
+const sidebarDiagnosticsStore = new Map<string, AgentRuntimeDiagnostics>();
+
+const sidebarDiagnosticsKey = (
+  runner: BaseCodingAgent,
+  workspacePath?: string,
+) => `${runner}\u0000${workspacePath ?? ""}`;
 
 const invalidateSidebarDiagnostics = (runner?: BaseCodingAgent) => {
   if (runner) {
-    sidebarDiagnosticsStore.delete(runner);
+    const prefix = `${runner}\u0000`;
+    for (const key of sidebarDiagnosticsStore.keys()) {
+      if (key.startsWith(prefix)) sidebarDiagnosticsStore.delete(key);
+    }
   } else {
     sidebarDiagnosticsStore.clear();
   }
@@ -1088,6 +1093,7 @@ function AgentConfigSidebar({
   onClose,
   onSave,
   onDiagnosticsLoaded,
+  workspacePath,
   refreshRevision,
   rechecking,
   onRecheck,
@@ -1102,6 +1108,7 @@ function AgentConfigSidebar({
     envJson: Record<string, string> | null,
   ) => Promise<void>;
   onDiagnosticsLoaded: (diagnostics: AgentRuntimeDiagnostics) => void;
+  workspacePath?: string;
   refreshRevision: number;
   rechecking: boolean;
   onRecheck: () => void;
@@ -1354,7 +1361,8 @@ function AgentConfigSidebar({
   }, [formData, envText, envDirty, isDirty, runAutoSave]);
 
   useEffect(() => {
-    const cached = sidebarDiagnosticsStore.get(runner.runner_type);
+    const diagnosticsKey = sidebarDiagnosticsKey(runner.runner_type, workspacePath);
+    const cached = sidebarDiagnosticsStore.get(diagnosticsKey);
     if (cached) {
       setDiagnostics(cached);
       setDiagnosticsError(null);
@@ -1367,9 +1375,9 @@ function AgentConfigSidebar({
     setDiagnosticsLoading(true);
 
     agentRuntimeApi
-      .getDiagnostics(runner.runner_type)
+      .getDiagnostics(runner.runner_type, { workspacePath })
       .then((result) => {
-        sidebarDiagnosticsStore.set(runner.runner_type, result);
+        sidebarDiagnosticsStore.set(diagnosticsKey, result);
         if (active) {
           setDiagnostics(result);
           onDiagnosticsLoadedRef.current(result);
@@ -1391,7 +1399,7 @@ function AgentConfigSidebar({
     return () => {
       active = false;
     };
-  }, [refreshRevision, runner.runner_type]);
+  }, [refreshRevision, runner.runner_type, workspacePath]);
 
   const handleConfigFieldChange = (
     key: string,
@@ -1658,7 +1666,7 @@ function AgentConfigEmptyState({ t }: { t: TranslateFn }) {
 const FOCUS_RECHECK_INTERVAL_MS = 30_000;
 
 export function AgentsPage() {
-  const { t, showToast } = useWorkspace();
+  const { t, showToast, projects, selectedProjectId } = useWorkspace();
   const [runners, setRunners] = useState<AgentRuntimeStatus[]>([]);
   const runnersRef = useRef<AgentRuntimeStatus[]>([]);
   const lastFocusRecheckRef = useRef(0);
@@ -1679,6 +1687,15 @@ export function AgentsPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const configRefreshedNotice = t("agents.notice.configRefreshed");
   const configSavedNotice = t("agents.notice.configSaved");
+  const activeWorkspacePath = useMemo(
+    () =>
+      selectedProjectId
+        ? projects
+            .find((project) => project.id === selectedProjectId)
+            ?.default_workspace_path?.trim() || undefined
+        : undefined,
+    [projects, selectedProjectId],
+  );
 
   const statusFilterOptions = useMemo(() => createStatusFilterOptions(t), [t]);
   const toggleAgentNavCollapsed = useCallback(() => {
@@ -1885,7 +1902,7 @@ export function AgentsPage() {
     setRefreshingConfig(true);
     setNotice(null);
     try {
-      const response = await agentRuntimeApi.refresh();
+      const response = await agentRuntimeApi.refresh(activeWorkspacePath);
       setPiModelsSync(response.pi_models_sync);
       updateRuntimeRunners(response.runners, { notifyErrors: true });
       setRuntimeLoaded(true);
@@ -2196,6 +2213,7 @@ export function AgentsPage() {
                 onClose={() => setSelectedRunner(null)}
                 onSave={handleSave}
                 onDiagnosticsLoaded={handleDiagnosticsLoaded}
+                workspacePath={activeWorkspacePath}
                 refreshRevision={refreshRevision}
                 rechecking={refreshingConfig}
                 onRecheck={() => void handleRefreshConfig()}

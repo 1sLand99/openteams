@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    fs,
     future::Future,
     path::{Path, PathBuf},
     process::Stdio,
@@ -89,6 +90,8 @@ pub enum AgentRuntimeError {
     InvalidEnvKey(String),
     #[error("unknown runner: {0}")]
     UnknownRunner(String),
+    #[error("invalid runtime workspace path: {0}")]
+    InvalidWorkspacePath(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -253,6 +256,33 @@ struct AgentRuntimeStore {
 
 pub fn store_path() -> PathBuf {
     utils::assets::asset_dir().join(STORE_FILE_NAME)
+}
+
+pub fn resolve_runtime_probe_dir(
+    workspace_path: Option<&Path>,
+) -> Result<PathBuf, AgentRuntimeError> {
+    let Some(workspace_path) = workspace_path else {
+        let fallback = utils::assets::asset_dir().join("agent-runtime");
+        fs::create_dir_all(&fallback)?;
+        return Ok(fallback);
+    };
+
+    if workspace_path.as_os_str().is_empty() {
+        return Err(AgentRuntimeError::InvalidWorkspacePath(
+            "path cannot be empty".to_string(),
+        ));
+    }
+
+    let resolved = fs::canonicalize(workspace_path).map_err(|error| {
+        AgentRuntimeError::InvalidWorkspacePath(format!("{}: {error}", workspace_path.display()))
+    })?;
+    if !resolved.is_dir() {
+        return Err(AgentRuntimeError::InvalidWorkspacePath(format!(
+            "{} is not a directory",
+            workspace_path.display()
+        )));
+    }
+    Ok(resolved)
 }
 
 pub async fn list_runtime_statuses() -> Result<AgentRuntimeListResponse, AgentRuntimeError> {
@@ -1726,6 +1756,30 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn runtime_probe_dir_resolves_an_explicit_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+
+        let resolved = resolve_runtime_probe_dir(Some(workspace.path())).unwrap();
+
+        assert_eq!(resolved, fs::canonicalize(workspace.path()).unwrap());
+    }
+
+    #[test]
+    fn runtime_probe_dir_rejects_non_directories_and_missing_paths() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(matches!(
+            resolve_runtime_probe_dir(Some(file.path())),
+            Err(AgentRuntimeError::InvalidWorkspacePath(_))
+        ));
+
+        let missing = file.path().with_extension("missing");
+        assert!(matches!(
+            resolve_runtime_probe_dir(Some(&missing)),
+            Err(AgentRuntimeError::InvalidWorkspacePath(_))
+        ));
+    }
 
     fn model_agent(model: Option<&str>) -> CodingAgent {
         CodingAgent::KimiCode(KimiCode {

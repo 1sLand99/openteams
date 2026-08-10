@@ -33,6 +33,7 @@ const successResponse = (data: unknown) =>
 
 const originalFetch = globalThis.fetch;
 let diagnosticsFetches = 0;
+const refreshUrls: string[] = [];
 let releaseFirstDiagnostics: () => void = () => {
   throw new Error('First diagnostics request was not started');
 };
@@ -58,6 +59,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return successResponse({ runners: [], errors: [] });
   }
   if (init?.method === 'POST' && url.includes('/agents/runtime/refresh')) {
+    refreshUrls.push(url);
     return successResponse({ runners: [], errors: [] });
   }
   throw new Error(`Unexpected request: ${url}`);
@@ -136,7 +138,12 @@ check(
   diagnosticsFetches,
 );
 
-await agentRuntimeApi.refresh();
+await agentRuntimeApi.refresh('/workspace/current');
+check(
+  'heavy refresh passes the active workspace path',
+  refreshUrls[0]?.includes('workspace_path=%2Fworkspace%2Fcurrent') === true,
+  refreshUrls,
+);
 await agentRuntimeApi.getDiagnostics('GEMINI', {
   workspacePath: '/workspace/b',
 });
