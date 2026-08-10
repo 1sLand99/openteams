@@ -8,7 +8,7 @@
   <h5>Plan, Build, and Ship — with a team of AI agents instead of one</h5>
 
   <p>
-    openteams is an open-source, local-first AI desktop app that helps indie developers plan, build, and ship software faster with an AI team they can control.
+    openteams is an open-source, local-first AI desktop app that helps indie developers plan, build, and ship software faster with an AI team they can control, supporting 13 coding agents including Claude Code, Codex, Gemini CLI, and the bundled openteams-cli.
   </p>
 
   <p>
@@ -110,19 +110,24 @@ npx openteams-web
 
 **openteams** includes a built-in openteams CLI agent. Configure your model providers in the app under `Settings → Provider Config → Add Provider`.
 
-⚙️ [Provider config](https://doc.openteams-lab.com/advanced-usage/custom-provider)
-
-You can also connect supported coding agents such as:
+You can also connect any of these supported coding agents:
 
 | Agent | Example install |
 | --- | --- |
 | Claude Code | `npm i -g @anthropic-ai/claude-code` |
-| Gemini CLI | `npm i -g @google/gemini-cli` |
 | Codex | `npm i -g @openai/codex` |
+| Gemini CLI | `npm i -g @google/gemini-cli` |
 | Qwen Code | `npm i -g @qwen-code/qwen-code` |
 | OpenCode | `npm i -g opencode-ai` |
+| Amp | `npm i -g @sourcegraph/amp` |
+| GitHub Copilot | `npm i -g @github/copilot` |
+| Cursor | `curl https://cursor.com/install -fsS \| bash` |
+| Droid | `curl -fsSL https://app.factory.ai/cli \| sh` |
+| Kimi Code | `curl -LsSf https://code.kimi.com/install.sh \| bash` |
+| Qoder CLI | `curl -fsSL https://qoder.com/install \| bash` |
+| Pi | No install needed (runs via `npx`) |
+| OpenTeams CLI | Bundled with openteams |
 
-📚 [More agent installation guides](https://doc.openteams-lab.com/getting-started)
 
 ## Major updates
 - **2026.08.04 (v1.0.9)**

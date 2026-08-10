@@ -118,6 +118,29 @@ mod tests {
         ]
     }
 
+    fn build_test_iteration_prompt(
+        original_goal: &str,
+        current_state_summary: &str,
+        user_feedback_json: &str,
+        lead_agent_id: &str,
+        available_agents: &[WorkflowPlanningAgent],
+        previous_plan: &WorkflowPlanJson,
+        response_language_instruction: &str,
+    ) -> String {
+        let input = build_iteration_plan_generation_input(
+            original_goal,
+            current_state_summary,
+            user_feedback_json,
+            lead_agent_id,
+            available_agents,
+            previous_plan,
+            response_language_instruction,
+        );
+        crate::services::workflow_runtime::prompt_builders::plan_generation::build_plan_generation_prompt(
+            &input,
+        )
+    }
+
     #[test]
     fn summarize_round_results_collects_steps_result_and_outputs() {
         let round = sample_round();
@@ -141,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn build_iteration_plan_prompt_includes_feedback_history_and_agents() {
+    fn iteration_plan_builder_includes_feedback_history_and_agents() {
         let round = sample_round();
         let feedback = WorkflowIterationFeedback {
             id: Uuid::new_v4(),
@@ -162,44 +185,37 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        let prompt = build_iteration_plan_prompt(
+        let prompt = build_test_iteration_prompt(
             "Ship a stable workflow",
             &feedback.current_status_summary,
             &feedback.user_feedback_json,
-            1,
-            std::slice::from_ref(&feedback),
             "lead-agent",
             &sample_planning_agents(),
             &sample_plan(),
             "You MUST write human-readable JSON string values in English.",
         );
 
-        assert!(prompt.contains("Workflow Plan Generation"));
-        assert!(prompt.contains("workflow iteration round 2"));
-        assert!(prompt.contains("Iteration request: user rejected the previous round"));
-        assert!(prompt.contains("requested a revised plan for round 2"));
+        assert!(prompt.contains("# 根据用户反馈重新生成工作流计划"));
+        assert!(prompt.contains("## 输出方式（两阶段）"));
         assert!(prompt.contains("Ship a stable workflow"));
         assert!(prompt.contains("Round 1 completed without tests"));
         assert!(prompt.contains("- what_wrong: Missing tests"));
         assert!(prompt.contains("- expected: Add regression coverage"));
-        assert!(prompt.contains("Available agents JSON"));
         assert!(prompt.contains("lead-session-agent"));
         assert!(prompt.contains("worker-session-agent"));
         assert!(prompt.contains("writing-plans"));
         assert!(prompt.contains("code-guidelines"));
-        assert!(prompt.contains("Return exactly one workflow plan JSON object"));
-        assert!(prompt.contains("`globals.default_retry` and optional node `maxRetry`"));
-        assert!(prompt.contains("Use `3` as the default"));
-        assert!(prompt.contains("defaults to 3"));
-        assert!(prompt.contains("Do not output top-level `policies` or `loops`"));
-        assert!(prompt.contains("without a non-empty `reviewScope` is one independent review step"));
-        assert!(!prompt.contains("\"kind\": \"hard | soft\""));
-        assert!(!prompt.contains("\"policies\": {"));
-        assert!(prompt.contains("Final instruction: return the workflow plan JSON object only."));
+        assert!(prompt.contains("## 编译规则"));
+        assert!(prompt.contains("## 节点字段说明"));
+        assert!(prompt.contains("## 输出 JSON Schema"));
+        assert!(prompt.contains("## 上一版计划"));
+        assert!(!prompt.contains("openteams_untrusted_data"));
+        assert!(!prompt.contains("Data Boundary"));
+        assert!(prompt.trim_end().ends_with("先以 Markdown 简要说明调整内容，再在末尾输出一个匹配 Schema 的完整 JSON 对象。"));
     }
 
     #[test]
-    fn build_iteration_plan_prompt_injects_full_previous_plan_json() {
+    fn iteration_plan_builder_injects_full_previous_plan_json() {
         let mut previous_plan = sample_plan();
         previous_plan.nodes = vec![
             db::models::workflow_types::WorkflowPlanNode {
@@ -211,9 +227,12 @@ mod tests {
                     agent_id: Some("worker-session-agent".to_string()),
                     title: "Draft".to_string(),
                     instructions: "Draft the feature".to_string(),
-                    acceptance: Some(vec!["Draft accepted".to_string()]),
+                    acceptance: Some(db::models::workflow_types::AcceptanceCriteria {
+                        required: vec!["Draft accepted".to_string()],
+                        ..Default::default()
+                    }),
                     outputs: Some(vec!["out/draft.md".to_string()]),
-                    checklist: Some(vec!["Draft written".to_string()]),
+                    self_check: Some(vec!["Draft written".to_string()]),
                     verification_commands: Some(vec!["cargo test draft".to_string()]),
                     completion_evidence: Some(vec!["test output".to_string()]),
                     interruptible: true,
@@ -234,7 +253,7 @@ mod tests {
                     instructions: "Summarize".to_string(),
                     acceptance: None,
                     outputs: None,
-                    checklist: None,
+                    self_check: None,
                     verification_commands: None,
                     completion_evidence: None,
                     interruptible: true,
@@ -253,19 +272,17 @@ mod tests {
             data: None,
         }];
 
-        let prompt = build_iteration_plan_prompt(
+        let prompt = build_test_iteration_prompt(
             "Ship a stable workflow",
             "Round 1 completed",
             r#"{"action":"reject","feedback":{"what_wrong":"Missing tests"}}"#,
-            1,
-            &[],
             "lead-session-agent",
             &sample_planning_agents(),
             &previous_plan,
             "You MUST write human-readable JSON string values in English.",
         );
 
-        assert!(prompt.contains("### Previous Round Workflow Plan JSON"));
+        assert!(prompt.contains("## 上一版计划"));
         // Full previous plan content must be present: node ids, edges, and
         // the original acceptance/outputs contract fields.
         assert!(prompt.contains("\"id\": \"draft\""));
@@ -273,7 +290,7 @@ mod tests {
         assert!(prompt.contains("Draft accepted"));
         assert!(prompt.contains("out/draft.md"));
         assert!(prompt.contains("cargo test draft"));
-        assert!(prompt.contains("Preserve existing node ids, edge ids, and edge structure"));
-        assert!(prompt.contains("Do not discard completed work"));
+        assert!(prompt.contains("保留用户未要求变更的节点 ID"));
+        assert!(prompt.contains("## 最新用户反馈"));
     }
 }

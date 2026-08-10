@@ -48,6 +48,7 @@
   "teamPage.form.memberNameDesc": "@メンションとメッセージの振り分けに使用されます",
   "teamPage.form.model": "モデル",
   "teamPage.form.modelDesc": "このメンバーの既定モデルです",
+  "teamPage.form.modelLoading": "モデルを読み込んでいます…",
   "teamPage.form.reasoning": "推論レベル",
   "teamPage.form.reasoningDesc": "既定の推論の深さです",
   "teamPage.form.runtime": "Agent 実行環境",

@@ -427,6 +427,10 @@ impl StandardCodingAgentExecutor for KimiCode {
         super::acp::normalize_logs(msg_store, worktree_path);
     }
 
+    fn default_runtime_config_path(&self) -> Option<PathBuf> {
+        kimi_runtime_config_path(None)
+    }
+
     fn default_mcp_config_path(&self) -> Option<PathBuf> {
         kimi_mcp_config_path(None)
     }
@@ -536,6 +540,10 @@ fn kimi_code_home(env: Option<&ExecutionEnv>) -> Option<PathBuf> {
 
 fn kimi_mcp_config_path(env: Option<&ExecutionEnv>) -> Option<PathBuf> {
     kimi_code_home(env).map(|home| home.join("mcp.json"))
+}
+
+fn kimi_runtime_config_path(env: Option<&ExecutionEnv>) -> Option<PathBuf> {
+    kimi_code_home(env).map(|home| home.join("config.toml"))
 }
 
 #[cfg(test)]
@@ -722,6 +730,10 @@ mod tests {
         assert_eq!(
             kimi_mcp_config_path(Some(&env)),
             Some(temp.path().join("mcp.json"))
+        );
+        assert_eq!(
+            kimi_runtime_config_path(Some(&env)),
+            Some(temp.path().join("config.toml"))
         );
     }
 

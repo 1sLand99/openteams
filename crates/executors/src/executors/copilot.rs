@@ -270,6 +270,10 @@ impl StandardCodingAgentExecutor for Copilot {
         });
     }
 
+    fn default_runtime_config_path(&self) -> Option<std::path::PathBuf> {
+        copilot_home().map(|home| home.join("settings.json"))
+    }
+
     // MCP configuration methods
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf> {
         dirs::home_dir().map(|home| home.join(".copilot").join("mcp-config.json"))
@@ -290,12 +294,24 @@ impl StandardCodingAgentExecutor for Copilot {
     }
 }
 
+fn copilot_home() -> Option<PathBuf> {
+    copilot_home_from(
+        std::env::var_os("COPILOT_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
+        dirs::home_dir(),
+    )
+}
+
+fn copilot_home_from(
+    configured_home: Option<PathBuf>,
+    user_home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    configured_home.or_else(|| user_home.map(|home| home.join(".copilot")))
+}
+
 fn copilot_config_path() -> Option<PathBuf> {
-    std::env::var_os("COPILOT_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".copilot")))
-        .map(|home| home.join("config.json"))
+    copilot_home().map(|home| home.join("config.json"))
 }
 
 impl Copilot {
@@ -385,7 +401,9 @@ impl Copilot {
 
 #[cfg(test)]
 mod tests {
-    use super::{Copilot, copilot_auth_value_has_credentials};
+    use std::path::PathBuf;
+
+    use super::{Copilot, copilot_auth_value_has_credentials, copilot_home_from};
     use crate::{command::CmdOverrides, executors::AppendPrompt};
 
     #[test]
@@ -428,5 +446,20 @@ mod tests {
         assert!(copilot_auth_value_has_credentials(
             &serde_json::json!({"loggedInUsers": [{"login": "octocat"}]})
         ));
+    }
+
+    #[test]
+    fn copilot_home_prefers_configured_directory_and_has_default() {
+        let user_home = PathBuf::from("/users/tester");
+        let configured_home = PathBuf::from("/configured/copilot");
+
+        assert_eq!(
+            copilot_home_from(Some(configured_home.clone()), Some(user_home.clone())),
+            Some(configured_home)
+        );
+        assert_eq!(
+            copilot_home_from(None, Some(user_home.clone())),
+            Some(user_home.join(".copilot"))
+        );
     }
 }

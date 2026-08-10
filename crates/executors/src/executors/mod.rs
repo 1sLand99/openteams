@@ -28,7 +28,7 @@ use crate::{
     env::ExecutionEnv,
     executors::{
         amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::CursorAgent,
-        droid::Droid, gemini::Gemini, kimi::KimiCode, opencode::Opencode,
+        droid::Droid, gemini::Gemini, hermes::Hermes, kimi::KimiCode, opencode::Opencode,
         openteams_cli::OpenTeamsCli, pi::Pi, qoder::QoderCli, qwen::QwenCode,
     },
     logs::utils::patch,
@@ -47,6 +47,7 @@ pub mod copilot;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
+pub mod hermes;
 pub mod kimi;
 pub mod opencode;
 pub mod openteams_cli;
@@ -118,6 +119,8 @@ pub enum ExecutorError {
     #[error(transparent)]
     TomlDeserialize(#[from] toml::de::Error),
     #[error(transparent)]
+    Yaml(#[from] serde_yaml::Error),
+    #[error(transparent)]
     ExecutorApprovalError(#[from] crate::approvals::ExecutorApprovalError),
     #[error(transparent)]
     CommandBuild(#[from] CommandBuildError),
@@ -127,6 +130,8 @@ pub enum ExecutorError {
     SetupHelperNotSupported,
     #[error("Auth required: {0}")]
     AuthRequired(String),
+    #[error("Configuration error: {0}")]
+    Configuration(String),
 }
 
 #[enum_dispatch]
@@ -161,6 +166,7 @@ pub enum CodingAgent {
     KimiCode,
     QoderCli,
     Pi,
+    Hermes,
     #[cfg(feature = "qa-mode")]
     QaMock(QaMockExecutor),
     #[cfg(feature = "qa-mode")]
@@ -175,6 +181,7 @@ impl CodingAgent {
             Self::KimiCode(config) => config.acp_mcp_policy = policy,
             Self::QoderCli(config) => config.acp_mcp_policy = policy,
             Self::Pi(config) => config.acp_mcp_policy = policy,
+            Self::Hermes(config) => config.acp_mcp_policy = policy,
             #[cfg(feature = "qa-mode")]
             Self::AcpQa(config) => config.acp_mcp_policy = policy,
             _ => {}
@@ -224,6 +231,14 @@ impl CodingAgent {
                 self.preconfigured_mcp(),
                 false,
             ),
+            Self::Hermes(_) => McpConfig::new(
+                vec!["mcp_servers".to_string()],
+                serde_json::json!({
+                    "mcp_servers": {}
+                }),
+                self.preconfigured_mcp(),
+                false,
+            ),
             _ => McpConfig::new(
                 vec!["mcpServers".to_string()],
                 serde_json::json!({
@@ -263,6 +278,7 @@ impl CodingAgent {
                 BaseAgentCapability::SessionFork,
                 BaseAgentCapability::SetupHelper,
             ],
+            Self::Hermes(_) => vec![BaseAgentCapability::ContextUsage],
             #[cfg(feature = "qa-mode")]
             Self::QaMock(_) | Self::AcpQa(_) => vec![],
         }
@@ -299,6 +315,36 @@ fn authentication_detected(
         })
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AcpModelFallback {
+    #[default]
+    Allowed,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcpProbeAuthState {
+    Authenticated,
+    Unauthenticated,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcpProbeInterpretation {
+    pub models: Option<Vec<String>>,
+    pub auth_state: Option<AcpProbeAuthState>,
+    pub model_fallback: AcpModelFallback,
+}
+
+impl AcpProbeInterpretation {
+    pub fn from_probe(probe: &acp::AcpCapabilityProbe) -> Self {
+        Self {
+            models: probe.model_ids(),
+            auth_state: None,
+            model_fallback: AcpModelFallback::Allowed,
+        }
+    }
+}
+
 #[async_trait]
 #[enum_dispatch(CodingAgent)]
 pub trait StandardCodingAgentExecutor {
@@ -328,6 +374,16 @@ pub trait StandardCodingAgentExecutor {
         _auth_method_id: Option<&str>,
     ) -> Result<Option<acp::AcpCapabilityProbe>, ExecutorError> {
         Ok(None)
+    }
+
+    fn acp_model_fallback(&self) -> AcpModelFallback {
+        AcpModelFallback::Allowed
+    }
+
+    fn interpret_acp_probe(&self, probe: &acp::AcpCapabilityProbe) -> AcpProbeInterpretation {
+        let mut interpretation = AcpProbeInterpretation::from_probe(probe);
+        interpretation.model_fallback = self.acp_model_fallback();
+        interpretation
     }
 
     /// Report whether this CLI can currently authenticate model requests.
@@ -413,6 +469,15 @@ pub trait StandardCodingAgentExecutor {
     }
 
     fn normalize_logs(&self, _raw_logs_event_store: Arc<MsgStore>, _worktree_path: &Path);
+
+    /// Primary runner settings file shown by runtime diagnostics.
+    ///
+    /// Most runners keep their MCP servers in the primary settings file, so
+    /// the compatibility default matches the MCP path. Runners with a separate
+    /// MCP file override this independently.
+    fn default_runtime_config_path(&self) -> Option<std::path::PathBuf> {
+        self.default_mcp_config_path()
+    }
 
     // MCP configuration methods
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf>;

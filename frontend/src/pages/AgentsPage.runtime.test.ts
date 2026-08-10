@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 
 const source = readFileSync(new URL('./AgentsPage.tsx', import.meta.url), 'utf8');
 const apiSource = readFileSync(new URL('../lib/api.ts', import.meta.url), 'utf8');
+const hermesSchema = JSON.parse(
+  readFileSync(new URL('../../../shared/schemas/hermes.json', import.meta.url), 'utf8'),
+) as { properties?: Record<string, { properties?: Record<string, unknown> }> };
 
 assert.match(source, /useEffect\(\(\) => \{[\s\S]*?agentRuntimeApi[\s\S]*?\.getDiagnostics\(runner\.runner_type, \{ workspacePath \}\)[\s\S]*?\}, \[refreshRevision, runner\.runner_type, workspacePath\]\);/u);
 assert.doesNotMatch(source, /diagnosticsRefreshKey|refreshKey/iu);
@@ -71,7 +74,19 @@ assert.match(
   /<AgentInstallGuide[\s\S]*?runner=\{runner\}[\s\S]*?rechecking=\{rechecking\}[\s\S]*?onRecheck=\{onRecheck\}/u,
 );
 assert.doesNotMatch(source, /npx --|npx -y|install -g pi\b/iu);
-assert.doesNotMatch(source, /npx_available/u);
+// Runtime status/diagnostics merges must carry the npm/npx probes so the
+// install guide and error toasts see fresh dependency state.
+assert.match(
+  source,
+  /node_available: runner\.node_available,[\s\S]*?npm_available: runner\.npm_available,[\s\S]*?npx_available: runner\.npx_available,/u,
+);
+assert.match(
+  source,
+  /node_available: diagnostics\.node_available,[\s\S]*?npm_available: diagnostics\.npm_available,[\s\S]*?npx_available: diagnostics\.npx_available,/u,
+);
+// Installed-but-not-executable runners explain which tools are missing.
+assert.match(source, /getMissingRuntimeTools\(runner\)/u);
+assert.match(source, /t\("agents\.status\.missingDependencies"/u);
 assert.match(source, /const envSummary = runner\.env_summary;/u);
 assert.doesNotMatch(
   source,
@@ -100,7 +115,19 @@ assert.match(
 );
 assert.match(
   source,
-  /const isAcpRunner[\s\S]*?runner === "GEMINI"[\s\S]*?runner === "QWEN_CODE"[\s\S]*?runner === "KIMI_CODE"[\s\S]*?runner === "QODER_CLI"[\s\S]*?runner === "PI"/u,
+  /const discoveredCliVersion = currentDiagnostics\?\.version;/u,
+);
+assert.match(
+  source,
+  /const acpVersion =[\s\S]*?currentDiagnostics\?\.acp_probe\?\.agent_version/u,
+);
+assert.match(
+  source,
+  /label=\{t\("agents\.details\.acpVersion"\)\}[\s\S]*?value=\{acpVersion\}/u,
+);
+assert.match(
+  source,
+  /const isAcpRunner[\s\S]*?runner === (?:\("HERMES" as BaseCodingAgent\)|"HERMES")[\s\S]*?runner === "GEMINI"[\s\S]*?runner === "QWEN_CODE"[\s\S]*?runner === "KIMI_CODE"[\s\S]*?runner === "QODER_CLI"[\s\S]*?runner === "PI"/u,
 );
 assert.match(
   source,
@@ -112,6 +139,31 @@ assert.match(
   /import piSchema from "..\/..\/..\/shared\/schemas\/pi\.json";/u,
 );
 assert.match(source, /PI: piSchema,/u);
+assert.match(
+  source,
+  /import hermesSchema from "..\/..\/..\/shared\/schemas\/hermes\.json";/u,
+);
+assert.match(source, /HERMES: hermesSchema,/u);
+assert.match(
+  source,
+  /HERMES: \{[\s\S]*?title: "Hermes"/u,
+);
+assert.deepEqual(Object.keys(hermesSchema.properties ?? {}).sort(), [
+  'acp',
+  'additional_params',
+  'append_prompt',
+  'base_command_override',
+  'env',
+  'model',
+]);
+assert.deepEqual(Object.keys(hermesSchema.properties?.acp?.properties ?? {}).sort(), [
+  'access_mode',
+  'additional_directories',
+  'approval_mode',
+  'auth',
+  'config_overrides',
+]);
+assert.doesNotMatch(source, /hermes[_-]?(auth|token|api[_-]?key|config)/iu);
 assert.match(
   source,
   /PI: \{[\s\S]*?title: "Pi"[\s\S]*?logoSrc: "\/logos\/pi-logo\.svg"/u,

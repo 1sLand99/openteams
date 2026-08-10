@@ -11,10 +11,17 @@ import type { AgentRuntimeStatus, BaseCodingAgent } from "@/types";
 
 export type InstallGuidePlatform = "macos" | "linux" | "windows";
 export type WindowsSupport = "supported" | "wsl_only";
-export type InstallGuideStepKind = "node" | "install" | "auth";
+export type InstallGuideStepKind = "node" | "npm" | "npx" | "install" | "auth";
+
+/** Runtime tools the backend probes per runner (node/npm/npx availability). */
+export type MissingRuntimeTool = "node" | "npm" | "npx";
 
 export interface AgentInstallGuideEntry {
   requiresNode: boolean;
+  /** Installed via `npm install -g`; cannot run without npm. */
+  requiresNpm: boolean;
+  /** Executed through `npx`; cannot run without npx (implies npm). */
+  requiresNpx: boolean;
   documentationUrl: string;
   /** macOS/Linux are always supported; Windows may require WSL. */
   windowsSupport: WindowsSupport;
@@ -60,6 +67,8 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
   {
     CLAUDE_CODE: {
       requiresNode: true,
+      requiresNpm: true,
+      requiresNpx: true,
       documentationUrl: "https://docs.claude.com/en/docs/claude-code/quickstart",
       windowsSupport: "supported",
       installCommands: {
@@ -71,6 +80,8 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
     },
     CODEX: {
       requiresNode: true,
+      requiresNpm: true,
+      requiresNpx: true,
       documentationUrl: "https://github.com/openai/codex",
       windowsSupport: "supported",
       installCommands: {
@@ -81,6 +92,8 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
     },
     OPENCODE: {
       requiresNode: true,
+      requiresNpm: true,
+      requiresNpx: true,
       documentationUrl: "https://opencode.ai",
       windowsSupport: "supported",
       installCommands: {
@@ -91,6 +104,8 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
     },
     AMP: {
       requiresNode: true,
+      requiresNpm: true,
+      requiresNpx: false,
       documentationUrl: "https://ampcode.com/manual",
       windowsSupport: "supported",
       installCommands: {
@@ -101,6 +116,8 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
     },
     COPILOT: {
       requiresNode: true,
+      requiresNpm: true,
+      requiresNpx: false,
       documentationUrl:
         "https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-copilot-cli",
       windowsSupport: "supported",
@@ -111,8 +128,22 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
       authCommands: ["copilot"],
       authFollowUpCommand: "/login",
     },
+    HERMES: {
+      requiresNode: false,
+      requiresNpm: false,
+      requiresNpx: false,
+      documentationUrl: "https://github.com/NousResearch/hermes-agent",
+      windowsSupport: "wsl_only",
+      installCommands: {
+        posix: ["pip install hermes-agent"],
+        windows: null,
+      },
+      authCommands: ["hermes acp --setup"],
+    },
     GEMINI: {
       requiresNode: true,
+      requiresNpm: true,
+      requiresNpx: false,
       documentationUrl: "https://github.com/google-gemini/gemini-cli",
       windowsSupport: "supported",
       installCommands: {
@@ -123,6 +154,8 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
     },
     QWEN_CODE: {
       requiresNode: true,
+      requiresNpm: true,
+      requiresNpx: false,
       documentationUrl: "https://github.com/QwenLM/qwen-code",
       windowsSupport: "supported",
       installCommands: {
@@ -134,6 +167,8 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
     },
     CURSOR_AGENT: {
       requiresNode: false,
+      requiresNpm: false,
+      requiresNpx: false,
       documentationUrl: "https://docs.cursor.com/en/cli/installation",
       windowsSupport: "wsl_only",
       installCommands: {
@@ -144,6 +179,8 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
     },
     DROID: {
       requiresNode: false,
+      requiresNpm: false,
+      requiresNpx: false,
       documentationUrl: "https://docs.factory.ai/droid-cli/cli-reference",
       windowsSupport: "wsl_only",
       installCommands: {
@@ -155,6 +192,8 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
     },
     KIMI_CODE: {
       requiresNode: false,
+      requiresNpm: false,
+      requiresNpx: false,
       documentationUrl:
         "https://moonshotai.github.io/kimi-cli/en/guides/getting-started.html",
       windowsSupport: "wsl_only",
@@ -165,10 +204,12 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
       authCommands: ["kimi login"],
     },
     // Pi runs through OpenTeams' pinned npx package set, so there is no
-    // global install or interactive login step: Node.js (which bundles npx)
-    // is the only prerequisite.
+    // global install or interactive login step: Node.js with npm/npx (both
+    // bundled with Node) is the only prerequisite.
     PI: {
       requiresNode: true,
+      requiresNpm: true,
+      requiresNpx: true,
       documentationUrl: "https://github.com/badlogic/pi-mono",
       windowsSupport: "supported",
       installCommands: {
@@ -180,6 +221,8 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
     },
     QODER_CLI: {
       requiresNode: false,
+      requiresNpm: false,
+      requiresNpx: false,
       documentationUrl: "https://docs.qoder.com/en/cli/install",
       windowsSupport: "supported",
       installCommands: {
@@ -195,6 +238,26 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
 export const getInstallGuideEntry = (
   runner: BaseCodingAgent,
 ): AgentInstallGuideEntry | null => INSTALL_GUIDES[runner] ?? null;
+
+/**
+ * Runtime tools the runner needs but the backend did not detect. Reports
+ * every missing tool explicitly: an npx executor missing npm and npx lists
+ * both, even though a single Node.js reinstall restores them.
+ */
+export const getMissingRuntimeTools = (
+  runner: Pick<
+    AgentRuntimeStatus,
+    "runner_type" | "node_available" | "npm_available" | "npx_available"
+  >,
+): MissingRuntimeTool[] => {
+  const entry = getInstallGuideEntry(runner.runner_type);
+  if (!entry) return [];
+  const missing: MissingRuntimeTool[] = [];
+  if (entry.requiresNode && !runner.node_available) missing.push("node");
+  if (entry.requiresNpm && !runner.npm_available) missing.push("npm");
+  if (entry.requiresNpx && !runner.npx_available) missing.push("npx");
+  return missing;
+};
 
 /** Bundled runtimes (OpenTeams CLI) ship with the app and need no setup. */
 export const runnerNeedsInstall = (
@@ -231,7 +294,12 @@ export function detectClientPlatform(input?: {
 export function resolveInstallGuide(
   runner: Pick<
     AgentRuntimeStatus,
-    "runner_type" | "installed" | "auth_state" | "node_available"
+    | "runner_type"
+    | "installed"
+    | "auth_state"
+    | "node_available"
+    | "npm_available"
+    | "npx_available"
   >,
   platform: InstallGuidePlatform,
 ): ResolvedInstallGuide | null {
@@ -244,10 +312,20 @@ export function resolveInstallGuide(
       : "posix";
   const steps: InstallGuideStep[] = [];
 
+  // Missing runtime tools block execution even when the agent itself is
+  // installed, so remediation comes first regardless of install state. A
+  // single step is enough: Node.js bundles npm, and npm bundles npx, so
+  // reinstalling the Node.js LTS release restores whichever tool is gone.
+  const missingTools = getMissingRuntimeTools(runner);
+  if (missingTools.includes("node")) {
+    steps.push({ kind: "node", commands: NODE_INSTALL_COMMANDS[commandSet] });
+  } else if (missingTools.includes("npm")) {
+    steps.push({ kind: "npm", commands: NODE_INSTALL_COMMANDS[commandSet] });
+  } else if (missingTools.includes("npx")) {
+    steps.push({ kind: "npx", commands: NODE_INSTALL_COMMANDS[commandSet] });
+  }
+
   if (runnerNeedsInstall(runner)) {
-    if (entry.requiresNode && !runner.node_available) {
-      steps.push({ kind: "node", commands: NODE_INSTALL_COMMANDS[commandSet] });
-    }
     const installCommands =
       commandSet === "windows"
         ? (entry.installCommands.windows ?? entry.installCommands.posix)

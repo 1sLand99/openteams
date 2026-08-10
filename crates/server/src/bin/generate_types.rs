@@ -226,6 +226,7 @@ fn generate_types_content() -> String {
         db::models::workflow_types::WorkflowPlanNode::decl(),
         db::models::workflow_types::WorkflowNodePosition::decl(),
         db::models::workflow_types::WorkflowNodeData::decl(),
+        db::models::workflow_types::AcceptanceCriteria::decl(),
         db::models::workflow_types::WorkflowLoopDef::decl(),
         db::models::workflow_types::WorkflowPlanEdge::decl(),
         db::models::workflow_types::WorkflowEdgeData::decl(),
@@ -509,6 +510,7 @@ fn generate_types_content() -> String {
         executors::executors::droid::Droid::decl(),
         executors::executors::kimi::KimiCode::decl(),
         executors::executors::pi::Pi::decl(),
+        executors::executors::hermes::Hermes::decl(),
         executors::executors::droid::Autonomy::decl(),
         executors::executors::droid::ReasoningEffortLevel::decl(),
         executors::executors::AppendPrompt::decl(),
@@ -636,6 +638,10 @@ fn generate_schemas() -> Result<HashMap<&'static str, String>, serde_json::Error
         (
             "pi",
             generate_json_schema::<executors::executors::pi::Pi>()?,
+        ),
+        (
+            "hermes",
+            generate_json_schema::<executors::executors::hermes::Hermes>()?,
         ),
     ]);
     println!(

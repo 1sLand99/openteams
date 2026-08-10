@@ -162,6 +162,35 @@ const normalizeDetail = (detail: string): string =>
   detail.trim().replace(/\s+/g, " ");
 
 /**
+ * File-edit lines append a change summary after the path, e.g.
+ * `Started file edit: src/a.ts (2 edit, 1 write)`. The summary is noise in
+ * the row target and, worse, breaks started/completed matching when only one
+ * side carries it, so the detail keeps just the path. History rows persisted
+ * without a path carry only the summary (`(1 edit)`), so it also matches at
+ * the start of the detail.
+ */
+const FILE_EDIT_CHANGE_SUMMARY_SUFFIX =
+  /(?:^|\s+)\((?:\d+\s(?:write|edit|delete|rename)(?:,\s)?)+\)$/u;
+
+const cleanFileEditDetail = (detail: string): string =>
+  detail.replace(FILE_EDIT_CHANGE_SUMMARY_SUFFIX, "").trim();
+
+/** Middle ellipsis for long path-like details so the file name stays visible. */
+export const truncatePathMiddle = (
+  value: string,
+  maxLength = 64,
+): string => {
+  const trimmed = value.trim();
+  if (trimmed.length <= maxLength) return trimmed;
+  const ellipsis = "…";
+  const keep = maxLength - ellipsis.length;
+  if (keep < 2) return trimmed;
+  const head = Math.ceil(keep / 3);
+  const tail = keep - head;
+  return `${trimmed.slice(0, head)}${ellipsis}${trimmed.slice(-tail)}`;
+};
+
+/**
  * Harness-internal notices (not agent activity) that should never be shown
  * in the user-facing activity log.
  */
@@ -294,12 +323,18 @@ export const parseToolActivityContent = (
   if (!statusMatch) return null;
 
   const rest = trimmed.slice(statusMatch.prefix.length).trim();
-  const { kind, detail } = parseKindAndDetail(rest);
+  const { kind, detail: rawDetail } = parseKindAndDetail(rest);
+  const detail =
+    kind === "command"
+      ? cleanCommandDetail(rawDetail)
+      : kind === "file_edit"
+        ? cleanFileEditDetail(rawDetail)
+        : rawDetail;
 
   return {
     kind,
     status: statusMatch.status,
-    detail: kind === "command" ? cleanCommandDetail(detail) : detail,
+    detail,
   };
 };
 

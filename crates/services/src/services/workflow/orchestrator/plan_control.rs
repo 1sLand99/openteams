@@ -34,9 +34,9 @@ use super::{
             WorkflowRuntimeError, cancel_running_step,
         },
     },
-    BootstrapResult, OrchestratorError, WorkflowOrchestrator, load_agents_for_session, reducer,
-    workflow_agent_id_map, workflow_agent_name_lookup, workflow_plan_agent_id,
-    workflow_valid_agent_ids,
+    BootstrapResult, OrchestratorError, WorkflowOrchestrator, default_step_review_requirements,
+    load_agents_for_session, reducer, workflow_agent_id_map, workflow_agent_name_lookup,
+    workflow_plan_agent_id, workflow_valid_agent_ids,
 };
 use crate::services::project::source_control::SourceControlService;
 
@@ -112,7 +112,13 @@ impl WorkflowOrchestrator {
             .collect();
         let agent_name_by_id = workflow_agent_name_lookup(&session_agents);
         let valid_agent_ids = workflow_valid_agent_ids(&session_agents);
+        let agent_id_map = workflow_agent_id_map(&session_agents);
         let compiled_preview = WorkflowCompiler::compile_from_json(plan_json, &valid_agent_ids)?;
+        let compiled_step_by_key = compiled_preview
+            .steps
+            .iter()
+            .map(|step| (step.step_key.as_str(), step))
+            .collect::<HashMap<_, _>>();
         let loop_key_by_step_key = compiled_preview
             .steps
             .iter()
@@ -142,11 +148,17 @@ impl WorkflowOrchestrator {
                 } else {
                     n.data.step_type.to_lowercase()
                 };
-                let (lead_review_required, user_review_required) = if step_type_str == "review" {
-                    (false, false)
-                } else {
-                    (true, true)
-                };
+                let (lead_review_required, user_review_required) = compiled_step_by_key
+                    .get(n.id.as_str())
+                    .map(|step| {
+                        default_step_review_requirements(
+                            &step.step_type,
+                            step.assigned_agent_id.as_deref(),
+                            Some(lead_session_agent.id),
+                            &agent_id_map,
+                        )
+                    })
+                    .unwrap_or((true, true));
                 WorkflowCardStep {
                     id: n.id.clone(),
                     step_key: n.id.clone(),

@@ -10,6 +10,7 @@ import {
   CircleAlert,
   FileText,
   FolderGit2,
+  Loader2,
   PackagePlus,
   RefreshCw,
   Server,
@@ -41,6 +42,7 @@ import {
   cx,
   effectiveAcpConfigValue,
   findAcpSelectConfigOption,
+  runnerSupportsAcp,
   type ProjectMemberWithExecution,
 } from "./teamUtils";
 
@@ -65,6 +67,7 @@ type TeamConfigTabsProps = {
   acpAuthMethodId: string;
   acpConfigOptions: AcpConfigOptionSnapshot[];
   acpConfigOverrides: AcpConfigOverride[];
+  acpProbeLoading: boolean;
   reasoningUnsupported: boolean;
   allowedSkillIds: string[];
   capability: AgentRuntimeReasoningCapability | null;
@@ -528,6 +531,7 @@ function SkillMarkdownPanel({
 function ConfigTab({
   acpConfigOptions,
   acpConfigOverrides,
+  acpProbeLoading,
   reasoningUnsupported,
   capability,
   isLeader,
@@ -676,6 +680,23 @@ function ConfigTab({
                   })
                 }
               />
+            ) : acpProbeLoading && runnerSupportsAcp(runnerType) ? (
+              <DropdownSelect
+                value="__openteams_model_loading__"
+                options={[
+                  {
+                    id: "__openteams_model_loading__",
+                    label: t("teamPage.form.modelLoading"),
+                  },
+                ]}
+                disabled
+                showSearch={false}
+                triggerIcon={
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--ink-tertiary)]" />
+                }
+                className="[&>button]:h-9 [&>button]:bg-[var(--surface-1)] [&>button]:font-mono [&>button]:text-[13px]"
+                onChange={() => undefined}
+              />
             ) : (
               <DropdownSelect
                 value={selectedModelValue}
@@ -808,6 +829,7 @@ function PermissionsTab({
   acpApprovalMode,
   acpAuthMode,
   acpAuthMethodId,
+  runnerType,
   setAcpAccessMode,
   setAcpAdditionalDirectories,
   setAcpAdditionalDirectoriesOverride,
@@ -823,6 +845,7 @@ function PermissionsTab({
   | "acpApprovalMode"
   | "acpAuthMode"
   | "acpAuthMethodId"
+  | "runnerType"
   | "setAcpAccessMode"
   | "setAcpAdditionalDirectories"
   | "setAcpAdditionalDirectoriesOverride"
@@ -849,14 +872,24 @@ function PermissionsTab({
       >
         <DropdownSelect
           value={acpAccessMode}
-          options={[
-            { id: "", label: "继承全局设置" },
-            { id: "workspace_only", label: "仅工作区" },
-            {
-              id: "full_access",
-              label: t("permissions.fullAccessHighRisk"),
-            },
-          ]}
+          options={
+            runnerType === "HERMES"
+              ? [
+                  { id: "", label: "继承全局设置" },
+                  {
+                    id: "full_access",
+                    label: t("permissions.fullAccessHighRisk"),
+                  },
+                ]
+              : [
+                  { id: "", label: "继承全局设置" },
+                  { id: "workspace_only", label: "仅工作区" },
+                  {
+                    id: "full_access",
+                    label: t("permissions.fullAccessHighRisk"),
+                  },
+                ]
+          }
           showSearch={false}
           className={dropdownClassName}
           onChange={(value) => {
@@ -920,33 +953,35 @@ function PermissionsTab({
         </div>
       </SettingRow>
 
-      <SettingRow
-        title="附加目录"
-        description="启用覆盖后，每行一个绝对目录；空列表会显式清除全局附加目录。"
-      >
-        <div className="space-y-2">
-          <label className="flex items-center gap-2 text-xs text-[var(--ink-subtle)]">
-            <input
-              type="checkbox"
-              checked={acpAdditionalDirectoriesOverride}
+      {runnerType !== "HERMES" && (
+        <SettingRow
+          title="附加目录"
+          description="启用覆盖后，每行一个绝对目录；空列表会显式清除全局附加目录。"
+        >
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-xs text-[var(--ink-subtle)]">
+              <input
+                type="checkbox"
+                checked={acpAdditionalDirectoriesOverride}
+                onChange={(event) =>
+                  setAcpAdditionalDirectoriesOverride(event.target.checked)
+                }
+              />
+              覆盖全局附加目录
+            </label>
+            <textarea
+              value={acpAdditionalDirectories}
+              disabled={!acpAdditionalDirectoriesOverride}
               onChange={(event) =>
-                setAcpAdditionalDirectoriesOverride(event.target.checked)
+                setAcpAdditionalDirectories(event.target.value)
               }
+              rows={4}
+              placeholder={"/absolute/path/one\n/absolute/path/two"}
+              className={`${inputClassName} h-auto resize-y font-mono text-xs disabled:opacity-50`}
             />
-            覆盖全局附加目录
-          </label>
-          <textarea
-            value={acpAdditionalDirectories}
-            disabled={!acpAdditionalDirectoriesOverride}
-            onChange={(event) =>
-              setAcpAdditionalDirectories(event.target.value)
-            }
-            rows={4}
-            placeholder={"/absolute/path/one\n/absolute/path/two"}
-            className={`${inputClassName} h-auto resize-y font-mono text-xs disabled:opacity-50`}
-          />
-        </div>
-      </SettingRow>
+          </div>
+        </SettingRow>
+      )}
       </ConfigSection>
       {pendingRiskyChange && (
         <ConfirmationDialog
@@ -1241,12 +1276,7 @@ function TeamProtocolTab({
 export function TeamConfigTabs(props: TeamConfigTabsProps) {
   const [activeTab, setActiveTab] = useState<MemberConfigTab>("config");
   const { selectedMember, t } = props;
-  const supportsAcpPermissions =
-    props.runnerType === "GEMINI" ||
-    props.runnerType === "QWEN_CODE" ||
-    props.runnerType === "KIMI_CODE" ||
-    props.runnerType === "QODER_CLI" ||
-    props.runnerType === "PI";
+  const supportsAcpPermissions = runnerSupportsAcp(props.runnerType);
   const effectiveActiveTab = selectedMember
     ? activeTab === "permissions" && !supportsAcpPermissions
       ? "config"

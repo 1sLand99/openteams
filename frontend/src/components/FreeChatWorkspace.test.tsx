@@ -764,6 +764,15 @@ check(
   { activityPanelSource, activityPanelCssSource },
 );
 check(
+  "completed tool rows without a path fall back to a visible title",
+  activityPanelSource.includes('status !== "completed" || !line.detail') &&
+    activityPanelSource.includes("showLabel") &&
+    activityPanelSource.includes("wf-log-task-label") &&
+    activityPanelSource.includes("truncatePathMiddle") &&
+    activityPanelSource.includes("displayDetail"),
+  activityPanelSource,
+);
+check(
   "thinking lines render as section headers",
   activityPanelSource.includes('line.line_type === "thinking"') &&
     activityPanelSource.includes("isThinkingHeaderContent") &&

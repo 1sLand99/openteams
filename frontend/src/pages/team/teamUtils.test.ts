@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import type { AcpConfigOptionSnapshot } from "../../../../shared/types";
+import type { BaseCodingAgent } from "@/types";
 import {
   acpOptionSemanticCategory,
   canonicalRuntimeModelId,
@@ -7,6 +8,7 @@ import {
   findAcpSelectConfigOption,
   normalizeRunnerType,
   resolveUniqueAcpChoice,
+  runnerSupportsAcp,
   withoutAcpModeOverrides,
   withoutAcpThoughtLevelOverrides,
 } from "./teamUtils";
@@ -140,3 +142,41 @@ assert.deepEqual(
 );
 
 console.log("Team ACP config matching: PASS");
+
+// --- Runner ACP support classification ---------------------------------
+
+const acpRunners = [
+  "GEMINI",
+  "HERMES",
+  "QWEN_CODE",
+  "KIMI_CODE",
+  "QODER_CLI",
+  "PI",
+];
+const nonAcpRunners = [
+  "CLAUDE_CODE",
+  "AMP",
+  "CODEX",
+  "OPENCODE",
+  "OPEN_TEAMS_CLI",
+  "CURSOR_AGENT",
+  "COPILOT",
+  "DROID",
+];
+
+for (const runner of acpRunners) {
+  assert.equal(
+    runnerSupportsAcp(runner as BaseCodingAgent),
+    true,
+    `${runner} should support ACP`,
+  );
+}
+for (const runner of nonAcpRunners) {
+  assert.equal(
+    runnerSupportsAcp(runner as BaseCodingAgent),
+    false,
+    `${runner} should not support ACP`,
+  );
+}
+
+console.log("Runner ACP support classification: PASS");

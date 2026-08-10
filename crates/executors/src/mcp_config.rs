@@ -22,6 +22,12 @@ fn is_jsonc_file(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("jsonc"))
 }
 
+fn is_yaml_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml"))
+}
+
 static DEFAULT_MCP_JSON: &str = include_str!("../default_mcp.json");
 pub static PRECONFIGURED_MCP_SERVERS: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str::<Value>(DEFAULT_MCP_JSON).expect("Failed to parse default MCP JSON")
@@ -59,6 +65,16 @@ impl McpConfig {
         Self::new(
             vec!["mcpServers".to_string()],
             serde_json::json!({ "mcpServers": {} }),
+            serde_json::json!({}),
+            false,
+        )
+    }
+
+    /// Hermes stores MCP servers under `mcp_servers` in `~/.hermes/config.yaml`.
+    pub fn hermes() -> Self {
+        Self::new(
+            vec!["mcp_servers".to_string()],
+            serde_json::json!({ "mcp_servers": {} }),
             serde_json::json!({}),
             false,
         )
@@ -110,6 +126,12 @@ pub async fn read_agent_config(
                 Ok(None) => Ok(serde_json::json!({})),
                 Err(_) => Ok(serde_json::from_str(&file_content)?),
             }
+        } else if is_yaml_file(config_path) {
+            if file_content.trim().is_empty() {
+                return Ok(serde_json::json!({}));
+            }
+            let yaml_val: serde_yaml::Value = serde_yaml::from_str(&file_content)?;
+            Ok(serde_json::to_value(yaml_val)?)
         } else {
             Ok(serde_json::from_str(&file_content)?)
         }
@@ -129,6 +151,10 @@ pub async fn write_agent_config(
         fs::write(config_path, toml_content).await?;
     } else if is_jsonc_file(config_path) {
         write_jsonc_preserving_comments(config_path, config).await?;
+    } else if is_yaml_file(config_path) {
+        let yaml_value: serde_yaml::Value = serde_json::from_value(config.clone())?;
+        let yaml_content = serde_yaml::to_string(&yaml_value)?;
+        fs::write(config_path, yaml_content).await?;
     } else {
         let json_content = serde_json::to_string_pretty(config)?;
         fs::write(config_path, json_content).await?;
@@ -436,12 +462,67 @@ impl CodingAgent {
             CodingAgent::Codex(_) => Codex,
             CodingAgent::Opencode(_) | CodingAgent::OpenTeamsCli(_) => Opencode,
             CodingAgent::Copilot(..) => Copilot,
-            CodingAgent::KimiCode(_) | CodingAgent::QoderCli(_) | CodingAgent::Pi(_) => Passthrough,
+            CodingAgent::KimiCode(_)
+            | CodingAgent::QoderCli(_)
+            | CodingAgent::Pi(_)
+            | CodingAgent::Hermes(_) => Passthrough,
             #[cfg(feature = "qa-mode")]
             CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => Passthrough,
         };
 
         let canonical = PRECONFIGURED_MCP_SERVERS.clone();
         apply_adapter(adapter, canonical)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn yaml_config_reads_mcp_servers_into_canonical_shape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "model: openrouter/nous/hermes\nmcp_servers:\n  filesystem:\n    command: npx\n    args: [\"-y\", \"@modelcontextprotocol/server-filesystem\"]\n",
+        )
+        .expect("write yaml config");
+
+        let canonical = read_canonical_mcp_config(&config_path, &McpConfig::hermes())
+            .await
+            .expect("read canonical config");
+        assert_eq!(
+            canonical["mcpServers"]["filesystem"]["command"],
+            serde_json::json!("npx")
+        );
+        // Non-MCP keys must not leak into the canonical MCP config.
+        assert!(canonical.get("model").is_none());
+    }
+
+    #[tokio::test]
+    async fn yaml_config_write_preserves_yaml_format() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.yaml");
+        std::fs::write(&config_path, "mcp_servers: {}\n").expect("write yaml config");
+
+        let mcp_config = McpConfig::hermes();
+        let mut raw = read_agent_config(&config_path, &mcp_config)
+            .await
+            .expect("read yaml config");
+        raw["mcp_servers"] = serde_json::json!({
+            "filesystem": { "command": "npx" }
+        });
+        write_agent_config(&config_path, &mcp_config, &raw)
+            .await
+            .expect("write yaml config");
+
+        let content = std::fs::read_to_string(&config_path).expect("read written config");
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&content).expect("written config must stay valid YAML");
+        assert_eq!(
+            parsed["mcp_servers"]["filesystem"]["command"],
+            serde_yaml::Value::String("npx".to_string())
+        );
     }
 }

@@ -42,9 +42,11 @@ import {
   getRuntimeDisplayState,
   parseEnvText,
   parseRuntimeErrorDetails,
+  RUNTIME_TOOL_LABELS,
   type AgentRuntimeFilter,
   type RuntimeDisplayState,
 } from "./agent-runtime/agentRuntimeViewModel";
+import { getMissingRuntimeTools } from "./agent-runtime/installGuidance";
 import { AgentInstallGuide } from "./agent-runtime/AgentInstallGuide";
 import { findAcpSelectConfigOption } from "./team/teamUtils";
 import ampSchema from "../../../shared/schemas/amp.json";
@@ -54,6 +56,7 @@ import copilotSchema from "../../../shared/schemas/copilot.json";
 import cursorAgentSchema from "../../../shared/schemas/cursor_agent.json";
 import droidSchema from "../../../shared/schemas/droid.json";
 import geminiSchema from "../../../shared/schemas/gemini.json";
+import hermesSchema from "../../../shared/schemas/hermes.json";
 import kimiCodeSchema from "../../../shared/schemas/kimi_code.json";
 import openTeamsCliSchema from "../../../shared/schemas/open_teams_cli.json";
 import opencodeSchema from "../../../shared/schemas/opencode.json";
@@ -122,6 +125,11 @@ const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
     logoClassName: "h-8 w-8",
   },
   GEMINI: { title: "Google Gemini", path: brandIconPaths.gemini },
+  HERMES: {
+    title: "Hermes",
+    logoSrc: "/logos/hermes-logo.png",
+    logoClassName: "h-[22px] w-[22px]",
+  },
   KIMI_CODE: { title: "Kimi", logoSrc: "/logos/kimi-logo.svg" },
   OPENCODE: {
     title: "OpenCode",
@@ -175,6 +183,7 @@ const agentConfigSchemas: Record<BaseCodingAgent, AgentJsonSchema> = {
   CURSOR_AGENT: cursorAgentSchema,
   DROID: droidSchema,
   GEMINI: geminiSchema,
+  HERMES: hermesSchema,
   KIMI_CODE: kimiCodeSchema,
   OPENCODE: opencodeSchema,
   OPEN_TEAMS_CLI: openTeamsCliSchema,
@@ -209,6 +218,7 @@ const isHiddenConfigField = (
     (fieldKey === "variant" || fieldKey === "agent"));
 
 const isAcpRunner = (runner: BaseCodingAgent): boolean =>
+  runner === "HERMES" ||
   runner === "GEMINI" ||
   runner === "QWEN_CODE" ||
   runner === "KIMI_CODE" ||
@@ -268,7 +278,17 @@ const getRuntimeErrorMessage = (
 ): string => {
   const lastError = runner.last_error?.trim();
   if (lastError) return lastError;
-  if (runner.installed && !runner.executable) return t("agents.status.error");
+  if (runner.installed && !runner.executable) {
+    const missingTools = getMissingRuntimeTools(runner);
+    if (missingTools.length > 0) {
+      return t("agents.status.missingDependencies", {
+        tools: missingTools
+          .map((tool) => RUNTIME_TOOL_LABELS[tool])
+          .join(", "),
+      });
+    }
+    return t("agents.status.error");
+  }
   return "";
 };
 
@@ -582,16 +602,19 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 }
 
 function AcpRuntimeConfigField({
+  runner,
   value,
   onChange,
   onCommit,
   t,
 }: {
+  runner: BaseCodingAgent;
   value: JsonValue | undefined;
   onChange: (key: string, value: JsonValue | undefined) => void;
   onCommit: () => void | Promise<void>;
   t: TranslateFn;
 }) {
+  const isHermes = runner === "HERMES";
   const [pendingRiskyChange, setPendingRiskyChange] = useState<
     "full_access" | "auto_allow" | null
   >(null);
@@ -635,16 +658,25 @@ function AcpRuntimeConfigField({
         <span className={labelClass}>{t("agents.acp.accessMode.label")}</span>
         <DropdownSelect
           value={accessMode}
-          options={[
-            {
-              id: "workspace_only",
-              label: t("agents.acp.accessMode.workspaceOnly"),
-            },
-            {
-              id: "full_access",
-              label: t("permissions.fullAccessHighRisk"),
-            },
-          ]}
+          options={
+            isHermes
+              ? [
+                  {
+                    id: "full_access",
+                    label: t("permissions.fullAccessHighRisk"),
+                  },
+                ]
+              : [
+                  {
+                    id: "workspace_only",
+                    label: t("agents.acp.accessMode.workspaceOnly"),
+                  },
+                  {
+                    id: "full_access",
+                    label: t("permissions.fullAccessHighRisk"),
+                  },
+                ]
+          }
           showSearch={false}
           className={dropdownClass}
           onChange={(next) => {
@@ -720,29 +752,31 @@ function AcpRuntimeConfigField({
           />
         </label>
       )}
-      <label className="grid grid-cols-[128px_minmax(0,1fr)] items-start gap-3 py-1.5">
-        <span className={`${labelClass} pt-1`}>
-          {t("agents.acp.directories.label")}
-        </span>
-        <textarea
-          value={directories.join("\n")}
-          rows={3}
-          className={`${inputClass} h-auto resize-y py-1.5`}
-          placeholder={t("agents.acp.directories.placeholder")}
-          onChange={(event) =>
-            onChange(
-              "acp",
-              merge({
-                additional_directories: event.target.value
-                  .split(/\r?\n/u)
-                  .map((path) => path.trim())
-                  .filter(Boolean),
-              }),
-            )
-          }
-          onBlur={() => void onCommit()}
-        />
-      </label>
+      {!isHermes && (
+        <label className="grid grid-cols-[128px_minmax(0,1fr)] items-start gap-3 py-1.5">
+          <span className={`${labelClass} pt-1`}>
+            {t("agents.acp.directories.label")}
+          </span>
+          <textarea
+            value={directories.join("\n")}
+            rows={3}
+            className={`${inputClass} h-auto resize-y py-1.5`}
+            placeholder={t("agents.acp.directories.placeholder")}
+            onChange={(event) =>
+              onChange(
+                "acp",
+                merge({
+                  additional_directories: event.target.value
+                    .split(/\r?\n/u)
+                    .map((path) => path.trim())
+                    .filter(Boolean),
+                }),
+              )
+            }
+            onBlur={() => void onCommit()}
+          />
+        </label>
+      )}
       {pendingRiskyChange && (
         <ConfirmationDialog
           idPrefix="agent-acp-permission-confirmation"
@@ -1158,12 +1192,14 @@ function AgentConfigSidebar({
     (diagnosticsLoading
       ? t("agents.details.loading")
       : t("agents.details.notReported"));
-  const discoveredCliVersion = isAcpRunner(runner.runner_type)
-    ? currentDiagnostics?.acp_probe?.agent_version
-    : currentDiagnostics?.version;
+  const discoveredCliVersion = currentDiagnostics?.version;
   const cliVersion = diagnosticsLoading
     ? t("agents.details.checking")
     : (discoveredCliVersion?.trim() || t("agents.details.notReported"));
+  const acpVersion = diagnosticsLoading
+    ? t("agents.details.checking")
+    : (currentDiagnostics?.acp_probe?.agent_version?.trim() ||
+      t("agents.details.notReported"));
   const commandSource = diagnosticsLoading
     ? t("agents.details.loading")
     : currentDiagnostics?.command_source
@@ -1317,6 +1353,8 @@ function AgentConfigSidebar({
             availability: runner.availability,
             auth_state: runner.auth_state,
             node_available: runner.node_available,
+            npm_available: runner.npm_available,
+            npx_available: runner.npx_available,
             discovered_models: runner.discovered_models,
             model_source: runner.model_source,
             last_checked_at: runner.last_checked_at,
@@ -1517,6 +1555,12 @@ function AgentConfigSidebar({
               label={t("agents.details.cliVersion")}
               value={cliVersion}
             />
+            {isAcpRunner(runner.runner_type) && (
+              <DetailRow
+                label={t("agents.details.acpVersion")}
+                value={acpVersion}
+              />
+            )}
             <DetailRow
               label={t("agents.details.commandSource")}
               value={commandSource}
@@ -1604,6 +1648,7 @@ function AgentConfigSidebar({
                 />
                 {isAcpRunner(runner.runner_type) && (
                   <AcpRuntimeConfigField
+                    runner={runner.runner_type}
                     value={formData.acp}
                     onChange={handleConfigFieldChange}
                     onCommit={runAutoSave}
@@ -1958,6 +2003,8 @@ export function AgentsPage() {
               availability: diagnostics.availability,
               auth_state: diagnostics.auth_state,
               node_available: diagnostics.node_available,
+              npm_available: diagnostics.npm_available,
+              npx_available: diagnostics.npx_available,
               discovered_models: diagnostics.discovered_models,
               model_source: diagnostics.model_source,
               version: diagnostics.version,

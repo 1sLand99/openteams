@@ -1,8 +1,9 @@
 use crate::services::agent_activity_stream::{
-    tool_activity_content, truncate_activity_line, AgentActivityStreamState,
+    tool_activity_content, truncate_activity_line, AgentActivityEntryLine, AgentActivityStreamState,
 };
 #[cfg(test)]
-use crate::services::agent_activity_stream::{activity_line_for_entry, AgentActivityEntryLine};
+use crate::services::agent_activity_stream::activity_line_for_entry;
+use crate::services::chat_runner::{ChatStreamEvent, RUN_ACTIVITY_FILE_NAME};
 
 #[derive(Default)]
 struct WorkflowRuntimeStreamState {
@@ -363,4 +364,178 @@ struct WorkflowRuntimeStreamContext {
     step_key: String,
     agent_id: Uuid,
     agent_name: String,
+}
+
+/// Streaming context for workflow plan generation runs. Unlike step execution
+/// there is no workflow execution/transcript to persist into, so lines go to
+/// the run's `activity.jsonl` and surface through the chat run activity
+/// channel, matching free-chat behavior.
+#[derive(Clone)]
+struct PlanGenerationStreamContext {
+    chat_runner: ChatRunner,
+    session_id: Uuid,
+    card_message_id: Uuid,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_and_notify_plan_generation_lines(
+    sender: &tokio::sync::broadcast::Sender<ChatStreamEvent>,
+    activity_path: &std::path::Path,
+    session_id: Uuid,
+    session_agent_id: Uuid,
+    agent_id: Uuid,
+    agent_name: &str,
+    run_id: Uuid,
+    sequence: &mut u64,
+    activity_lines: Vec<AgentActivityEntryLine>,
+) {
+    for activity_line in activity_lines {
+        ChatRunner::persist_and_notify_activity_line(
+            activity_path,
+            sender,
+            session_id,
+            session_agent_id,
+            agent_id,
+            agent_name,
+            run_id,
+            sequence,
+            activity_line,
+        )
+        .await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drain_plan_generation_patch_lines(
+    state: &mut AgentActivityStreamState,
+    patch: &Patch,
+    sender: &tokio::sync::broadcast::Sender<ChatStreamEvent>,
+    activity_path: &std::path::Path,
+    session_id: Uuid,
+    session_agent_id: Uuid,
+    agent_id: Uuid,
+    agent_name: &str,
+    run_id: Uuid,
+    sequence: &mut u64,
+) {
+    // Assistant lines stay disabled: the final assistant payload is the plan
+    // JSON itself, not chat content.
+    let activity_lines = state.drain_patch_lines(patch, false);
+    persist_and_notify_plan_generation_lines(
+        sender,
+        activity_path,
+        session_id,
+        session_agent_id,
+        agent_id,
+        agent_name,
+        run_id,
+        sequence,
+        activity_lines,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_plan_generation_stream(
+    chat_runner: ChatRunner,
+    session_id: Uuid,
+    session_agent_id: Uuid,
+    agent_id: Uuid,
+    agent_name: String,
+    run_id: Uuid,
+    run_dir: PathBuf,
+    msg_store: Arc<MsgStore>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let sender = chat_runner.sender_for(session_id);
+        let activity_path = run_dir.join(RUN_ACTIVITY_FILE_NAME);
+        let mut state = AgentActivityStreamState::default();
+        let mut sequence = 0_u64;
+        let mut stream = msg_store.history_plus_stream();
+
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(LogMsg::JsonPatch(patch)) => {
+                    drain_plan_generation_patch_lines(
+                        &mut state,
+                        &patch,
+                        &sender,
+                        &activity_path,
+                        session_id,
+                        session_agent_id,
+                        agent_id,
+                        &agent_name,
+                        run_id,
+                        &mut sequence,
+                    )
+                    .await;
+                }
+                Ok(LogMsg::Finished) => {
+                    let drain_deadline =
+                        time::Instant::now() + WORKFLOW_RUNTIME_STREAM_TAIL_DRAIN_TIMEOUT;
+                    loop {
+                        let remaining =
+                            drain_deadline.saturating_duration_since(time::Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+
+                        match time::timeout(remaining, stream.next()).await {
+                            Ok(Some(Ok(LogMsg::JsonPatch(patch)))) => {
+                                drain_plan_generation_patch_lines(
+                                    &mut state,
+                                    &patch,
+                                    &sender,
+                                    &activity_path,
+                                    session_id,
+                                    session_agent_id,
+                                    agent_id,
+                                    &agent_name,
+                                    run_id,
+                                    &mut sequence,
+                                )
+                                .await;
+                            }
+                            Ok(Some(Ok(_))) => {}
+                            Ok(Some(Err(error))) => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    run_id = %run_id,
+                                    %error,
+                                    "plan generation stream read failed during tail drain"
+                                );
+                                break;
+                            }
+                            Ok(None) | Err(_) => break,
+                        }
+                    }
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        run_id = %run_id,
+                        %error,
+                        "plan generation stream read failed"
+                    );
+                    break;
+                }
+            }
+        }
+
+        let pending_lines = state.flush_pending_lines();
+        persist_and_notify_plan_generation_lines(
+            &sender,
+            &activity_path,
+            session_id,
+            session_agent_id,
+            agent_id,
+            &agent_name,
+            run_id,
+            &mut sequence,
+            pending_lines,
+        )
+        .await;
+    })
 }

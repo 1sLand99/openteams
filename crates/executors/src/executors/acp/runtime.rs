@@ -18,8 +18,8 @@ use agent_client_protocol::{
             RequestPermissionRequest, ResumeSessionRequest, SessionConfigKind, SessionConfigOption,
             SessionConfigOptionCategory, SessionConfigOptionValue,
             SessionConfigOptionsCapabilities, SessionConfigSelectOptions, SessionId,
-            SessionNotification, SetSessionConfigOptionRequest, TerminalOutputRequest, TextContent,
-            WaitForTerminalExitRequest, WriteTextFileRequest,
+            SessionNotification, SetSessionConfigOptionRequest, StopReason, TerminalOutputRequest,
+            TextContent, WaitForTerminalExitRequest, WriteTextFileRequest,
         },
     },
 };
@@ -31,8 +31,8 @@ use tokio_util::{compat::TokioAsyncReadCompatExt, sync::CancellationToken};
 
 use super::{
     AcpApprovalPolicy, AcpAuthMethodInfo, AcpCapabilityProbe, AcpClient, AcpConfigChoice,
-    AcpConfigOptionKind, AcpConfigOptionSnapshot, AcpConfigSource, AcpEvent, AcpRunConfig,
-    AcpSessionPreferences, config::is_session_mode_key, mcp::validate_mcp_servers,
+    AcpConfigOptionKind, AcpConfigOptionSnapshot, AcpConfigSource, AcpEvent, AcpResumePolicy,
+    AcpRunConfig, AcpSessionPreferences, config::is_session_mode_key, mcp::validate_mcp_servers,
     output::AcpOutput,
 };
 use crate::{
@@ -47,8 +47,11 @@ use crate::{
 enum BootstrapError {
     FollowUpNotSupported(String),
     AuthRequired(String),
+    Configuration(String),
     Other(String),
 }
+
+const INVALID_SESSION_RECOVERY_MESSAGE: &str = "ACP session recovery reused the requested session ID and the prompt was refused; the session is invalid";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +73,7 @@ struct LegacyModelInfo {
 #[derive(Debug)]
 struct AcpSessionConfigState {
     session_id: SessionId,
+    session_id_was_fallback: bool,
     config_options: Vec<SessionConfigOption>,
     legacy_models: Option<LegacySessionModelState>,
 }
@@ -94,6 +98,11 @@ impl AcpAgentHarness {
 
     pub fn with_approval_policy(mut self, approval_policy: AcpApprovalPolicy) -> Self {
         self.config.approval_policy = approval_policy;
+        self
+    }
+
+    pub fn with_resume_policy(mut self, resume_policy: AcpResumePolicy) -> Self {
+        self.config.resume_policy = resume_policy;
         self
     }
 
@@ -486,12 +495,15 @@ impl AcpAgentHarness {
                 if let Err(error) = &result
                     && !was_cancelled
                 {
-                    let startup_error =
-                        if error.code == agent_client_protocol::ErrorCode::AuthRequired {
+                    let startup_error = match error.code {
+                        agent_client_protocol::ErrorCode::AuthRequired => {
                             BootstrapError::AuthRequired(error.to_string())
-                        } else {
-                            BootstrapError::Other(error.to_string())
-                        };
+                        }
+                        agent_client_protocol::ErrorCode::InvalidParams => {
+                            BootstrapError::Configuration(error.to_string())
+                        }
+                        _ => BootstrapError::Other(error.to_string()),
+                    };
                     send_startup(&startup_tx, Err(startup_error));
                     let _ = output_for_runtime
                         .send(AcpEvent::Error(protocol_error_message(error)))
@@ -502,8 +514,13 @@ impl AcpAgentHarness {
                 if let Err(error) = output_task.await {
                     tracing::error!("ACP output task failed: {error}");
                 }
+                let failure = result.as_ref().err().and_then(|error| {
+                    is_invalid_session_recovery_error(error).then(|| protocol_error_message(error))
+                });
                 let _ = exit_signal.send(if result.is_ok() || was_cancelled {
                     ExecutorExitResult::Success
+                } else if let Some(message) = failure {
+                    ExecutorExitResult::FailureWithError(message)
                 } else {
                     ExecutorExitResult::Failure
                 });
@@ -517,6 +534,9 @@ impl AcpAgentHarness {
             }
             Ok(Err(BootstrapError::AuthRequired(message))) => {
                 Err(ExecutorError::AuthRequired(message))
+            }
+            Ok(Err(BootstrapError::Configuration(message))) => {
+                Err(ExecutorError::Configuration(message))
             }
             Ok(Err(BootstrapError::Other(message))) => Err(ExecutorError::Io(
                 std::io::Error::other(format!("ACP startup failed: {message}")),
@@ -824,15 +844,15 @@ fn parse_session_start_response(
     response: serde_json::Value,
     fallback_session_id: Option<SessionId>,
 ) -> agent_client_protocol::Result<AcpSessionConfigState> {
-    let session_id = response
+    let response_session_id = response
         .get("sessionId")
         .and_then(serde_json::Value::as_str)
-        .map(SessionId::new)
-        .or(fallback_session_id)
-        .ok_or_else(|| {
-            agent_client_protocol::Error::internal_error()
-                .data(format!("ACP `{method}` response omitted sessionId"))
-        })?;
+        .map(SessionId::new);
+    let session_id_was_fallback = response_session_id.is_none() && fallback_session_id.is_some();
+    let session_id = response_session_id.or(fallback_session_id).ok_or_else(|| {
+        agent_client_protocol::Error::internal_error()
+            .data(format!("ACP `{method}` response omitted sessionId"))
+    })?;
     let config_options = response
         .get("configOptions")
         .and_then(serde_json::Value::as_array)
@@ -861,6 +881,7 @@ fn parse_session_start_response(
 
     Ok(AcpSessionConfigState {
         session_id,
+        session_id_was_fallback,
         config_options,
         legacy_models,
     })
@@ -1026,6 +1047,7 @@ async fn run_connection(
             .data("ACP Agent does not support additionalDirectories"));
     }
 
+    let is_follow_up = existing_session.is_some();
     let mut session_state = match existing_session {
         None => {
             send_session_start_request(
@@ -1077,6 +1099,7 @@ async fn run_connection(
         }
     };
     let session_id = session_state.session_id.clone();
+    let session_id_was_fallback = session_state.session_id_was_fallback;
 
     output
         .send(AcpEvent::SessionStart(session_id.0.to_string()))
@@ -1121,10 +1144,19 @@ async fn run_connection(
         _ = cancel.cancelled() => {
             connection.send_notification(CancelNotification::new(session_id.clone()))?;
             tokio::time::timeout(std::time::Duration::from_secs(10), &mut request)
-                .await
+            .await
                 .map_err(|_| agent_client_protocol::Error::request_cancelled())??
         }
     };
+    if config.resume_policy == AcpResumePolicy::RefusalMeansInvalidSession
+        && is_follow_up
+        && session_id_was_fallback
+        && response.stop_reason == StopReason::Refusal
+    {
+        return Err(
+            agent_client_protocol::Error::invalid_params().data(INVALID_SESSION_RECOVERY_MESSAGE)
+        );
+    }
     if let Some(usage) = client.finish_turn_token_usage(&response).await {
         output
             .send(AcpEvent::TokenUsage(usage))
@@ -1463,12 +1495,30 @@ async fn set_config_option_and_verify(
         })?;
     if !config_current_value_matches(effective, &value) {
         return Err(invalid_config(format!(
-            "ACP Agent did not activate the requested value for `{}`",
-            option.id
+            "ACP config option `{}` requested {}, but the Agent activated {}; the requested value may be unsupported",
+            option.id,
+            config_value_display(&value),
+            config_current_value_display(effective),
         )));
     }
     *options = response.config_options;
     Ok(())
+}
+
+fn config_value_display(value: &SessionConfigOptionValue) -> String {
+    match value {
+        SessionConfigOptionValue::ValueId { value } => format!("`{value}`"),
+        SessionConfigOptionValue::Boolean { value } => format!("`{value}`"),
+        _ => "an unsupported value type".to_string(),
+    }
+}
+
+fn config_current_value_display(option: &SessionConfigOption) -> String {
+    match &option.kind {
+        SessionConfigKind::Select(select) => format!("`{}`", select.current_value),
+        SessionConfigKind::Boolean(boolean) => format!("`{}`", boolean.current_value),
+        _ => "an unsupported value type".to_string(),
+    }
 }
 
 fn config_current_value_matches(
@@ -1577,6 +1627,14 @@ fn protocol_error_message(error: &agent_client_protocol::Error) -> String {
     }
 }
 
+fn is_invalid_session_recovery_error(error: &agent_client_protocol::Error) -> bool {
+    error.code == agent_client_protocol::ErrorCode::InvalidParams
+        && error
+            .data
+            .as_ref()
+            .is_some_and(|data| data.as_str() == Some(INVALID_SESSION_RECOVERY_MESSAGE))
+}
+
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::schema::v1::SessionConfigSelectOption;
@@ -1662,6 +1720,21 @@ mod tests {
     }
 
     #[test]
+    fn resume_policy_is_an_explicit_adapter_capability() {
+        let harness =
+            AcpAgentHarness::new().with_resume_policy(AcpResumePolicy::RefusalMeansInvalidSession);
+
+        assert_eq!(
+            harness.config.resume_policy,
+            AcpResumePolicy::RefusalMeansInvalidSession
+        );
+        assert_eq!(
+            AcpAgentHarness::new().config.resume_policy,
+            AcpResumePolicy::PreserveRefusal
+        );
+    }
+
+    #[test]
     fn model_preference_resolves_unique_provider_qualified_value() {
         let option = SessionConfigOption::select(
             "model",
@@ -1738,6 +1811,21 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn marks_missing_resume_session_id_when_using_requested_id_fallback() {
+        let state = parse_session_start_response(
+            "session/resume",
+            serde_json::json!({
+                "models": {"currentModelId": "model-1", "availableModels": []}
+            }),
+            Some(SessionId::new("session-1")),
+        )
+        .expect("resume response should use the requested ID for the wire follow-up");
+
+        assert_eq!(state.session_id.0.as_ref(), "session-1");
+        assert!(state.session_id_was_fallback);
     }
 
     #[test]

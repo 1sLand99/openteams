@@ -48,6 +48,7 @@
   "teamPage.form.memberNameDesc": "Utilisé pour les @mentions et le routage des messages",
   "teamPage.form.model": "Modèle",
   "teamPage.form.modelDesc": "Modèle par défaut pour ce membre",
+  "teamPage.form.modelLoading": "Chargement des modèles…",
   "teamPage.form.reasoning": "Niveau de raisonnement",
   "teamPage.form.reasoningDesc": "Profondeur de raisonnement par défaut",
   "teamPage.form.runtime": "Environnement d'exécution de l'agent",

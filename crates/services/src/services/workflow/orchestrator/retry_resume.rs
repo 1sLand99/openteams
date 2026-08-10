@@ -94,7 +94,16 @@ impl WorkflowOrchestrator {
     ) -> Result<(WorkflowExecution, WorkflowStep), OrchestratorError> {
         let pool = &db.pool;
         let execution =
-            Self::retry_single_step_only(db, chat_runner, execution, ready_step).await?;
+            if Self::prepare_manual_loop_review_retry(pool, execution, ready_step).await? {
+                // A Loop review is a Loop work item, not an ordinary Review step.
+                // Re-enter the scheduler so it reconstructs the compiled Loop
+                // definition and dispatches through `LoopExecutor` with the
+                // `loop_review` prompt/parser path.
+                Self::wake_scheduler(db, chat_runner, execution.id).await?;
+                execution.clone()
+            } else {
+                Self::retry_single_step_only(db, chat_runner, execution, ready_step).await?
+            };
 
         let latest_execution = WorkflowExecution::find_by_id(pool, execution.id)
             .await?
@@ -106,6 +115,70 @@ impl WorkflowOrchestrator {
             .ok_or_else(|| OrchestratorError::NotFound(format!("step {} 未找到", ready_step.id)))?;
 
         Ok((latest_execution, latest_step))
+    }
+
+    /// Restores a failed Loop when its review step is manually retried.
+    /// Returns `true` only for the Loop's review step; member task retries keep
+    /// using the ordinary single-step path.
+    pub(super) async fn prepare_manual_loop_review_retry(
+        pool: &SqlitePool,
+        execution: &WorkflowExecution,
+        step: &WorkflowStep,
+    ) -> Result<bool, OrchestratorError> {
+        let Some(loop_id) = step.loop_id else {
+            return Ok(false);
+        };
+        let workflow_loop = WorkflowLoop::find_by_id(pool, loop_id)
+            .await?
+            .ok_or_else(|| OrchestratorError::NotFound(format!("loop {} not found", loop_id)))?;
+        if workflow_loop.execution_id != execution.id {
+            return Err(OrchestratorError::IllegalTransition(format!(
+                "step {} references loop {} from another execution",
+                step.id, workflow_loop.id
+            )));
+        }
+        if workflow_loop.review_step_id != step.id {
+            return Ok(false);
+        }
+
+        let active_loop = match workflow_loop.status.clone() {
+            WorkflowLoopStatus::Failed => WorkflowLoop::update_status_if_current(
+                pool,
+                workflow_loop.id,
+                WorkflowLoopStatus::Failed,
+                WorkflowLoopStatus::Running,
+                workflow_loop.rejection_reason.clone(),
+            )
+            .await?
+            .ok_or_else(|| {
+                OrchestratorError::IllegalTransition(format!(
+                    "loop {} changed before manual review retry",
+                    workflow_loop.id
+                ))
+            })?,
+            WorkflowLoopStatus::Pending
+            | WorkflowLoopStatus::Running
+            | WorkflowLoopStatus::Rejected => workflow_loop,
+            status => {
+                return Err(OrchestratorError::IllegalTransition(format!(
+                    "loop {} is {:?}, cannot manually retry its review step",
+                    workflow_loop.id, status
+                )));
+            }
+        };
+
+        LoopExecutor::emit_loop_event(
+            pool,
+            execution,
+            &active_loop,
+            WorkflowEventType::LoopRetrying,
+            Some(serde_json::json!({
+                "reason": "loop_review_manual_retry",
+                "step_id": step.id,
+            })),
+        )
+        .await?;
+        Ok(true)
     }
 
     /// Skip an interrupted, blocked, or failed step and resume scheduling from

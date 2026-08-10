@@ -161,6 +161,7 @@ const workflowPlanGenerationFromMeta = (
       typeof raw.retry_endpoint === 'string' ? raw.retry_endpoint : undefined,
     error_message:
       typeof raw.error_message === 'string' ? raw.error_message : null,
+    run_id: typeof raw.run_id === 'string' ? raw.run_id : undefined,
   };
 };
 

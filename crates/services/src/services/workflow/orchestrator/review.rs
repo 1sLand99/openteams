@@ -372,7 +372,6 @@ impl WorkflowOrchestrator {
                     &recompiling_execution,
                     &plan,
                     &active_revision,
-                    &from_round,
                     &iteration_feedback,
                 )
                 .await?;
@@ -618,6 +617,7 @@ impl WorkflowOrchestrator {
                 previous_content,
                 &previous_payload.outputs,
                 step.retry_count + 1,
+                None,
             )
         });
 

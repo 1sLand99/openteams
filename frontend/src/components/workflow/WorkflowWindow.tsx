@@ -86,6 +86,10 @@ import {
   type WorkflowReviewSettingOverride,
 } from './WorkflowReviewSettingsDialog';
 import { localizeWorkflowGeneratedText } from './workflowGeneratedText';
+import {
+  parseWorkflowReviewTranscriptDetails,
+  WorkflowReviewDetailsView,
+} from './WorkflowReviewDetailsView';
 
 type WorkflowCardStep = WorkflowCardData['steps'][number];
 
@@ -254,10 +258,10 @@ const REVIEW_SETTINGS_EXECUTION_FINISHED_ERROR =
 const REVIEW_SETTINGS_ACTIVE_EXECUTION_ERROR =
   'Review settings can only be changed while execution is not running or waiting for review.';
 const workflowDetailMarkdownTextClassName = [
-  'text-[13px] text-[var(--ink-subtle)] leading-[1.7]',
-  '[&_h1]:text-[var(--ink)] [&_h1]:font-semibold [&_h1]:text-[17px] [&_h1]:mb-3 [&_h1]:mt-6',
-  '[&_h2]:text-[var(--ink)] [&_h2]:font-semibold [&_h2]:text-[15px] [&_h2]:mb-3 [&_h2]:mt-5',
-  '[&_h3]:text-[var(--ink)] [&_h3]:font-medium [&_h3]:text-[14px] [&_h3]:mb-2 [&_h3]:mt-4',
+  'text-[14px] text-[var(--ink-subtle)] leading-[1.7]',
+  '[&_h1]:text-[var(--ink)] [&_h1]:font-semibold [&_h1]:text-[18px] [&_h1]:mb-3 [&_h1]:mt-6',
+  '[&_h2]:text-[var(--ink)] [&_h2]:font-semibold [&_h2]:text-[16px] [&_h2]:mb-3 [&_h2]:mt-5',
+  '[&_h3]:text-[var(--ink)] [&_h3]:font-medium [&_h3]:text-[15px] [&_h3]:mb-2 [&_h3]:mt-4',
   '[&_p]:mb-3',
   '[&_ul]:mb-3 [&_ul]:pl-4',
   '[&_ol]:mb-3 [&_ol]:pl-4',
@@ -281,7 +285,7 @@ const workflowDetailMarkdownTextClassName = [
   '[&_pre]:rounded-[6px]',
   '[&_pre]:p-4',
   '[&_pre]:my-4',
-  '[&_pre]:text-[12px]',
+  '[&_pre]:text-[13px]',
   '[&_pre]:leading-[1.6]',
   '[&_pre]:overflow-x-auto',
   '[&_pre_code]:bg-transparent',
@@ -515,11 +519,9 @@ function getTranscriptMarkdown(
         verdict: localizedVerdict,
         defaultValue: `Verdict: ${localizedVerdict}`,
       });
-      return content.length > 0
-        ? `${verdictLine}\n\n${content}`
-        : verdictLine;
+      return [verdictLine, content].filter(Boolean).join('\n\n');
     }
-    return content.length > 0 ? content : null;
+    return content || null;
   }
 
   if (
@@ -1019,13 +1021,22 @@ function InspectorCard({
     (items ?? [])
       .map((item) => item.trim())
       .filter((item) => item.length > 0);
+  const flattenAcceptance = (acceptance?: {
+    required?: string[] | null;
+    partial?: string[] | null;
+    recommended?: string[] | null;
+  } | null) => [
+    ...(acceptance?.required ?? []),
+    ...(acceptance?.partial ?? []),
+    ...(acceptance?.recommended ?? []),
+  ];
   const contractSections = [
     {
       key: 'acceptance',
       title: t('workflow.inspector.acceptanceHeading', {
         defaultValue: 'Acceptance Criteria',
       }),
-      items: cleanContractItems(planNode?.data.acceptance),
+      items: cleanContractItems(flattenAcceptance(planNode?.data.acceptance)),
     },
     {
       key: 'expectedOutputs',
@@ -1035,11 +1046,11 @@ function InspectorCard({
       items: cleanContractItems(planNode?.data.outputs),
     },
     {
-      key: 'checklist',
-      title: t('workflow.inspector.checklistHeading', {
-        defaultValue: 'Checklist',
+      key: 'selfCheck',
+      title: t('workflow.inspector.selfCheckHeading', {
+        defaultValue: 'Self-Check',
       }),
-      items: cleanContractItems(planNode?.data.checklist),
+      items: cleanContractItems(planNode?.data.selfCheck),
     },
     {
       key: 'verificationCommands',
@@ -1246,7 +1257,7 @@ function InspectorCard({
               {step.title}
             </h2>
 
-            <div className="mb-4 flex flex-wrap items-center gap-1.5 text-[11px] leading-[1.4] text-[var(--ink-tertiary)]">
+            <div className="mb-4 flex flex-wrap items-center gap-1.5 text-[12px] leading-[1.4] text-[var(--ink-tertiary)]">
               <span className="inline-flex items-center gap-1 text-[var(--ink-subtle)]">
                 <Bot className="w-3 h-3" /> {agentName}
               </span>
@@ -1296,7 +1307,7 @@ function InspectorCard({
 
             {contractSections.map((section) => (
               <InspectorSection key={section.key} title={section.title}>
-                <ul className="list-disc space-y-1 pl-4 text-[12px] leading-[1.6] text-[var(--ink-muted)]">
+                <ul className="list-disc space-y-1 pl-4 text-[13px] leading-[1.6] text-[var(--ink-muted)]">
                   {section.items.map((item, index) => (
                     <li
                       key={`${section.key}-${index}`}
@@ -1349,7 +1360,7 @@ function InspectorCard({
               })}
             >
               {isLoadingTranscript ? (
-                <div className="flex items-center gap-2 text-[11px] text-[var(--ink-tertiary)]">
+                <div className="flex items-center gap-2 text-[12px] text-[var(--ink-tertiary)]">
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   {t('workflow.inspector.loadingTranscript', {
                     defaultValue: 'Loading transcript...',
@@ -1358,6 +1369,10 @@ function InspectorCard({
               ) : outputEntries.length > 0 ? (
                 <div className="divide-y divide-[var(--hairline)]">
                   {outputEntries.map((entry) => {
+                    const isReviewEntry = isWorkflowReviewEntry(entry);
+                    const reviewDetails = isReviewEntry
+                      ? parseWorkflowReviewTranscriptDetails(entry.meta_json)
+                      : null;
                     const content =
                       getLocalizedTranscriptMarkdown(entry, t) ||
                       localizeWorkflowGeneratedText(entry.content, t);
@@ -1366,7 +1381,7 @@ function InspectorCard({
                       entry.entry_type === 'message' ||
                       entry.entry_type === 'output'
                         ? entry.agent_name?.trim() || undefined
-                        : isWorkflowReviewEntry(entry)
+                        : isReviewEntry
                           ? getWorkflowReviewAgentName(entry, 'Reviewer', t)
                           : null;
                     const outputLabel =
@@ -1391,11 +1406,11 @@ function InspectorCard({
                           >
                             <OutputIcon className="h-3.5 w-3.5" />
                           </span>
-                          <span className="shrink-0 text-[12px] font-medium text-[var(--ink-muted)]">
+                          <span className="shrink-0 text-[13px] font-medium text-[var(--ink-muted)]">
                             {outputLabel}
                           </span>
                           {!isEntryExpanded && preview ? (
-                            <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--ink-tertiary)]">
+                            <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--ink-tertiary)]">
                               {preview}
                             </span>
                           ) : null}
@@ -1408,20 +1423,28 @@ function InspectorCard({
                         </button>
                         {isEntryExpanded && (
                           <div className="pb-3 pl-[22px]">
-                            <ChatMarkdown
-                              content={content}
-                              maxWidth="100%"
-                              textClassName={
-                                entry.entry_type === 'error'
-                                  ? 'font-mono text-[12px] leading-[1.5] text-[var(--ink-tertiary)] [&_pre]:bg-transparent [&_pre]:border-0 [&_pre]:p-0 [&_pre]:m-0 [&_pre_code]:text-[var(--ink-tertiary)]'
-                                  : workflowDetailMarkdownTextClassName
-                              }
-                              className={cn(
-                                'w-full select-text',
-                                entry.entry_type === 'error' &&
-                                  'max-h-40 overflow-y-auto'
-                              )}
-                            />
+                            {content && (
+                              <ChatMarkdown
+                                content={content}
+                                maxWidth="100%"
+                                textClassName={
+                                  entry.entry_type === 'error'
+                                    ? 'font-mono text-[13px] leading-[1.5] text-[var(--ink-tertiary)] [&_pre]:bg-transparent [&_pre]:border-0 [&_pre]:p-0 [&_pre]:m-0 [&_pre_code]:text-[var(--ink-tertiary)]'
+                                    : workflowDetailMarkdownTextClassName
+                                }
+                                className={cn(
+                                  'w-full select-text',
+                                  entry.entry_type === 'error' &&
+                                    'max-h-40 overflow-y-auto'
+                                )}
+                              />
+                            )}
+                            {reviewDetails && (
+                              <WorkflowReviewDetailsView
+                                details={reviewDetails}
+                                className={content ? 'mt-2' : undefined}
+                              />
+                            )}
                           </div>
                         )}
                       </div>
@@ -1429,7 +1452,7 @@ function InspectorCard({
                   })}
                 </div>
               ) : (
-                <div className="text-[11px] text-[var(--ink-tertiary)]">
+                <div className="text-[12px] text-[var(--ink-tertiary)]">
                   {t('workflow.inspector.noOutputEntries', {
                     defaultValue: 'No output entries for this step yet.',
                   })}
@@ -1452,7 +1475,7 @@ function InspectorCard({
                   <ChatMarkdown
                     content={summaryText}
                     maxWidth="100%"
-                    textClassName="font-mono text-[12px] leading-[1.5] text-[var(--ink-tertiary)] [&_pre]:bg-transparent [&_pre]:border-0 [&_pre]:p-0 [&_pre]:m-0 [&_pre_code]:text-[var(--ink-tertiary)]"
+                    textClassName="font-mono text-[13px] leading-[1.5] text-[var(--ink-tertiary)] [&_pre]:bg-transparent [&_pre]:border-0 [&_pre]:p-0 [&_pre]:m-0 [&_pre_code]:text-[var(--ink-tertiary)]"
                     className="w-full select-text"
                   />
                 </div>
@@ -1735,6 +1758,9 @@ function ChatPanel({
           const isReviewEntry = isWorkflowReviewEntry(entry);
           const isUser = entry.message_type === 'user' && !isReviewEntry;
           const markdownContent = getLocalizedTranscriptMarkdown(entry, t);
+          const reviewDetails = isReviewEntry
+            ? parseWorkflowReviewTranscriptDetails(entry.meta_json)
+            : null;
           const entryAgentName =
             !isUser && isReviewEntry
               ? getWorkflowReviewAgentName(entry, agentName, t)
@@ -1855,17 +1881,27 @@ function ChatPanel({
               >
                 {isUser ? (
                   localizeWorkflowGeneratedText(entry.content, t)
-                ) : markdownContent ? (
-                  <ChatMarkdown
-                    content={markdownContent}
-                    maxWidth="100%"
-                    textClassName={workflowDetailMarkdownTextClassName}
-                    className="w-full select-text"
-                  />
                 ) : (
-                  <span className="text-[13px]">
-                    {localizeWorkflowGeneratedText(entry.content, t)}
-                  </span>
+                  <>
+                    {markdownContent ? (
+                      <ChatMarkdown
+                        content={markdownContent}
+                        maxWidth="100%"
+                        textClassName={workflowDetailMarkdownTextClassName}
+                        className="w-full select-text"
+                      />
+                    ) : !reviewDetails ? (
+                      <span className="text-[13px]">
+                        {localizeWorkflowGeneratedText(entry.content, t)}
+                      </span>
+                    ) : null}
+                    {reviewDetails && (
+                      <WorkflowReviewDetailsView
+                        details={reviewDetails}
+                        className={markdownContent ? 'mt-2' : undefined}
+                      />
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -3380,7 +3416,7 @@ export function WorkflowWindow({
             <motion.aside
               key="inspector-panel"
               initial={{ width: 0, opacity: 0 }}
-              animate={{ width: 700, opacity: 1 }}
+              animate={{ width: 860, opacity: 1 }}
               transition={{
                 type: 'tween',
                 duration: 0.25,

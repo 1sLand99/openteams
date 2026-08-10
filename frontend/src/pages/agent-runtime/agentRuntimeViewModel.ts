@@ -4,10 +4,18 @@ import type {
   AvailabilityInfo,
   BaseCodingAgent,
 } from "@/types";
+import type { MissingRuntimeTool } from "./installGuidance";
 
 export type AgentRuntimeFilter = "all" | "available" | "error" | "not_installed";
 
 export type RuntimeDisplayState = "available" | "error" | "not_installed";
+
+/** Display labels for probed runtime tools (Node.js/npm/npx). */
+export const RUNTIME_TOOL_LABELS: Record<MissingRuntimeTool, string> = {
+  node: "Node.js",
+  npm: "npm",
+  npx: "npx",
+};
 
 export const AGENT_RUNTIME_EDITABLE_FIELDS = [
   "run_mode",
