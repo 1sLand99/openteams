@@ -26,7 +26,10 @@ use agent_client_protocol::{
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use futures::{AsyncBufReadExt, sink};
 use serde::{Deserialize, Serialize};
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    process::Command,
+};
 use tokio_util::{compat::TokioAsyncReadCompatExt, sync::CancellationToken};
 
 use super::{
@@ -606,7 +609,7 @@ async fn probe_acp_command_inner(
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .current_dir(current_dir)
         .args(args);
     env.clone()
@@ -629,6 +632,19 @@ async fn probe_acp_command_inner(
             "stdin pipe unavailable",
         )
     })?;
+    let stderr = child.inner().stderr.take().ok_or_else(|| {
+        acp_probe_diagnostic_error(
+            &command_display,
+            "open ACP probe stderr",
+            "stderr pipe unavailable",
+        )
+    })?;
+    let stderr_task = tokio::spawn(async move {
+        let mut stderr = stderr;
+        let mut captured = Vec::new();
+        let read_result = stderr.read_to_end(&mut captured).await;
+        (captured, read_result)
+    });
     let (probe_tx, probe_rx) =
         tokio::sync::oneshot::channel::<Result<AcpCapabilityProbe, String>>();
     let probe_tx = Arc::new(StdMutex::new(Some(probe_tx)));
@@ -798,8 +814,26 @@ async fn probe_acp_command_inner(
         .map_err(|error| {
             acp_probe_diagnostic_error(&command_display, "initialize ACP connection", error)
         });
+    let process_status = match child.inner().try_wait() {
+        Ok(Some(status)) => format!("exited ({status})"),
+        Ok(None) => "running".to_string(),
+        Err(error) => format!("status unavailable ({error})"),
+    };
     let _ = child.kill().await;
-    result
+    let stderr_diagnostics = match tokio::time::timeout(Duration::from_secs(2), stderr_task).await {
+        Ok(Ok((captured, Ok(_)))) => String::from_utf8_lossy(&captured).trim_end().to_string(),
+        Ok(Ok((captured, Err(error)))) => format!(
+            "{}\n[stderr read failed: {error}]",
+            String::from_utf8_lossy(&captured).trim_end()
+        ),
+        Ok(Err(error)) => format!("[stderr capture task failed: {error}]"),
+        Err(_) => "[stderr capture timed out]".to_string(),
+    };
+    result.map_err(|error| {
+        ExecutorError::Io(std::io::Error::other(format!(
+            "{error}; outer_process_status={process_status}; outer_stderr={stderr_diagnostics:?}"
+        )))
+    })
 }
 
 fn acp_probe_diagnostic_error(

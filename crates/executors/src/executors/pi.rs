@@ -107,7 +107,32 @@ struct PiRunFiles {
     mcp_extension: PathBuf,
     approval_extension: PathBuf,
     mcp_snapshot: PathBuf,
+    diagnostic_log: PathBuf,
     armed: bool,
+}
+
+fn pi_acp_compatible_current_dir(current_dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+
+        let mut components = current_dir.components();
+        let Some(Component::Prefix(prefix)) = components.next() else {
+            return current_dir.to_path_buf();
+        };
+        let Prefix::VerbatimDisk(drive) = prefix.kind() else {
+            return current_dir.to_path_buf();
+        };
+        let mut compatible = PathBuf::from(format!("{}:", char::from(drive)));
+        for component in components {
+            compatible.push(component.as_os_str());
+        }
+        compatible
+    }
+    #[cfg(not(windows))]
+    {
+        current_dir.to_path_buf()
+    }
 }
 
 impl PiRunFiles {
@@ -132,6 +157,7 @@ impl PiRunFiles {
             mcp_extension: directory.join(format!("pi-{run_id}-mcp-extension.ts")),
             approval_extension: directory.join(format!("pi-{run_id}-approval-extension.mjs")),
             mcp_snapshot: directory.join(format!("pi-{run_id}-mcp.json")),
+            diagnostic_log: directory.join(format!("pi-{run_id}-diagnostic.log")),
             armed: true,
         };
         let result = (|| {
@@ -160,6 +186,7 @@ impl PiRunFiles {
                 &files.mcp_snapshot,
                 &serde_json::to_vec(&snapshot.mcp_config)?,
             )?;
+            write_private_file(&files.diagnostic_log, b"")?;
             Ok::<(), ExecutorError>(())
         })();
         if let Err(error) = result {
@@ -195,6 +222,10 @@ impl PiRunFiles {
             "OPENTEAMS_PI_SKILL_PATHS_JSON",
             serde_json::to_string(&snapshot.skill_paths).unwrap_or_else(|_| "[]".to_string()),
         );
+        env.insert(
+            "OPENTEAMS_PI_DIAGNOSTIC_LOG",
+            self.diagnostic_log.to_string_lossy().to_string(),
+        );
         env
     }
 
@@ -207,8 +238,22 @@ impl PiRunFiles {
             self.mcp_extension.as_path(),
             self.approval_extension.as_path(),
             self.mcp_snapshot.as_path(),
+            self.diagnostic_log.as_path(),
         ]);
         paths
+    }
+
+    fn enrich_probe_error(&self, error: ExecutorError) -> ExecutorError {
+        let Ok(diagnostics) = fs::read_to_string(&self.diagnostic_log) else {
+            return error;
+        };
+        let diagnostics = diagnostics.trim_end();
+        if diagnostics.is_empty() {
+            return error;
+        }
+        ExecutorError::Io(std::io::Error::other(format!(
+            "{error}\nPi launcher diagnostics:\n{diagnostics}"
+        )))
     }
 
     fn into_cleanup(mut self) -> ExecutorRunCleanup {
@@ -631,18 +676,20 @@ impl StandardCodingAgentExecutor for Pi {
             _ => None,
         });
         let snapshot = self.runtime_snapshot();
-        let files = PiRunFiles::create(current_dir, &snapshot)?;
+        let current_dir = pi_acp_compatible_current_dir(current_dir);
+        let files = PiRunFiles::create(&current_dir, &snapshot)?;
         let runtime_env = files.apply_to_env(env, &snapshot);
         let mut result = super::acp::runtime::probe_acp_command(
             self.build_command_builder()?.build_initial()?,
-            current_dir,
+            &current_dir,
             &runtime_env,
             &self.cmd,
             auth_method_id
                 .map(str::to_string)
                 .or(configured_auth_method_id),
         )
-        .await?;
+        .await
+        .map_err(|error| files.enrich_probe_error(error))?;
         let config_overrides = self
             .acp
             .as_ref()
@@ -663,13 +710,14 @@ impl StandardCodingAgentExecutor for Pi {
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
         let snapshot = self.runtime_snapshot();
-        let files = PiRunFiles::create(current_dir, &snapshot)?;
+        let current_dir = pi_acp_compatible_current_dir(current_dir);
+        let files = PiRunFiles::create(&current_dir, &snapshot)?;
         let runtime_env = files.apply_to_env(env, &snapshot);
         let mut spawned = self
             .acp_harness(env)
             .await?
             .spawn_with_command(
-                current_dir,
+                &current_dir,
                 self.append_prompt.combine_prompt(prompt),
                 self.build_command_builder()?.build_initial()?,
                 &runtime_env,
@@ -690,13 +738,14 @@ impl StandardCodingAgentExecutor for Pi {
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
         let snapshot = self.runtime_snapshot();
-        let files = PiRunFiles::create(current_dir, &snapshot)?;
+        let current_dir = pi_acp_compatible_current_dir(current_dir);
+        let files = PiRunFiles::create(&current_dir, &snapshot)?;
         let runtime_env = files.apply_to_env(env, &snapshot);
         let mut spawned = self
             .acp_harness(env)
             .await?
             .spawn_follow_up_with_command(
-                current_dir,
+                &current_dir,
                 self.append_prompt.combine_prompt(prompt),
                 session_id,
                 self.build_command_builder()?.build_follow_up(&[])?,
@@ -719,13 +768,14 @@ impl StandardCodingAgentExecutor for Pi {
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
         let snapshot = self.runtime_snapshot();
-        let files = PiRunFiles::create(current_dir, &snapshot)?;
+        let current_dir = pi_acp_compatible_current_dir(current_dir);
+        let files = PiRunFiles::create(&current_dir, &snapshot)?;
         let runtime_env = files.apply_to_env(env, &snapshot);
         let mut spawned = self
             .acp_harness(env)
             .await?
             .spawn_structured_with_command(
-                current_dir,
+                &current_dir,
                 prompt,
                 self.build_command_builder()?.build_initial()?,
                 &runtime_env,
@@ -748,13 +798,14 @@ impl StandardCodingAgentExecutor for Pi {
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
         let snapshot = self.runtime_snapshot();
-        let files = PiRunFiles::create(current_dir, &snapshot)?;
+        let current_dir = pi_acp_compatible_current_dir(current_dir);
+        let files = PiRunFiles::create(&current_dir, &snapshot)?;
         let runtime_env = files.apply_to_env(env, &snapshot);
         let mut spawned = self
             .acp_harness(env)
             .await?
             .spawn_follow_up_structured_with_command(
-                current_dir,
+                &current_dir,
                 prompt,
                 session_id,
                 self.build_command_builder()?.build_follow_up(&[])?,
@@ -1264,6 +1315,9 @@ rl.on("close", () => {
         assert!(super::PI_LAUNCHER_SOURCE.contains("--skill"));
         assert!(super::PI_LAUNCHER_SOURCE.contains("process.ppid"));
         assert!(super::PI_LAUNCHER_SOURCE.contains("terminateOrphanedTree"));
+        assert!(super::PI_LAUNCHER_SOURCE.contains("OPENTEAMS_PI_DIAGNOSTIC_LOG"));
+        assert!(super::PI_LAUNCHER_SOURCE.contains("pi_stderr"));
+        assert!(super::PI_LAUNCHER_SOURCE.contains("pi_exit"));
         assert!(super::PI_MCP_EXTENSION_SOURCE.contains("createMcpAdapter"));
         assert!(super::PI_APPROVAL_EXTENSION_SOURCE.contains("tool_call"));
         for source in [
@@ -1273,6 +1327,42 @@ rl.on("close", () => {
         ] {
             assert!(!source.contains("openteams-pi-secret-never-log"));
         }
+    }
+
+    #[test]
+    fn probe_errors_include_launcher_diagnostics_and_cleanup_log() {
+        let temp = tempfile::tempdir().expect("temporary Pi runtime directory");
+        let files =
+            PiRunFiles::create(temp.path(), &PiRuntimeSnapshot::empty()).expect("Pi runtime files");
+        fs::write(
+            &files.diagnostic_log,
+            "{\"event\":\"pi_stderr\",\"text\":\"inner Pi failure\"}\n",
+        )
+        .expect("write Pi diagnostic log");
+        let diagnostic_log = files.diagnostic_log.clone();
+
+        let error =
+            files.enrich_probe_error(ExecutorError::Io(std::io::Error::other("ACP probe failed")));
+        let message = error.to_string();
+
+        assert!(message.contains("ACP probe failed"));
+        assert!(message.contains("Pi launcher diagnostics"));
+        assert!(message.contains("inner Pi failure"));
+        drop(files);
+        assert!(!diagnostic_log.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pi_acp_current_dir_strips_verbatim_disk_prefix() {
+        assert_eq!(
+            pi_acp_compatible_current_dir(Path::new(r"\\?\E:\workspace\projectSS\openteams-dev")),
+            PathBuf::from(r"E:\workspace\projectSS\openteams-dev")
+        );
+        assert_eq!(
+            pi_acp_compatible_current_dir(Path::new(r"E:\workspace\projectSS\openteams-dev")),
+            PathBuf::from(r"E:\workspace\projectSS\openteams-dev")
+        );
     }
 
     #[test]

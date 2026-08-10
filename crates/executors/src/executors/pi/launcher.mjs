@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
@@ -7,6 +7,22 @@ const PI_PACKAGE = "@earendil-works/pi-coding-agent";
 const PI_VERSION = "0.83.0";
 const MCP_PACKAGE = "pi-mcp-adapter";
 const MCP_VERSION = "2.18.0";
+const diagnosticLog = process.env.OPENTEAMS_PI_DIAGNOSTIC_LOG;
+
+function logDiagnostic(event, details = {}) {
+  if (!diagnosticLog || !isAbsolute(diagnosticLog)) return;
+  try {
+    appendFileSync(diagnosticLog, `${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      event,
+      launcherPid: process.pid,
+      launcherParentPid: process.ppid,
+      ...details,
+    })}\n`, "utf8");
+  } catch {
+    // Diagnostics must never change the launcher lifecycle.
+  }
+}
 
 function packageVersion(packageRoot) {
   try {
@@ -74,7 +90,23 @@ function isolatedSkillPaths() {
   return values;
 }
 
-const { pi, piRoot, nodeModules } = locatePinnedNpxEnvironment();
+logDiagnostic("launcher_start", {
+  cwd: process.cwd(),
+  argv: process.argv,
+  path: process.env.PATH,
+});
+
+let pinnedEnvironment;
+try {
+  pinnedEnvironment = locatePinnedNpxEnvironment();
+} catch (error) {
+  logDiagnostic("pinned_environment_error", {
+    error: error instanceof Error ? error.stack ?? error.message : String(error),
+  });
+  throw error;
+}
+const { pi, piRoot, nodeModules } = pinnedEnvironment;
+logDiagnostic("pinned_environment_resolved", { pi, piRoot, nodeModules });
 process.env.NODE_PATH = [nodeModules, join(piRoot, "node_modules"), process.env.NODE_PATH]
   .filter(Boolean)
   .join(delimiter);
@@ -90,15 +122,17 @@ const childProgram = process.platform === "win32" ? process.execPath : pi;
 const childArgs = process.platform === "win32" ? [pi, ...args] : args;
 const child = spawn(childProgram, childArgs, {
   env: process.env,
-  stdio: "inherit",
+  stdio: ["inherit", "inherit", "pipe"],
   shell: false
 });
+logDiagnostic("pi_spawn_requested", { childProgram, childArgs });
 const acpParentPid = process.ppid;
 let orphanCleanupStarted = false;
 
 function terminateOrphanedTree() {
   if (orphanCleanupStarted) return;
   orphanCleanupStarted = true;
+  logDiagnostic("orphan_cleanup_started", { childPid: child.pid });
   if (process.platform === "win32") {
     child.kill("SIGTERM");
     setTimeout(() => child.kill("SIGKILL"), 1000);
@@ -126,14 +160,30 @@ const parentWatcher = setInterval(() => {
   }
 }, 250);
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => child.kill(signal));
+  process.on(signal, () => {
+    logDiagnostic("launcher_signal", { signal, childPid: child.pid });
+    child.kill(signal);
+  });
 }
+child.on("spawn", () => {
+  logDiagnostic("pi_spawned", { childPid: child.pid });
+});
+child.stderr?.on("data", (chunk) => {
+  const text = chunk.toString();
+  logDiagnostic("pi_stderr", { childPid: child.pid, text });
+  process.stderr.write(chunk);
+});
 child.on("error", (error) => {
   clearInterval(parentWatcher);
+  logDiagnostic("pi_spawn_error", {
+    childPid: child.pid,
+    error: error instanceof Error ? error.stack ?? error.message : String(error),
+  });
   process.stderr.write(`Pi launcher failed: ${error.message}\n`);
   process.exitCode = 1;
 });
 child.on("exit", (code, signal) => {
   clearInterval(parentWatcher);
+  logDiagnostic("pi_exit", { childPid: child.pid, code, signal });
   process.exitCode = code ?? (signal ? 1 : 0);
 });
