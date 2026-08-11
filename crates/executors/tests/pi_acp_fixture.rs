@@ -557,6 +557,28 @@ fn offline_pi_empty_mcp_allowlist_produces_empty_snapshot() {
     );
 }
 
+#[test]
+fn offline_pi_missing_mcp_allowlist_includes_all_configured_servers() {
+    use executors::executors::acp::mcp::{AcpMcpPolicy, resolve_isolated_mcp_snapshot};
+    let canonical = serde_json::json!({
+        "mcpServers": {
+            "server1": {"command": "/bin/echo"},
+            "server2": {"command": "/bin/echo"}
+        },
+        "settings": {"hostConfigDiscovery": "on"}
+    });
+    let snapshot = resolve_isolated_mcp_snapshot(&canonical, &AcpMcpPolicy::default())
+        .expect("default snapshot");
+    let servers = snapshot
+        .get("mcpServers")
+        .and_then(|value| value.as_object())
+        .expect("servers");
+    assert_eq!(servers.len(), 2, "default policy must preserve all servers");
+    assert!(servers.contains_key("server1"));
+    assert!(servers.contains_key("server2"));
+    assert_eq!(snapshot["settings"]["hostConfigDiscovery"], "off");
+}
+
 #[tokio::test]
 async fn offline_pi_launcher_chain_produces_real_pids() {
     let temp = tempfile::tempdir().expect("launcher workspace");
