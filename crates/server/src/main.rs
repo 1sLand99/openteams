@@ -7,6 +7,7 @@ use services::services::{
     build_stats::model_pricing_sync::ModelPricingSyncService,
     config::{TeamTemplateCatalogService, TeamTemplateCatalogSyncResult, load_config_from_file},
     container::ContainerService,
+    output_validation::{OUTPUT_VALIDATION_ROUTE, configure_output_validation_url},
     project::migration::ProjectMigrationService,
 };
 use sqlx::{Error as SqlxError, SqlitePool};
@@ -190,8 +191,6 @@ async fn main() -> Result<(), OpenTeamsError> {
             }
         }
     });
-    let app_router = routes::router(deployment.clone());
-
     let port = std::env::var("BACKEND_PORT")
         .or_else(|_| std::env::var("PORT"))
         .ok()
@@ -223,7 +222,19 @@ async fn main() -> Result<(), OpenTeamsError> {
         }
         Err(err) => return Err(err.into()),
     };
-    let actual_port = listener.local_addr()?.port(); // get 鈫?53427 (example)
+    let actual_addr = listener.local_addr()?;
+    let actual_port = actual_addr.port();
+    let validation_host = match actual_addr.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_string(),
+        std::net::IpAddr::V4(ip) => ip.to_string(),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+    };
+    configure_output_validation_url(format!(
+        "http://{validation_host}:{actual_port}{OUTPUT_VALIDATION_ROUTE}"
+    ))
+    .map_err(anyhow::Error::msg)?;
+    let app_router = routes::router(deployment.clone());
 
     tracing::info!("Server running on http://{host}:{actual_port}");
 

@@ -145,9 +145,17 @@ impl<'a> IterationManager<'a> {
             "Raw output from workflow agent for iteration plan generation: {}",
             raw_output
         );
-        let plan_json = super::workflow_runtime::parse_plan_output(&raw_output)?;
-        let valid_agent_ids = workflow_valid_agent_ids(self.session_agents);
-        WorkflowCompiler::compile(&plan_json, &valid_agent_ids)?;
+        let valid_agent_ids = prompt_input
+            .members
+            .iter()
+            .map(|member| member.agent_id.clone())
+            .collect::<Vec<_>>();
+        let plan_json = validate_workflow_plan_output(
+            &raw_output,
+            &prompt_input.lead_agent_id,
+            &valid_agent_ids,
+        )
+        .map_err(|error| WorkflowRuntimeError::Validation(error.to_string()))?;
 
         Ok(plan_json)
     }

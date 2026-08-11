@@ -974,6 +974,29 @@ impl ChatRunner {
             markdown.push_str("\n```\n\n");
         }
 
+        let validation_section = if is_workflow_mode {
+            crate::services::output_validation::render_output_validation_instructions(
+                crate::services::output_validation::OutputValidationKind::ChatWorkflowProtocol,
+                &crate::services::output_validation::ChatWorkflowProtocolValidationContext {
+                    allowed_targets: vec![RESERVED_USER_HANDLE.to_string()],
+                    workflow_generation_allowed: workflow_generation_available,
+                },
+                crate::services::output_validation::OutputValidationReturnMode::JsonOnly,
+            )
+        } else {
+            let mut allowed_targets = vec![RESERVED_USER_HANDLE.to_string()];
+            allowed_targets.extend(visible_members.iter().map(|member| member.name.clone()));
+            crate::services::output_validation::render_output_validation_instructions(
+                crate::services::output_validation::OutputValidationKind::ChatProtocol,
+                &crate::services::output_validation::ChatProtocolValidationContext {
+                    allowed_targets,
+                },
+                crate::services::output_validation::OutputValidationReturnMode::JsonOnly,
+            )
+        };
+        markdown.push_str(&validation_section);
+        markdown.push_str("\n\n");
+
         if !is_protocol_retry {
             markdown.push_str("## Agent\n");
             markdown.push_str("- name: ");
@@ -1414,7 +1437,7 @@ impl ChatRunner {
         }
     }
 
-    pub(super) fn parse_agent_protocol_messages_from_json(
+    pub(crate) fn parse_agent_protocol_messages_from_json(
         json_str: &str,
     ) -> Result<Vec<AgentProtocolMessage>, AgentProtocolError> {
         let raw: serde_json::Value =
@@ -1926,7 +1949,7 @@ impl ChatRunner {
         Ok(validated)
     }
 
-    pub(super) fn normalize_protocol_target(target: &str) -> Option<String> {
+    pub(crate) fn normalize_protocol_target(target: &str) -> Option<String> {
         let normalized = target.trim().trim_start_matches('@').trim();
         if normalized.is_empty() {
             return None;
@@ -2071,7 +2094,7 @@ impl ChatRunner {
     }
 
     /// Extract JSON from content, handling various formats
-    pub(super) fn extract_json_from_content(content: &str) -> Result<String, AgentProtocolError> {
+    pub(crate) fn extract_json_from_content(content: &str) -> Result<String, AgentProtocolError> {
         let content = content.trim();
 
         // If content is empty, return EmptyMessage for cleaner error handling

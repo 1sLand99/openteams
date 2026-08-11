@@ -18,6 +18,10 @@ use super::{
         render_upstream_results,
     },
 };
+use crate::services::output_validation::{
+    OutputValidationKind, OutputValidationReturnMode, WorkflowTaskValidationContext,
+    render_output_validation_instructions,
+};
 
 /// Task execution contract (§6.3): deliberately has no `acceptance` field so
 /// acceptance criteria cannot reach the executor at the type level.
@@ -126,6 +130,15 @@ pub fn build_task_execution_prompt(input: &TaskExecutionPromptInput) -> String {
         input.identity.execution_id,
         &input.identity.step_key,
         true,
+    ));
+    sections.push_attempt_level(render_output_validation_instructions(
+        OutputValidationKind::WorkflowTask,
+        &WorkflowTaskValidationContext {
+            execution_id: input.identity.execution_id,
+            step_key: input.identity.step_key.clone(),
+            allow_interaction_requests: true,
+        },
+        OutputValidationReturnMode::JsonOnly,
     ));
 
     if let Some(revision) = &input.revision {
@@ -388,6 +401,8 @@ mod tests {
         assert!(prompt.contains("\"final_result\""));
         assert!(prompt.contains("backend_pi_types_runtime"));
         assert!(prompt.contains(EXECUTION_ID));
+        assert!(prompt.contains("\"kind\": \"workflow_task\""));
+        assert!(prompt.contains("\"allow_interaction_requests\": true"));
         assert!(!prompt.contains("review_result"));
         assert!(!prompt.contains("result_review_result"));
         assert!(!prompt.contains("loop_review_result"));

@@ -22,6 +22,7 @@ pub mod health;
 pub mod images;
 pub mod inbox;
 pub mod onboarding;
+pub mod output_validation;
 pub mod project_github;
 pub mod project_source_control;
 pub mod projects;
@@ -49,6 +50,7 @@ pub fn router(deployment: DeploymentImpl) -> IntoMakeService<Router> {
         .merge(scratch::router(&deployment))
         .merge(workflow::router())
         .merge(onboarding::router())
+        .merge(output_validation::router())
         .merge(version::router())
         .merge(analytics::router())
         .merge(build_stats::router())

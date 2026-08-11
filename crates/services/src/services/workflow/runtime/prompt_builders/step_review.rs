@@ -18,6 +18,10 @@ use super::{
         render_upstream_results,
     },
 };
+use crate::services::output_validation::{
+    OutputValidationKind, OutputValidationReturnMode, WorkflowStepReviewValidationContext,
+    render_output_validation_instructions,
+};
 
 /// Worker's latest result as report lines (§6.4). The reviewer is instructed
 /// to verify everything independently; these fields are never authoritative.
@@ -123,6 +127,15 @@ pub fn build_step_review_prompt(input: &StepReviewPromptInput) -> String {
         input.identity.execution_id,
         &input.identity.step_key,
         &input.acceptance_criteria,
+    ));
+    sections.push_attempt_level(render_output_validation_instructions(
+        OutputValidationKind::WorkflowStepReview,
+        &WorkflowStepReviewValidationContext {
+            execution_id: input.identity.execution_id,
+            step_key: input.identity.step_key.clone(),
+            criteria: input.acceptance_criteria.clone(),
+        },
+        OutputValidationReturnMode::JsonOnly,
     ));
 
     if let Some(feedback) = &input.latest_review_feedback {
@@ -338,6 +351,8 @@ mod tests {
         assert!(prompt.contains("\"review_result\""));
         assert!(prompt.contains("backend_pi_types_runtime"));
         assert!(prompt.contains(EXECUTION_ID));
+        assert!(prompt.contains("\"kind\": \"workflow_step_review\""));
+        assert!(prompt.contains("POST $OPENTEAMS_OUTPUT_VALIDATION_URL"));
         assert!(prompt.contains("\"passed\""));
         assert!(!prompt.contains("\"verdict\""));
         assert!(!prompt.contains("final_result"));

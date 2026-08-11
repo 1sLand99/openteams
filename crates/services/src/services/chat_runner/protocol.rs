@@ -775,7 +775,64 @@ impl ChatRunner {
             error_info = ?error_info,
             "[chat_runner] Processing agent protocol output"
         );
-        let protocol_messages = match Self::parse_agent_protocol_messages(latest_assistant) {
+        let source_message = ChatMessage::find_by_id(&self.db.pool, source_message_id).await?;
+        let workflow_input_mode = source_message
+            .as_ref()
+            .is_some_and(|message| chat::is_workflow_chat_input_mode(&message.meta.0));
+        let workflow_generation_allowed = workflow_input_mode
+            && db::models::workflow_execution::WorkflowExecution::find_generation_blocking_by_session(
+                &self.db.pool,
+                session_id,
+            )
+            .await?
+            .is_empty();
+        let allowed_targets = if workflow_input_mode {
+            vec![RESERVED_USER_HANDLE.to_string()]
+        } else {
+            let mut targets = vec![RESERVED_USER_HANDLE.to_string()];
+            targets.extend(
+                ChatSessionAgent::find_all_for_session(&self.db.pool, session_id)
+                    .await?
+                    .into_iter()
+                    .filter(|member| member.agent_id != agent_id)
+                    .map(|member| member.member_name),
+            );
+            targets
+        };
+        let parsed_protocol_messages =
+            match crate::services::output_validation::validate_chat_protocol_output(
+                latest_assistant,
+                &allowed_targets,
+                workflow_generation_allowed,
+            ) {
+                Ok(messages) => Ok(messages),
+                Err(strict_failure) => match Self::parse_agent_protocol_messages(latest_assistant) {
+                    Ok(messages) => {
+                        match crate::services::output_validation::validate_chat_protocol_context(
+                            &messages,
+                            &allowed_targets,
+                            workflow_generation_allowed,
+                        ) {
+                            Ok(()) => {
+                                tracing::debug!(
+                                    session_id = %session_id,
+                                    run_id = %run_id,
+                                    strict_validation_error = %strict_failure,
+                                    "accepted legacy-compatible chat protocol output after strict validation failed"
+                                );
+                                Ok(messages)
+                            }
+                            Err(context_failure) => Err(
+                                crate::services::output_validation::chat_validation_failure_as_protocol_error(
+                                    context_failure,
+                                ),
+                            ),
+                        }
+                    }
+                    Err(error) => Err(error),
+                },
+            };
+        let protocol_messages = match parsed_protocol_messages {
             Ok(messages) => messages,
             Err(err) => {
                 if err.code == ChatProtocolNoticeCode::EmptyMessage {
@@ -962,7 +1019,6 @@ impl ChatRunner {
         }
 
         let session = ChatSession::find_by_id(&self.db.pool, session_id).await?;
-        let source_message = ChatMessage::find_by_id(&self.db.pool, source_message_id).await?;
         let workflow_route_mode = workflow_generate_detected
             || source_message
                 .as_ref()
@@ -1467,7 +1523,7 @@ impl ChatRunner {
 
         use super::super::{
             workflow_orchestrator::{
-                WorkflowOrchestrator, workflow_plan_agent_id, workflow_valid_agent_ids,
+                WorkflowOrchestrator, workflow_plan_agent_id,
             },
             workflow_runtime::{
                 WorkflowCardAgent, WorkflowCardState, build_workflow_planning_agents,
@@ -1478,8 +1534,8 @@ impl ChatRunner {
                 resolve_lead_agent, resolve_workflow_response_language_instruction,
                 run_workflow_plan_agent_prompt,
             },
-            workflow_validator,
         };
+        use crate::services::output_validation::validate_workflow_plan_output;
 
         let pool = &self.db.pool;
         let session = ChatSession::find_by_id(pool, session_id)
@@ -1727,7 +1783,15 @@ impl ChatRunner {
             "[plan_generation] raw output from lead agent"
         );
 
-        let parsed_plan: WorkflowPlanJson = match super::super::workflow_runtime::parse_plan_output(&raw_plan_output) {
+        let plan_agent_ids = planning_agents
+            .iter()
+            .map(|agent| agent.agent_id.clone())
+            .collect::<Vec<_>>();
+        let parsed_plan: WorkflowPlanJson = match validate_workflow_plan_output(
+            &raw_plan_output,
+            &lead_agent_id,
+            &plan_agent_ids,
+        ) {
             Ok(plan) => plan,
             Err(err) => {
                 tracing::error!(
@@ -1748,33 +1812,6 @@ impl ChatRunner {
                 return Ok(());
             }
         };
-
-        let valid_agent_ids = workflow_valid_agent_ids(&session_agents);
-        let validation = workflow_validator::validate_plan(&parsed_plan, &valid_agent_ids);
-        if !validation.is_valid {
-            let validation_summary = validation
-                .errors
-                .iter()
-                .map(|error| format!("{}: {}", error.field, error.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::warn!(
-                session_id = %session_id,
-                validation_errors = %validation_summary,
-                "[plan_generation] generated plan failed validation"
-            );
-            self.mark_plan_generation_failed(
-                session_id,
-                placeholder.id,
-                plan_goal,
-                &lead_agent_id,
-                &available_agents,
-                validation_summary,
-                previous_plan_context.as_ref(),
-            )
-            .await?;
-            return Ok(());
-        }
 
         let (plan, revision, workflow_card_message) =
             match WorkflowOrchestrator::create_workflow_plan_preview_card(

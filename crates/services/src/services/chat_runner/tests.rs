@@ -3712,6 +3712,16 @@ fn build_exact_markdown_prompt_matches_expected_input_template() {
     assert!(prompt.contains("conclusion`: current-turn summary only"));
     assert!(prompt.contains(PROTOCOL_OUTPUT_SCHEMA_JSON));
     assert!(prompt.contains("### Example"));
+    assert!(prompt.contains("## Mandatory output validation"));
+    assert!(prompt.contains("POST $OPENTEAMS_OUTPUT_VALIDATION_URL"));
+    assert!(prompt.contains("\"kind\": \"chat_protocol\""));
+    assert!(prompt.contains(
+        "You may retry validation at most 3 times after the initial request (4 total validation requests)."
+    ));
+    assert!(prompt.contains(
+        "After the third retry, if validation still has not returned `valid: true`, stop validating and return the current candidate JSON directly"
+    ));
+    assert!(!prompt.contains("Do not make a fifth validation request."));
     assert!(!prompt.contains("`workflow_generate`"));
     assert!(prompt.contains("## Agent"));
     assert!(prompt.contains("- name: fullstack"));
@@ -3798,6 +3808,8 @@ fn build_exact_markdown_prompt_restricts_send_targets_in_workflow_mode() {
         "Emit `workflow_generate` only when the user explicitly asks to start generating an execution plan."
     ));
     assert!(prompt.contains("`生成计划`, `开始执行`, `开始落实`, `进入执行`"));
+    assert!(prompt.contains("\"kind\": \"chat_workflow_protocol\""));
+    assert!(prompt.contains("\"workflow_generation_allowed\": true"));
 }
 
 #[test]
@@ -3832,6 +3844,8 @@ fn build_exact_markdown_prompt_blocks_workflow_generation_when_execution_is_acti
         "return only a `send` item addressed to `\"you\"` explaining that another workflow cannot be generated"
     ));
     assert!(prompt.contains(PROTOCOL_OUTPUT_SCHEMA_JSON));
+    assert!(prompt.contains("\"kind\": \"chat_workflow_protocol\""));
+    assert!(prompt.contains("\"workflow_generation_allowed\": false"));
     assert!(!prompt.contains(r#""type": { "const": "workflow_generate" }"#));
     assert!(!prompt.contains("Generate a workflow plan to implement the following task"));
 }

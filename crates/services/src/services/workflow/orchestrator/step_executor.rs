@@ -35,15 +35,17 @@ use super::{
             self, SummaryPayload, WORKFLOW_PROTOCOL_PARSE_MAX_RETRIES, WorkflowAgentRunOutput,
             WorkflowReviewProtocolMessage, WorkflowRevisionFeedbackSource, WorkflowRuntimeError,
             WorkflowStepExecutionContract, WorkflowStepProtocolMessage, WorkflowStepRunResult,
-            parse_step_review_protocol_output, parse_task_protocol_output, prompt_builders,
-            resolve_workflow_response_language_instruction, result_aggregation,
+            prompt_builders, resolve_workflow_response_language_instruction, result_aggregation,
             run_workflow_step_agent_follow_up, run_workflow_step_agent_prompt,
             should_retry_workflow_protocol_parse_failure, workflow_review_attempt_limit_reached,
         },
     },
     OrchestratorError, StepOutcome, WorkflowOrchestrator, resolve_step_workflow_session,
 };
-use crate::services::agent_skill_policy::AgentPromptContext;
+use crate::services::{
+    agent_skill_policy::AgentPromptContext,
+    output_validation::{validate_workflow_step_review_output, validate_workflow_task_output},
+};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -381,7 +383,8 @@ impl WorkflowOrchestrator {
             raw_output
         );
 
-        parse_task_protocol_output(execution_id, &step.step_key, raw_output)
+        validate_workflow_task_output(execution_id, &step.step_key, true, raw_output)
+            .map_err(|error| WorkflowRuntimeError::Validation(error.to_string()))
             .map_err(OrchestratorError::from)
     }
 
@@ -525,7 +528,7 @@ impl WorkflowOrchestrator {
                 )
                 .await?
             };
-            match parse_step_review_protocol_output(
+            match validate_workflow_step_review_output(
                 execution.id,
                 &step.step_key,
                 declared_acceptance,
@@ -550,7 +553,9 @@ impl WorkflowOrchestrator {
                     attempt += 1;
                     run_as_follow_up = true;
                 }
-                Err(err) => return Err(err.into()),
+                Err(err) => {
+                    return Err(WorkflowRuntimeError::Validation(err.to_string()).into());
+                }
             }
         }
     }

@@ -645,6 +645,7 @@ async fn run_workflow_agent_prompt_inner(
 
     let repo_context = RepoContext::new(workspace_path.clone(), Vec::new());
     let mut env = ExecutionEnv::new(repo_context, false, String::new());
+    crate::services::output_validation::inject_output_validation_url(&mut env);
     env.insert("VK_WORKFLOW_SESSION_ID", session.id.to_string());
     env.insert("VK_WORKFLOW_AGENT_ID", agent.id.to_string());
     env.insert("VK_WORKFLOW_SESSION_AGENT_ID", session_agent.id.to_string());
