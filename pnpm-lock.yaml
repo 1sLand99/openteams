@@ -93,6 +93,9 @@ importers:
       simple-icons:
         specifier: ^15.16.0
         version: 15.18.0
+      thinking-orbs:
+        specifier: ^0.2.0
+        version: 0.2.0(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4.1.14
@@ -2842,6 +2845,12 @@ packages:
   tapable@2.3.3:
     resolution: {integrity: sha512-uxc/zpqFg6x7C8vOE7lh6Lbda8eEL9zmVm/PLeTPBRhh1xCgdWaQ+J1CUieGpIfm2HdtsUpRv+HshiasBMcc6A==}
     engines: {node: '>=6'}
+
+  thinking-orbs@0.2.0:
+    resolution: {integrity: sha512-CQux/YsLlB9nY60BDpZ/uW7knAvXg+U2T/gzrzuLRw8xlzfJPLXZxAg2tbbIBGp/nE2Kol1GfbMOJnoH+tcb/A==}
+    peerDependencies:
+      react: '>=18.0.0'
+      react-dom: '>=18.0.0'
 
   three@0.135.0:
     resolution: {integrity: sha512-kuEpuuxRzLv0MDsXai9huCxOSQPZ4vje6y0gn80SRmQvgz6/+rI0NAvCRAw56zYaWKMGMfqKWsxF9Qa2Z9xymQ==}
@@ -6247,6 +6256,11 @@ snapshots:
   tailwindcss@4.3.0: {}
 
   tapable@2.3.3: {}
+
+  thinking-orbs@0.2.0(react-dom@19.2.6(react@19.2.6))(react@19.2.6):
+    dependencies:
+      react: 19.2.6
+      react-dom: 19.2.6(react@19.2.6)
 
   three@0.135.0: {}
 
