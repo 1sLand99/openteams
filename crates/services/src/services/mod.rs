@@ -31,6 +31,7 @@ pub mod native_skills;
 pub mod notification;
 pub mod oauth_credentials;
 pub mod onboarding;
+pub mod output_validation;
 pub mod pi_models;
 pub mod project;
 pub use project::{

@@ -54,7 +54,7 @@ These are defined in `crates/executors/src/executors/pi.rs` as constants:
 ### Member Skill/MCP Isolation
 
 - **Skills**: Pi always receives `--no-skills`. Only skills from the member's `allowed_skill_ids` (validated against the Skill Registry) are passed as `--skill <path>`. Paths must be canonical `SKILL.md` files within discovery roots (`~/.agents/skills` or `~/.pi/agent/skills`).
-- **MCP**: Pi defaults to an **empty allowlist** (deny-by-default). Only servers in the member's `tools_enabled.mcpServers` allowlist are included in the isolated MCP snapshot. The `hostConfigDiscovery` setting is forced to `off`.
+- **MCP**: Pi follows the shared CLI policy. When the member does not define `tools_enabled.mcpServers`, every enabled server in `~/.pi/agent/mcp.json` is included. An explicit member allowlist filters that set, and an explicit empty allowlist disables all MCP servers. The isolated snapshot always forces `hostConfigDiscovery` to `off`.
 - **Secrets**: The `PiRuntimeSnapshot` Debug impl redacts MCP server details. Runtime files use `0600` permissions (launcher uses `0700`).
 
 ### Provider Config Sync
@@ -116,7 +116,7 @@ cargo test -p services --features qa-mode workflow::orchestrator
 - **Cancel**: `session/cancel` notification with `stopReason: "cancelled"`
 - **Startup failure**: Non-executable `pi-acp` produces typed error
 - **Approval policies**: Ask, AutoAllow, AutoReject all produce consistent results
-- **MCP isolation**: Unauthorized servers filtered, empty allowlist produces empty snapshot
+- **MCP policy/isolation**: Missing allowlist includes all configured servers; explicit allowlists filter them; an explicit empty allowlist produces an empty snapshot
 - **Secret safety**: Fixture files contain no API keys or secrets
 - **Token usage**: Usage and TokenUsage events projected correctly
 - **No npm access**: Fake npx creates no `.npm` cache directory

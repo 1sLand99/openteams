@@ -43,7 +43,7 @@ const OPENTEAMS_GITIGNORE_ENTRY: &str = ".openteams/";
 /// Only `InvalidJson` and `NotJsonArray` errors trigger a retry; semantic errors
 /// (e.g. `EmptyMessage`, `MissingSendTarget`) are not retried.
 const MAX_PROTOCOL_PARSE_RETRIES: u32 = 1;
-const PROTOCOL_OUTPUT_SCHEMA_JSON_WORKFLOW_PLAN: &str = r#"{
+pub(crate) const PROTOCOL_OUTPUT_SCHEMA_JSON_WORKFLOW_PLAN: &str = r#"{
   "type": "array",
   "items": {
     "anyOf": [
@@ -107,7 +107,7 @@ const PROTOCOL_OUTPUT_SCHEMA_JSON_WORKFLOW_PLAN: &str = r#"{
   },
   "minItems": 1
 }"#;
-const PROTOCOL_OUTPUT_SCHEMA_JSON: &str = r#"{
+pub(crate) const PROTOCOL_OUTPUT_SCHEMA_JSON: &str = r#"{
   "type": "array",
   "items": {
     "anyOf": [

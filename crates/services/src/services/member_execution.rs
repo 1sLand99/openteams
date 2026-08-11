@@ -204,10 +204,7 @@ pub fn build_effective_member_executor(
             _ => {}
         }
     }
-    let mut mcp_policy = resolve_acp_mcp_policy(&agent.tools_enabled.0);
-    if matches!(executor, CodingAgent::Pi(_)) && mcp_policy.allowed_server_names.is_none() {
-        mcp_policy.allowed_server_names = Some(Default::default());
-    }
+    let mcp_policy = resolve_acp_mcp_policy(&agent.tools_enabled.0);
     executor.set_acp_mcp_policy(mcp_policy);
     Ok((resolved, executor))
 }
@@ -564,7 +561,16 @@ mod tests {
     }
 
     #[test]
-    fn pi_member_without_mcp_selection_gets_an_explicit_empty_allowlist() {
+    fn explicit_empty_member_mcp_settings_disable_all_servers() {
+        let policy = resolve_acp_mcp_policy(&serde_json::json!({
+            "mcpServers": {}
+        }));
+        assert_eq!(policy.allowed_server_names, Some(Default::default()),);
+        assert!(policy.disabled_server_names.is_empty());
+    }
+
+    #[test]
+    fn pi_member_without_mcp_selection_preserves_configured_servers() {
         let mut pi_agent = agent();
         pi_agent.runner_type = "PI".to_string();
         pi_agent.tools_enabled = Json(serde_json::json!({}));
@@ -580,10 +586,8 @@ mod tests {
         let CodingAgent::Pi(pi) = executor else {
             panic!("expected Pi");
         };
-        assert_eq!(
-            pi.acp_mcp_policy.allowed_server_names,
-            Some(Default::default())
-        );
+        assert!(pi.acp_mcp_policy.allowed_server_names.is_none());
+        assert!(pi.acp_mcp_policy.disabled_server_names.is_empty());
     }
 
     #[tokio::test]

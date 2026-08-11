@@ -323,6 +323,31 @@ pub async fn refresh_runtime_statuses() -> Result<AgentRuntimeRefreshResponse, A
     })
 }
 
+/// Reconciles profile-backed model changes into a runner's cached discovery so
+/// lightweight status reads immediately expose additions and removals while
+/// retaining models that came only from the CLI probe.
+pub async fn reconcile_runtime_model_discovery(
+    runner: BaseCodingAgent,
+    previous_profile_models: &[String],
+    current_profile_models: &[String],
+) -> Result<(), AgentRuntimeError> {
+    let _guard = RUNTIME_REFRESH_LOCK.lock().await;
+    update_store(&store_path(), |store| {
+        reconcile_cached_runtime_models(
+            store,
+            runner,
+            previous_profile_models,
+            current_profile_models,
+        );
+        Ok(())
+    })?;
+    CLI_PROBE_CACHE.retain(|key, _| {
+        key.request.runner != runner
+            || !matches!(key.kind, CliProbeKind::Models | CliProbeKind::Acp)
+    });
+    Ok(())
+}
+
 pub async fn refresh_runtime_discovery(
     current_dir: &Path,
 ) -> Result<AgentRuntimeRefreshResponse, AgentRuntimeError> {
@@ -1726,6 +1751,35 @@ fn models_for_runner(
     configured_models(executor_config)
 }
 
+fn reconcile_cached_runtime_models(
+    store: &mut AgentRuntimeStore,
+    runner: BaseCodingAgent,
+    previous_profile_models: &[String],
+    current_profile_models: &[String],
+) -> bool {
+    let Some(discovery) = store.discoveries.get_mut(&runner) else {
+        return false;
+    };
+    let previous_profile_models = previous_profile_models
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut next_models = discovery
+        .models
+        .iter()
+        .filter(|model| !previous_profile_models.contains(model.as_str()))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    next_models.extend(current_profile_models.iter().cloned());
+    let next_models = next_models.into_iter().collect::<Vec<_>>();
+
+    if discovery.models == next_models {
+        return false;
+    }
+    discovery.models = next_models;
+    true
+}
+
 fn model_source_for_runner(
     runner: BaseCodingAgent,
     executor_config: &ExecutorConfig,
@@ -2945,6 +2999,51 @@ mod tests {
             model_source_for_runner(runner, &executor_config, &store),
             AgentRuntimeModelSource::Runner
         );
+    }
+
+    #[test]
+    fn reconciled_discovery_applies_profile_changes_and_preserves_probe_models() {
+        let runner = BaseCodingAgent::OpenTeamsCli;
+        let checked_at = Utc::now();
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: vec![
+                    "provider/stale-model".to_string(),
+                    "opencode/free-model".to_string(),
+                ],
+                version: Some("openteams-cli 1.2.3".to_string()),
+                auth_state: Some(AgentRuntimeAuthState::Authenticated),
+                last_checked_at: checked_at,
+                last_error: None,
+            },
+        );
+        let executor_config =
+            ExecutorConfig::new_with_default(model_agent(Some("provider/updated-model")));
+
+        assert!(reconcile_cached_runtime_models(
+            &mut store,
+            runner,
+            &["provider/stale-model".to_string()],
+            &["provider/updated-model".to_string()],
+        ));
+        assert_eq!(
+            models_for_runner(runner, &executor_config, &store),
+            vec!["opencode/free-model", "provider/updated-model"]
+        );
+        assert_eq!(
+            model_source_for_runner(runner, &executor_config, &store),
+            AgentRuntimeModelSource::Runner
+        );
+
+        let discovery = store.discoveries.get(&runner).unwrap();
+        assert_eq!(discovery.version.as_deref(), Some("openteams-cli 1.2.3"));
+        assert_eq!(
+            discovery.auth_state,
+            Some(AgentRuntimeAuthState::Authenticated)
+        );
+        assert_eq!(discovery.last_checked_at, checked_at);
     }
 
     #[test]

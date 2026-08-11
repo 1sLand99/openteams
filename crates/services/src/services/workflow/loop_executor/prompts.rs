@@ -8,8 +8,14 @@ use db::models::workflow_types::AcceptanceCriterionLevel;
 use uuid::Uuid;
 
 use super::protocol::{LoopReviewCriterion, loop_review_protocol_json_schema};
-use crate::services::workflow_runtime::prompt_builders::common::{
-    UPSTREAM_SECTION_TITLE, UpstreamResultInput, render_upstream_results,
+use crate::services::{
+    output_validation::{
+        OutputValidationKind, OutputValidationReturnMode, WorkflowLoopReviewValidationContext,
+        render_output_validation_instructions,
+    },
+    workflow_runtime::prompt_builders::common::{
+        UPSTREAM_SECTION_TITLE, UpstreamResultInput, render_upstream_results,
+    },
 };
 
 /// Reviewer identity shown in the prompt header (§6.5).
@@ -179,6 +185,20 @@ pub fn build_loop_review_prompt(input: &LoopReviewPromptInput) -> String {
                 .collect::<Vec<_>>(),
         )
         .trim()
+    ));
+    sections.push(render_output_validation_instructions(
+        OutputValidationKind::WorkflowLoopReview,
+        &WorkflowLoopReviewValidationContext {
+            execution_id: input.execution_id,
+            loop_key: input.loop_key.clone(),
+            criteria: input.acceptance_criteria.clone(),
+            allowed_step_keys: input
+                .review_scope
+                .iter()
+                .map(|task| task.step_key.clone())
+                .collect(),
+        },
+        OutputValidationReturnMode::JsonOnly,
     ));
 
     // Category 5: attempt-level content, after the schema.
@@ -439,6 +459,8 @@ mod tests {
         assert!(!prompt.contains("Data Boundary"));
         assert!(!prompt.contains("Output Protocol"));
         assert_eq!(prompt.matches("```json").count(), 1);
+        assert!(prompt.contains("\"kind\": \"workflow_loop_review\""));
+        assert!(prompt.contains("POST $OPENTEAMS_OUTPUT_VALIDATION_URL"));
         assert!(prompt.contains("\"loop_review_result\""));
         assert!(prompt.contains("\"passed\""));
         assert!(prompt.contains("\"rework\""));

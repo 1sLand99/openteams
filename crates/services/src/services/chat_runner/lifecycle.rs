@@ -2009,6 +2009,7 @@ impl ChatRunner {
 
             let repo_context = RepoContext::new(PathBuf::from(&workspace_path), Vec::new());
             let mut env = ExecutionEnv::new(repo_context, false, String::new());
+            crate::services::output_validation::inject_output_validation_url(&mut env);
             env.insert("VK_CHAT_SESSION_ID", session_id.to_string());
             env.insert("VK_CHAT_AGENT_ID", agent_id.to_string());
             env.insert("VK_CHAT_SESSION_AGENT_ID", session_agent_id.to_string());

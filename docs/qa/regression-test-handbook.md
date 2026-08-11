@@ -849,7 +849,7 @@ CLI-101 至 CLI-113 都必须完整执行以下步骤，不得用“其他 Agent
 2. **发现与诊断补充**：确认 availability 只依赖 Node.js + npx（不依赖全局 Pi）；记录 `pi-acp` 版本 0.0.33、Pi coding-agent 版本 0.83.0、MCP adapter 版本 2.18.0；确认 Pi models sync 状态为 `synchronized=true`。
 3. **模型刷新**：执行 ACP probe，记录 `initialize` 事件中的 `configOptions`（category=model）；确认模型值来自 ACP 服务端返回，不经前端硬编码或格式转换。
 4. **Provider 配置同步**：确认 Pi provider 配置同步将 `openteams-` 命名空间的受管条目原子写入 `~/.pi/agent/providers.json`（隔离 HOME）；验证 0600 权限、无效 JSON 保护、密钥以 Pi 字面量编码且不泄漏到命令行、日志或 API 响应。
-5. **Skill/MCP 成员隔离**：为两个差异化成员分别配置不同的 MCP allowlist 和 Skill 路径；验证 `freeze_runtime_snapshot` 按成员策略过滤 `mcpServers`；验证 `--no-skills` 强制追加；验证未授权的 MCP 服务器不出现在启动参数、运行时快照或工具列表中；验证密钥在快照中被遮蔽。
+5. **Skill/MCP 成员隔离**：先让成员不配置 MCP allowlist，验证 `mcp.json` 中全部已启用服务进入快照；再为两个差异化成员分别配置不同的显式 MCP allowlist 和 Skill 路径，验证 `freeze_runtime_snapshot` 按成员策略过滤 `mcpServers`；验证 `--no-skills` 强制追加；验证显式过滤后的 MCP 服务不出现在启动参数、运行时快照或工具列表中；验证密钥在快照中被遮蔽。
 6. **三种审批策略**：对原生工具（bash）和 MCP 工具分别执行 `ask`（弹出审批 UI，允许/拒绝按预期）、`auto_allow`（永不回退到 reject）、`auto_reject`（自动拒绝）；验证 `permission.jsonl` 记录正确的决策。
 7. **session/load 续聊**：在同一成员发送续聊消息，验证使用 `session/load`（非历史拼接）；核对外部 session ID 复用。
 8. **取消**：启动长任务并 Stop，验证 `session/cancel` notification 发送、protocol.jsonl 记录 cancel 事件、终态正确、进程树清理完整。
@@ -860,7 +860,7 @@ CLI-101 至 CLI-113 都必须完整执行以下步骤，不得用“其他 Agent
 - 满足全部逐 CLI 通用验收标准。
 - 实际 runner 为 `PI`，命令中包含固定版本 `pi-acp@0.0.33`、`@earendil-works/pi-coding-agent@0.83.0`、`pi-mcp-adapter@2.18.0`，无 `latest` 或未定版本。
 - `--no-skills` 强制追加到 launcher 命令；只有成员 Registry 校验通过的 Skill 路径进入 Pi 参数。
-- 仅成员 MCP allowlist 中的服务器进入隔离快照和工具面；未授权的全局或项目 MCP 不会启动。
+- 未配置成员 MCP allowlist 时，`mcp.json` 中全部已启用服务进入隔离快照和工具面；显式 allowlist 只保留列出的服务，显式空 allowlist 不启动任何 MCP 服务。
 - 原生工具与 MCP 工具均经过三种审批策略，审批门一致（`approval_extension.mjs` 对所有 `tool_call` 使用同一 `ctx.ui.confirm`）。
 - provider 配置同步使用原子合并（同目录 create_new 临时文件 + 0600 + rename），无效旧 JSON 不损坏原文件。
 - 密钥只以 Pi 原生字面值进入受保护文件，不进入命令行、日志、普通 API 错误或前端响应。

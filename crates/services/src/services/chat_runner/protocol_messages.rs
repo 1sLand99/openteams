@@ -1,6 +1,6 @@
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum AgentProtocolMessageType {
+pub(crate) enum AgentProtocolMessageType {
     Send,
     Record,
     #[serde(alias = "artiface", alias = "artefact")]
@@ -10,19 +10,19 @@ enum AgentProtocolMessageType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AgentProtocolMessage {
+pub(crate) struct AgentProtocolMessage {
     #[serde(rename = "type")]
-    message_type: AgentProtocolMessageType,
+    pub(crate) message_type: AgentProtocolMessageType,
     #[serde(default)]
-    to: Option<String>,
+    pub(crate) to: Option<String>,
     #[serde(default)]
-    intent: Option<String>,
+    pub(crate) intent: Option<String>,
     #[serde(default)]
-    plan_check: Option<bool>,
+    pub(crate) plan_check: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_protocol_content")]
-    content: String,
+    pub(crate) content: String,
     #[serde(default)]
-    design_doc_path: Option<Vec<String>>,
+    pub(crate) design_doc_path: Option<Vec<String>>,
 }
 
 fn deserialize_protocol_content<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -58,10 +58,10 @@ where
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentProtocolError {
-    code: ChatProtocolNoticeCode,
-    target: Option<String>,
-    detail: Option<String>,
+pub(crate) struct AgentProtocolError {
+    pub(crate) code: ChatProtocolNoticeCode,
+    pub(crate) target: Option<String>,
+    pub(crate) detail: Option<String>,
 }
 
 /// Result of processing agent protocol output.

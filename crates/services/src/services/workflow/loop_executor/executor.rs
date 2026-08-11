@@ -1258,7 +1258,7 @@ impl<'a> LoopExecutor<'a> {
             };
             let raw_output = agent_output.output;
 
-            match protocol::parse_loop_review_protocol_output(
+            match crate::services::output_validation::validate_workflow_loop_review_output(
                 self.execution.id,
                 &workflow_loop.loop_key,
                 declared_acceptance,
@@ -1285,7 +1285,11 @@ impl<'a> LoopExecutor<'a> {
                     attempt += 1;
                     run_as_follow_up = true;
                 }
-                Err(err) => return Err(err.into()),
+                Err(err) => {
+                    return Err(
+                        workflow_runtime::WorkflowRuntimeError::Validation(err.to_string()).into(),
+                    );
+                }
             }
         }
     }

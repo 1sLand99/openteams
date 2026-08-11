@@ -12,6 +12,11 @@
 
 use db::models::workflow_types::WorkflowPlanJson;
 
+use crate::services::output_validation::{
+    OutputValidationKind, OutputValidationReturnMode, WorkflowPlanValidationContext,
+    render_output_validation_instructions,
+};
+
 /// How plan generation was triggered (design §6.2, §8.1).
 #[derive(Debug, Clone)]
 pub enum PlanGenerationMode {
@@ -189,6 +194,18 @@ pub fn build_plan_generation_prompt(input: &PlanGenerationPromptInput) -> String
 
     sections.push(render_members_section(input));
     sections.push(render_schema_section(input));
+    sections.push(render_output_validation_instructions(
+        OutputValidationKind::WorkflowPlan,
+        &WorkflowPlanValidationContext {
+            lead_agent_id: input.lead_agent_id.clone(),
+            available_agent_ids: input
+                .members
+                .iter()
+                .map(|member| member.agent_id.trim().to_string())
+                .collect(),
+        },
+        OutputValidationReturnMode::PlanTwoPhase,
+    ));
 
     // Attempt-level content always lives after the Schema (§7.1).
     match &input.mode {
@@ -292,7 +309,7 @@ fn render_previous_plan_section(plan: &WorkflowPlanJson) -> String {
 /// Structural constraints (node id `pattern`, non-empty `agents.available`,
 /// per-`stepType` conditional requirements, tiered acceptance) live here and
 /// nowhere else.
-fn plan_output_schema(lead_agent_id: &str, member_ids: &[String]) -> serde_json::Value {
+pub(crate) fn plan_output_schema(lead_agent_id: &str, member_ids: &[String]) -> serde_json::Value {
     serde_json::json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -683,6 +700,15 @@ mod tests {
 
         // The full Schema appears exactly once.
         assert_eq!(prompt.matches("```json").count(), 1);
+        assert!(prompt.contains("## Mandatory output validation"));
+        assert!(prompt.contains("POST $OPENTEAMS_OUTPUT_VALIDATION_URL"));
+        assert!(prompt.contains("\"kind\": \"workflow_plan\""));
+        assert!(
+            prompt.contains("If any response has `valid: true`, finish the two-phase response")
+        );
+        assert!(prompt.contains(
+            "After the third retry, if validation still has not returned `valid: true`, stop validating, finish the two-phase response"
+        ));
     }
 
     #[test]

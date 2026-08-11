@@ -423,7 +423,7 @@ check(
 check(
   "running pill uses the required copy and reused visual tokens",
   runStatusSource.includes("正在执行") &&
-    runStatusSource.includes("Loader2") &&
+    runStatusSource.includes("ThinkingOrb") &&
     runStatusSource.includes("min-h-6") &&
     runStatusSource.includes("whitespace-nowrap") &&
     runStatusSource.includes("bg-[var(--primary-tint)]") &&
