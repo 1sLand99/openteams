@@ -30,6 +30,7 @@ use jsonc_parser::ParseOptions;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use services::services::{
+    agent_runtime::reconcile_runtime_model_discovery,
     cli_config::{
         CliConfig, CustomProviderEntry, CustomProviderOptions, OllamaConfig, OpenTeamsCliConfig,
         OpenTeamsCliProviderConfig, OpenTeamsCliProviderOptions, ProviderCredentials,

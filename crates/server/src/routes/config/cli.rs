@@ -157,7 +157,7 @@ async fn sync_to_openteams_cli(
     if cli_config_changed(&original_cli_config, &cli_config)? {
         write_openteams_cli_config_to_disk(&cli_config).await?;
     }
-    sync_openteams_cli_profiles_from_cli_config(&cli_config)?;
+    sync_openteams_cli_profiles_from_cli_config(&cli_config).await?;
 
     Ok(cli_config_path.to_string_lossy().to_string())
 }
@@ -676,22 +676,46 @@ fn cli_config_changed(
 async fn sync_openteams_cli_profiles_from_disk()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli_config = try_read_openteams_cli_config_from_disk().await?;
-    sync_openteams_cli_profiles_from_cli_config(&cli_config)
+    sync_openteams_cli_profiles_from_cli_config(&cli_config).await
 }
 
-fn sync_openteams_cli_profiles_from_cli_config(
+async fn sync_openteams_cli_profiles_from_cli_config(
     cli_config: &OpenTeamsCliConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ExecutorConfigs::reload();
     let mut profiles = ExecutorConfigs::get_cached();
+    let previous_profile_models = openteams_cli_profile_model_ids(&profiles);
     let changed = sync_openteams_cli_models_into_profiles(&mut profiles, cli_config);
+    let current_profile_models = openteams_cli_profile_model_ids(&profiles);
 
     if changed {
         profiles.save_overrides()?;
         ExecutorConfigs::reload();
     }
 
+    reconcile_runtime_model_discovery(
+        BaseCodingAgent::OpenTeamsCli,
+        &previous_profile_models,
+        &current_profile_models,
+    )
+    .await?;
+
     Ok(())
+}
+
+fn openteams_cli_profile_model_ids(profiles: &ExecutorConfigs) -> Vec<String> {
+    let mut models = BTreeSet::new();
+    if let Some(executor_config) = profiles.executors.get(&BaseCodingAgent::OpenTeamsCli) {
+        for config in executor_config.configurations.values() {
+            if let CodingAgent::OpenTeamsCli(config) = config
+                && let Some(model) = config.model.as_deref().map(str::trim)
+                && !model.is_empty()
+            {
+                models.insert(model.to_string());
+            }
+        }
+    }
+    models.into_iter().collect()
 }
 
 fn sync_openteams_cli_models_into_profiles(
