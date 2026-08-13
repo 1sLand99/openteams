@@ -436,6 +436,7 @@ impl OpenTeamsCli {
 
         Ok(SpawnedChild {
             child,
+            stdout: None,
             exit_signal: Some(exit_signal_rx),
             cancel: Some(cancel),
             cleanup: None,

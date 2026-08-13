@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     path::{Component, Path, PathBuf},
     process::{ExitStatus, Stdio},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use agent_client_protocol::schema::v1::{
@@ -51,6 +54,7 @@ pub struct AcpClient {
     additional_directories: Vec<PathBuf>,
     services: AcpClientServicePolicy,
     terminal_env: HashMap<String, String>,
+    forward_session_updates: Arc<AtomicBool>,
     terminals: Arc<Mutex<HashMap<String, TerminalRecord>>>,
     tool_calls: Arc<Mutex<HashMap<String, ToolCallUpdate>>>,
     token_usage: Arc<Mutex<AcpTokenUsageAccumulator>>,
@@ -86,6 +90,7 @@ impl AcpClient {
             additional_directories,
             services,
             terminal_env: safe_terminal_env,
+            forward_session_updates: Arc::new(AtomicBool::new(true)),
             terminals: Arc::new(Mutex::new(HashMap::new())),
             tool_calls: Arc::new(Mutex::new(HashMap::new())),
             token_usage: Arc::new(Mutex::new(AcpTokenUsageAccumulator::default())),
@@ -95,6 +100,12 @@ impl AcpClient {
 
     pub async fn record_user_prompt_event(&self, prompt: &str) {
         self.send_event(AcpEvent::User(prompt.to_string())).await;
+    }
+
+    /// Session resume/load may replay the full conversation through notifications. Those updates
+    /// are context reconstruction, not output or activity for the new OpenTeams run.
+    pub fn begin_session_replay(&self) {
+        self.forward_session_updates.store(false, Ordering::Release);
     }
 
     async fn send_event(&self, event: AcpEvent) {
@@ -107,6 +118,9 @@ impl AcpClient {
         &self,
         notification: SessionNotification,
     ) -> Result<(), Error> {
+        if !self.forward_session_updates.load(Ordering::Acquire) {
+            return Ok(());
+        }
         self.token_usage
             .lock()
             .await
@@ -156,6 +170,7 @@ impl AcpClient {
         self.token_usage.lock().await.begin_turn();
         *self.terminal_api_error.lock().await = None;
         self.tool_calls.lock().await.clear();
+        self.forward_session_updates.store(true, Ordering::Release);
     }
 
     pub async fn take_terminal_api_error(&self) -> Option<DetectedApiError> {

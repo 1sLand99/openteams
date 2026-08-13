@@ -42,7 +42,7 @@ use crate::{
     approvals::ExecutorApprovalService,
     command::{CmdOverrides, CommandParts},
     env::ExecutionEnv,
-    executors::{ExecutorError, ExecutorExitResult, ExecutorPrompt, SpawnedChild},
+    executors::{ExecutorError, ExecutorExitResult, ExecutorOutput, ExecutorPrompt, SpawnedChild},
     model_identity::model_id_match_score,
 };
 
@@ -55,6 +55,7 @@ enum BootstrapError {
 }
 
 const INVALID_SESSION_RECOVERY_MESSAGE: &str = "ACP session recovery reused the requested session ID and the prompt was refused; the session is invalid";
+const ACP_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -312,21 +313,23 @@ impl AcpAgentHarness {
         let mut child = command.group_spawn()?;
         let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
         let cancel = CancellationToken::new();
-        self.bootstrap_acp_connection(
-            &mut child,
-            current_dir.to_path_buf(),
-            existing_session,
-            prompt,
-            prompt_text,
-            exit_tx,
-            approvals,
-            env.vars.clone(),
-            cancel.clone(),
-        )
-        .await?;
+        let stdout = self
+            .bootstrap_acp_connection(
+                &mut child,
+                current_dir.to_path_buf(),
+                existing_session,
+                prompt,
+                prompt_text,
+                exit_tx,
+                approvals,
+                env.vars.clone(),
+                cancel.clone(),
+            )
+            .await?;
 
         Ok(SpawnedChild {
             child,
+            stdout: Some(stdout),
             exit_signal: Some(exit_rx),
             cancel: Some(cancel),
             cleanup: None,
@@ -345,8 +348,8 @@ impl AcpAgentHarness {
         approvals: Option<Arc<dyn ExecutorApprovalService>>,
         terminal_env: std::collections::HashMap<String, String>,
         cancel: CancellationToken,
-    ) -> Result<(), ExecutorError> {
-        let stdout = child.inner().stdout.take().ok_or_else(|| {
+    ) -> Result<ExecutorOutput, ExecutorError> {
+        let protocol_stdout = child.inner().stdout.take().ok_or_else(|| {
             ExecutorError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Child process has no stdout",
@@ -358,20 +361,20 @@ impl AcpAgentHarness {
                 "Child process has no stdin",
             ))
         })?;
-        let output_writer = crate::stdout_dup::create_stdout_pipe_writer(child)?;
-        let (output, output_task) = AcpOutput::start(output_writer);
+        let (output, executor_stdout) = AcpOutput::channel();
         let (startup_tx, startup_rx) = tokio::sync::oneshot::channel();
         let startup_tx = Arc::new(StdMutex::new(Some(startup_tx)));
 
         let config = self.config.clone();
         let output_for_runtime = output.clone();
+        let runtime_cancel = cancel.clone();
         tokio::task::spawn_blocking(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("build ACP runtime");
             runtime.block_on(async move {
-                let incoming = futures::io::BufReader::new(stdout.compat()).lines();
+                let incoming = futures::io::BufReader::new(protocol_stdout.compat()).lines();
                 let outgoing = sink::unfold(stdin, |mut stdin, line: String| async move {
                     stdin.write_all(line.as_bytes()).await?;
                     const LINE_ENDING: &[u8] = if cfg!(windows) { b"\r\n" } else { b"\n" };
@@ -385,12 +388,13 @@ impl AcpAgentHarness {
                     output_for_runtime.clone(),
                     approvals,
                     config.approval_policy,
-                    cancel.clone(),
+                    runtime_cancel.clone(),
                     cwd.clone(),
                     config.additional_directories.clone(),
                     config.client_services,
                     terminal_env,
                 );
+                client.begin_session_replay();
                 let notify_client = client.clone();
                 let permission_client = client.clone();
                 let read_client = client.clone();
@@ -404,7 +408,7 @@ impl AcpAgentHarness {
                 let startup_for_connection = startup_tx.clone();
                 let output_for_connection = output_for_runtime.clone();
                 let config_for_connection = config.clone();
-                let cancel_for_connection = cancel.clone();
+                let cancel_for_connection = runtime_cancel.clone();
 
                 let result = agent_client_protocol::Client
                     .builder()
@@ -493,7 +497,7 @@ impl AcpAgentHarness {
                     .await;
                 cleanup_client.shutdown_terminals().await;
                 drop(cleanup_client);
-                let was_cancelled = cancel.is_cancelled();
+                let was_cancelled = runtime_cancel.is_cancelled();
 
                 if let Err(error) = &result
                     && !was_cancelled
@@ -514,9 +518,6 @@ impl AcpAgentHarness {
                 }
 
                 drop(output_for_runtime);
-                if let Err(error) = output_task.await {
-                    tracing::error!("ACP output task failed: {error}");
-                }
                 let failure = result.as_ref().err().and_then(|error| {
                     is_invalid_session_recovery_error(error).then(|| protocol_error_message(error))
                 });
@@ -530,23 +531,34 @@ impl AcpAgentHarness {
             });
         });
 
-        match startup_rx.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(BootstrapError::FollowUpNotSupported(message))) => {
+        let startup_result = tokio::time::timeout(ACP_STARTUP_TIMEOUT, startup_rx).await;
+        match startup_result {
+            Ok(Ok(Ok(()))) => Ok(executor_stdout),
+            Ok(Ok(Err(BootstrapError::FollowUpNotSupported(message)))) => {
                 Err(ExecutorError::FollowUpNotSupported(message))
             }
-            Ok(Err(BootstrapError::AuthRequired(message))) => {
+            Ok(Ok(Err(BootstrapError::AuthRequired(message)))) => {
                 Err(ExecutorError::AuthRequired(message))
             }
-            Ok(Err(BootstrapError::Configuration(message))) => {
+            Ok(Ok(Err(BootstrapError::Configuration(message)))) => {
                 Err(ExecutorError::Configuration(message))
             }
-            Ok(Err(BootstrapError::Other(message))) => Err(ExecutorError::Io(
+            Ok(Ok(Err(BootstrapError::Other(message)))) => Err(ExecutorError::Io(
                 std::io::Error::other(format!("ACP startup failed: {message}")),
             )),
-            Err(_) => Err(ExecutorError::Io(std::io::Error::other(
+            Ok(Err(_)) => Err(ExecutorError::Io(std::io::Error::other(
                 "ACP startup task exited before initialization",
             ))),
+            Err(_) => {
+                cancel.cancel();
+                Err(ExecutorError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "ACP startup timed out after {} seconds",
+                        ACP_STARTUP_TIMEOUT.as_secs()
+                    ),
+                )))
+            }
         }
     }
 }

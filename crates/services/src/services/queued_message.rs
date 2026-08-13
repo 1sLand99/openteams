@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
-use db::models::chat_message_queue::{
-    ChatMessageQueue, CreateChatMessageQueue, QueuedMessageStatus,
+use db::models::{
+    chat_message_queue::{ChatMessageQueue, CreateChatMessageQueue, QueuedMessageStatus},
+    chat_session_agent::{ChatSessionAgent, ChatSessionAgentState},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -92,6 +93,11 @@ pub struct CreateQueuedMessage {
     pub session_agent_id: Uuid,
     pub agent_id: Uuid,
     pub chat_message_id: Uuid,
+}
+
+pub struct RunQueueFinalization {
+    pub applied: bool,
+    pub next: Option<QueuedMessage>,
 }
 
 /// Database-backed service for managing member-scoped queued chat messages.
@@ -240,6 +246,13 @@ impl QueuedMessageService {
         Ok(rows.into_iter().map(Self::from_row).collect())
     }
 
+    pub async fn list_members_with_queued(
+        &self,
+        pool: &SqlitePool,
+    ) -> Result<Vec<Uuid>, sqlx::Error> {
+        ChatMessageQueue::list_members_with_queued(pool).await
+    }
+
     /// Return the member's currently claimed or running queue row, if one exists.
     pub async fn find_active_for_member(
         &self,
@@ -324,6 +337,87 @@ impl QueuedMessageService {
         let (_completed, claimed) =
             ChatMessageQueue::complete_run_and_claim_next(pool, run_id, session_agent_id).await?;
         Ok(claimed.map(Self::from_row))
+    }
+
+    /// Atomically move the member to idle, complete the queue row guarded by `run_id`, and
+    /// optionally claim its next durable message.
+    pub async fn finalize_completed_run(
+        &self,
+        pool: &SqlitePool,
+        run_id: Uuid,
+        session_agent_id: Uuid,
+        claim_next: bool,
+    ) -> Result<RunQueueFinalization, sqlx::Error> {
+        let mut transaction = pool.begin().await?;
+        let updated_agent = ChatSessionAgent::update_state_for_run_in_transaction(
+            &mut transaction,
+            session_agent_id,
+            run_id,
+            ChatSessionAgentState::Idle,
+        )
+        .await?;
+        if updated_agent.is_none() {
+            transaction.rollback().await?;
+            return Ok(RunQueueFinalization {
+                applied: false,
+                next: None,
+            });
+        }
+        let completed =
+            ChatMessageQueue::mark_completed_by_run_in_transaction(&mut transaction, run_id)
+                .await?;
+        if completed.is_none() {
+            transaction.rollback().await?;
+            return Ok(RunQueueFinalization {
+                applied: false,
+                next: None,
+            });
+        }
+        let next = if claim_next {
+            ChatMessageQueue::claim_next_in_transaction(&mut transaction, session_agent_id).await?
+        } else {
+            None
+        };
+        transaction.commit().await?;
+        Ok(RunQueueFinalization {
+            applied: true,
+            next: next.map(Self::from_row),
+        })
+    }
+
+    /// Atomically move the member to dead and finalize the queue row guarded by `run_id`.
+    pub async fn finalize_failed_run(
+        &self,
+        pool: &SqlitePool,
+        run_id: Uuid,
+        session_agent_id: Uuid,
+        failure_reason: Option<String>,
+    ) -> Result<bool, sqlx::Error> {
+        let mut transaction = pool.begin().await?;
+        let updated_agent = ChatSessionAgent::update_state_for_run_in_transaction(
+            &mut transaction,
+            session_agent_id,
+            run_id,
+            ChatSessionAgentState::Dead,
+        )
+        .await?;
+        if updated_agent.is_none() {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        let finalized = ChatMessageQueue::mark_failed_or_skipped_by_run_in_transaction(
+            &mut transaction,
+            run_id,
+            session_agent_id,
+            failure_reason,
+        )
+        .await?;
+        if finalized.is_none() {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        transaction.commit().await?;
+        Ok(true)
     }
 
     /// Mark `processing` or `running` as `completed` after success or a normal stop.
@@ -524,7 +618,45 @@ mod tests {
         .execute(&pool)
         .await
         .expect("create partial unique index");
+        sqlx::query(
+            r#"
+            CREATE TABLE chat_session_agents (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                agent_id BLOB NOT NULL,
+                state TEXT NOT NULL
+                    CHECK (state IN ('idle','running','stopping','waitingapproval','dead')),
+                workspace_path TEXT,
+                pty_session_key TEXT,
+                agent_session_id TEXT,
+                agent_message_id TEXT,
+                project_member_id BLOB,
+                member_name TEXT NOT NULL DEFAULT '',
+                execution_config TEXT NOT NULL DEFAULT '{}',
+                allowed_skill_ids TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create chat_session_agents table");
         pool
+    }
+
+    async fn insert_running_member(pool: &SqlitePool, member: Uuid, data: &CreateQueuedMessage) {
+        sqlx::query(
+            "INSERT INTO chat_session_agents (
+                 id, session_id, agent_id, state, member_name
+             ) VALUES (?1, ?2, ?3, 'running', 'Target')",
+        )
+        .bind(member)
+        .bind(data.session_id)
+        .bind(data.agent_id)
+        .execute(pool)
+        .await
+        .expect("insert running member");
     }
 
     fn sample_create(session_agent_id: Uuid) -> CreateQueuedMessage {
@@ -724,6 +856,156 @@ mod tests {
 
         assert_eq!(next.id, second.id);
         assert_eq!(next.status, QueuedMessageStatus::Processing);
+    }
+
+    #[tokio::test]
+    async fn completed_run_atomically_updates_member_and_claims_next() {
+        let pool = setup_pool().await;
+        let service = QueuedMessageService::new();
+        let member = Uuid::new_v4();
+        let first_data = sample_create(member);
+        insert_running_member(&pool, member, &first_data).await;
+        let first = service
+            .create_queued(&pool, &first_data)
+            .await
+            .expect("create first queue row");
+        let second = service
+            .create_queued(&pool, &sample_create(member))
+            .await
+            .expect("create second queue row");
+        sqlx::query(
+            "UPDATE chat_message_queue
+             SET created_at = CASE id WHEN ?1 THEN ?3 WHEN ?2 THEN ?4 END
+             WHERE id IN (?1, ?2)",
+        )
+        .bind(first.id)
+        .bind(second.id)
+        .bind("2026-08-12T00:00:01.000")
+        .bind("2026-08-12T00:00:02.000")
+        .execute(&pool)
+        .await
+        .expect("order queue rows");
+        let claimed = service
+            .claim_next(&pool, member)
+            .await
+            .expect("claim first")
+            .expect("first claimed");
+        assert_eq!(claimed.id, first.id);
+        let run_id = Uuid::new_v4();
+        service
+            .bind_run(&pool, claimed.id, run_id)
+            .await
+            .expect("bind run")
+            .expect("run bound");
+
+        let finalized = service
+            .finalize_completed_run(&pool, run_id, member, true)
+            .await
+            .expect("finalize completed run");
+
+        assert!(finalized.applied);
+        assert_eq!(
+            finalized.next.as_ref().map(|entry| entry.id),
+            Some(second.id)
+        );
+        let member_state: String =
+            sqlx::query_scalar("SELECT state FROM chat_session_agents WHERE id = ?1")
+                .bind(member)
+                .fetch_one(&pool)
+                .await
+                .expect("load member state");
+        assert_eq!(member_state, "idle");
+        assert_eq!(
+            service
+                .find_by_id(&pool, first.id)
+                .await
+                .expect("load first")
+                .expect("first exists")
+                .status,
+            QueuedMessageStatus::Completed
+        );
+
+        let stale = service
+            .finalize_completed_run(&pool, run_id, member, true)
+            .await
+            .expect("repeat stale finalization");
+        assert!(!stale.applied);
+        assert!(stale.next.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_run_atomically_updates_member_and_blocks_waiting_work() {
+        let pool = setup_pool().await;
+        let service = QueuedMessageService::new();
+        let member = Uuid::new_v4();
+        let first_data = sample_create(member);
+        insert_running_member(&pool, member, &first_data).await;
+        let first = service
+            .create_queued(&pool, &first_data)
+            .await
+            .expect("create first queue row");
+        let second = service
+            .create_queued(&pool, &sample_create(member))
+            .await
+            .expect("create second queue row");
+        sqlx::query(
+            "UPDATE chat_message_queue
+             SET created_at = CASE id WHEN ?1 THEN ?3 WHEN ?2 THEN ?4 END
+             WHERE id IN (?1, ?2)",
+        )
+        .bind(first.id)
+        .bind(second.id)
+        .bind("2026-08-12T00:00:01.000")
+        .bind("2026-08-12T00:00:02.000")
+        .execute(&pool)
+        .await
+        .expect("order queue rows");
+        let claimed = service
+            .claim_next(&pool, member)
+            .await
+            .expect("claim first")
+            .expect("first claimed");
+        let run_id = Uuid::new_v4();
+        service
+            .bind_run(&pool, claimed.id, run_id)
+            .await
+            .expect("bind run")
+            .expect("run bound");
+
+        let applied = service
+            .finalize_failed_run(&pool, run_id, member, Some("startup failed".to_string()))
+            .await
+            .expect("finalize failed run");
+
+        assert!(applied);
+        let member_state: String =
+            sqlx::query_scalar("SELECT state FROM chat_session_agents WHERE id = ?1")
+                .bind(member)
+                .fetch_one(&pool)
+                .await
+                .expect("load member state");
+        assert_eq!(member_state, "dead");
+        let failed = service
+            .find_by_id(&pool, first.id)
+            .await
+            .expect("load first")
+            .expect("first exists");
+        assert_eq!(failed.status, QueuedMessageStatus::Failed);
+        assert_eq!(failed.failure_reason.as_deref(), Some("startup failed"));
+        assert!(
+            service
+                .claim_next(&pool, member)
+                .await
+                .expect("blocked claim")
+                .is_none()
+        );
+
+        assert!(
+            !service
+                .finalize_failed_run(&pool, run_id, member, None)
+                .await
+                .expect("repeat stale finalization")
+        );
     }
 
     #[tokio::test]

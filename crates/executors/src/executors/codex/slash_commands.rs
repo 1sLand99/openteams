@@ -499,9 +499,35 @@ fn format_mcp_status(servers: &[codex_app_server_protocol::McpServerStatus]) -> 
 
 fn format_mcp_auth_status(status: &codex_app_server_protocol::McpAuthStatus) -> &'static str {
     match status {
+        codex_app_server_protocol::McpAuthStatus::Unknown => "unknown",
         codex_app_server_protocol::McpAuthStatus::Unsupported => "unsupported",
         codex_app_server_protocol::McpAuthStatus::NotLoggedIn => "not logged in",
         codex_app_server_protocol::McpAuthStatus::BearerToken => "bearer token",
         codex_app_server_protocol::McpAuthStatus::OAuth => "oauth",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use codex_app_server_protocol::McpAuthStatus;
+
+    use super::format_mcp_auth_status;
+
+    #[test]
+    fn formats_all_mcp_auth_statuses() {
+        assert_eq!(format_mcp_auth_status(&McpAuthStatus::Unknown), "unknown");
+        assert_eq!(
+            format_mcp_auth_status(&McpAuthStatus::Unsupported),
+            "unsupported"
+        );
+        assert_eq!(
+            format_mcp_auth_status(&McpAuthStatus::NotLoggedIn),
+            "not logged in"
+        );
+        assert_eq!(
+            format_mcp_auth_status(&McpAuthStatus::BearerToken),
+            "bearer token"
+        );
+        assert_eq!(format_mcp_auth_status(&McpAuthStatus::OAuth), "oauth");
     }
 }

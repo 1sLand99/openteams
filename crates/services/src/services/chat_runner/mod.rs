@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    future::Future,
     path::{Component, Path, PathBuf},
     sync::{
         Arc, LazyLock,
@@ -30,7 +31,7 @@ use executors::{
     env::{ExecutionEnv, RepoContext},
     executors::{
         BaseCodingAgent, CancellationToken, ExecutorError, ExecutorExitSignal, ExecutorPrompt,
-        ExecutorPromptImage, ExecutorRunCleanup, StandardCodingAgentExecutor,
+        ExecutorPromptImage, ExecutorRunCleanup, SpawnedChild, StandardCodingAgentExecutor,
     },
     logs::{
         NormalizedEntryError, NormalizedEntryType, TokenUsageInfo,

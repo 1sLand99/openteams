@@ -42,12 +42,7 @@ async fn run_turn(
             .await
             .expect("spawn ACP turn"),
     };
-    let stdout = spawned
-        .child
-        .inner()
-        .stdout
-        .take()
-        .expect("replacement stdout");
+    let stdout = spawned.take_stdout().expect("replacement stdout");
     let mut lines = BufReader::new(stdout).lines();
     let mut events = Vec::new();
     while let Ok(Ok(Some(line))) =
@@ -73,12 +68,7 @@ async fn run_turn(
 async fn read_spawned_turn(
     mut spawned: executors::executors::SpawnedChild,
 ) -> (Vec<AcpEvent>, ExecutorExitResult) {
-    let stdout = spawned
-        .child
-        .inner()
-        .stdout
-        .take()
-        .expect("replacement stdout");
+    let stdout = spawned.take_stdout().expect("replacement stdout");
     let mut lines = BufReader::new(stdout).lines();
     let mut events = Vec::new();
     while let Ok(Ok(Some(line))) =
@@ -141,6 +131,56 @@ async fn hidden_runner_completes_new_and_native_resume_turns() {
             .iter()
             .any(|event| matches!(event, AcpEvent::Message(_)))
     );
+
+    tokio::fs::remove_dir_all(workspace)
+        .await
+        .expect("remove workspace");
+}
+
+#[tokio::test]
+async fn large_follow_up_replay_does_not_block_spawn_or_leak_history() {
+    let workspace = std::env::temp_dir().join(format!("openteams-acp-qa-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&workspace)
+        .await
+        .expect("create workspace");
+    let executor = AcpQaExecutor {
+        command: env!("CARGO_BIN_EXE_acp-qa-agent").to_string(),
+        ..AcpQaExecutor::default()
+    };
+    let mut env = ExecutionEnv::new(
+        RepoContext::new(workspace.clone(), Vec::new()),
+        false,
+        String::new(),
+    );
+    env.insert("ACP_QA_REPLAY_NOTIFICATION_COUNT", "1024");
+
+    let spawned = tokio::time::timeout(
+        Duration::from_secs(3),
+        executor.spawn_follow_up(
+            &workspace,
+            "current follow-up",
+            "large-history-session",
+            None,
+            &env,
+        ),
+    )
+    .await
+    .expect("ACP follow-up startup must not block on replay output")
+    .expect("spawn ACP follow-up");
+    let (events, exit) = read_spawned_turn(spawned).await;
+
+    assert!(matches!(exit, ExecutorExitResult::Success));
+    assert!(
+        events.iter().any(|event| {
+            matches!(event, AcpEvent::User(prompt) if prompt == "current follow-up")
+        })
+    );
+    assert!(events.iter().any(|event| {
+        matches!(event, AcpEvent::Message(message) if format!("{message:?}").contains("current follow-up"))
+    }));
+    assert!(!events.iter().any(|event| {
+        matches!(event, AcpEvent::Message(message) if format!("{message:?}").contains("replayed-history"))
+    }));
 
     tokio::fs::remove_dir_all(workspace)
         .await
