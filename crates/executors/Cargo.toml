@@ -57,6 +57,7 @@ which = "7"
 
 [target.'cfg(windows)'.dependencies]
 winsplit = "0.1.0"
+winapi = { version = "0.3.9", features = ["std"] }
 
 [target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
