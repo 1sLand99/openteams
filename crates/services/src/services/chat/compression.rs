@@ -216,7 +216,7 @@ async fn call_agent_for_summary(
         .map_err(map_executor_error)?;
 
     let msg_store = Arc::new(MsgStore::new());
-    spawn_summary_log_forwarders(&mut spawned.child, msg_store.clone())?;
+    spawn_summary_log_forwarders(&mut spawned, msg_store.clone())?;
     executor.normalize_logs(msg_store.clone(), workspace_path);
 
     let mut failed_by_signal = false;
@@ -357,13 +357,13 @@ fn map_executor_error(err: ExecutorError) -> ChatServiceError {
 }
 
 fn spawn_summary_log_forwarders(
-    child: &mut command_group::AsyncGroupChild,
+    spawned: &mut executors::executors::SpawnedChild,
     msg_store: Arc<MsgStore>,
 ) -> Result<(), ChatServiceError> {
-    let stdout = child.inner().stdout.take().ok_or_else(|| {
+    let stdout = spawned.take_stdout().ok_or_else(|| {
         ChatServiceError::Validation("summarization child missing stdout".to_string())
     })?;
-    let stderr = child.inner().stderr.take().ok_or_else(|| {
+    let stderr = spawned.child.inner().stderr.take().ok_or_else(|| {
         ChatServiceError::Validation("summarization child missing stderr".to_string())
     })?;
 

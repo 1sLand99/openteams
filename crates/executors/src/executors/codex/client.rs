@@ -117,6 +117,7 @@ impl AppServerClient {
                     request_attestation: false,
                     mcp_server_openai_form_elicitation: false,
                     opt_out_notification_methods: None,
+                    extensions: None,
                 }),
             },
         };
@@ -658,10 +659,11 @@ impl AppServerClient {
                 if feedback.is_some() {
                     (ReviewDecision::Abort, feedback)
                 } else {
-                    (ReviewDecision::Denied, None)
+                    (ReviewDecision::denied("rejected by user"), None)
                 }
             }
-            ApprovalStatus::TimedOut | ApprovalStatus::Pending => (ReviewDecision::Denied, None),
+            ApprovalStatus::TimedOut => (ReviewDecision::TimedOut, None),
+            ApprovalStatus::Pending => (ReviewDecision::denied("approval still pending"), None),
         }
     }
 
@@ -1159,8 +1161,10 @@ mod tests {
     use codex_app_server_protocol::{
         JSONRPCNotification, Turn, TurnCompletedNotification, TurnItemsView, TurnStatus,
     };
+    use codex_protocol::protocol::ReviewDecision;
     use tokio::io::sink;
     use tokio_util::sync::CancellationToken;
+    use workspace_utils::approvals::ApprovalStatus;
 
     use super::{AppServerClient, LogWriter, redact_sensitive_raw_log};
     use crate::env::RepoContext;
@@ -1202,6 +1206,38 @@ mod tests {
         assert_eq!(value["result"]["nested"]["tokenUsage"]["totalTokens"], 123);
         assert!(!redacted.contains("secret-token"));
         assert!(!redacted.contains("refresh-secret"));
+    }
+
+    #[test]
+    fn legacy_review_decision_preserves_denial_outcomes() {
+        let client = AppServerClient::new(
+            LogWriter::new(sink()),
+            None,
+            false,
+            RepoContext::default(),
+            false,
+            String::new(),
+            CancellationToken::new(),
+        );
+
+        let (denied, feedback) =
+            client.legacy_review_decision(&ApprovalStatus::Denied { reason: None });
+        assert!(matches!(
+            denied,
+            ReviewDecision::Denied { ref rejection } if rejection == "rejected by user"
+        ));
+        assert_eq!(feedback, None);
+
+        let (timed_out, feedback) = client.legacy_review_decision(&ApprovalStatus::TimedOut);
+        assert!(matches!(timed_out, ReviewDecision::TimedOut));
+        assert_eq!(feedback, None);
+
+        let (pending, feedback) = client.legacy_review_decision(&ApprovalStatus::Pending);
+        assert!(matches!(
+            pending,
+            ReviewDecision::Denied { ref rejection } if rejection == "approval still pending"
+        ));
+        assert_eq!(feedback, None);
     }
 
     #[tokio::test]

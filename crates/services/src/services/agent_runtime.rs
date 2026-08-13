@@ -15,7 +15,8 @@ use executors::{
     env::ExecutionEnv,
     executors::{
         AcpModelFallback, AcpProbeAuthState, AvailabilityInfo, BaseCodingAgent, CodingAgent,
-        StandardCodingAgentExecutor, acp::AcpCapabilityProbe, opencode::Opencode, pi::Pi,
+        StandardCodingAgentExecutor, acp::AcpCapabilityProbe, codex::Codex, opencode::Opencode,
+        pi::Pi,
     },
     profile::{ExecutorConfig, ExecutorConfigs, ProfileError},
 };
@@ -1023,7 +1024,7 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
         }
         CodingAgent::Amp(_) => "amp".to_string(),
         CodingAgent::Gemini(_) => "gemini".to_string(),
-        CodingAgent::Codex(_) => "npx -y @openai/codex@0.144.1".to_string(),
+        CodingAgent::Codex(_) => Codex::base_command().to_string(),
         CodingAgent::Opencode(_) => {
             format!("npx -y opencode-ai@{}", Opencode::PACKAGE_VERSION)
         }

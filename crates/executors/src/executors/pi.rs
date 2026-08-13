@@ -1550,12 +1550,7 @@ rl.on("close", () => {
         async fn finish_turn(
             mut spawned: SpawnedChild,
         ) -> (Vec<AcpEvent>, crate::executors::ExecutorExitResult) {
-            let stdout = spawned
-                .child
-                .inner()
-                .stdout
-                .take()
-                .expect("ACP runtime stdout");
+            let stdout = spawned.take_stdout().expect("ACP runtime stdout");
             let mut lines = BufReader::new(stdout).lines();
             let mut events = Vec::new();
             loop {

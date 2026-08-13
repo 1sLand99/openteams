@@ -755,25 +755,28 @@ async fn run_workflow_agent_prompt_inner(
     }
 
     let msg_store = Arc::new(MsgStore::new());
-    if let Err(error) = spawn_log_forwarders(&mut spawned.child, msg_store.clone()) {
-        clear_running_step(step_id, step_retry_count);
-        let message = error.to_string();
-        io_log.log_output("", Some(&message));
-        let _ = finish_workflow_runtime_run_record(
-            db,
-            session,
-            agent,
-            &effective_session_agent,
-            &workspace_path,
-            runtime_run_record.as_ref(),
-            &io_log,
-            "",
-            None,
-            Some(&message),
-        )
-        .await;
-        return Err(error);
-    }
+    let mut stdout_forwarder = match spawn_log_forwarders(&mut spawned, msg_store.clone()) {
+        Ok(stdout_forwarder) => Some(stdout_forwarder),
+        Err(error) => {
+            clear_running_step(step_id, step_retry_count);
+            let message = error.to_string();
+            io_log.log_output("", Some(&message));
+            let _ = finish_workflow_runtime_run_record(
+                db,
+                session,
+                agent,
+                &effective_session_agent,
+                &workspace_path,
+                runtime_run_record.as_ref(),
+                &io_log,
+                "",
+                None,
+                Some(&message),
+            )
+            .await;
+            return Err(error);
+        }
+    };
     if let Some(record) = runtime_run_record.as_mut() {
         record.analytics_started = true;
         if let Some(analytics) = &record.analytics {
@@ -903,7 +906,12 @@ async fn run_workflow_agent_prompt_inner(
                     Err(error) => {
                         terminate_child(&mut spawned).await;
                         clear_running_step(step_id, step_retry_count);
-                        finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
+                        finish_workflow_runtime_stream(
+                            &msg_store,
+                            &mut stdout_forwarder,
+                            &mut workflow_stream_task,
+                        )
+                        .await;
                         finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
                         let history = msg_store.get_history();
                         let latest_assistant =
@@ -938,7 +946,12 @@ async fn run_workflow_agent_prompt_inner(
             Ok(ExecutorWaitEvent::ProcessExited(Err(error))) => {
                 terminate_child(&mut spawned).await;
                 clear_running_step(step_id, step_retry_count);
-                finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
+                finish_workflow_runtime_stream(
+                    &msg_store,
+                    &mut stdout_forwarder,
+                    &mut workflow_stream_task,
+                )
+                .await;
                 finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
                 let history = msg_store.get_history();
                 let latest_assistant =
@@ -971,7 +984,12 @@ async fn run_workflow_agent_prompt_inner(
             Err(_) => {
                 terminate_child(&mut spawned).await;
                 clear_running_step(step_id, step_retry_count);
-                finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
+                finish_workflow_runtime_stream(
+                    &msg_store,
+                    &mut stdout_forwarder,
+                    &mut workflow_stream_task,
+                )
+                .await;
                 finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
                 let history = msg_store.get_history();
                 let message = workflow_executor_inactivity_message(&agent.name, &history);
@@ -999,7 +1017,12 @@ async fn run_workflow_agent_prompt_inner(
                 Ok(Ok(exit_status)) => status = Some(exit_status),
                 Ok(Err(err)) => {
                     clear_running_step(step_id, step_retry_count);
-                    finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
+                    finish_workflow_runtime_stream(
+                        &msg_store,
+                        &mut stdout_forwarder,
+                        &mut workflow_stream_task,
+                    )
+                    .await;
                     finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
                     let history = msg_store.get_history();
                     let latest_assistant =
@@ -1029,7 +1052,12 @@ async fn run_workflow_agent_prompt_inner(
             Err(error) => {
                 terminate_child(&mut spawned).await;
                 clear_running_step(step_id, step_retry_count);
-                finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
+                finish_workflow_runtime_stream(
+                    &msg_store,
+                    &mut stdout_forwarder,
+                    &mut workflow_stream_task,
+                )
+                .await;
                 finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
                 let history = msg_store.get_history();
                 let latest_assistant =
@@ -1055,7 +1083,12 @@ async fn run_workflow_agent_prompt_inner(
 
     // Unregister from the running steps map.
     clear_running_step(step_id, step_retry_count);
-    finish_workflow_runtime_stream(&msg_store, &mut workflow_stream_task).await;
+    finish_workflow_runtime_stream(
+        &msg_store,
+        &mut stdout_forwarder,
+        &mut workflow_stream_task,
+    )
+    .await;
     finish_workflow_runtime_session_id_persistor(&mut session_id_task).await;
 
     if interrupted {
@@ -1768,10 +1801,10 @@ async fn persist_workflow_runtime_session_ids(
 }
 
 fn spawn_log_forwarders(
-    child: &mut command_group::AsyncGroupChild,
+    spawned: &mut executors::executors::SpawnedChild,
     msg_store: Arc<MsgStore>,
-) -> Result<(), WorkflowRuntimeError> {
-    let stdout = child.inner().stdout.take().ok_or_else(|| {
+) -> Result<tokio::task::JoinHandle<()>, WorkflowRuntimeError> {
+    let stdout = spawned.take_stdout().ok_or_else(|| {
         WorkflowRuntimeError::Validation(workflow_runtime_error_message(
             WorkflowRuntimeErrorCode::ChildStdoutMissing,
             None,
@@ -1779,7 +1812,7 @@ fn spawn_log_forwarders(
             None,
         ))
     })?;
-    let stderr = child.inner().stderr.take().ok_or_else(|| {
+    let stderr = spawned.child.inner().stderr.take().ok_or_else(|| {
         WorkflowRuntimeError::Validation(workflow_runtime_error_message(
             WorkflowRuntimeErrorCode::ChildStderrMissing,
             None,
@@ -1789,7 +1822,7 @@ fn spawn_log_forwarders(
     })?;
 
     let stdout_store = msg_store.clone();
-    tokio::spawn(async move {
+    let stdout_forwarder = tokio::spawn(async move {
         let mut stream = ReaderStream::new(stdout);
         let mut decoder = Utf8LossyDecoder::new();
         while let Some(chunk) = stream.next().await {
@@ -1832,7 +1865,7 @@ fn spawn_log_forwarders(
         }
     });
 
-    Ok(())
+    Ok(stdout_forwarder)
 }
 
 #[derive(Debug)]

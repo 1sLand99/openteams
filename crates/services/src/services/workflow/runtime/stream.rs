@@ -51,8 +51,12 @@ fn truncate_workflow_runtime_line(value: &str) -> String {
 
 async fn finish_workflow_runtime_stream(
     msg_store: &Arc<MsgStore>,
+    stdout_forwarder: &mut Option<tokio::task::JoinHandle<()>>,
     stream_task: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
+    if let Some(task) = stdout_forwarder.take() {
+        let _ = time::timeout(WORKFLOW_DRAIN_TIMEOUT, task).await;
+    }
     msg_store.push_finished();
     if let Some(task) = stream_task.take() {
         let _ = time::timeout(WORKFLOW_DRAIN_TIMEOUT, task).await;

@@ -19,7 +19,7 @@ use db::{
         workflow_types::WorkflowAgentSessionRole,
     },
 };
-use executors::executors::CancellationToken;
+use executors::executors::{CancellationToken, ExecutorError};
 use git::GitService;
 use serde_json::json;
 use sqlx::SqlitePool;
@@ -32,6 +32,7 @@ use uuid::Uuid;
 
 use super::{
     AgentProtocolError, AgentProtocolMessageType, ChatProtocolNoticeCode, ChatRunner,
+    ChatRunnerError,
     ChatStreamEvent, LifecycleEvent, MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON,
     MAX_PROTOCOL_PARSE_RETRIES, PROTOCOL_OUTPUT_SCHEMA_JSON, RUNS_MAX_TOTAL_BYTES_PER_WORKSPACE,
     RUNS_PRUNE_TARGET_BYTES_PER_WORKSPACE, ResolvedPromptLanguage, RunCompletionStatus,
@@ -1279,6 +1280,74 @@ async fn self_mention_is_rejected_by_session_member_id_and_persisted() {
 }
 
 #[tokio::test]
+async fn agent_protocol_delivery_is_durably_queued_before_target_startup() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    runner
+        .stop_after_queue_binding
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let workspace = tempfile::tempdir().expect("create target workspace");
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let source_agent = insert_test_chat_agent(&db, "SourceAgent").await;
+    let target_agent = insert_test_chat_agent(&db, "TargetAgent").await;
+    let source_member = insert_test_session_agent(&db, session_id, source_agent.id).await;
+    let target_member = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: target_agent.id,
+            member_name: Some("TargetAgent".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create target member");
+    let message_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO chat_messages (
+               id, session_id, sender_type, sender_id, sender_session_agent_id,
+               content, mentions, meta
+           ) VALUES (?1, ?2, 'agent', ?3, ?4, '@TargetAgent work', '["TargetAgent"]', '{}')"#,
+    )
+    .bind(message_id)
+    .bind(session_id)
+    .bind(source_agent.id)
+    .bind(source_member.id)
+    .execute(&db.pool)
+    .await
+    .expect("insert inter-agent message");
+    let message = ChatMessage::find_by_id(&db.pool, message_id)
+        .await
+        .expect("load inter-agent message")
+        .expect("inter-agent message exists");
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        runner.run_agent_for_mention(session_id, "TargetAgent", 0, &message),
+    )
+    .await
+    .expect("source delivery must not wait for target startup")
+    .expect("queue target delivery");
+
+    let queue_id = match outcome {
+        super::DispatchOutcome::Queued { queue_id } => queue_id,
+        other => panic!("expected durable queued handoff, got {other:?}"),
+    };
+    let queued = QueuedMessageService::new()
+        .find_by_id(&db.pool, queue_id)
+        .await
+        .expect("load durable handoff")
+        .expect("durable handoff exists");
+    assert_eq!(queued.chat_message_id, message_id);
+    assert_eq!(queued.session_agent_id, target_member.id);
+}
+
+#[tokio::test]
 async fn queued_dispatch_keeps_claimed_session_agent_when_backing_names_collide() {
     let db = setup_chat_runner_db().await;
     let runner = ChatRunner::new(db.clone());
@@ -1898,6 +1967,42 @@ fn protocol_send_routing_blocks_agent_targets_in_workflow_mode() {
 }
 
 #[tokio::test]
+async fn executor_startup_stop_interrupts_a_pending_spawn() {
+    let stop = CancellationToken::new();
+    let stop_request = stop.clone();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        stop_request.cancel();
+    });
+
+    let result = ChatRunner::wait_for_executor_startup(
+        std::future::pending::<Result<executors::executors::SpawnedChild, ExecutorError>>(),
+        &stop,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+
+    assert!(matches!(result, Err(ChatRunnerError::StartupStopped)));
+}
+
+#[tokio::test]
+async fn executor_startup_has_a_bounded_deadline() {
+    let stop = CancellationToken::new();
+    let result = ChatRunner::wait_for_executor_startup(
+        std::future::pending::<Result<executors::executors::SpawnedChild, ExecutorError>>(),
+        &stop,
+        std::time::Duration::from_millis(10),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(ChatRunnerError::Executor(ExecutorError::Io(error)))
+            if error.kind() == std::io::ErrorKind::TimedOut
+    ));
+}
+
+#[tokio::test]
 async fn exit_signal_waits_for_cleanup_before_finished() {
     let child = sleep_command(1).group_spawn().expect("spawn child");
     let stop = CancellationToken::new();
@@ -2404,6 +2509,87 @@ async fn recover_orphaned_session_agents_finds_dead_member_with_unbound_processi
     })
     .await
     .expect("recovered queue is automatically dispatched and finalized");
+}
+
+#[tokio::test]
+async fn recover_orphaned_session_agents_dispatches_queued_idle_member_without_resetting_session() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    let session_agent_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    let queue_id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_session_agents (
+            id, session_id, agent_id, state, pty_session_key,
+            agent_session_id, agent_message_id, allowed_skill_ids
+        )
+        VALUES (?1, ?2, ?3, 'idle', 'preserved-pty', 'preserved-session', 'preserved-message', '[]')
+        "#,
+    )
+    .bind(session_agent_id)
+    .bind(session_id)
+    .bind(agent_id)
+    .execute(&db.pool)
+    .await
+    .expect("insert idle session agent");
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_message_queue (
+            id, session_id, session_agent_id, agent_id, chat_message_id, status
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, 'queued')
+        "#,
+    )
+    .bind(queue_id)
+    .bind(session_id)
+    .bind(session_agent_id)
+    .bind(agent_id)
+    .bind(Uuid::new_v4())
+    .execute(&db.pool)
+    .await
+    .expect("insert queued row");
+
+    let recovered = runner
+        .recover_orphaned_session_agents()
+        .await
+        .expect("recover queued idle member");
+    assert_eq!(recovered, 1);
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let queue_status: String =
+                sqlx::query_scalar("SELECT status FROM chat_message_queue WHERE id = ?1")
+                    .bind(queue_id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .expect("lookup recovered queue row");
+            if queue_status == "skipped" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queued idle member is automatically dispatched");
+
+    let session_agent = ChatSessionAgent::find_by_id(&db.pool, session_agent_id)
+        .await
+        .expect("lookup recovered member")
+        .expect("recovered member exists");
+    assert_eq!(session_agent.state, ChatSessionAgentState::Idle);
+    assert_eq!(session_agent.pty_session_key.as_deref(), Some("preserved-pty"));
+    assert_eq!(
+        session_agent.agent_session_id.as_deref(),
+        Some("preserved-session")
+    );
+    assert_eq!(
+        session_agent.agent_message_id.as_deref(),
+        Some("preserved-message")
+    );
 }
 
 #[test]

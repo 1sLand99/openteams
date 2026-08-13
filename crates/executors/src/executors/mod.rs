@@ -1,7 +1,9 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
 };
 
 use async_trait::async_trait;
@@ -14,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Type;
 use strum_macros::{Display, EnumDiscriminants, EnumString, VariantNames};
 use thiserror::Error;
+use tokio::io::{AsyncRead, ReadBuf};
 use ts_rs::TS;
 use workspace_utils::msg_store::MsgStore;
 
@@ -548,6 +551,42 @@ pub type ExecutorExitSignal = tokio::sync::oneshot::Receiver<ExecutorExitResult>
 /// When cancelled, the executor should attempt to cancel gracefully before being killed.
 pub type CancellationToken = tokio_util::sync::CancellationToken;
 
+/// Executor-owned stdout stream. Most executors expose the child process pipe directly; protocol
+/// adapters may provide a synthetic stream so callbacks can be drained before process startup is
+/// reported as complete.
+pub struct ExecutorOutput {
+    inner: Pin<Box<dyn AsyncRead + Send + 'static>>,
+}
+
+impl ExecutorOutput {
+    pub(crate) fn new<R>(reader: R) -> Self
+    where
+        R: AsyncRead + Send + 'static,
+    {
+        Self {
+            inner: Box::pin(reader),
+        }
+    }
+}
+
+impl std::fmt::Debug for ExecutorOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExecutorOutput")
+            .finish_non_exhaustive()
+    }
+}
+
+impl AsyncRead for ExecutorOutput {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.inner.as_mut().poll_read(context, buffer)
+    }
+}
+
 /// Files whose lifetime must match the executor process rather than command startup.
 #[derive(Debug)]
 pub struct ExecutorRunCleanup {
@@ -571,6 +610,8 @@ impl Drop for ExecutorRunCleanup {
 #[derive(Debug)]
 pub struct SpawnedChild {
     pub child: AsyncGroupChild,
+    /// Optional executor-owned stdout. Falls back to the child process pipe when absent.
+    pub stdout: Option<ExecutorOutput>,
     /// Executor → Container: signals when executor wants to exit
     pub exit_signal: Option<ExecutorExitSignal>,
     /// Container → Executor: signals when container wants to cancel the execution
@@ -583,10 +624,19 @@ impl From<AsyncGroupChild> for SpawnedChild {
     fn from(child: AsyncGroupChild) -> Self {
         Self {
             child,
+            stdout: None,
             exit_signal: None,
             cancel: None,
             cleanup: None,
         }
+    }
+}
+
+impl SpawnedChild {
+    pub fn take_stdout(&mut self) -> Option<ExecutorOutput> {
+        self.stdout
+            .take()
+            .or_else(|| self.child.inner().stdout.take().map(ExecutorOutput::new))
     }
 }
 

@@ -404,7 +404,7 @@ impl StandardCodingAgentExecutor for Codex {
 }
 
 impl Codex {
-    const BASE_COMMAND: &'static str = "npx -y @openai/codex@0.144.1";
+    const BASE_COMMAND: &'static str = "npx -y @openai/codex@0.147.0";
 
     pub fn base_command() -> &'static str {
         Self::BASE_COMMAND
@@ -714,6 +714,7 @@ impl Codex {
 
         Ok(SpawnedChild {
             child,
+            stdout: None,
             exit_signal: Some(exit_signal_rx),
             cancel: Some(cancel),
             cleanup: None,
@@ -753,8 +754,13 @@ fn codex_config_has_provider(path: &Path, env: &ExecutionEnv) -> bool {
 mod tests {
     use tempfile::TempDir;
 
-    use super::{CODEX_MODEL_FALLBACKS, codex_config_has_provider};
+    use super::{CODEX_MODEL_FALLBACKS, Codex, codex_config_has_provider};
     use crate::env::ExecutionEnv;
+
+    #[test]
+    fn base_command_uses_codex_0_147_0() {
+        assert_eq!(Codex::base_command(), "npx -y @openai/codex@0.147.0");
+    }
 
     #[test]
     fn codex_model_fallbacks_include_latest_gpt_5_6_models() {

@@ -234,6 +234,37 @@ impl ChatSessionAgent {
         .await
     }
 
+    /// Update the member projection only while `run_id` is still the active queue row. This CAS
+    /// guard prevents a delayed completion from an older run overwriting a newer run's state.
+    pub async fn update_state_for_run_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        id: Uuid,
+        run_id: Uuid,
+        state: ChatSessionAgentState,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, ChatSessionAgent>(&format!(
+            r#"
+            UPDATE chat_session_agents
+            SET state = ?3,
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1
+              AND EXISTS (
+                  SELECT 1
+                  FROM chat_message_queue queue
+                  WHERE queue.session_agent_id = chat_session_agents.id
+                    AND queue.run_id = ?2
+                    AND queue.status IN ('processing', 'running')
+              )
+            {CHAT_SESSION_AGENT_RETURNING}
+            "#
+        ))
+        .bind(id)
+        .bind(run_id)
+        .bind(state)
+        .fetch_optional(&mut **transaction)
+        .await
+    }
+
     pub async fn update_workspace_path(
         pool: &SqlitePool,
         id: Uuid,

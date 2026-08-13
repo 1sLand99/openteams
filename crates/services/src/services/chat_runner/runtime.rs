@@ -495,18 +495,35 @@ impl ChatRunner {
         stop
     }
 
+    pub(super) async fn wait_for_executor_startup<F>(
+        startup: F,
+        stop: &CancellationToken,
+        timeout: std::time::Duration,
+    ) -> Result<SpawnedChild, ChatRunnerError>
+    where
+        F: Future<Output = Result<SpawnedChild, ExecutorError>>,
+    {
+        tokio::select! {
+            result = startup => result.map_err(ChatRunnerError::Executor),
+            _ = stop.cancelled() => Err(ChatRunnerError::StartupStopped),
+            _ = tokio::time::sleep(timeout) => Err(ChatRunnerError::Executor(
+                ExecutorError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("executor startup timed out after {} seconds", timeout.as_secs()),
+                )),
+            )),
+        }
+    }
+
     pub(super) fn spawn_log_forwarders(
         &self,
-        child: &mut command_group::AsyncGroupChild,
+        spawned: &mut SpawnedChild,
         msg_store: Arc<MsgStore>,
         raw_log_spool: Arc<Mutex<RunLogSpool>>,
     ) -> RunLogForwarders {
-        let stdout = child
-            .inner()
-            .stdout
-            .take()
-            .expect("chat runner missing stdout");
-        let stderr = child
+        let stdout = spawned.take_stdout().expect("chat runner missing stdout");
+        let stderr = spawned
+            .child
             .inner()
             .stderr
             .take()
@@ -2442,35 +2459,76 @@ impl ChatRunner {
                             }
                         };
 
-                        let update_result = ChatSessionAgent::update_state(
-                            &db.pool,
-                            session_agent_id,
-                            final_state.clone(),
-                        )
-                        .await;
-                        match update_result {
-                            Ok(_) => {
-                                tracing::debug!(
-                                    session_id = %session_id,
-                                    session_agent_id = %session_agent_id,
-                                    agent_id = %agent_id,
-                                    run_id = %run_id,
-                                    final_state = ?final_state,
-                                    "[chat_runner] Updated final agent state"
-                                );
-                            }
-                            Err(err) => {
-                                tracing::debug!(
-                                    session_id = %session_id,
-                                    session_agent_id = %session_agent_id,
-                                    agent_id = %agent_id,
-                                    run_id = %run_id,
-                                    final_state = ?final_state,
-                                    error = %err,
-                                    "[chat_runner] Failed to update final agent state"
-                                );
-                            }
+                        let (finalization_applied, next_queued_entry) =
+                            if final_state == ChatSessionAgentState::Idle {
+                                match QueuedMessageService::new()
+                                    .finalize_completed_run(
+                                        &db.pool,
+                                        run_id,
+                                        session_agent_id,
+                                        protocol_retry_request.is_none(),
+                                    )
+                                    .await
+                                {
+                                    Ok(finalization) => {
+                                        (finalization.applied, finalization.next)
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            session_id = %session_id,
+                                            session_agent_id = %session_agent_id,
+                                            run_id = %run_id,
+                                            error = %err,
+                                            "failed to atomically finalize completed agent run"
+                                        );
+                                        (false, None)
+                                    }
+                                }
+                            } else {
+                                match QueuedMessageService::new()
+                                    .finalize_failed_run(
+                                        &db.pool,
+                                        run_id,
+                                        session_agent_id,
+                                        Some(format!(
+                                            "agent run ended in state {final_state:?}"
+                                        )),
+                                    )
+                                    .await
+                                {
+                                    Ok(applied) => (applied, None),
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            session_id = %session_id,
+                                            session_agent_id = %session_agent_id,
+                                            run_id = %run_id,
+                                            error = %err,
+                                            "failed to atomically finalize failed agent run"
+                                        );
+                                        (false, None)
+                                    }
+                                }
+                            };
+                        if !finalization_applied {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                session_agent_id = %session_agent_id,
+                                run_id = %run_id,
+                                "ignored stale or incomplete agent finalization"
+                            );
+                            break;
                         }
+                        runner
+                            .emit_member_queue_update(session_id, session_agent_id)
+                            .await;
+                        tracing::debug!(
+                            session_id = %session_id,
+                            session_agent_id = %session_agent_id,
+                            agent_id = %agent_id,
+                            run_id = %run_id,
+                            final_state = ?final_state,
+                            "[chat_runner] Atomically finalized agent and queue state"
+                        );
 
                         let _ = sender.send(ChatStreamEvent::AgentState {
                             session_agent_id,
@@ -2611,7 +2669,6 @@ impl ChatRunner {
                             {
                                 // Protocol retries are part of the same logical turn; keep them
                                 // ahead of later queued user messages.
-                                runner.mark_run_queue_completed(run_id).await;
                                 tracing::info!(
                                     session_id = %session_id,
                                     session_agent_id = %session_agent_id,
@@ -2669,27 +2726,12 @@ impl ChatRunner {
                                 break;
                             }
 
-                            // Success / normal stop: finalize this run's queue row and claim the
-                            // next queued user message before dispatching it.
-                            if let Some(entry) = runner
-                                .complete_run_and_claim_next(run_id, session_id, session_agent_id)
-                                .await
-                            {
+                            // The atomic finalizer already claimed the next durable message.
+                            if let Some(entry) = next_queued_entry {
                                 runner
                                     .dispatch_queued_entry(session_id, session_agent_id, entry)
                                     .await;
                             }
-                        } else {
-                            // Agent failed/died: finalize this run's queue row. When queued
-                            // messages are waiting, the entry is marked `failed` so the member
-                            // queue blocks until the user continues. When nothing is queued, the
-                            // entry is auto-skipped so the next message runs directly.
-                            runner
-                                .mark_run_queue_failed(
-                                    run_id,
-                                    Some(format!("agent run ended in state {final_state:?}")),
-                                )
-                                .await;
                         }
 
                         break;

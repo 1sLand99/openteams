@@ -1,16 +1,21 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
+use futures::StreamExt;
 use tokio::{
     io::{AsyncWrite, AsyncWriteExt},
     sync::{Mutex, mpsc},
     task::JoinHandle,
 };
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::io::StreamReader;
 
 use super::{AcpEvent, events::AcpRuntimeEvent};
+use crate::executors::ExecutorOutput;
 
 const DEFAULT_OUTPUT_CAPACITY: usize = 256;
 
-/// Bounded, ordered bridge from ACP callbacks to the executor stdout contract.
+/// Ordered bridge from ACP callbacks to the executor stdout contract.
 #[derive(Clone)]
 pub struct AcpOutput {
     state: Arc<Mutex<OutputState>>,
@@ -50,6 +55,31 @@ impl AcpOutput {
                 })),
             },
             task,
+        )
+    }
+
+    /// Create a bounded synthetic stdout stream. Replay notifications are filtered before they
+    /// reach this bridge, so the small handshake can complete before the caller attaches its log
+    /// forwarder while current-turn output still receives normal backpressure.
+    pub fn channel() -> (Self, ExecutorOutput) {
+        let (tx, rx) = mpsc::channel::<AcpRuntimeEvent>(DEFAULT_OUTPUT_CAPACITY);
+        let stream = ReceiverStream::new(rx).map(|event| {
+            let mut line = serde_json::to_vec(&event)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            line.push(b'\n');
+            Ok::<_, std::io::Error>(Bytes::from(line))
+        });
+        let reader = StreamReader::new(stream);
+        (
+            Self {
+                state: Arc::new(Mutex::new(OutputState {
+                    tx,
+                    connection_id: uuid::Uuid::new_v4().to_string(),
+                    session_id: None,
+                    next_sequence: 0,
+                })),
+            },
+            ExecutorOutput::new(reader),
         )
     }
 

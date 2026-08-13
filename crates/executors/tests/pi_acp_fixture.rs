@@ -153,7 +153,7 @@ fn make_pi_and_env(root: &Path, executable: bool) -> (Pi, ExecutionEnv, PathBuf)
 async fn finish_turn(
     mut spawned: executors::executors::SpawnedChild,
 ) -> (Vec<AcpEvent>, ExecutorExitResult) {
-    let stdout = spawned.child.inner().stdout.take().expect("ACP stdout");
+    let stdout = spawned.take_stdout().expect("ACP stdout");
     let mut lines = BufReader::new(stdout).lines();
     let mut events = Vec::new();
     loop {

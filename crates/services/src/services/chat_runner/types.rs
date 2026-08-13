@@ -276,6 +276,8 @@ pub enum ChatStreamDeltaType {
 
 #[derive(Debug, Error)]
 pub enum ChatRunnerError {
+    #[error("agent startup stopped")]
+    StartupStopped,
     #[error("chat agent not found: {0}")]
     AgentNotFound(String),
     #[error("session not found: {0}")]

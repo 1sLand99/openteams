@@ -18,7 +18,7 @@ use agent_client_protocol::{
             AgentCapabilities, AuthMethod, AuthMethodAgent, AuthenticateRequest,
             AuthenticateResponse, CancelNotification, ContentBlock, ContentChunk,
             InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
-            McpServer, NewSessionRequest, NewSessionResponse, PermissionOption,
+            McpServer, MessageId, NewSessionRequest, NewSessionResponse, PermissionOption,
             PermissionOptionKind, PromptCapabilities, PromptRequest, PromptResponse,
             RequestPermissionOutcome, RequestPermissionRequest, ResumeSessionRequest,
             ResumeSessionResponse, SessionCapabilities, SessionConfigOption,
@@ -98,6 +98,26 @@ fn session_key(session_id: &agent_client_protocol::schema::v1::SessionId) -> Str
     session_id.0.to_string()
 }
 
+fn send_replayed_session_history(
+    connection: &ConnectionTo<Client>,
+    session_id: &agent_client_protocol::schema::v1::SessionId,
+    replay_count: usize,
+) -> agent_client_protocol::Result<()> {
+    for index in 0..replay_count {
+        connection.send_notification(SessionNotification::new(
+            session_id.clone(),
+            SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::Text(TextContent::new(format!(
+                    "replayed-history-{index:04}-{}",
+                    "x".repeat(128)
+                ))))
+                .message_id(MessageId::new(format!("replayed-message-{index:04}"))),
+            ),
+        ))?;
+    }
+    Ok(())
+}
+
 /// Serve the fake Agent over stdio. The prompt can select deterministic
 /// scenarios with `[qa:write]`, `[qa:approval]`, `[qa:sleep]` and `[qa:error]`.
 pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
@@ -107,6 +127,10 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
     let advertise_config = std::env::var_os("ACP_QA_CONFIG_OPTIONS").is_some();
     let advertise_mode = std::env::var_os("ACP_QA_MODE_OPTIONS").is_some();
     let refuse_mode_set = std::env::var_os("ACP_QA_REFUSE_MODE_SET").is_some();
+    let replay_count = std::env::var("ACP_QA_REPLAY_NOTIFICATION_COUNT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
     let authenticated = Arc::new(AtomicBool::new(false));
     let cancel_requested = Arc::new(AtomicBool::new(false));
     let cancel_notify = Arc::new(Notify::new());
@@ -120,6 +144,8 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
     let sessions_for_new = sessions.clone();
     let sessions_for_resume = sessions.clone();
     let sessions_for_load = sessions.clone();
+    let resume_replay_count = replay_count;
+    let load_replay_count = replay_count;
     let sessions_for_config = sessions.clone();
     let sessions_for_prompt = sessions.clone();
     let cancel_requested_for_notification = cancel_requested.clone();
@@ -207,7 +233,7 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |request: ResumeSessionRequest, responder, _connection| {
+            async move |request: ResumeSessionRequest, responder, connection| {
                 if !authenticated_for_resume.load(Ordering::SeqCst) {
                     return responder
                         .respond_with_error(agent_client_protocol::Error::auth_required());
@@ -224,6 +250,11 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     .lock()
                     .await
                     .insert(session_key(&request.session_id), session);
+                send_replayed_session_history(
+                    &connection,
+                    &request.session_id,
+                    resume_replay_count,
+                )?;
                 let response = ResumeSessionResponse::new();
                 responder.respond(if config_options.is_empty() {
                     response
@@ -234,7 +265,7 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_request(
-            async move |request: LoadSessionRequest, responder, _connection| {
+            async move |request: LoadSessionRequest, responder, connection| {
                 if !authenticated_for_load.load(Ordering::SeqCst) {
                     return responder
                         .respond_with_error(agent_client_protocol::Error::auth_required());
@@ -251,6 +282,11 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     .lock()
                     .await
                     .insert(session_key(&request.session_id), session);
+                send_replayed_session_history(
+                    &connection,
+                    &request.session_id,
+                    load_replay_count,
+                )?;
                 let response = LoadSessionResponse::new();
                 responder.respond(if config_options.is_empty() {
                     response

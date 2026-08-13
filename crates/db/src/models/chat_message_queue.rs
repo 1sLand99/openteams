@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool, Type};
+use sqlx::{FromRow, Sqlite, SqlitePool, Transaction, Type};
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -114,6 +114,19 @@ impl ChatMessageQueue {
              WHERE status = 'processing' AND run_id IS NULL
              ORDER BY created_at ASC, id ASC"
         ))
+        .fetch_all(pool)
+        .await
+    }
+
+    /// Members with durable work waiting to be claimed. Used at backend startup so a crash after
+    /// enqueue but before task scheduling cannot strand an otherwise idle member.
+    pub async fn list_members_with_queued(pool: &SqlitePool) -> Result<Vec<Uuid>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT DISTINCT session_agent_id
+             FROM chat_message_queue
+             WHERE status = 'queued'
+             ORDER BY session_agent_id",
+        )
         .fetch_all(pool)
         .await
     }
@@ -367,6 +380,77 @@ impl ChatMessageQueue {
 
         tx.commit().await?;
         Ok((completed, claimed))
+    }
+
+    pub async fn mark_completed_by_run_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        run_id: Uuid,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(&format!(
+            "UPDATE chat_message_queue
+             SET status = 'completed',
+                 updated_at = datetime('now', 'subsec')
+             WHERE run_id = ?1 AND status IN ('processing', 'running')
+             RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
+        ))
+        .bind(run_id)
+        .fetch_optional(&mut **transaction)
+        .await
+    }
+
+    pub async fn claim_next_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        session_agent_id: Uuid,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(&format!(
+            "UPDATE chat_message_queue
+             SET status = 'processing',
+                 processing_started_at = datetime('now', 'subsec'),
+                 updated_at = datetime('now', 'subsec')
+             WHERE id = (
+                 SELECT id FROM chat_message_queue
+                 WHERE session_agent_id = ?1 AND status = 'queued'
+                 ORDER BY created_at ASC, id ASC
+                 LIMIT 1
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM chat_message_queue
+                 WHERE session_agent_id = ?1 AND status IN ('processing', 'running', 'failed')
+             )
+             RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
+        ))
+        .bind(session_agent_id)
+        .fetch_optional(&mut **transaction)
+        .await
+    }
+
+    /// Mark a failed run `failed` when work is waiting behind it, otherwise `skipped` so the
+    /// member is not left permanently paused by a lone failure.
+    pub async fn mark_failed_or_skipped_by_run_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        run_id: Uuid,
+        session_agent_id: Uuid,
+        failure_reason: Option<String>,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(&format!(
+            "UPDATE chat_message_queue
+             SET status = CASE
+                     WHEN EXISTS (
+                         SELECT 1 FROM chat_message_queue queued
+                         WHERE queued.session_agent_id = ?2 AND queued.status = 'queued'
+                     ) THEN 'failed'
+                     ELSE 'skipped'
+                 END,
+                 failure_reason = ?3,
+                 updated_at = datetime('now', 'subsec')
+             WHERE run_id = ?1 AND status IN ('processing', 'running')
+             RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
+        ))
+        .bind(run_id)
+        .bind(session_agent_id)
+        .bind(failure_reason)
+        .fetch_optional(&mut **transaction)
+        .await
     }
 
     /// Mark an in-flight entry `failed`. Remaining `queued` entries are left untouched so the
