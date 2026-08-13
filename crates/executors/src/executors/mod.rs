@@ -27,12 +27,13 @@ use crate::executors::qa_mock::QaMockExecutor;
 use crate::{
     actions::{ExecutorAction, review::RepoReviewContext},
     approvals::ExecutorApprovalService,
-    command::CommandBuildError,
+    command::{CommandBuildError, CommandParts},
     env::ExecutionEnv,
     executors::{
         amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::CursorAgent,
-        droid::Droid, gemini::Gemini, hermes::Hermes, kimi::KimiCode, opencode::Opencode,
-        openteams_cli::OpenTeamsCli, pi::Pi, qoder::QoderCli, qwen::QwenCode,
+        deepseek_harness::DeepseekHarness, droid::Droid, gemini::Gemini, hermes::Hermes,
+        kimi::KimiCode, opencode::Opencode, openteams_cli::OpenTeamsCli, pi::Pi, qoder::QoderCli,
+        qwen::QwenCode,
     },
     logs::utils::patch,
     mcp_config::McpConfig,
@@ -48,6 +49,7 @@ pub mod claude;
 pub mod codex;
 pub mod copilot;
 pub mod cursor;
+pub mod deepseek_harness;
 pub mod droid;
 pub mod gemini;
 pub mod hermes;
@@ -170,6 +172,7 @@ pub enum CodingAgent {
     QoderCli,
     Pi,
     Hermes,
+    DeepseekHarness,
     #[cfg(feature = "qa-mode")]
     QaMock(QaMockExecutor),
     #[cfg(feature = "qa-mode")]
@@ -282,6 +285,7 @@ impl CodingAgent {
                 BaseAgentCapability::SetupHelper,
             ],
             Self::Hermes(_) => vec![BaseAgentCapability::ContextUsage],
+            Self::DeepseekHarness(_) => vec![],
             #[cfg(feature = "qa-mode")]
             Self::QaMock(_) | Self::AcpQa(_) => vec![],
         }
@@ -353,6 +357,12 @@ impl AcpProbeInterpretation {
 pub trait StandardCodingAgentExecutor {
     fn use_approvals(&mut self, _approvals: Arc<dyn ExecutorApprovalService>) {}
 
+    fn overlay_acp_execution_options(&mut self, _higher_priority: &acp::AcpExecutionOptions) {}
+
+    fn acp_full_access_enabled(&self) -> bool {
+        false
+    }
+
     async fn available_slash_commands(
         &self,
         _workdir: &Path,
@@ -376,6 +386,13 @@ pub trait StandardCodingAgentExecutor {
         _env: &ExecutionEnv,
         _auth_method_id: Option<&str>,
     ) -> Result<Option<acp::AcpCapabilityProbe>, ExecutorError> {
+        Ok(None)
+    }
+
+    /// Exact executor-owned launch command shown by runtime diagnostics.
+    /// Adapters with checkout-relative or otherwise structured commands can
+    /// expose them without adding concrete-runner branches to shared services.
+    fn runtime_command_for_diagnostics(&self) -> Result<Option<CommandParts>, ExecutorError> {
         Ok(None)
     }
 

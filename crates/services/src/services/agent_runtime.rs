@@ -796,16 +796,29 @@ async fn resolve_runtime_command_for_diagnostics(
 async fn resolve_runtime_command(
     executor: &CodingAgent,
 ) -> Result<Option<ResolvedRuntimeCommand>, String> {
-    let Some(base) = runtime_command_base(executor) else {
-        return Ok(None);
+    let parts = match executor
+        .runtime_command_for_diagnostics()
+        .map_err(|error| {
+            command_failure_detail(
+                "<configured command could not be built>",
+                "build runtime command",
+                error,
+            )
+        })? {
+        Some(parts) => parts,
+        None => {
+            let Some(base) = runtime_command_base(executor) else {
+                return Ok(None);
+            };
+            CommandBuilder::new(base).build_initial().map_err(|error| {
+                command_failure_detail(
+                    "<configured command could not be parsed>",
+                    "parse runtime command",
+                    error,
+                )
+            })?
+        }
     };
-    let parts = CommandBuilder::new(base).build_initial().map_err(|error| {
-        command_failure_detail(
-            "<configured command could not be parsed>",
-            "parse runtime command",
-            error,
-        )
-    })?;
     let unresolved_command = parts.redacted_display();
     let (executable, args) = parts.into_resolved().await.map_err(|error| {
         command_failure_detail(&unresolved_command, "resolve runtime executable", error)
@@ -1036,6 +1049,7 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
         CodingAgent::KimiCode(_) => "kimi".to_string(),
         CodingAgent::QoderCli(_) => "qodercli".to_string(),
         CodingAgent::Hermes(_) => "hermes".to_string(),
+        CodingAgent::DeepseekHarness(_) => return None,
         CodingAgent::Pi(_) => Pi::version_command(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => return None,
@@ -1060,6 +1074,7 @@ fn cmd_overrides_for_executor(executor: &CodingAgent) -> Option<&CmdOverrides> {
         CodingAgent::QoderCli(config) => Some(&config.cmd),
         CodingAgent::Pi(config) => Some(&config.cmd),
         CodingAgent::Hermes(config) => Some(&config.cmd),
+        CodingAgent::DeepseekHarness(config) => Some(&config.cmd),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => None,
         #[cfg(feature = "qa-mode")]
@@ -1722,7 +1737,8 @@ fn reasoning_capability_for_runner(
         | BaseCodingAgent::CursorAgent
         | BaseCodingAgent::Copilot
         | BaseCodingAgent::Pi
-        | BaseCodingAgent::Hermes => None,
+        | BaseCodingAgent::Hermes
+        | BaseCodingAgent::DeepseekHarness => None,
         #[cfg(feature = "qa-mode")]
         BaseCodingAgent::QaMock | BaseCodingAgent::AcpQa => None,
     }
@@ -2103,6 +2119,7 @@ mod tests {
             BaseCodingAgent::KimiCode,
             BaseCodingAgent::QoderCli,
             BaseCodingAgent::Hermes,
+            BaseCodingAgent::DeepseekHarness,
         ] {
             assert_eq!(
                 runtime_dependency_requirement(runner),
@@ -3324,6 +3341,33 @@ mod tests {
                 executors::executors::hermes::Hermes::default()
             )),
             Some("hermes".to_string())
+        );
+    }
+
+    #[test]
+    fn deepseek_harness_is_registered_as_source_checkout_acp_runner() {
+        assert!(
+            ExecutorConfigs::from_defaults()
+                .executors
+                .contains_key(&BaseCodingAgent::DeepseekHarness),
+            "DeepSeek Harness must have a default profile"
+        );
+        assert_eq!(
+            reasoning_capability_for_runner(BaseCodingAgent::DeepseekHarness),
+            None,
+            "DeepSeek provider and model are configured by its Cordis composition"
+        );
+        assert_eq!(
+            runtime_dependency_requirement(BaseCodingAgent::DeepseekHarness),
+            RuntimeDependencyRequirement::None,
+            "the built checkout launches directly through Node without npm or npx"
+        );
+        assert_eq!(
+            version_command_base(&CodingAgent::DeepseekHarness(
+                executors::executors::deepseek_harness::DeepseekHarness::default()
+            )),
+            None,
+            "the ACP stdio server must not receive a generic --version argument"
         );
     }
 

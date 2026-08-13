@@ -6,8 +6,10 @@ fn agent_runtime_does_not_special_case_adapter_probe_semantics() {
         .map_or(source, |(production, _)| production);
     for forbidden in [
         "runner == BaseCodingAgent::Hermes",
+        "runner == BaseCodingAgent::DeepseekHarness",
         "RunnerDiscoveryOutcome::Hermes",
         "executors::executors::hermes",
+        "executors::executors::deepseek_harness",
         "provider_needs_setup",
     ] {
         assert!(

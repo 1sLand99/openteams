@@ -211,7 +211,7 @@ check(
 check(
   "ACP member permissions appear immediately without waiting for diagnostics",
   configTabsSource.includes(
-    'props.runnerType === "GEMINI" ||\n    props.runnerType === "QWEN_CODE" ||\n    props.runnerType === "KIMI_CODE" ||\n    props.runnerType === "QODER_CLI" ||\n    props.runnerType === "PI"',
+    "const supportsAcpPermissions = runnerSupportsAcp(props.runnerType);",
   ) &&
     !configTabsSource.includes(
       "const supportsAcpPermissions = props.acpProbeAvailable",
@@ -267,9 +267,20 @@ const teamUtilsSource = readFileSync(
 );
 
 check(
-  "member runtime normalization recognizes PI from the shared runtime list",
-  /"QODER_CLI",[\s\S]*?"PI",[\s\S]*?\];/u.test(teamUtilsSource),
+  "member runtime normalization recognizes DeepSeek Harness and PI",
+  /"DEEPSEEK_HARNESS",[\s\S]*?"QODER_CLI",[\s\S]*?"PI",[\s\S]*?\];/u.test(
+    teamUtilsSource,
+  ),
   teamUtilsSource,
+);
+
+check(
+  "DeepSeek Harness member permissions hide unsupported auth methods and extra directories",
+  configTabsSource.includes('runnerType === "DEEPSEEK_HARNESS"') &&
+    configTabsSource.includes(
+      'runnerType !== "HERMES" && runnerType !== "DEEPSEEK_HARNESS"',
+    ),
+  configTabsSource,
 );
 
 check(

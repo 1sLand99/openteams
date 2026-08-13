@@ -128,6 +128,29 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
       authCommands: ["copilot"],
       authFollowUpCommand: "/login",
     },
+    DEEPSEEK_HARNESS: {
+      requiresNode: true,
+      requiresNpm: false,
+      requiresNpx: false,
+      documentationUrl: "https://github.com/deepseek-ai/deepseek-harness",
+      windowsSupport: "supported",
+      installCommands: {
+        posix: [
+          'git clone https://github.com/deepseek-ai/deepseek-harness.git "$HOME/deepseek-harness"',
+          'git -C "$HOME/deepseek-harness" checkout 47f943859bef60e4160492346772ded9b24f765a',
+          'npx --yes pnpm@11.7.0 --dir "$HOME/deepseek-harness" install --frozen-lockfile',
+          'npx --yes pnpm@11.7.0 --dir "$HOME/deepseek-harness" run build',
+        ],
+        windows: [
+          'git clone https://github.com/deepseek-ai/deepseek-harness.git "$HOME\\deepseek-harness"',
+          'git -C "$HOME\\deepseek-harness" checkout 47f943859bef60e4160492346772ded9b24f765a',
+          'npx --yes pnpm@11.7.0 --dir "$HOME\\deepseek-harness" install --frozen-lockfile',
+          'npx --yes pnpm@11.7.0 --dir "$HOME\\deepseek-harness" run build',
+        ],
+      },
+      authCommands: null,
+      authEnvVars: ["DEEPSEEK_API_KEY"],
+    },
     HERMES: {
       requiresNode: false,
       requiresNpm: false,
@@ -335,10 +358,13 @@ export function resolveInstallGuide(
     }
   }
 
-  if (runnerNeedsAuth(runner) && entry.authCommands) {
+  if (
+    runnerNeedsAuth(runner) &&
+    (entry.authCommands || (entry.authEnvVars?.length ?? 0) > 0)
+  ) {
     steps.push({
       kind: "auth",
-      commands: entry.authCommands,
+      commands: entry.authCommands ?? [],
       authFollowUpCommand: entry.authFollowUpCommand,
     });
   }

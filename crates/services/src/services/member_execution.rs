@@ -17,7 +17,7 @@ use executors::{
     env::ExecutionEnv,
     executors::{
         BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor,
-        acp::{AcpAccessMode, AcpExecutionOptions, mcp::AcpMcpPolicy},
+        acp::{AcpExecutionOptions, mcp::AcpMcpPolicy},
     },
     model_sync::with_member_execution_overrides,
     profile::{ExecutorConfigs, ExecutorProfileId, canonical_variant_key},
@@ -176,33 +176,7 @@ pub fn build_effective_member_executor(
         resolved.model_variant.as_deref(),
     );
     if let Some(member_acp) = &resolved.acp {
-        match &mut executor {
-            CodingAgent::Gemini(config) => {
-                let inherited = config.acp.clone().unwrap_or_default();
-                config.acp = Some(inherited.overlay(member_acp));
-            }
-            CodingAgent::QwenCode(config) => {
-                let inherited = config.acp.clone().unwrap_or_default();
-                config.acp = Some(inherited.overlay(member_acp));
-            }
-            CodingAgent::KimiCode(config) => {
-                let inherited = config.acp.clone().unwrap_or_default();
-                config.acp = Some(inherited.overlay(member_acp));
-            }
-            CodingAgent::QoderCli(config) => {
-                let inherited = config.acp.clone().unwrap_or_default();
-                config.acp = Some(inherited.overlay(member_acp));
-            }
-            CodingAgent::Pi(config) => {
-                let inherited = config.acp.clone().unwrap_or_default();
-                config.acp = Some(inherited.overlay(member_acp));
-            }
-            CodingAgent::Hermes(config) => {
-                let inherited = config.acp.clone().unwrap_or_default();
-                config.acp = Some(inherited.overlay(member_acp));
-            }
-            _ => {}
-        }
+        executor.overlay_acp_execution_options(member_acp);
     }
     let mcp_policy = resolve_acp_mcp_policy(&agent.tools_enabled.0);
     executor.set_acp_mcp_policy(mcp_policy);
@@ -321,57 +295,7 @@ async fn validate_pi_skill_path(path: &Path, roots: &[PathBuf]) -> Result<PathBu
 }
 
 pub fn executor_acp_full_access_enabled(executor: &CodingAgent) -> bool {
-    match executor {
-        CodingAgent::Gemini(config) => {
-            config
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.access_mode)
-                .unwrap_or_default()
-                == AcpAccessMode::FullAccess
-        }
-        CodingAgent::QwenCode(config) => {
-            config
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.access_mode)
-                .unwrap_or_default()
-                == AcpAccessMode::FullAccess
-        }
-        CodingAgent::KimiCode(config) => {
-            config
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.access_mode)
-                .unwrap_or_default()
-                == AcpAccessMode::FullAccess
-        }
-        CodingAgent::QoderCli(config) => {
-            config
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.access_mode)
-                .unwrap_or_default()
-                == AcpAccessMode::FullAccess
-        }
-        CodingAgent::Pi(config) => {
-            config
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.access_mode)
-                .unwrap_or_default()
-                == AcpAccessMode::FullAccess
-        }
-        CodingAgent::Hermes(config) => {
-            config
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.access_mode)
-                .unwrap_or_default()
-                == AcpAccessMode::FullAccess
-        }
-        _ => false,
-    }
+    executor.acp_full_access_enabled()
 }
 
 fn resolve_acp_mcp_policy(tools_enabled: &serde_json::Value) -> AcpMcpPolicy {
@@ -449,7 +373,7 @@ mod tests {
         chat_agent::ChatAgent,
         chat_session_agent::{ChatSessionAgent, ChatSessionAgentState},
     };
-    use executors::executors::BaseCodingAgent;
+    use executors::executors::{BaseCodingAgent, acp::AcpAccessMode};
     use sqlx::types::Json;
     use uuid::Uuid;
 
@@ -672,9 +596,38 @@ mod tests {
             BaseCodingAgent::KimiCode,
             BaseCodingAgent::QoderCli,
             BaseCodingAgent::Hermes,
+            BaseCodingAgent::DeepseekHarness,
         ] {
             let executor = profiles.get_coding_agent_or_default(&ExecutorProfileId::new(runner));
             assert!(executor_acp_full_access_enabled(&executor), "{runner}");
         }
+    }
+
+    #[test]
+    fn deepseek_member_acp_override_uses_executor_capability() {
+        let mut deepseek_agent = agent();
+        deepseek_agent.runner_type = "DEEPSEEK_HARNESS".to_string();
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        let (_, executor) = build_effective_member_executor(
+            &deepseek_agent,
+            &session_agent(MemberExecutionConfig {
+                runner_type: Some(BaseCodingAgent::DeepseekHarness),
+                acp: Some(AcpExecutionOptions {
+                    access_mode: Some(AcpAccessMode::WorkspaceOnly),
+                    ..AcpExecutionOptions::default()
+                }),
+                ..MemberExecutionConfig::default()
+            }),
+            &mut env,
+        )
+        .expect("DeepSeek Harness executor");
+
+        let CodingAgent::DeepseekHarness(harness) = executor else {
+            panic!("expected DeepSeek Harness");
+        };
+        assert_eq!(
+            harness.acp.and_then(|options| options.access_mode),
+            Some(AcpAccessMode::WorkspaceOnly)
+        );
     }
 }

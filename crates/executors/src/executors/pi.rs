@@ -638,6 +638,19 @@ fn filter_pi_thinking_options(
 
 #[async_trait]
 impl StandardCodingAgentExecutor for Pi {
+    fn overlay_acp_execution_options(&mut self, higher_priority: &AcpExecutionOptions) {
+        let inherited = self.acp.clone().unwrap_or_default();
+        self.acp = Some(inherited.overlay(higher_priority));
+    }
+
+    fn acp_full_access_enabled(&self) -> bool {
+        self.acp
+            .as_ref()
+            .and_then(|options| options.access_mode)
+            .unwrap_or_default()
+            == AcpAccessMode::FullAccess
+    }
+
     fn acp_model_fallback(&self) -> AcpModelFallback {
         AcpModelFallback::Disabled
     }

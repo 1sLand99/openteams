@@ -55,6 +55,7 @@ const guidedRunners: BaseCodingAgent[] = [
   "CODEX",
   "COPILOT",
   "CURSOR_AGENT",
+  "DEEPSEEK_HARNESS",
   "DROID",
   "GEMINI",
   "HERMES",
@@ -194,6 +195,47 @@ check(
   hermesNeedsSetup?.steps.length === 1 &&
     hermesNeedsSetup.steps[0]?.kind === "auth" &&
     hermesNeedsSetup.steps[0]?.commands[0] === "hermes acp --setup",
+);
+
+const deepseekOnLinux = resolveInstallGuide(
+  makeRunner("DEEPSEEK_HARNESS", { node_available: true }),
+  "linux",
+);
+check(
+  "DeepSeek Harness installs from the official source checkout",
+  deepseekOnLinux?.steps[0]?.kind === "install" &&
+    deepseekOnLinux.steps[0]?.commands[0] ===
+      'git clone https://github.com/deepseek-ai/deepseek-harness.git "$HOME/deepseek-harness"',
+  deepseekOnLinux?.steps,
+);
+check(
+  "DeepSeek Harness setup pins the researched revision and pnpm release",
+  deepseekOnLinux?.steps[0]?.commands.includes(
+    'git -C "$HOME/deepseek-harness" checkout 47f943859bef60e4160492346772ded9b24f765a',
+  ) === true &&
+    deepseekOnLinux.steps[0]?.commands.includes(
+      'npx --yes pnpm@11.7.0 --dir "$HOME/deepseek-harness" install --frozen-lockfile',
+    ) === true,
+  deepseekOnLinux?.steps,
+);
+check(
+  "DeepSeek Harness uses env-only authentication without a fake login command",
+  deepseekOnLinux?.steps[1]?.kind === "auth" &&
+    deepseekOnLinux.steps[1]?.commands.length === 0 &&
+    getInstallGuideEntry("DEEPSEEK_HARNESS")?.authEnvVars?.includes(
+      "DEEPSEEK_API_KEY",
+    ) === true,
+  deepseekOnLinux?.steps,
+);
+check(
+  "DeepSeek Harness runtime requires Node but not npm or npx after build",
+  getMissingRuntimeTools(
+    makeRunner("DEEPSEEK_HARNESS", {
+      node_available: true,
+      npm_available: false,
+      npx_available: false,
+    }),
+  ).length === 0,
 );
 
 const kimiOnLinux = resolveInstallGuide(makeRunner("KIMI_CODE"), "linux");

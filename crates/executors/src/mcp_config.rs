@@ -465,7 +465,8 @@ impl CodingAgent {
             CodingAgent::KimiCode(_)
             | CodingAgent::QoderCli(_)
             | CodingAgent::Pi(_)
-            | CodingAgent::Hermes(_) => Passthrough,
+            | CodingAgent::Hermes(_)
+            | CodingAgent::DeepseekHarness(_) => Passthrough,
             #[cfg(feature = "qa-mode")]
             CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => Passthrough,
         };

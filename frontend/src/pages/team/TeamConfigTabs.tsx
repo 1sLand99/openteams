@@ -928,32 +928,45 @@ function PermissionsTab({
 
       <SettingRow
         title="认证方法"
-        description="留空时自动使用 CLI 已有登录状态；指定值必须由 ACP Agent 公布。"
+        description={
+          runnerType === "DEEPSEEK_HARNESS"
+            ? "使用 Agents 页面配置的 DEEPSEEK_API_KEY；上游 ACP 不公布登录方法。"
+            : "留空时自动使用 CLI 已有登录状态；指定值必须由 ACP Agent 公布。"
+        }
       >
         <div className="space-y-2">
           <DropdownSelect
             value={acpAuthMode}
             options={[
               { id: "", label: "继承全局设置" },
-              { id: "auto", label: "自动（使用 CLI 登录态）" },
-              { id: "method_id", label: "指定 auth_method_id" },
+              {
+                id: "auto",
+                label:
+                  runnerType === "DEEPSEEK_HARNESS"
+                    ? "自动（使用环境变量）"
+                    : "自动（使用 CLI 登录态）",
+              },
+              ...(runnerType === "DEEPSEEK_HARNESS"
+                ? []
+                : [{ id: "method_id", label: "指定 auth_method_id" }]),
             ]}
             showSearch={false}
             className={dropdownClassName}
             onChange={setAcpAuthMode}
           />
-          {acpAuthMode === "method_id" && (
-            <input
-              value={acpAuthMethodId}
-              onChange={(event) => setAcpAuthMethodId(event.target.value)}
-              placeholder="auth_method_id"
-              className={inputClassName}
-            />
-          )}
+          {runnerType !== "DEEPSEEK_HARNESS" &&
+            acpAuthMode === "method_id" && (
+              <input
+                value={acpAuthMethodId}
+                onChange={(event) => setAcpAuthMethodId(event.target.value)}
+                placeholder="auth_method_id"
+                className={inputClassName}
+              />
+            )}
         </div>
       </SettingRow>
 
-      {runnerType !== "HERMES" && (
+      {runnerType !== "HERMES" && runnerType !== "DEEPSEEK_HARNESS" && (
         <SettingRow
           title="附加目录"
           description="启用覆盖后，每行一个绝对目录；空列表会显式清除全局附加目录。"

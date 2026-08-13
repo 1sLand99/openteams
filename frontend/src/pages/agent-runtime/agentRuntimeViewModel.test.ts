@@ -248,6 +248,10 @@ check(
   "getRunnerLabel renders Hermes",
   getRunnerLabel("HERMES") === "Hermes",
 );
+check(
+  "getRunnerLabel preserves the DeepSeek brand spelling",
+  getRunnerLabel("DEEPSEEK_HARNESS") === "DeepSeek Harness",
+);
 
 check(
   "getRunnerLabel keeps the Qoder CLI acronym uppercase",
