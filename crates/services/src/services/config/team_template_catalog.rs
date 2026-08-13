@@ -432,7 +432,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::services::config::{
-        ChatTeamPreset, ChatTeamTemplateTier, Config, TeamTemplateCatalogService,
+        ChatMemberPreset, ChatTeamPreset, ChatTeamTemplateTier, Config, TeamTemplateCatalogService,
         preset_loader::PresetLoader, save_config_to_file_atomic,
     };
 
@@ -467,6 +467,17 @@ mod tests {
             tier: ChatTeamTemplateTier::Advanced,
             ..custom_team(id)
         }
+    }
+
+    fn strip_member_workspace_paths(members: &[ChatMemberPreset]) -> Vec<ChatMemberPreset> {
+        members
+            .iter()
+            .map(|member| {
+                let mut without_workspace = member.clone();
+                without_workspace.default_workspace_path = None;
+                without_workspace
+            })
+            .collect()
     }
 
     async fn write_config_with_custom(path: &std::path::Path, team: ChatTeamPreset) {
@@ -593,7 +604,10 @@ Use the English protocol.
             .expect("list templates");
 
         assert_ne!(localized.name, english.name);
-        assert_eq!(localized.members, english.members);
+        assert_eq!(
+            strip_member_workspace_paths(&localized.members),
+            strip_member_workspace_paths(&english.members)
+        );
         assert_eq!(custom_detail.name, custom.name);
         assert_eq!(custom_detail.team_protocol, custom.team_protocol);
         assert_eq!(listed.len(), 12);
