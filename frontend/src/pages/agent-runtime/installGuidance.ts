@@ -131,22 +131,12 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
     DEEPSEEK_HARNESS: {
       requiresNode: true,
       requiresNpm: false,
-      requiresNpx: false,
+      requiresNpx: true,
       documentationUrl: "https://github.com/deepseek-ai/deepseek-harness",
       windowsSupport: "supported",
       installCommands: {
-        posix: [
-          'git clone https://github.com/deepseek-ai/deepseek-harness.git "$HOME/deepseek-harness"',
-          'git -C "$HOME/deepseek-harness" checkout 47f943859bef60e4160492346772ded9b24f765a',
-          'npx --yes pnpm@11.7.0 --dir "$HOME/deepseek-harness" install --frozen-lockfile',
-          'npx --yes pnpm@11.7.0 --dir "$HOME/deepseek-harness" run build',
-        ],
-        windows: [
-          'git clone https://github.com/deepseek-ai/deepseek-harness.git "$HOME\\deepseek-harness"',
-          'git -C "$HOME\\deepseek-harness" checkout 47f943859bef60e4160492346772ded9b24f765a',
-          'npx --yes pnpm@11.7.0 --dir "$HOME\\deepseek-harness" install --frozen-lockfile',
-          'npx --yes pnpm@11.7.0 --dir "$HOME\\deepseek-harness" run build',
-        ],
+        posix: ["npx @deepseek-ai/dsh web"],
+        windows: ["npx @deepseek-ai/dsh web"],
       },
       authCommands: null,
       authEnvVars: ["DEEPSEEK_API_KEY"],

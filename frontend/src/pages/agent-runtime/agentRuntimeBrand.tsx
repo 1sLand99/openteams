@@ -43,7 +43,12 @@ export const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
     logoMode: "mask",
     logoClassName: "h-[22px] w-[22px]",
   },
-  DEEPSEEK_HARNESS: { title: "DeepSeek Harness", text: "DS" },
+  DEEPSEEK_HARNESS: {
+    title: "DeepSeek Harness",
+    logoSrc: "/logos/deepseek-logo.svg",
+    logoMode: "mask",
+    logoClassName: "h-[22px] w-[22px]",
+  },
   DROID: {
     title: "Droid",
     logoSrc: "/logos/droid-light.svg",

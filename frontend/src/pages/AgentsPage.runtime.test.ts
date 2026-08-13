@@ -7,6 +7,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const source = readFileSync(new URL('./AgentsPage.tsx', import.meta.url), 'utf8');
+const sharedBrandSource = readFileSync(
+  new URL('./agent-runtime/agentRuntimeBrand.tsx', import.meta.url),
+  'utf8',
+);
 const apiSource = readFileSync(new URL('../lib/api.ts', import.meta.url), 'utf8');
 const hermesSchema = JSON.parse(
   readFileSync(new URL('../../../shared/schemas/hermes.json', import.meta.url), 'utf8'),
@@ -177,7 +181,11 @@ assert.match(
 assert.match(source, /DEEPSEEK_HARNESS: deepseekHarnessSchema,/u);
 assert.match(
   source,
-  /DEEPSEEK_HARNESS: \{ title: "DeepSeek Harness", text: "DS" \}/u,
+  /DEEPSEEK_HARNESS: \{[\s\S]*?title: "DeepSeek Harness",[\s\S]*?logoSrc: "\/logos\/deepseek-logo\.svg",[\s\S]*?logoMode: "mask"/u,
+);
+assert.match(
+  sharedBrandSource,
+  /DEEPSEEK_HARNESS: \{[\s\S]*?title: "DeepSeek Harness",[\s\S]*?logoSrc: "\/logos\/deepseek-logo\.svg",[\s\S]*?logoMode: "mask"/u,
 );
 assert.deepEqual(Object.keys(deepseekHarnessSchema.properties ?? {}).sort(), [
   'acp',
