@@ -201,11 +201,28 @@ const deepseekOnLinux = resolveInstallGuide(
   makeRunner("DEEPSEEK_HARNESS", { node_available: true }),
   "linux",
 );
+const deepseekInstallCommands = deepseekOnLinux?.steps[0]?.commands ?? [];
 check(
-  "DeepSeek Harness installs through its npx web command",
+  "DeepSeek Harness installs from the official source checkout",
   deepseekOnLinux?.steps[0]?.kind === "install" &&
-    deepseekOnLinux.steps[0]?.commands[0] ===
-      "npx @deepseek-ai/dsh web",
+    deepseekInstallCommands.includes(
+      'git clone https://github.com/deepseek-ai/deepseek-harness.git "$HOME/deepseek-harness"',
+    ),
+  deepseekOnLinux?.steps,
+);
+check(
+  "DeepSeek Harness setup pins the rc.7 revision and pnpm release",
+  deepseekInstallCommands.includes(
+    'git -C "$HOME/deepseek-harness" checkout 99f6f02fecdb7dff40c3fbc9470f5907c29f74ca',
+  ) &&
+    deepseekInstallCommands.includes(
+      "npm install --global pnpm@11.7.0",
+    ),
+  deepseekOnLinux?.steps,
+);
+check(
+  "DeepSeek Harness setup and launch do not use npx",
+  deepseekInstallCommands.every((command) => !command.includes("npx")),
   deepseekOnLinux?.steps,
 );
 check(
@@ -218,14 +235,28 @@ check(
   deepseekOnLinux?.steps,
 );
 check(
-  "DeepSeek Harness runtime requires npx",
+  "DeepSeek Harness runtime requires Node but not npm or npx after build",
   getMissingRuntimeTools(
     makeRunner("DEEPSEEK_HARNESS", {
       node_available: true,
       npm_available: false,
       npx_available: false,
     }),
-  ).join(",") === "npx",
+  ).length === 0,
+);
+const deepseekOnWindows = resolveInstallGuide(
+  makeRunner("DEEPSEEK_HARNESS", { node_available: true }),
+  "windows",
+);
+check(
+  "DeepSeek Harness uses the pinned source checkout on Windows without npx",
+  deepseekOnWindows?.steps[0]?.commands.includes(
+    'git clone https://github.com/deepseek-ai/deepseek-harness.git "$HOME\\deepseek-harness"',
+  ) === true &&
+    deepseekOnWindows.steps[0]?.commands.every(
+      (command) => !command.includes("npx"),
+    ) === true,
+  deepseekOnWindows?.steps,
 );
 
 const kimiOnLinux = resolveInstallGuide(makeRunner("KIMI_CODE"), "linux");

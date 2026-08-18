@@ -24,7 +24,7 @@ use crate::{
     },
 };
 
-pub const DEEPSEEK_HARNESS_REVISION: &str = "47f943859bef60e4160492346772ded9b24f765a";
+pub const DEEPSEEK_HARNESS_REVISION: &str = "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca";
 
 const DEEPSEEK_AUTH_ENV_VARS: &[&str] = &["DEEPSEEK_API_KEY"];
 const DEFAULT_CHECKOUT_DIR: &str = "deepseek-harness";
