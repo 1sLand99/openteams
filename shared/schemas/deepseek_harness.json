@@ -11,6 +11,14 @@
       "format": "textarea",
       "default": null
     },
+    "model": {
+      "title": "Model",
+      "description": "Model ID declared by the configured DeepSeek Harness Cordis composition",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "harness_path": {
       "title": "DeepSeek Harness Checkout",
       "description": "Absolute path to a built deepseek-ai/deepseek-harness checkout. Defaults to ~/deepseek-harness",

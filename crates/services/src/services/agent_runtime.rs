@@ -1840,6 +1840,7 @@ fn model_name(config: &CodingAgent) -> Option<&str> {
         CodingAgent::QoderCli(config) => config.model.as_deref(),
         CodingAgent::Pi(config) => config.model.as_deref(),
         CodingAgent::Hermes(config) => config.model.as_deref(),
+        CodingAgent::DeepseekHarness(config) => config.model.as_deref(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => None,
         _ => None,
@@ -1940,6 +1941,7 @@ mod tests {
     use executors::executors::{
         AppendPrompt,
         acp::{AcpConfigChoice, AcpConfigOptionKind, AcpConfigOptionSnapshot, AcpConfigSource},
+        deepseek_harness::DeepseekHarness,
         kimi::KimiCode,
         pi::Pi,
         qoder::QoderCli,
@@ -2001,6 +2003,7 @@ mod tests {
             (BaseCodingAgent::Pi, "settings.json", "mcp.json"),
             (BaseCodingAgent::Droid, "settings.json", "mcp.json"),
         ];
+        let runtime_only_paths = [(BaseCodingAgent::DeepseekHarness, "cordis.yml")];
 
         for (runner, runtime_file_name, mcp_file_name) in separate_paths {
             let executor = profiles
@@ -2032,10 +2035,35 @@ mod tests {
             assert_ne!(runtime_path, mcp_path, "{runner}");
         }
 
+        for (runner, runtime_file_name) in runtime_only_paths {
+            let executor = profiles
+                .executors
+                .get(&runner)
+                .and_then(|config| {
+                    config
+                        .get_default()
+                        .or_else(|| config.configurations.values().next())
+                })
+                .unwrap_or_else(|| panic!("missing default executor for {runner}"));
+            let runtime_path = executor
+                .default_runtime_config_path()
+                .unwrap_or_else(|| panic!("missing runtime config path for {runner}"));
+
+            assert_eq!(
+                runtime_path.file_name().and_then(|name| name.to_str()),
+                Some(runtime_file_name),
+                "{runner}"
+            );
+            assert_eq!(executor.default_mcp_config_path(), None, "{runner}");
+        }
+
         for (runner, config) in &profiles.executors {
             if separate_paths
                 .iter()
                 .any(|(separate_runner, _, _)| separate_runner == runner)
+                || runtime_only_paths
+                    .iter()
+                    .any(|(runtime_only_runner, _)| runtime_only_runner == runner)
             {
                 continue;
             }
@@ -3181,6 +3209,27 @@ mod tests {
             panic!("expected KimiCode executor");
         };
         assert_eq!(config.model.as_deref(), Some("kimi-k2.6"));
+    }
+
+    #[test]
+    fn deepseek_model_option_merges_into_executor() {
+        let runner = BaseCodingAgent::DeepseekHarness;
+        let mut runtime = default_config(runner);
+        runtime.executor_options = serde_json::json!({
+            "model": "deepseek-v4-flash"
+        });
+        let mut store = AgentRuntimeStore::default();
+        store.configs.insert(runner, runtime);
+        let mut executor = CodingAgent::DeepseekHarness(DeepseekHarness::default());
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        apply_config_to_executor_and_env(runner, &mut executor, &mut env, &store).unwrap();
+
+        assert_eq!(model_name(&executor), Some("deepseek-v4-flash"));
+        let CodingAgent::DeepseekHarness(config) = executor else {
+            panic!("expected DeepSeek Harness executor");
+        };
+        assert_eq!(config.model.as_deref(), Some("deepseek-v4-flash"));
     }
 
     #[test]

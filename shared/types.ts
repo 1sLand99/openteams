@@ -1483,7 +1483,7 @@ export type Pi = { append_prompt: AppendPrompt, model?: string | null, acp?: Acp
 
 export type Hermes = { append_prompt: AppendPrompt, model?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
-export type DeepseekHarness = { append_prompt: AppendPrompt, harness_path?: string | null, acp_config_path?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+export type DeepseekHarness = { append_prompt: AppendPrompt, model?: string | null, harness_path?: string | null, acp_config_path?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Autonomy = "normal" | "low" | "medium" | "high" | "skip-permissions-unsafe";
 

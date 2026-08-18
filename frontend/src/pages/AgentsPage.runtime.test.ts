@@ -195,6 +195,7 @@ assert.deepEqual(Object.keys(deepseekHarnessSchema.properties ?? {}).sort(), [
   'base_command_override',
   'env',
   'harness_path',
+  'model',
 ]);
 assert.deepEqual(
   Object.keys(deepseekHarnessSchema.properties?.acp?.properties ?? {}).sort(),
