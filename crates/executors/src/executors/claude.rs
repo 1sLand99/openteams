@@ -31,11 +31,12 @@ use self::{
 };
 use crate::{
     approvals::ExecutorApprovalService,
-    command::{CmdOverrides, CommandBuildError, CommandBuilder, CommandParts, apply_overrides},
+    command::{CmdOverrides, CommandBuildError, CommandBuilder, apply_overrides},
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
         codex::client::LogWriter,
+        opencode::FrozenProcessCommand,
         utils::{json_has_nonempty_string, read_json_file, reorder_slash_commands},
     },
     logs::{
@@ -47,6 +48,8 @@ use crate::{
             patch::{self, ConversationPatch},
         },
     },
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun, PrivateMcpRunDirectory},
     stdout_dup::create_stdout_pipe_writer,
 };
 
@@ -76,6 +79,23 @@ fn claude_auth_value_has_credentials(value: &serde_json::Value) -> bool {
 
 use derivative::Derivative;
 
+#[derive(Clone)]
+struct ClaudeMcpRuntimeSnapshot {
+    config_path: PathBuf,
+    process_command: FrozenProcessCommand,
+    server_count: usize,
+}
+
+impl std::fmt::Debug for ClaudeMcpRuntimeSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClaudeMcpRuntimeSnapshot")
+            .field("config_path", &self.config_path)
+            .field("server_count", &self.server_count)
+            .finish()
+    }
+}
+
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
 pub struct ClaudeCode {
@@ -102,10 +122,25 @@ pub struct ClaudeCode {
     #[ts(skip)]
     #[derivative(Debug = "ignore", PartialEq = "ignore")]
     approvals_service: Option<Arc<dyn ExecutorApprovalService>>,
+
+    #[serde(skip)]
+    #[ts(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    runtime_mcp_snapshot: Option<Arc<ClaudeMcpRuntimeSnapshot>>,
+
+    #[cfg(test)]
+    #[serde(skip)]
+    #[ts(skip)]
+    #[schemars(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    test_base_command: Option<String>,
 }
 
 impl ClaudeCode {
-    async fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+    async fn build_command_builder(
+        &self,
+        mcp_config_path: Option<&Path>,
+    ) -> Result<CommandBuilder, CommandBuildError> {
         // If base_command_override is provided and claude_code_router is also set, log a warning
         if self.cmd.base_command_override.is_some() && self.claude_code_router.is_some() {
             tracing::warn!(
@@ -113,9 +148,10 @@ impl ClaudeCode {
             );
         }
 
-        let mut builder =
-            CommandBuilder::new(base_command(self.claude_code_router.unwrap_or(false)))
-                .params(["-p"]);
+        let configured_base = base_command(self.claude_code_router.unwrap_or(false));
+        #[cfg(test)]
+        let configured_base = self.test_base_command.as_deref().unwrap_or(configured_base);
+        let mut builder = CommandBuilder::new(configured_base).params(["-p"]);
 
         let plan = self.plan.unwrap_or(false);
         let approvals = self.approvals.unwrap_or(false);
@@ -147,8 +183,31 @@ impl ClaudeCode {
             "--replay-user-messages",
             "--disallowedTools=AskUserQuestion",
         ]);
+        if let Some(path) = mcp_config_path {
+            builder = builder.extend_params([
+                "--mcp-config".to_string(),
+                path.to_string_lossy().into_owned(),
+                "--strict-mcp-config".to_string(),
+            ]);
+        }
 
         apply_overrides(builder, &self.cmd)
+    }
+
+    fn validate_mcp_command_overrides(&self) -> Result<(), CommandBuildError> {
+        for value in self.cmd.additional_params.as_deref().unwrap_or_default() {
+            let normalized = value.replace(['=', '\t', '\n'], " ");
+            if let Some(flag) = ["--mcp-config", "--strict-mcp-config"].iter().find(|flag| {
+                normalized
+                    .split_ascii_whitespace()
+                    .any(|token| token == **flag)
+            }) {
+                return Err(CommandBuildError::InvalidShellParams(format!(
+                    "Claude {flag} is controlled by run-scoped MCP isolation"
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn permission_mode(&self) -> PermissionMode {
@@ -206,6 +265,38 @@ impl ClaudeCode {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for ClaudeCode {
+    async fn prepare_mcp_for_run(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        context: &McpRunContext,
+        _env: &mut ExecutionEnv,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        self.runtime_mcp_snapshot = None;
+        if self.cmd.base_command_override.is_some() {
+            return Err(ExecutorError::Configuration(
+                "Claude run-scoped MCP isolation cannot be verified for a custom base command"
+                    .to_string(),
+            ));
+        }
+        self.validate_mcp_command_overrides()?;
+        let prepared = PreparedMcpRun::new(canonical)?;
+        let directory = PrivateMcpRunDirectory::create(context, "claude-mcp")?;
+        let config_path =
+            directory.write_file("mcp.json", &serde_json::to_vec_pretty(canonical)?)?;
+        let process_command = FrozenProcessCommand::resolve(
+            self.build_command_builder(Some(&config_path))
+                .await?
+                .build_initial()?,
+        )
+        .await?;
+        self.runtime_mcp_snapshot = Some(Arc::new(ClaudeMcpRuntimeSnapshot {
+            config_path,
+            process_command,
+            server_count: prepared.server_count(),
+        }));
+        Ok(prepared.with_cleanup(directory.into_cleanup()))
+    }
+
     fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
         let env = env.clone().with_profile(&self.cmd);
         let oauth_login = dirs::home_dir().is_some_and(|home| {
@@ -243,10 +334,7 @@ impl StandardCodingAgentExecutor for ClaudeCode {
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let command_builder = self.build_command_builder().await?;
-        let command_parts = command_builder.build_initial()?;
-        self.spawn_internal(current_dir, prompt, command_parts, env)
-            .await
+        self.spawn_internal(current_dir, prompt, &[], env).await
     }
 
     async fn spawn_follow_up(
@@ -257,8 +345,6 @@ impl StandardCodingAgentExecutor for ClaudeCode {
         reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let command_builder = self.build_command_builder().await?;
-
         let mut args = vec!["--resume".to_string(), session_id.to_string()];
 
         // --resume-session-at truncates Claude's conversation history to the specified
@@ -268,9 +354,7 @@ impl StandardCodingAgentExecutor for ClaudeCode {
             args.push(uuid.to_string());
         }
 
-        let command_parts = command_builder.build_follow_up(&args)?;
-        self.spawn_internal(current_dir, prompt, command_parts, env)
-            .await
+        self.spawn_internal(current_dir, prompt, &args, env).await
     }
 
     fn normalize_logs(&self, msg_store: Arc<MsgStore>, current_dir: &Path) {
@@ -350,10 +434,21 @@ impl ClaudeCode {
         &self,
         current_dir: &Path,
         prompt: &str,
-        command_parts: CommandParts,
+        additional_args: &[String],
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let (program_path, args) = command_parts.into_resolved().await?;
+        let snapshot = self
+            .runtime_mcp_snapshot
+            .as_ref()
+            .ok_or(ExecutorError::McpIsolationNotImplemented)?;
+        if self.cmd.base_command_override.is_some() {
+            return Err(ExecutorError::Configuration(
+                "Claude command changed after run-scoped MCP preparation".to_string(),
+            ));
+        }
+        let (program_path, frozen_args) = snapshot.process_command.parts();
+        let mut args = frozen_args.to_vec();
+        args.extend_from_slice(additional_args);
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
 
         let mut command = Command::new(program_path);
@@ -2313,10 +2408,17 @@ impl ClaudeToolData {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, sync::Arc};
+    use std::{fs, path::PathBuf, sync::Arc};
+
+    use tempfile::TempDir;
+    use uuid::Uuid;
 
     use super::*;
-    use crate::logs::utils::{EntryIndexProvider, patch::extract_normalized_entry_from_patch};
+    use crate::{
+        env::{ExecutionEnv, RepoContext},
+        logs::utils::{EntryIndexProvider, patch::extract_normalized_entry_from_patch},
+        mcp_run::McpRunContext,
+    };
 
     #[test]
     fn claude_auth_requires_nonempty_account_or_token() {
@@ -2326,6 +2428,159 @@ mod tests {
         assert!(claude_auth_value_has_credentials(
             &serde_json::json!({"claudeAiOauth": {"refreshToken": "token"}})
         ));
+    }
+
+    fn run_context(workspace: &TempDir) -> McpRunContext {
+        McpRunContext::new(workspace.path(), Uuid::new_v4(), Uuid::new_v4())
+            .expect("create Claude MCP run context")
+    }
+
+    fn execution_env(workspace: &TempDir) -> ExecutionEnv {
+        ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn claude_prepares_owner_private_strict_mcp_snapshot_and_cleans_it() {
+        let workspace = TempDir::new().expect("create workspace");
+        let source_home = TempDir::new().expect("create source home");
+        let global_config_path = source_home.path().join(".claude.json");
+        let global_config = br#"{"mcpServers":{"ambient":{"command":"must-not-run"}}}"#;
+        fs::write(&global_config_path, global_config).expect("write global Claude config fixture");
+        let mut executor = test_executor();
+        let mut env = execution_env(&workspace);
+        env.insert("HOME", source_home.path().to_string_lossy().into_owned());
+        let secret = "claude-private-secret";
+        let canonical: MemberMcpConfig = serde_json::from_value(serde_json::json!({
+            "mcpServers": {
+                "member-only": {"command": "/bin/echo", "env": {"TOKEN": secret}}
+            }
+        }))
+        .expect("deserialize member MCP config");
+
+        let prepared = executor
+            .prepare_mcp_for_run(&canonical, &run_context(&workspace), &mut env)
+            .await
+            .expect("prepare Claude MCP run");
+        let snapshot = executor
+            .runtime_mcp_snapshot
+            .as_ref()
+            .expect("runtime snapshot");
+        let config_path = snapshot.config_path.clone();
+        let config: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config_path).expect("read private config"))
+                .expect("parse private config");
+        assert_eq!(config["mcpServers"]["member-only"]["env"]["TOKEN"], secret);
+        let (_, args) = snapshot.process_command.parts();
+        assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
+        assert!(
+            args.windows(2).any(|pair| {
+                pair[0] == "--mcp-config" && pair[1] == config_path.to_string_lossy()
+            })
+        );
+        assert!(!format!("{snapshot:?}").contains(secret));
+        assert_eq!(fs::read(global_config_path).unwrap(), global_config);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(config_path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        drop(prepared);
+        assert!(
+            !config_path.exists(),
+            "cancelled run must remove Claude overlay"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_spawn_failure_releases_private_mcp_overlay() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = TempDir::new().expect("create workspace");
+        let command_path = workspace.path().join("claude-test-command");
+        fs::write(&command_path, b"#!/bin/sh\nexit 0\n").expect("write command fixture");
+        let mut permissions = fs::metadata(&command_path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&command_path, permissions).expect("make command executable");
+        let mut executor = test_executor();
+        executor.test_base_command = Some(command_path.to_string_lossy().into_owned());
+        let mut env = execution_env(&workspace);
+        let prepared = executor
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(&workspace),
+                &mut env,
+            )
+            .await
+            .expect("prepare Claude MCP run");
+        let run_root = executor
+            .runtime_mcp_snapshot
+            .as_ref()
+            .unwrap()
+            .config_path
+            .parent()
+            .unwrap()
+            .to_path_buf();
+
+        fs::remove_file(command_path).expect("remove command before spawn");
+        assert!(
+            executor
+                .spawn(workspace.path(), "prompt", &env)
+                .await
+                .is_err()
+        );
+        drop(prepared);
+        assert!(!run_root.exists());
+    }
+
+    #[tokio::test]
+    async fn claude_empty_snapshot_still_uses_explicit_strict_isolation() {
+        let workspace = TempDir::new().expect("create workspace");
+        let mut executor = test_executor();
+        let mut env = execution_env(&workspace);
+        let prepared = executor
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(&workspace),
+                &mut env,
+            )
+            .await
+            .expect("prepare empty Claude MCP run");
+        let snapshot = executor
+            .runtime_mcp_snapshot
+            .as_ref()
+            .expect("runtime snapshot");
+        let config: serde_json::Value = serde_json::from_slice(
+            &fs::read(&snapshot.config_path).expect("read empty private config"),
+        )
+        .expect("parse empty private config");
+        assert_eq!(config, serde_json::json!({"mcpServers": {}}));
+        assert!(
+            snapshot
+                .process_command
+                .parts()
+                .1
+                .iter()
+                .any(|arg| arg == "--strict-mcp-config")
+        );
+        drop(prepared);
     }
 
     fn patches_to_entries(patches: &[json_patch::Patch]) -> Vec<NormalizedEntry> {
@@ -2365,6 +2620,13 @@ mod tests {
                 env: None,
             },
             approvals_service: None,
+            runtime_mcp_snapshot: None,
+            test_base_command: Some(
+                std::env::current_exe()
+                    .expect("resolve current test executable")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             disable_api_key: None,
         }
     }

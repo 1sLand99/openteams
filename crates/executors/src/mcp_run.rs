@@ -301,6 +301,34 @@ impl PrivateMcpRunDirectory {
         Ok(path)
     }
 
+    /// Link an explicitly selected vendor session resource into this run directory.
+    ///
+    /// Callers must never use this for configuration files: linked resources remain
+    /// writable vendor state, while run configuration must be copied or generated as
+    /// owner-only files beneath this directory.
+    pub fn link_session_resource(
+        &self,
+        relative_path: impl AsRef<Path>,
+        source: impl AsRef<Path>,
+    ) -> Result<Option<PathBuf>, ExecutorError> {
+        let relative_path = relative_path.as_ref();
+        validate_relative_path(relative_path, false)?;
+        let source = match fs::canonicalize(source.as_ref()) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ExecutorError::Io(error)),
+        };
+        let metadata = fs::metadata(&source).map_err(ExecutorError::Io)?;
+        if let Some(parent) = relative_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            self.ensure_relative_directories(parent)?;
+        }
+        let target = self.path.join(relative_path);
+        create_session_symlink(&source, &target, metadata.is_dir())?;
+        Ok(Some(target))
+    }
+
     pub fn into_cleanup(mut self) -> ExecutorRunCleanup {
         self.cleanup
             .take()
@@ -410,19 +438,71 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), ExecutorError>
     file.sync_all().map_err(ExecutorError::Io)
 }
 
+fn create_session_symlink(
+    source: &Path,
+    target: &Path,
+    is_directory: bool,
+) -> Result<(), ExecutorError> {
+    #[cfg(unix)]
+    {
+        let _ = is_directory;
+        std::os::unix::fs::symlink(source, target).map_err(ExecutorError::Io)
+    }
+    #[cfg(windows)]
+    {
+        if is_directory {
+            std::os::windows::fs::symlink_dir(source, target).map_err(ExecutorError::Io)
+        } else {
+            std::os::windows::fs::symlink_file(source, target).map_err(ExecutorError::Io)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
 
     use serde_json::json;
     use uuid::Uuid;
+    use workspace_utils::msg_store::MsgStore;
 
     use super::*;
     use crate::{
         env::{ExecutionEnv, RepoContext},
-        executors::{BaseCodingAgent, StandardCodingAgentExecutor},
+        executors::{BaseCodingAgent, SpawnedChild, StandardCodingAgentExecutor},
         profile::{ExecutorConfigs, ExecutorProfileId},
     };
+
+    struct DefaultMcpExecutor;
+
+    #[async_trait::async_trait]
+    impl StandardCodingAgentExecutor for DefaultMcpExecutor {
+        async fn spawn(
+            &self,
+            _current_dir: &Path,
+            _prompt: &str,
+            _env: &ExecutionEnv,
+        ) -> Result<SpawnedChild, ExecutorError> {
+            Err(ExecutorError::McpIsolationNotImplemented)
+        }
+
+        async fn spawn_follow_up(
+            &self,
+            _current_dir: &Path,
+            _prompt: &str,
+            _session_id: &str,
+            _reset_to_message_id: Option<&str>,
+            _env: &ExecutionEnv,
+        ) -> Result<SpawnedChild, ExecutorError> {
+            Err(ExecutorError::McpIsolationNotImplemented)
+        }
+
+        fn normalize_logs(&self, _msg_store: Arc<MsgStore>, _worktree_path: &Path) {}
+
+        fn default_mcp_config_path(&self) -> Option<PathBuf> {
+            Some(PathBuf::from("vendor-mcp-config.json"))
+        }
+    }
 
     fn context(workspace: &std::path::Path) -> McpRunContext {
         McpRunContext::new(workspace, Uuid::new_v4(), Uuid::new_v4()).expect("absolute run context")
@@ -636,8 +716,7 @@ mod tests {
             false,
             String::new(),
         );
-        let mut executor = ExecutorConfigs::from_defaults()
-            .get_coding_agent_or_default(&ExecutorProfileId::new(BaseCodingAgent::Codex));
+        let mut executor = DefaultMcpExecutor;
 
         let error = executor
             .prepare_mcp_for_run(&MemberMcpConfig::default(), &context, &mut env)
