@@ -700,12 +700,36 @@ mod tests {
             .await
             .expect("Qwen vendor directory");
         let ambient_path = vendor_dir.join("settings.json");
-        tokio::fs::write(
-            &ambient_path,
-            br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
-        )
-        .await
-        .expect("ambient Qwen settings");
+        let vendor_files: Vec<(std::path::PathBuf, &[u8])> = vec![
+            (
+                ambient_path.clone(),
+                br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
+            ),
+            (
+                vendor_dir.join("oauth_creds.json"),
+                br#"{"refresh_token":"qwen-fixture-refresh-token"}"#,
+            ),
+            (
+                vendor_dir.join(".env"),
+                b"OPENAI_API_KEY=qwen-fixture-api-key\n",
+            ),
+            (
+                vendor_dir.join("settings.jsonc"),
+                b"// fixture model config\n{\"model\":\"qwen-fixture-model\"}\n",
+            ),
+        ];
+        let mut original_vendor_files = Vec::new();
+        for (path, contents) in vendor_files {
+            tokio::fs::write(&path, contents)
+                .await
+                .unwrap_or_else(|_| panic!("write Qwen vendor file {}", path.display()));
+            original_vendor_files.push((
+                path.clone(),
+                tokio::fs::read(&path)
+                    .await
+                    .unwrap_or_else(|_| panic!("read Qwen vendor file {}", path.display())),
+            ));
+        }
         let mut qwen = qwen_with_approval(None);
         let mut env = ExecutionEnv::new(Default::default(), false, String::new());
         env.insert("HOME", home.to_string_lossy().into_owned());
@@ -741,13 +765,31 @@ mod tests {
                 .expect("Qwen system MCP override")
                 .is_empty()
         );
+        for (path, original) in &original_vendor_files {
+            let current = tokio::fs::read(path)
+                .await
+                .unwrap_or_else(|_| panic!("read Qwen vendor file {}", path.display()));
+            assert_eq!(
+                current.as_slice(),
+                original.as_slice(),
+                "Qwen preparation changed user file {}",
+                path.display()
+            );
+        }
 
         drop(prepared.into_cleanup());
         assert!(!settings_path.exists());
-        assert!(
-            ambient_path.is_file(),
-            "ambient settings must remain untouched"
-        );
+        for (path, original) in &original_vendor_files {
+            let current = tokio::fs::read(path)
+                .await
+                .unwrap_or_else(|_| panic!("read Qwen vendor file {}", path.display()));
+            assert_eq!(
+                current.as_slice(),
+                original.as_slice(),
+                "Qwen cleanup changed user file {}",
+                path.display()
+            );
+        }
     }
 
     #[test]

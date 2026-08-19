@@ -675,17 +675,47 @@ async fn offline_pi_explicit_empty_member_map_ignores_ambient_and_cleans_exact_r
     let pi = Pi::default();
     let ambient_dir = temp.path().join("ambient-pi-agent");
     fs::create_dir_all(&ambient_dir).expect("ambient Pi directory");
+    let home = temp.path().join("home");
+    let default_agent_dir = home.join(".pi/agent");
+    fs::create_dir_all(&default_agent_dir).expect("default Pi agent directory");
     let ambient_path = ambient_dir.join("mcp.json");
-    fs::write(
-        &ambient_path,
-        r#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
-    )
-    .expect("ambient Pi MCP");
+    let vendor_files: Vec<(PathBuf, &[u8])> = vec![
+        (
+            ambient_path.clone(),
+            br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
+        ),
+        (
+            ambient_dir.join("settings.json"),
+            br#"{"defaultProvider":"fixture-provider"}"#,
+        ),
+        (
+            ambient_dir.join("models.json"),
+            br#"{"providers":{"fixture":{"models":[]}}}"#,
+        ),
+        (
+            ambient_dir.join("auth.json"),
+            br#"{"fixture-provider":{"type":"api_key","key":"pi-fixture-auth-token"}}"#,
+        ),
+        (
+            default_agent_dir.join("auth.json"),
+            br#"{"fixture-provider":{"type":"api_key","key":"pi-home-auth-token"}}"#,
+        ),
+    ];
+    let mut original_vendor_files = Vec::new();
+    for (path, contents) in vendor_files {
+        fs::write(&path, contents)
+            .unwrap_or_else(|_| panic!("write Pi vendor file {}", path.display()));
+        original_vendor_files.push((
+            path.clone(),
+            fs::read(&path).unwrap_or_else(|_| panic!("read Pi vendor file {}", path.display())),
+        ));
+    }
     let mut env = ExecutionEnv::new(
         RepoContext::new(temp.path().to_path_buf(), Vec::new()),
         false,
         String::new(),
     );
+    env.insert("HOME", home.to_string_lossy().into_owned());
     env.insert(
         "PI_CODING_AGENT_DIR",
         ambient_dir.to_string_lossy().into_owned(),
@@ -721,13 +751,32 @@ async fn offline_pi_explicit_empty_member_map_ignores_ambient_and_cleans_exact_r
     );
     assert_eq!(run_files.len(), PI_RUN_FILE_ENV_KEYS.len());
     assert!(run_files.iter().all(|path| path.is_file()));
+    for (path, original) in &original_vendor_files {
+        let current =
+            fs::read(path).unwrap_or_else(|_| panic!("read Pi vendor file {}", path.display()));
+        assert_eq!(
+            current.as_slice(),
+            original.as_slice(),
+            "Pi preparation changed user file {}",
+            path.display()
+        );
+    }
 
     drop(prepared.into_cleanup());
     assert!(
         run_files.iter().all(|path| !path.exists()),
         "empty-member cleanup must remove every owned Pi run file"
     );
-    assert!(ambient_path.is_file(), "ambient MCP must remain untouched");
+    for (path, original) in &original_vendor_files {
+        let current =
+            fs::read(path).unwrap_or_else(|_| panic!("read Pi vendor file {}", path.display()));
+        assert_eq!(
+            current.as_slice(),
+            original.as_slice(),
+            "Pi cleanup changed user file {}",
+            path.display()
+        );
+    }
 }
 
 #[tokio::test]

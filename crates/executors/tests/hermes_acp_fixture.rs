@@ -1279,13 +1279,15 @@ async fn offline_hermes_explicit_empty_member_map_ignores_ambient_vendor_mcp() {
     let hermes_config_dir = env_info.home.join(".hermes");
     fs::create_dir_all(&hermes_config_dir).expect("hermes config dir");
     let marker_secret = "hermes-host-config-secret-never-leak";
+    let config_path = hermes_config_dir.join("config.yaml");
     fs::write(
-        hermes_config_dir.join("config.yaml"),
+        &config_path,
         format!(
             "mcp_servers:\n  marker-server:\n    command: openteams-marker-command-not-real\n    env:\n      TOKEN: {marker_secret}\n"
         ),
     )
     .expect("write marker mcp config");
+    let original_config = fs::read(&config_path).expect("read original Hermes config");
 
     let spawned = spawn_prepared_hermes(&hermes, temp.path(), "isolation-check", &env)
         .await
@@ -1303,6 +1305,11 @@ async fn offline_hermes_explicit_empty_member_map_ignores_ambient_vendor_mcp() {
     assert!(protocol_log.contains(r#""skip_configured_mcp":"1""#));
     assert!(!protocol_log.contains("marker-server"));
     assert!(!protocol_log.contains(marker_secret));
+    assert_eq!(
+        fs::read(&config_path).expect("read Hermes config after successful cleanup"),
+        original_config,
+        "Hermes run must not modify the user's config.yaml"
+    );
 }
 
 #[tokio::test]

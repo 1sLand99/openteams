@@ -469,8 +469,10 @@ mod tests {
     use super::*;
     use crate::{
         env::{ExecutionEnv, RepoContext},
-        executors::{BaseCodingAgent, SpawnedChild, StandardCodingAgentExecutor},
-        profile::{ExecutorConfigs, ExecutorProfileId},
+        executors::{
+            CodingAgent, SpawnedChild, StandardCodingAgentExecutor,
+            deepseek_harness::DeepseekHarness,
+        },
     };
 
     struct DefaultMcpExecutor;
@@ -727,7 +729,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_non_mcp_executor_accepts_only_an_empty_map() {
+    async fn deepseek_harness_reports_no_mcp_capability_and_never_prepares_mcp() {
         let workspace = tempfile::tempdir().expect("workspace");
         let context = context(workspace.path());
         let mut env = ExecutionEnv::new(
@@ -735,14 +737,23 @@ mod tests {
             false,
             String::new(),
         );
-        let mut executor = ExecutorConfigs::from_defaults()
-            .get_coding_agent_or_default(&ExecutorProfileId::new(BaseCodingAgent::DeepseekHarness));
+        let mut executor = DeepseekHarness::default();
+        let agent = CodingAgent::DeepseekHarness(executor.clone());
+        let original_env = env.vars.clone();
+
+        assert!(!agent.supports_mcp());
 
         let prepared = executor
             .prepare_mcp_for_run(&MemberMcpConfig::default(), &context, &mut env)
             .await
             .expect("empty map is valid for a non-MCP executor");
         assert_eq!(prepared.server_count(), 0);
+        drop(prepared.into_cleanup());
+        assert_eq!(env.vars, original_env);
+        assert!(
+            !workspace.path().join(".openteams").exists(),
+            "DeepSeek Harness must not create MCP preparation resources"
+        );
 
         let configured = MemberMcpConfig {
             mcp_servers: [("server".to_string(), json!({"command": "/bin/echo"}))]
@@ -754,5 +765,7 @@ mod tests {
             .await
             .expect_err("non-MCP executor must reject configured servers");
         assert!(matches!(error, ExecutorError::McpNotSupported));
+        assert_eq!(env.vars, original_env);
+        assert!(!workspace.path().join(".openteams").exists());
     }
 }

@@ -694,12 +694,36 @@ mod tests {
             .await
             .expect("Gemini vendor directory");
         let ambient_path = vendor_dir.join("settings.json");
-        tokio::fs::write(
-            &ambient_path,
-            br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
-        )
-        .await
-        .expect("ambient Gemini settings");
+        let vendor_files: Vec<(std::path::PathBuf, &[u8])> = vec![
+            (
+                ambient_path.clone(),
+                br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
+            ),
+            (
+                vendor_dir.join("oauth_creds.json"),
+                br#"{"refresh_token":"gemini-fixture-refresh-token"}"#,
+            ),
+            (
+                vendor_dir.join(".env"),
+                b"GEMINI_API_KEY=gemini-fixture-api-key\n",
+            ),
+            (
+                vendor_dir.join("settings.jsonc"),
+                b"// fixture model config\n{\"model\":\"gemini-fixture-model\"}\n",
+            ),
+        ];
+        let mut original_vendor_files = Vec::new();
+        for (path, contents) in vendor_files {
+            tokio::fs::write(&path, contents)
+                .await
+                .unwrap_or_else(|_| panic!("write Gemini vendor file {}", path.display()));
+            original_vendor_files.push((
+                path.clone(),
+                tokio::fs::read(&path)
+                    .await
+                    .unwrap_or_else(|_| panic!("read Gemini vendor file {}", path.display())),
+            ));
+        }
         let mut gemini = Gemini {
             append_prompt: AppendPrompt::default(),
             model: None,
@@ -743,13 +767,31 @@ mod tests {
                 .expect("Gemini system MCP override")
                 .is_empty()
         );
+        for (path, original) in &original_vendor_files {
+            let current = tokio::fs::read(path)
+                .await
+                .unwrap_or_else(|_| panic!("read Gemini vendor file {}", path.display()));
+            assert_eq!(
+                current.as_slice(),
+                original.as_slice(),
+                "Gemini preparation changed user file {}",
+                path.display()
+            );
+        }
 
         drop(prepared.into_cleanup());
         assert!(!settings_path.exists());
-        assert!(
-            ambient_path.is_file(),
-            "ambient settings must remain untouched"
-        );
+        for (path, original) in &original_vendor_files {
+            let current = tokio::fs::read(path)
+                .await
+                .unwrap_or_else(|_| panic!("read Gemini vendor file {}", path.display()));
+            assert_eq!(
+                current.as_slice(),
+                original.as_slice(),
+                "Gemini cleanup changed user file {}",
+                path.display()
+            );
+        }
     }
 
     #[test]

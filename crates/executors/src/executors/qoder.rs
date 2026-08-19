@@ -604,22 +604,48 @@ mod tests {
     async fn public_empty_member_map_keeps_strict_empty_override_and_ignores_ambient_mcp() {
         let workspace = tempfile::tempdir().expect("workspace");
         let qoder_home = workspace.path().join("qoder-home");
-        tokio::fs::create_dir_all(&qoder_home)
+        tokio::fs::create_dir_all(qoder_home.join(".auth"))
             .await
             .expect("Qoder config directory");
         let ambient_path = qoder_home.join("settings.json");
-        tokio::fs::write(
-            &ambient_path,
-            br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
-        )
-        .await
-        .expect("ambient Qoder settings");
+        let vendor_files: Vec<(std::path::PathBuf, &[u8])> = vec![
+            (
+                ambient_path.clone(),
+                br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
+            ),
+            (qoder_home.join(".auth/user"), b"fixture-login-state\n"),
+            (
+                qoder_home.join("credentials.json"),
+                br#"{"accessToken":"qoder-fixture-access-token"}"#,
+            ),
+            (
+                qoder_home.join("oauth_creds.json"),
+                br#"{"refresh_token":"qoder-fixture-refresh-token"}"#,
+            ),
+            (
+                qoder_home.join("auth.json"),
+                br#"{"token":"qoder-fixture-auth-token"}"#,
+            ),
+        ];
+        let mut original_vendor_files = Vec::new();
+        for (path, contents) in vendor_files {
+            tokio::fs::write(&path, contents)
+                .await
+                .unwrap_or_else(|_| panic!("write Qoder vendor file {}", path.display()));
+            original_vendor_files.push((
+                path.clone(),
+                tokio::fs::read(&path)
+                    .await
+                    .unwrap_or_else(|_| panic!("read Qoder vendor file {}", path.display())),
+            ));
+        }
         let mut executor = qoder();
         let mut env = ExecutionEnv::new(Default::default(), false, String::new());
         env.insert(
             "QODER_CONFIG_DIR",
             qoder_home.to_string_lossy().into_owned(),
         );
+        assert!(executor.is_authenticated(&env));
 
         let prepared = executor
             .prepare_mcp_for_run(
@@ -651,11 +677,29 @@ mod tests {
             args.windows(2)
                 .any(|pair| { pair[0] == "--allowed-mcp-server-names" && pair[1].is_empty() })
         );
+        for (path, original) in &original_vendor_files {
+            let current = tokio::fs::read(path)
+                .await
+                .unwrap_or_else(|_| panic!("read Qoder vendor file {}", path.display()));
+            assert_eq!(
+                current.as_slice(),
+                original.as_slice(),
+                "Qoder preparation changed user file {}",
+                path.display()
+            );
+        }
         drop(prepared.into_cleanup());
-        assert!(
-            ambient_path.is_file(),
-            "ambient settings must remain untouched"
-        );
+        for (path, original) in &original_vendor_files {
+            let current = tokio::fs::read(path)
+                .await
+                .unwrap_or_else(|_| panic!("read Qoder vendor file {}", path.display()));
+            assert_eq!(
+                current.as_slice(),
+                original.as_slice(),
+                "Qoder cleanup changed user file {}",
+                path.display()
+            );
+        }
     }
 
     #[test]
