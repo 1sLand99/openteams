@@ -33,6 +33,15 @@ const runtime = (
     executor_options: configuredModel ? { model: configuredModel } : {},
   }) as unknown as AgentRuntimeStatus;
 
+// Compare config-bearing values without letting assertion failures serialize
+// fake secrets into the test log.
+const assertJsonEqual = (actual: unknown, expected: unknown): void => {
+  assert.ok(
+    JSON.stringify(actual) === JSON.stringify(expected),
+    'values differ (details suppressed to avoid leaking config secrets)',
+  );
+};
+
 const member = (patch: Partial<ChatMemberPreset>): ChatMemberPreset => ({
   id: patch.id ?? 'lead',
   name: patch.name ?? 'Lead Agent',
@@ -126,7 +135,7 @@ const configuredSpec = buildTemplateMemberSpecs(
   runtimes,
 )[0];
 assert.ok(configuredSpec);
-assert.deepEqual(configuredSpec.executionConfig, {
+assertJsonEqual(configuredSpec.executionConfig, {
   ...completeExecutionConfig,
   runner_type: BaseCodingAgent.CLAUDE_CODE,
   model_name: 'claude-sonnet-4-20250514',
@@ -143,26 +152,49 @@ const configuredServer = configuredSpec.executionConfig.mcp?.mcpServers
   .fake_local as { env: { API_TOKEN: string } };
 configuredServer.env.API_TOKEN = 'mutated-token';
 configuredSpec.executionConfig.acp?.additional_directories?.push('/mutated');
-assert.equal(
+assert.ok(
   (
     completeExecutionConfig.mcp?.mcpServers.fake_local as {
       env: { API_TOKEN: string };
     }
-  ).env.API_TOKEN,
-  'fake-template-token',
+  ).env.API_TOKEN === 'fake-template-token',
+  'template token must survive member-side mutation (details suppressed)',
 );
-assert.deepEqual(completeExecutionConfig.acp?.additional_directories, [
+assertJsonEqual(completeExecutionConfig.acp?.additional_directories, [
   '/fake/template/context',
 ]);
-assert.equal(
+assert.ok(
   (
     independentlyBuiltSpec.executionConfig.mcp?.mcpServers.fake_local as {
       env: { API_TOKEN: string };
     }
-  ).env.API_TOKEN,
-  'fake-template-token',
+  ).env.API_TOKEN === 'fake-template-token',
+  'independent spec token must survive member-side mutation (details suppressed)',
 );
-assert.deepEqual(
+assertJsonEqual(
+  independentlyBuiltSpec.executionConfig.acp?.additional_directories,
+  ['/fake/template/context'],
+);
+
+// Reverse direction: mutating the template after member specs were built must
+// not reach the already-created member specs.
+(
+  configuredTeam.members[0]?.execution_config?.mcp?.mcpServers.fake_local as {
+    env: { API_TOKEN: string };
+  }
+).env.API_TOKEN = 'template-mutated-after-build';
+configuredTeam.members[0]?.execution_config?.acp?.additional_directories?.push(
+  '/template-mutated',
+);
+assert.ok(
+  (
+    independentlyBuiltSpec.executionConfig.mcp?.mcpServers.fake_local as {
+      env: { API_TOKEN: string };
+    }
+  ).env.API_TOKEN === 'fake-template-token',
+  'created member spec token must survive template-side mutation (details suppressed)',
+);
+assertJsonEqual(
   independentlyBuiltSpec.executionConfig.acp?.additional_directories,
   ['/fake/template/context'],
 );

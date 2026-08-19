@@ -48,6 +48,27 @@ type AcceptanceRecord = {
 const records: AcceptanceRecord[] = [];
 let failures = 0;
 
+// Fake secrets used by the fixtures. Failure logs and the printed acceptance
+// snapshot must redact them so test output never prints config secrets.
+const FAKE_CONFIG_SECRETS = [
+  'fake-template-token',
+  'fake-template-header',
+  'mutated-after-apply',
+  'mutated-after-reapply',
+  'mutated-on-template',
+];
+const redactFakeConfigSecretsInText = (text: string): string => {
+  let redacted = text;
+  for (const secret of FAKE_CONFIG_SECRETS) {
+    redacted = redacted.split(secret).join('[REDACTED]');
+  }
+  return redacted;
+};
+const redactFakeConfigSecrets = (value: unknown): string =>
+  redactFakeConfigSecretsInText(
+    typeof value === 'string' ? value : (JSON.stringify(value) ?? ''),
+  );
+
 const fakeExecutionConfig: MemberExecutionConfig = {
   runner_type: BaseCodingAgent.CODEX,
   model_name: 'template-model',
@@ -111,7 +132,9 @@ const assertAcceptance: (
 ) => void = (condition, message, detail) => {
   if (!condition) {
     throw new Error(
-      detail === undefined ? message : `${message}: ${JSON.stringify(detail)}`,
+      detail === undefined
+        ? message
+        : `${message}: ${redactFakeConfigSecrets(detail)}`,
     );
   }
 };
@@ -763,10 +786,28 @@ await runScenario(
       'rebuilding specs from the template should ignore earlier mutations',
     );
 
+    // Reverse direction: mutating the exported template afterwards must not
+    // reach the member specs that were already created from it.
+    const templateSideServer = exportedDetail.members[0]?.execution_config?.mcp
+      ?.mcpServers.fake_local as { env: { API_TOKEN: string } };
+    templateSideServer.env.API_TOKEN = 'mutated-on-template';
+    assertAcceptance(
+      (
+        rebuiltSpecs[0]?.executionConfig.mcp?.mcpServers.fake_local as {
+          env: { API_TOKEN: string };
+        }
+      ).env.API_TOKEN === 'fake-template-token',
+      'mutating the exported template must not change already-created member specs',
+    );
+    assertAcceptance(
+      rebuiltSpecs[0]?.executionConfig.acp?.additional_directories?.length === 1,
+      'template-side edits must not leak into created member specs',
+    );
+
     return [
       '会话快照导出为自定义模板，编辑草稿回显 canonical MCP。',
       '再应用时不可用 runner 回退到可用 runtime，仅覆盖 runner/model。',
-      'legacy 成员获得显式空 MCP，模板与应用结果双向互不影响。',
+      'legacy 成员获得显式空 MCP，模板与已创建成员双向修改互不影响。',
     ];
   },
 );
@@ -780,6 +821,7 @@ await runScenario(
     '确认模板页面源码不含敏感值复制提示。',
     '确认全部 locale 文案不含敏感值复制提示。',
     '确认 MCP 校验错误不回显配置值。',
+    '确认验收快照与失败诊断不含固定假秘密。',
   ],
   () => {
     assertAcceptance(
@@ -822,16 +864,32 @@ await runScenario(
       'session export should use the preset snapshot endpoint',
     );
 
+    const recordsSnapshot = JSON.stringify(records);
+    assertAcceptance(
+      !FAKE_CONFIG_SECRETS.some((secret) => recordsSnapshot.includes(secret)),
+      'acceptance records must not contain fake config secrets',
+    );
+    assertAcceptance(
+      redactFakeConfigSecrets({ token: 'fake-template-token' }).includes(
+        '[REDACTED]',
+      ) &&
+        !redactFakeConfigSecrets({ token: 'fake-template-token' }).includes(
+          'fake-template-token',
+        ),
+      'failure diagnostics should redact fake config secrets',
+    );
+
     return [
       '页面源码与 6 个 locale 均无敏感值复制提示。',
       '非法 MCP JSON 的错误只含通用文案，不泄漏配置值。',
       '会话导出走 /presets/snapshot 端点。',
+      '验收记录与失败诊断均经脱敏，不含固定假秘密。',
     ];
   },
 );
 
 console.log('TeamTemplatesAcceptance');
-console.log(JSON.stringify(records, null, 2));
+console.log(redactFakeConfigSecretsInText(JSON.stringify(records, null, 2)));
 
 if (failures > 0) {
   console.error(`\n${failures} acceptance scenario(s) FAILED`);

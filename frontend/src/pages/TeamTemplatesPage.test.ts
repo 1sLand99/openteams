@@ -38,6 +38,21 @@ import {
 } from '../../../shared/types';
 
 let failures = 0;
+// Fake secrets used by the fixtures. Failure diagnostics must redact them so
+// test logs never print config secrets.
+const FAKE_CONFIG_SECRETS = [
+  'fake-template-token',
+  'fake-template-header',
+  'mutated-after-submit',
+];
+const redactFakeConfigSecrets = (detail: unknown): string => {
+  let text =
+    typeof detail === 'string' ? detail : (JSON.stringify(detail) ?? '');
+  for (const secret of FAKE_CONFIG_SECRETS) {
+    text = text.split(secret).join('[REDACTED]');
+  }
+  return text;
+};
 const check = (label: string, cond: boolean, detail?: unknown) => {
   if (cond) {
     // eslint-disable-next-line no-console
@@ -45,8 +60,26 @@ const check = (label: string, cond: boolean, detail?: unknown) => {
   } else {
     failures += 1;
     // eslint-disable-next-line no-console
-    console.error(`  FAIL ${label}`, detail ?? '');
+    console.error(
+      `  FAIL ${label}`,
+      detail === undefined ? '' : redactFakeConfigSecrets(detail),
+    );
   }
+};
+
+// Spy on console output so the suite can prove no fake secret is ever printed.
+const consoleOutputLines: string[] = [];
+const originalConsoleLog = console.log;
+const originalConsoleError = console.error;
+// eslint-disable-next-line no-console
+console.log = (...args: unknown[]) => {
+  consoleOutputLines.push(args.map((arg) => String(arg)).join(' '));
+  originalConsoleLog(...args);
+};
+// eslint-disable-next-line no-console
+console.error = (...args: unknown[]) => {
+  consoleOutputLines.push(args.map((arg) => String(arg)).join(' '));
+  originalConsoleError(...args);
 };
 
 const source = readFileSync(new URL('./TeamTemplatesPage.tsx', import.meta.url), 'utf8');
@@ -486,6 +519,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, options?: RequestInit) => {
 }) as typeof fetch;
 
 let setHarnessLocale: ((locale: Locale) => void) | null = null;
+const toastMessages: string[] = [];
 const WorkspaceHarness = () => {
   const [locale, setLocale] = useState<Locale>('en');
   setHarnessLocale = setLocale;
@@ -496,7 +530,9 @@ const WorkspaceHarness = () => {
     selectedProjectId: 'project-1',
     refreshMembers: async () => undefined,
     refreshSessions: async () => undefined,
-    showToast: () => undefined,
+    showToast: (message: string) => {
+      toastMessages.push(String(message));
+    },
     skills: [],
     t: (key: string) => key,
   } as unknown as WorkspaceContextProps;
@@ -632,6 +668,14 @@ check(
   'rendered secret-bearing template shows no sensitive-value copy hint',
   !/(sensitive|secret|敏感)/i.test(rootElement.textContent ?? ''),
 );
+check(
+  'toasts never print fake config secrets',
+  toastMessages.every(
+    (message) =>
+      !FAKE_CONFIG_SECRETS.some((secret) => message.includes(secret)),
+  ),
+  toastMessages,
+);
 await act(async () => {
   root.unmount();
 });
@@ -691,6 +735,12 @@ check('delete actions expose deleting state', source.includes('Deleting...') && 
 check('reuses TemplateDetailView for create and edit mode', !source.includes('<TemplateEditor') && source.includes('editorMode={editorMode}'));
 check('adds and auto-selects custom member drafts', source.includes('addCustomMember') && source.includes('setSelectedMemberId(nextMember.id)'));
 check('keeps readonly detail rendering isolated from editable controls', source.includes('const isEditing = Boolean(editorMode && form)') && source.includes('canEdit && !isEditing'));
+check(
+  'console output never prints fake config secrets',
+  consoleOutputLines.every(
+    (line) => !FAKE_CONFIG_SECRETS.some((secret) => line.includes(secret)),
+  ),
+);
 
 if (failures > 0) {
   // eslint-disable-next-line no-console
