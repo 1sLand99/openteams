@@ -157,16 +157,16 @@ impl Droid {
     }
 
     fn validate_mcp_command_overrides(&self) -> Result<(), CommandBuildError> {
-        for value in self.cmd.additional_params.as_deref().unwrap_or_default() {
-            let normalized = value.replace(['=', '\t', '\n'], " ");
-            if normalized
-                .split_ascii_whitespace()
-                .any(|token| token == "--settings")
-            {
-                return Err(CommandBuildError::InvalidShellParams(
-                    "Droid --settings is controlled by run-scoped isolation".to_string(),
-                ));
-            }
+        let additional_params = self.cmd.parsed_additional_params()?;
+        if additional_params.iter().any(|token| {
+            token == "--settings"
+                || token
+                    .strip_prefix("--settings")
+                    .is_some_and(|suffix| suffix.starts_with('='))
+        }) {
+            return Err(CommandBuildError::InvalidShellParams(
+                "Droid --settings is controlled by run-scoped isolation".to_string(),
+            ));
         }
         Ok(())
     }
@@ -571,6 +571,21 @@ mod tests {
             false,
             String::new(),
         )
+    }
+
+    #[test]
+    fn droid_rejects_quoted_run_scoped_mcp_flags() {
+        for additional_params in [
+            vec!["\"--settings\" /tmp/ambient.json".to_string()],
+            vec!["\"--settings=/tmp/ambient.json\"".to_string()],
+        ] {
+            let mut droid = test_droid();
+            droid.cmd.additional_params = Some(additional_params);
+
+            droid
+                .validate_mcp_command_overrides()
+                .expect_err("quoted Droid MCP control flags must fail closed");
+        }
     }
 
     #[test]

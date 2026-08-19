@@ -133,6 +133,23 @@ pub struct CmdOverrides {
     pub env: Option<HashMap<String, String>>,
 }
 
+impl CmdOverrides {
+    pub(crate) fn parsed_additional_params(&self) -> Result<Vec<String>, CommandBuildError> {
+        let joined = self
+            .additional_params
+            .as_deref()
+            .unwrap_or_default()
+            .join(" ");
+
+        if joined.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        split_command_line(&joined)
+            .map_err(|err| CommandBuildError::InvalidShellParams(format!("{joined}: {err}")))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
 pub struct CommandBuilder {
     /// Base executable command (e.g., "npx -y @anthropic-ai/claude-code@2.1.161")
@@ -161,31 +178,6 @@ impl CommandBuilder {
     pub fn override_base<S: Into<String>>(mut self, base: S) -> Self {
         self.base = base.into();
         self
-    }
-
-    fn extend_shell_params<I>(mut self, more: I) -> Result<Self, CommandBuildError>
-    where
-        I: IntoIterator,
-        I::Item: Into<String>,
-    {
-        let joined = more
-            .into_iter()
-            .map(|p| p.into())
-            .collect::<Vec<String>>()
-            .join(" ");
-
-        if joined.trim().is_empty() {
-            return Ok(self);
-        }
-
-        let extra: Vec<String> = split_command_line(&joined)
-            .map_err(|err| CommandBuildError::InvalidShellParams(format!("{joined}: {err}")))?;
-
-        match &mut self.params {
-            Some(p) => p.extend(extra),
-            None => self.params = Some(extra),
-        }
-        Ok(self)
     }
 
     pub fn extend_params<I>(mut self, more: I) -> Self
@@ -275,10 +267,11 @@ pub fn apply_overrides(
     } else {
         builder
     };
-    if let Some(ref extra) = overrides.additional_params {
-        builder.extend_shell_params(extra.clone())
-    } else {
+    let additional_params = overrides.parsed_additional_params()?;
+    if additional_params.is_empty() {
         Ok(builder)
+    } else {
+        Ok(builder.extend_params(additional_params))
     }
 }
 
@@ -300,7 +293,9 @@ pub fn command_is_available(base_command: &str, overrides: &CmdOverrides) -> boo
 
 #[cfg(test)]
 mod tests {
-    use super::{CmdOverrides, command_is_available, redacted_command};
+    use super::{
+        CmdOverrides, CommandBuilder, apply_overrides, command_is_available, redacted_command,
+    };
 
     fn quoted_current_executable() -> String {
         format!(
@@ -333,6 +328,28 @@ mod tests {
             "openteams-command-that-does-not-exist",
             &overrides
         ));
+    }
+
+    #[test]
+    fn additional_params_parser_matches_built_command_tokens() {
+        let overrides = CmdOverrides {
+            additional_params: Some(vec![
+                "\"--mcp-config\"".to_string(),
+                "\"/tmp/member config.json\"".to_string(),
+            ]),
+            ..CmdOverrides::default()
+        };
+        let parsed = overrides
+            .parsed_additional_params()
+            .expect("parse quoted additional parameters");
+        let (_, built_args) = apply_overrides(CommandBuilder::new("adapter"), &overrides)
+            .expect("apply quoted additional parameters")
+            .build_initial()
+            .expect("build command")
+            .into_parts_for_test();
+
+        assert_eq!(parsed, ["--mcp-config", "/tmp/member config.json"]);
+        assert_eq!(built_args, parsed);
     }
 
     #[test]

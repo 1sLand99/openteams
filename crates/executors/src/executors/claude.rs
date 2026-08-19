@@ -195,12 +195,13 @@ impl ClaudeCode {
     }
 
     fn validate_mcp_command_overrides(&self) -> Result<(), CommandBuildError> {
-        for value in self.cmd.additional_params.as_deref().unwrap_or_default() {
-            let normalized = value.replace(['=', '\t', '\n'], " ");
-            if let Some(flag) = ["--mcp-config", "--strict-mcp-config"].iter().find(|flag| {
-                normalized
-                    .split_ascii_whitespace()
-                    .any(|token| token == **flag)
+        let additional_params = self.cmd.parsed_additional_params()?;
+        for flag in ["--mcp-config", "--strict-mcp-config"] {
+            if additional_params.iter().any(|token| {
+                token == flag
+                    || token
+                        .strip_prefix(flag)
+                        .is_some_and(|suffix| suffix.starts_with('='))
             }) {
                 return Err(CommandBuildError::InvalidShellParams(format!(
                     "Claude {flag} is controlled by run-scoped MCP isolation"
@@ -2441,6 +2442,22 @@ mod tests {
             false,
             String::new(),
         )
+    }
+
+    #[test]
+    fn claude_rejects_quoted_run_scoped_mcp_flags() {
+        for additional_params in [
+            vec!["\"--mcp-config\" /tmp/ambient.json".to_string()],
+            vec!["\"--mcp-config=/tmp/ambient.json\"".to_string()],
+            vec!["\"--strict-mcp-config\"".to_string()],
+        ] {
+            let mut executor = test_executor();
+            executor.cmd.additional_params = Some(additional_params);
+
+            executor
+                .validate_mcp_command_overrides()
+                .expect_err("quoted Claude MCP control flags must fail closed");
+        }
     }
 
     #[tokio::test]
