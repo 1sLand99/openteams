@@ -11,7 +11,10 @@ use workspace_utils::msg_store::MsgStore;
 use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
     AcpCapabilityProbe, AcpClientServicePolicy, AcpExecutionOptions,
-    mcp::{AcpMcpPolicy, resolve_effective_mcp_config, write_mcp_isolation_settings},
+    mcp::{
+        AcpMcpPolicy, load_prepared_acp_mcp_config, pin_mcp_run_environment,
+        prepare_acp_mcp_for_run, write_mcp_isolation_settings,
+    },
 };
 use crate::{
     approvals::ExecutorApprovalService,
@@ -24,7 +27,8 @@ use crate::{
         StandardCodingAgentExecutor,
         utils::{dotenv_has_nonempty_value, json_has_nonempty_string, read_json_file},
     },
-    mcp_config::{McpConfig, read_canonical_mcp_config},
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun},
     model_discovery::{
         ProviderKind, cli_model_commands, discover_from_sources, runner_config_paths,
     },
@@ -41,6 +45,7 @@ const QWEN_AUTH_ENV_VARS: &[&str] = &[
     "GOOGLE_API_KEY",
 ];
 const QWEN_STREAM_IDLE_TIMEOUT_MS_ENV: &str = "QWEN_STREAM_IDLE_TIMEOUT_MS";
+const QWEN_SYSTEM_SETTINGS_ENV: &str = "QWEN_CODE_SYSTEM_SETTINGS_PATH";
 // ACP agents can legitimately be quiet while a tool runs. The workflow runtime
 // still detects genuinely stalled runs, so leave Qwen's shorter transport-level
 // idle timer disabled unless the user has explicitly configured one.
@@ -155,7 +160,7 @@ impl QwenCode {
         apply_overrides(builder, &self.cmd)
     }
 
-    async fn acp_harness(&self) -> Result<AcpAgentHarness, ExecutorError> {
+    async fn acp_harness(&self, env: &ExecutionEnv) -> Result<AcpAgentHarness, ExecutorError> {
         let options = self.acp.clone().unwrap_or_default();
         let approval_policy = match self.effective_approval_mode() {
             AcpApprovalMode::Ask => AcpApprovalPolicy::Ask,
@@ -211,12 +216,7 @@ impl QwenCode {
         for selection in config_overrides {
             harness = harness.with_config_override(selection);
         }
-        let config_path = self.default_mcp_config_path();
-        let canonical = match config_path {
-            Some(path) => read_canonical_mcp_config(&path, &McpConfig::canonical_acp()).await?,
-            None => serde_json::json!({ "mcpServers": {} }),
-        };
-        let effective = resolve_effective_mcp_config(&canonical, &self.acp_mcp_policy)?;
+        let effective = load_prepared_acp_mcp_config(env).await?;
         tracing::debug!(
             server_count = effective.servers.len(),
             config_hash = %effective.config_hash,
@@ -225,17 +225,7 @@ impl QwenCode {
         Ok(harness.with_mcp_servers(effective.servers))
     }
 
-    async fn acp_runtime_env(
-        &self,
-        current_dir: &Path,
-        env: &ExecutionEnv,
-    ) -> Result<ExecutionEnv, ExecutorError> {
-        let path = write_mcp_isolation_settings(
-            current_dir,
-            "qwen-acp-settings",
-            self.native_reasoning_settings()?,
-        )
-        .await?;
+    fn acp_runtime_env(&self, env: &ExecutionEnv) -> ExecutionEnv {
         let mut runtime_env = env.clone();
         if !runtime_env.contains_key(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV)
             && !self
@@ -250,11 +240,7 @@ impl QwenCode {
                 DEFAULT_QWEN_STREAM_IDLE_TIMEOUT_MS,
             );
         }
-        runtime_env.insert(
-            "QWEN_CODE_SYSTEM_SETTINGS_PATH",
-            path.to_string_lossy().to_string(),
-        );
-        Ok(runtime_env)
+        runtime_env
     }
 }
 
@@ -267,6 +253,28 @@ fn invalid_reasoning_effort(message: impl Into<String>) -> ExecutorError {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for QwenCode {
+    async fn prepare_mcp_for_run(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        context: &McpRunContext,
+        env: &mut ExecutionEnv,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        let prepared =
+            prepare_acp_mcp_for_run(canonical, context, env, &mut self.cmd, "qwen-acp-mcp")?;
+        let (path, cleanup) = write_mcp_isolation_settings(
+            context,
+            "qwen-acp-settings",
+            self.native_reasoning_settings()?,
+        )?;
+        pin_mcp_run_environment(
+            env,
+            &mut self.cmd,
+            QWEN_SYSTEM_SETTINGS_ENV,
+            path.to_string_lossy().into_owned(),
+        );
+        Ok(prepared.with_cleanup(cleanup))
+    }
+
     fn overlay_acp_execution_options(&mut self, higher_priority: &AcpExecutionOptions) {
         let inherited = self.acp.clone().unwrap_or_default();
         self.acp = Some(inherited.overlay(higher_priority));
@@ -368,8 +376,8 @@ impl StandardCodingAgentExecutor for QwenCode {
     ) -> Result<SpawnedChild, ExecutorError> {
         let qwen_command = self.build_command_builder()?.build_initial()?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
-        let harness = self.acp_harness().await?;
-        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
+        let runtime_env = self.acp_runtime_env(env);
+        let harness = self.acp_harness(&runtime_env).await?;
         harness
             .spawn_with_command(
                 current_dir,
@@ -392,8 +400,8 @@ impl StandardCodingAgentExecutor for QwenCode {
     ) -> Result<SpawnedChild, ExecutorError> {
         let qwen_command = self.build_command_builder()?.build_follow_up(&[])?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
-        let harness = self.acp_harness().await?;
-        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
+        let runtime_env = self.acp_runtime_env(env);
+        let harness = self.acp_harness(&runtime_env).await?;
         harness
             .spawn_follow_up_with_command(
                 current_dir,
@@ -414,8 +422,8 @@ impl StandardCodingAgentExecutor for QwenCode {
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
         let command = self.build_command_builder()?.build_initial()?;
-        let harness = self.acp_harness().await?;
-        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
+        let runtime_env = self.acp_runtime_env(env);
+        let harness = self.acp_harness(&runtime_env).await?;
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
         harness
@@ -439,8 +447,8 @@ impl StandardCodingAgentExecutor for QwenCode {
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
         let command = self.build_command_builder()?.build_follow_up(&[])?;
-        let harness = self.acp_harness().await?;
-        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
+        let runtime_env = self.acp_runtime_env(env);
+        let harness = self.acp_harness(&runtime_env).await?;
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
         harness
@@ -530,6 +538,11 @@ fn auth_env_keys(value: &Value) -> Box<dyn Iterator<Item = &str> + '_> {
 mod tests {
     use super::*;
 
+    fn run_context(workspace: &Path) -> McpRunContext {
+        McpRunContext::new(workspace, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .expect("run context")
+    }
+
     #[test]
     fn custom_model_provider_counts_as_authentication() {
         let value = serde_json::json!({
@@ -591,24 +604,27 @@ mod tests {
 
     #[tokio::test]
     async fn acp_writes_native_qwen_reasoning_fallback() {
-        let workspace =
-            std::env::temp_dir().join(format!("openteams-qwen-{}", uuid::Uuid::new_v4()));
-        tokio::fs::create_dir_all(&workspace)
-            .await
-            .expect("create workspace");
+        let workspace = tempfile::tempdir().expect("workspace");
         let mut qwen = qwen_with_approval(None);
         qwen.thinking_effort = Some("high".to_string());
-        let env = ExecutionEnv::new(Default::default(), false, String::new());
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
 
-        let runtime_env = qwen
-            .acp_runtime_env(&workspace, &env)
+        let prepared = qwen
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(workspace.path()),
+                &mut env,
+            )
             .await
-            .expect("ACP runtime environment");
-        let settings_path = runtime_env
-            .get("QWEN_CODE_SYSTEM_SETTINGS_PATH")
-            .expect("Qwen system settings path");
+            .expect("Qwen MCP preparation");
+        let runtime_env = qwen.acp_runtime_env(&env);
+        let settings_path = std::path::PathBuf::from(
+            runtime_env
+                .get(QWEN_SYSTEM_SETTINGS_ENV)
+                .expect("Qwen system settings path"),
+        );
         let settings: Value = serde_json::from_slice(
-            &tokio::fs::read(settings_path)
+            &tokio::fs::read(&settings_path)
                 .await
                 .expect("read Qwen system settings"),
         )
@@ -628,26 +644,17 @@ mod tests {
                 .is_empty()
         );
 
-        tokio::fs::remove_dir_all(workspace)
-            .await
-            .expect("remove workspace");
+        drop(prepared.into_cleanup());
+        assert!(!settings_path.exists());
     }
 
     #[tokio::test]
     async fn explicit_qwen_stream_idle_timeout_is_preserved() {
-        let workspace =
-            std::env::temp_dir().join(format!("openteams-qwen-{}", uuid::Uuid::new_v4()));
-        tokio::fs::create_dir_all(&workspace)
-            .await
-            .expect("create workspace");
         let qwen = qwen_with_approval(None);
         let mut env = ExecutionEnv::new(Default::default(), false, String::new());
         env.insert(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, "900000");
 
-        let runtime_env = qwen
-            .acp_runtime_env(&workspace, &env)
-            .await
-            .expect("ACP runtime environment");
+        let runtime_env = qwen.acp_runtime_env(&env);
 
         assert_eq!(
             runtime_env
@@ -655,10 +662,33 @@ mod tests {
                 .map(String::as_str),
             Some("900000")
         );
+    }
 
-        tokio::fs::remove_dir_all(workspace)
+    #[tokio::test]
+    async fn public_preparation_uses_member_canonical_not_legacy_allowlist() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut qwen = qwen_with_approval(None);
+        qwen.acp_mcp_policy = AcpMcpPolicy {
+            allowed_server_names: Some(Default::default()),
+            disabled_server_names: Default::default(),
+        };
+        let canonical = MemberMcpConfig {
+            mcp_servers: [("member-only".to_string(), json!({"command": "/bin/echo"}))]
+                .into_iter()
+                .collect(),
+        };
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let prepared = qwen
+            .prepare_mcp_for_run(&canonical, &run_context(workspace.path()), &mut env)
             .await
-            .expect("remove workspace");
+            .expect("Qwen MCP preparation");
+        let effective = load_prepared_acp_mcp_config(&env)
+            .await
+            .expect("prepared member config");
+
+        assert_eq!(effective.server_names(), ["member-only".to_string()].into());
+        drop(prepared.into_cleanup());
     }
 
     #[test]

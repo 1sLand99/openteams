@@ -10,7 +10,7 @@ use workspace_utils::msg_store::MsgStore;
 use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
     AcpCapabilityProbe, AcpClientServicePolicy, AcpExecutionOptions,
-    mcp::{AcpMcpPolicy, resolve_effective_mcp_config},
+    mcp::{AcpMcpPolicy, load_prepared_acp_mcp_config, prepare_acp_mcp_for_run},
 };
 use crate::{
     approvals::ExecutorApprovalService,
@@ -24,7 +24,8 @@ use crate::{
         utils::{json_has_nonempty_string, read_json_file},
     },
     logs::utils::patch,
-    mcp_config::{McpConfig, read_canonical_mcp_config},
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun},
     model_discovery::{ModelCollector, read_config_value},
     skill_config::NativeSkillConfigBackend,
 };
@@ -142,7 +143,10 @@ impl QoderCli {
         apply_overrides(builder, &self.cmd)
     }
 
-    async fn acp_harness(&self) -> Result<(AcpAgentHarness, BTreeSet<String>), ExecutorError> {
+    async fn acp_harness(
+        &self,
+        env: &ExecutionEnv,
+    ) -> Result<(AcpAgentHarness, BTreeSet<String>), ExecutorError> {
         let options = self.acp.clone().unwrap_or_default();
         let approval_policy = match self.effective_approval_mode() {
             AcpApprovalMode::Ask => AcpApprovalPolicy::Ask,
@@ -185,27 +189,8 @@ impl QoderCli {
             harness = harness.with_config_override(selection);
         }
 
-        let canonical = match self.default_mcp_config_path() {
-            Some(path) => read_canonical_mcp_config(&path, &McpConfig::canonical_acp()).await?,
-            None => serde_json::json!({ "mcpServers": {} }),
-        };
-        let effective = resolve_effective_mcp_config(&canonical, &self.acp_mcp_policy)?;
-        let allowed_names = effective
-            .servers
-            .iter()
-            .filter_map(|server| match server {
-                agent_client_protocol::schema::v1::McpServer::Stdio(server) => {
-                    Some(server.name.clone())
-                }
-                agent_client_protocol::schema::v1::McpServer::Http(server) => {
-                    Some(server.name.clone())
-                }
-                agent_client_protocol::schema::v1::McpServer::Sse(server) => {
-                    Some(server.name.clone())
-                }
-                _ => None,
-            })
-            .collect();
+        let effective = load_prepared_acp_mcp_config(env).await?;
+        let allowed_names = effective.server_names();
         tracing::debug!(
             server_count = effective.servers.len(),
             config_hash = %effective.config_hash,
@@ -257,6 +242,15 @@ impl QoderCli {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for QoderCli {
+    async fn prepare_mcp_for_run(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        context: &McpRunContext,
+        env: &mut ExecutionEnv,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        prepare_acp_mcp_for_run(canonical, context, env, &mut self.cmd, "qoder-acp-mcp")
+    }
+
     fn overlay_acp_execution_options(&mut self, higher_priority: &AcpExecutionOptions) {
         let inherited = self.acp.clone().unwrap_or_default();
         self.acp = Some(inherited.overlay(higher_priority));
@@ -359,7 +353,7 @@ impl StandardCodingAgentExecutor for QoderCli {
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let (harness, allowed) = self.acp_harness().await?;
+        let (harness, allowed) = self.acp_harness(env).await?;
         let command = self.build_command_builder(&allowed)?.build_initial()?;
         harness
             .spawn_with_command(
@@ -379,7 +373,7 @@ impl StandardCodingAgentExecutor for QoderCli {
         prompt: &ExecutorPrompt,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let (harness, allowed) = self.acp_harness().await?;
+        let (harness, allowed) = self.acp_harness(env).await?;
         let command = self.build_command_builder(&allowed)?.build_initial()?;
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
@@ -403,7 +397,7 @@ impl StandardCodingAgentExecutor for QoderCli {
         _reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let (harness, allowed) = self.acp_harness().await?;
+        let (harness, allowed) = self.acp_harness(env).await?;
         let command = self.build_command_builder(&allowed)?.build_follow_up(&[])?;
         harness
             .spawn_follow_up_with_command(
@@ -426,7 +420,7 @@ impl StandardCodingAgentExecutor for QoderCli {
         _reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let (harness, allowed) = self.acp_harness().await?;
+        let (harness, allowed) = self.acp_harness(env).await?;
         let command = self.build_command_builder(&allowed)?.build_follow_up(&[])?;
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
@@ -487,6 +481,11 @@ impl StandardCodingAgentExecutor for QoderCli {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_context(workspace: &Path) -> McpRunContext {
+        McpRunContext::new(workspace, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .expect("run context")
+    }
 
     fn qoder() -> QoderCli {
         QoderCli {
@@ -551,6 +550,87 @@ mod tests {
         assert!(args.windows(2).any(|pair| {
             pair[0] == "--allowed-mcp-server-names" && pair[1] == "context7,github"
         }));
+    }
+
+    #[tokio::test]
+    async fn public_preparation_pins_exact_member_allowlist_and_ignores_legacy_policy() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut executor = qoder();
+        executor.acp_mcp_policy = AcpMcpPolicy {
+            allowed_server_names: Some(Default::default()),
+            disabled_server_names: Default::default(),
+        };
+        let canonical = MemberMcpConfig {
+            mcp_servers: [
+                (
+                    "alpha".to_string(),
+                    serde_json::json!({"command": "/bin/echo"}),
+                ),
+                (
+                    "beta".to_string(),
+                    serde_json::json!({"command": "/bin/echo"}),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let prepared = executor
+            .prepare_mcp_for_run(&canonical, &run_context(workspace.path()), &mut env)
+            .await
+            .expect("Qoder MCP preparation");
+        let (_, allowed) = executor.acp_harness(&env).await.expect("Qoder ACP harness");
+        let (_, args) = executor
+            .build_command_builder(&allowed)
+            .expect("Qoder command")
+            .build_initial()
+            .expect("initial command")
+            .into_parts_for_test();
+
+        assert_eq!(
+            allowed,
+            BTreeSet::from(["alpha".to_string(), "beta".to_string()])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair[0] == "--allowed-mcp-server-names" && pair[1] == "alpha,beta" })
+        );
+        assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
+        drop(prepared.into_cleanup());
+    }
+
+    #[tokio::test]
+    async fn public_empty_member_map_keeps_strict_empty_override() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut executor = qoder();
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let prepared = executor
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(workspace.path()),
+                &mut env,
+            )
+            .await
+            .expect("Qoder empty MCP preparation");
+        let (_, allowed) = executor
+            .acp_harness(&env)
+            .await
+            .expect("Qoder empty ACP harness");
+        let (_, args) = executor
+            .build_command_builder(&allowed)
+            .expect("Qoder command")
+            .build_initial()
+            .expect("initial command")
+            .into_parts_for_test();
+
+        assert!(allowed.is_empty());
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair[0] == "--allowed-mcp-server-names" && pair[1].is_empty() })
+        );
+        drop(prepared.into_cleanup());
     }
 
     #[test]

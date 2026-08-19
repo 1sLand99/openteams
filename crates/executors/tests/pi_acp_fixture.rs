@@ -16,10 +16,13 @@ use std::{
 use executors::{
     env::{ExecutionEnv, RepoContext},
     executors::{
-        ExecutorExitResult, StandardCodingAgentExecutor,
+        ExecutorError, ExecutorExitResult, ExecutorRunCleanup, SpawnedChild,
+        StandardCodingAgentExecutor,
         acp::{AcpEvent, events::AcpRuntimeEvent},
         pi::Pi,
     },
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun},
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -150,6 +153,51 @@ fn make_pi_and_env(root: &Path, executable: bool) -> (Pi, ExecutionEnv, PathBuf)
     (pi, env, env_info.prompts)
 }
 
+async fn prepare_pi_run(
+    pi: &Pi,
+    root: &Path,
+    env: &ExecutionEnv,
+    canonical: &MemberMcpConfig,
+) -> Result<(Pi, ExecutionEnv, PreparedMcpRun), ExecutorError> {
+    let mut pi = pi.clone();
+    let mut env = env.clone();
+    let context = McpRunContext::new(root, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())?;
+    let prepared = pi
+        .prepare_mcp_for_run(canonical, &context, &mut env)
+        .await?;
+    Ok((pi, env, prepared))
+}
+
+fn attach_prepared_cleanup(mut spawned: SpawnedChild, prepared: PreparedMcpRun) -> SpawnedChild {
+    spawned.cleanup = ExecutorRunCleanup::combine(spawned.cleanup.take(), prepared.into_cleanup());
+    spawned
+}
+
+async fn spawn_prepared_pi(
+    pi: &Pi,
+    root: &Path,
+    prompt: &str,
+    env: &ExecutionEnv,
+) -> Result<SpawnedChild, ExecutorError> {
+    let (pi, env, prepared) = prepare_pi_run(pi, root, env, &MemberMcpConfig::default()).await?;
+    let spawned = pi.spawn(root, prompt, &env).await?;
+    Ok(attach_prepared_cleanup(spawned, prepared))
+}
+
+async fn spawn_prepared_pi_follow_up(
+    pi: &Pi,
+    root: &Path,
+    prompt: &str,
+    session_id: &str,
+    env: &ExecutionEnv,
+) -> Result<SpawnedChild, ExecutorError> {
+    let (pi, env, prepared) = prepare_pi_run(pi, root, env, &MemberMcpConfig::default()).await?;
+    let spawned = pi
+        .spawn_follow_up(root, prompt, session_id, None, &env)
+        .await?;
+    Ok(attach_prepared_cleanup(spawned, prepared))
+}
+
 async fn finish_turn(
     mut spawned: executors::executors::SpawnedChild,
 ) -> (Vec<AcpEvent>, ExecutorExitResult) {
@@ -183,8 +231,7 @@ async fn finish_turn(
 async fn fake_npx_does_not_contact_npm_or_public_network() {
     let temp = tempfile::tempdir().expect("offline workspace");
     let (pi, env, _) = make_pi_and_env(temp.path(), true);
-    let spawned = pi
-        .spawn(temp.path(), "verify-offline", &env)
+    let spawned = spawn_prepared_pi(&pi, temp.path(), "verify-offline", &env)
         .await
         .expect("spawn");
     let (events, exit) = finish_turn(spawned).await;
@@ -202,8 +249,7 @@ async fn offline_pi_lifecycle_new_prompt_follow_up_cancel_and_startup_failure() 
     let temp = tempfile::tempdir().expect("workspace");
     let (pi, env, prompts) = make_pi_and_env(temp.path(), true);
 
-    let first = pi
-        .spawn(temp.path(), "first", &env)
+    let first = spawn_prepared_pi(&pi, temp.path(), "first", &env)
         .await
         .expect("spawn first");
     let runtime_dir = temp.path().join(".openteams/tmp");
@@ -227,8 +273,7 @@ async fn offline_pi_lifecycle_new_prompt_follow_up_cancel_and_startup_failure() 
     assert!(first_events.iter().any(|e| matches!(e, AcpEvent::Done(_))));
     assert!(first_files.iter().all(|p| !p.exists()));
 
-    let follow_up = pi
-        .spawn_follow_up(temp.path(), "second", &session_id, None, &env)
+    let follow_up = spawn_prepared_pi_follow_up(&pi, temp.path(), "second", &session_id, &env)
         .await
         .expect("follow-up");
     let (fu_events, fu_exit) = finish_turn(follow_up).await;
@@ -245,10 +290,14 @@ async fn offline_pi_lifecycle_new_prompt_follow_up_cancel_and_startup_failure() 
 
     let mut cancel_env = env.clone();
     cancel_env.insert("OPENTEAMS_FAKE_PI_HANG", "1");
-    let mut cancelled = pi
-        .spawn(temp.path(), "cancel-me", &cancel_env)
+    let mut cancelled = spawn_prepared_pi(&pi, temp.path(), "cancel-me", &cancel_env)
         .await
         .expect("cancellable spawn");
+    let cancel_files: Vec<_> = fs::read_dir(&runtime_dir)
+        .expect("cancel runtime files")
+        .map(|entry| entry.expect("cancel runtime entry").path())
+        .collect();
+    assert_eq!(cancel_files.len(), 5);
     cancelled.cancel.as_ref().expect("cancel token").cancel();
     let cancel_exit = cancelled.exit_signal.take().expect("cancel exit");
     assert!(matches!(
@@ -259,6 +308,10 @@ async fn offline_pi_lifecycle_new_prompt_follow_up_cancel_and_startup_failure() 
         ExecutorExitResult::Success
     ));
     drop(cancelled);
+    assert!(
+        cancel_files.iter().all(|path| !path.exists()),
+        "cancellation must clean every Pi run asset"
+    );
 
     let protocol_log = temp.path().join("protocol.jsonl");
     if protocol_log.exists() {
@@ -273,7 +326,7 @@ async fn offline_pi_lifecycle_new_prompt_follow_up_cancel_and_startup_failure() 
     let (fail_pi, fail_env, _) = make_pi_and_env(fail_temp.path(), false);
     let error = tokio::time::timeout(
         Duration::from_secs(15),
-        fail_pi.spawn(fail_temp.path(), "must fail", &fail_env),
+        spawn_prepared_pi(&fail_pi, fail_temp.path(), "must fail", &fail_env),
     )
     .await
     .expect("timeout")
@@ -306,8 +359,7 @@ async fn offline_pi_model_refresh_and_initialize_events() {
 async fn offline_pi_token_usage_is_projected() {
     let temp = tempfile::tempdir().expect("token workspace");
     let (pi, env, _) = make_pi_and_env(temp.path(), true);
-    let spawned = pi
-        .spawn(temp.path(), "token-test", &env)
+    let spawned = spawn_prepared_pi(&pi, temp.path(), "token-test", &env)
         .await
         .expect("spawn");
     let (events, exit) = finish_turn(spawned).await;
@@ -321,8 +373,7 @@ async fn offline_pi_tool_call_is_projected() {
     let temp = tempfile::tempdir().expect("tool workspace");
     let (pi, mut env, _) = make_pi_and_env(temp.path(), true);
     env.insert("OPENTEAMS_FAKE_PI_TOOL_CALL", "use-tool");
-    let spawned = pi
-        .spawn(temp.path(), "use-tool", &env)
+    let spawned = spawn_prepared_pi(&pi, temp.path(), "use-tool", &env)
         .await
         .expect("spawn");
     let (events, exit) = finish_turn(spawned).await;
@@ -390,8 +441,7 @@ async fn offline_pi_three_approval_policies_verify_permission_decisions() {
         });
         env.insert("OPENTEAMS_FAKE_PI_TOOL_CALL", "use-tool");
 
-        let spawned = pi
-            .spawn(temp.path(), "use-tool", &env)
+        let spawned = spawn_prepared_pi(&pi, temp.path(), "use-tool", &env)
             .await
             .expect("spawn");
         let (events, exit) = finish_turn(spawned).await;
@@ -455,8 +505,7 @@ async fn offline_pi_native_and_mcp_tools_verify_three_approval_policies() {
             });
             env.insert(trigger_env, "use-tool");
 
-            let spawned = pi
-                .spawn(temp.path(), "use-tool", &env)
+            let spawned = spawn_prepared_pi(&pi, temp.path(), "use-tool", &env)
                 .await
                 .expect("spawn");
             let (events, exit) = finish_turn(spawned).await;
@@ -496,95 +545,118 @@ async fn offline_pi_native_and_mcp_tools_verify_three_approval_policies() {
     }
 }
 
-#[test]
-fn offline_pi_mcp_snapshot_redacts_secrets_and_filters_unauthorized() {
-    use executors::executors::acp::mcp::{AcpMcpPolicy, resolve_isolated_mcp_snapshot};
-    let secret = "pi-test-secret-never-leak";
-    let canonical = serde_json::json!({
-        "mcpServers": {
-            "authorized": {"command": "/bin/echo", "env": {"TOKEN": secret}},
-            "unauthorized": {"command": "/bin/echo", "env": {"KEY": secret}}
+#[tokio::test]
+async fn offline_pi_public_preparation_redacts_fake_secret_and_ignores_legacy_allowlist() {
+    use executors::executors::acp::mcp::AcpMcpPolicy;
+
+    let temp = tempfile::tempdir().expect("MCP preparation workspace");
+    let secret = "pi-public-preparation-fake-secret-never-leak";
+    let pi = Pi {
+        acp_mcp_policy: AcpMcpPolicy {
+            allowed_server_names: Some(Default::default()),
+            disabled_server_names: Default::default(),
         },
-        "settings": {"hostConfigDiscovery": "off"}
-    });
-    let policy = AcpMcpPolicy {
-        allowed_server_names: Some(["authorized".to_string()].into_iter().collect()),
-        disabled_server_names: Default::default(),
+        ..Pi::default()
     };
-    let snapshot = resolve_isolated_mcp_snapshot(&canonical, &policy).expect("snapshot");
-    let servers = snapshot.get("mcpServers").unwrap().as_object().unwrap();
-    assert!(
-        servers.contains_key("authorized"),
-        "authorized server must be present"
+    let env = ExecutionEnv::new(
+        RepoContext::new(temp.path().to_path_buf(), Vec::new()),
+        false,
+        String::new(),
     );
-    assert!(
-        !servers.contains_key("unauthorized"),
-        "unauthorized server must be filtered out"
+    let canonical = MemberMcpConfig {
+        mcp_servers: [(
+            "member-only".to_string(),
+            serde_json::json!({
+                "command": "/bin/echo",
+                "env": {"TOKEN": secret}
+            }),
+        )]
+        .into_iter()
+        .collect(),
+    };
+
+    let (_, prepared_env, prepared) = prepare_pi_run(&pi, temp.path(), &env, &canonical)
+        .await
+        .expect("Pi public preparation");
+    let snapshot_path = PathBuf::from(
+        prepared_env
+            .get("OPENTEAMS_PI_MCP_SNAPSHOT")
+            .expect("Pi snapshot path"),
     );
-    // Verify the snapshot disables hostConfigDiscovery
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&fs::read(&snapshot_path).expect("read Pi snapshot"))
+            .expect("parse Pi snapshot");
+
+    assert!(snapshot["mcpServers"].get("member-only").is_some());
     assert_eq!(
-        snapshot
-            .get("settings")
-            .and_then(|s| s.get("hostConfigDiscovery"))
-            .and_then(|v| v.as_str()),
-        Some("off"),
-        "hostConfigDiscovery must be off"
+        snapshot["mcpServers"].as_object().map(serde_json::Map::len),
+        Some(1)
     );
-}
-
-#[test]
-fn offline_pi_empty_mcp_allowlist_produces_empty_snapshot() {
-    use executors::executors::acp::mcp::{AcpMcpPolicy, resolve_isolated_mcp_snapshot};
-    let canonical = serde_json::json!({
-        "mcpServers": {
-            "server1": {"command": "/bin/echo"},
-            "server2": {"command": "/bin/echo"}
-        },
-        "settings": {"hostConfigDiscovery": "off"}
-    });
-    let policy = AcpMcpPolicy {
-        allowed_server_names: Some(Default::default()),
-        disabled_server_names: Default::default(),
-    };
-    let snapshot = resolve_isolated_mcp_snapshot(&canonical, &policy).expect("snapshot");
-    let servers = snapshot
-        .get("mcpServers")
-        .and_then(|v| v.as_object())
-        .expect("servers");
-    assert!(
-        servers.is_empty(),
-        "empty allowlist must produce empty snapshot"
-    );
-}
-
-#[test]
-fn offline_pi_missing_mcp_allowlist_includes_all_configured_servers() {
-    use executors::executors::acp::mcp::{AcpMcpPolicy, resolve_isolated_mcp_snapshot};
-    let canonical = serde_json::json!({
-        "mcpServers": {
-            "server1": {"command": "/bin/echo"},
-            "server2": {"command": "/bin/echo"}
-        },
-        "settings": {"hostConfigDiscovery": "on"}
-    });
-    let snapshot = resolve_isolated_mcp_snapshot(&canonical, &AcpMcpPolicy::default())
-        .expect("default snapshot");
-    let servers = snapshot
-        .get("mcpServers")
-        .and_then(|value| value.as_object())
-        .expect("servers");
-    assert_eq!(servers.len(), 2, "default policy must preserve all servers");
-    assert!(servers.contains_key("server1"));
-    assert!(servers.contains_key("server2"));
     assert_eq!(snapshot["settings"]["hostConfigDiscovery"], "off");
+    assert!(!format!("{prepared:?}").contains(secret));
+
+    drop(prepared.into_cleanup());
+    assert!(!snapshot_path.exists());
+}
+
+#[tokio::test]
+async fn offline_pi_explicit_empty_member_map_disables_extension_and_cleans_all_files() {
+    let temp = tempfile::tempdir().expect("empty MCP workspace");
+    let pi = Pi::default();
+    let env = ExecutionEnv::new(
+        RepoContext::new(temp.path().to_path_buf(), Vec::new()),
+        false,
+        String::new(),
+    );
+
+    let (_, prepared_env, prepared) =
+        prepare_pi_run(&pi, temp.path(), &env, &MemberMcpConfig::default())
+            .await
+            .expect("empty Pi public preparation");
+    let snapshot_path = PathBuf::from(
+        prepared_env
+            .get("OPENTEAMS_PI_MCP_SNAPSHOT")
+            .expect("Pi snapshot path"),
+    );
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&fs::read(&snapshot_path).expect("read Pi snapshot"))
+            .expect("parse Pi snapshot");
+    let runtime_dir = temp.path().join(".openteams/tmp");
+
+    assert!(
+        snapshot["mcpServers"]
+            .as_object()
+            .expect("server map")
+            .is_empty()
+    );
+    assert_eq!(snapshot["settings"]["hostConfigDiscovery"], "off");
+    assert_eq!(
+        prepared_env
+            .get("OPENTEAMS_PI_ENABLE_MCP_EXTENSION")
+            .map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(
+        fs::read_dir(&runtime_dir)
+            .expect("runtime directory")
+            .count(),
+        5
+    );
+
+    drop(prepared.into_cleanup());
+    assert!(
+        fs::read_dir(&runtime_dir)
+            .expect("runtime directory")
+            .next()
+            .is_none()
+    );
 }
 
 #[tokio::test]
 async fn offline_pi_launcher_chain_produces_real_pids() {
     let temp = tempfile::tempdir().expect("launcher workspace");
     let (pi, env, _) = make_pi_and_env(temp.path(), true);
-    let spawned = pi
-        .spawn(temp.path(), "pid-test", &env)
+    let spawned = spawn_prepared_pi(&pi, temp.path(), "pid-test", &env)
         .await
         .expect("spawn");
     let (events, exit) = finish_turn(spawned).await;
@@ -621,8 +693,7 @@ async fn offline_pi_protocol_log_records_all_methods() {
     let (pi, env, _) = make_pi_and_env(temp.path(), true);
 
     // New session
-    let spawned = pi
-        .spawn(temp.path(), "proto-test", &env)
+    let spawned = spawn_prepared_pi(&pi, temp.path(), "proto-test", &env)
         .await
         .expect("spawn");
     let (events, exit) = finish_turn(spawned).await;
@@ -636,8 +707,7 @@ async fn offline_pi_protocol_log_records_all_methods() {
         .expect("session id");
 
     // Follow-up
-    let fu = pi
-        .spawn_follow_up(temp.path(), "follow-up", &session_id, None, &env)
+    let fu = spawn_prepared_pi_follow_up(&pi, temp.path(), "follow-up", &session_id, &env)
         .await
         .expect("follow-up");
     let (_, fu_exit) = finish_turn(fu).await;
@@ -673,75 +743,71 @@ async fn offline_pi_protocol_log_records_all_methods() {
     assert!(events.iter().any(|e| matches!(e, AcpEvent::Done(_))));
 }
 
-#[test]
-fn offline_pi_two_members_have_different_mcp_snapshots() {
-    use executors::executors::acp::mcp::{AcpMcpPolicy, resolve_isolated_mcp_snapshot};
-
-    let secret = "pi-member-secret-never-leak";
-    let canonical = serde_json::json!({
-        "mcpServers": {
-            "alpha": {"command": "/bin/echo", "env": {"TOKEN": secret}},
-            "beta": {"command": "/bin/echo", "env": {"KEY": secret}},
-            "gamma": {"command": "/bin/echo"}
-        },
-        "settings": {"hostConfigDiscovery": "off"}
-    });
-
-    // Member A: only alpha allowed
-    let policy_a = AcpMcpPolicy {
-        allowed_server_names: Some(["alpha".to_string()].into_iter().collect()),
-        disabled_server_names: Default::default(),
+#[tokio::test]
+async fn offline_pi_two_members_freeze_distinct_canonical_snapshots() {
+    let temp = tempfile::tempdir().expect("member snapshot workspace");
+    let pi = Pi::default();
+    let env = ExecutionEnv::new(
+        RepoContext::new(temp.path().to_path_buf(), Vec::new()),
+        false,
+        String::new(),
+    );
+    let member_a = MemberMcpConfig {
+        mcp_servers: [(
+            "alpha".to_string(),
+            serde_json::json!({"command": "/bin/echo"}),
+        )]
+        .into_iter()
+        .collect(),
     };
-    let snapshot_a = resolve_isolated_mcp_snapshot(&canonical, &policy_a).expect("snapshot A");
-    let servers_a = snapshot_a.get("mcpServers").unwrap().as_object().unwrap();
-    assert!(
-        servers_a.contains_key("alpha"),
-        "member A should have alpha"
-    );
-    assert!(
-        !servers_a.contains_key("beta"),
-        "member A should NOT have beta"
-    );
-    assert!(
-        !servers_a.contains_key("gamma"),
-        "member A should NOT have gamma"
-    );
-
-    // Member B: only beta allowed
-    let policy_b = AcpMcpPolicy {
-        allowed_server_names: Some(["beta".to_string()].into_iter().collect()),
-        disabled_server_names: Default::default(),
+    let member_b = MemberMcpConfig {
+        mcp_servers: [(
+            "beta".to_string(),
+            serde_json::json!({"command": "/bin/echo"}),
+        )]
+        .into_iter()
+        .collect(),
     };
-    let snapshot_b = resolve_isolated_mcp_snapshot(&canonical, &policy_b).expect("snapshot B");
-    let servers_b = snapshot_b.get("mcpServers").unwrap().as_object().unwrap();
-    assert!(servers_b.contains_key("beta"), "member B should have beta");
-    assert!(
-        !servers_b.contains_key("alpha"),
-        "member B should NOT have alpha"
-    );
-    assert!(
-        !servers_b.contains_key("gamma"),
-        "member B should NOT have gamma"
-    );
 
-    // Verify snapshots are different
-    assert_ne!(
-        snapshot_a.get("mcpServers"),
-        snapshot_b.get("mcpServers"),
-        "member snapshots must differ"
-    );
+    let (_, env_a, prepared_a) = prepare_pi_run(&pi, temp.path(), &env, &member_a)
+        .await
+        .expect("member A preparation");
+    let (_, env_b, prepared_b) = prepare_pi_run(&pi, temp.path(), &env, &member_b)
+        .await
+        .expect("member B preparation");
+    let path_a = PathBuf::from(env_a.get("OPENTEAMS_PI_MCP_SNAPSHOT").expect("snapshot A"));
+    let path_b = PathBuf::from(env_b.get("OPENTEAMS_PI_MCP_SNAPSHOT").expect("snapshot B"));
+    let snapshot_a: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path_a).expect("read snapshot A"))
+            .expect("parse snapshot A");
+    let snapshot_b: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path_b).expect("read snapshot B"))
+            .expect("parse snapshot B");
 
-    // Verify hostConfigDiscovery is off in both
-    for snapshot in [&snapshot_a, &snapshot_b] {
-        assert_eq!(
-            snapshot
-                .get("settings")
-                .and_then(|s| s.get("hostConfigDiscovery"))
-                .and_then(|v| v.as_str()),
-            Some("off"),
-            "hostConfigDiscovery must be off"
-        );
-    }
+    assert_eq!(
+        snapshot_a["mcpServers"]
+            .as_object()
+            .expect("member A servers")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["alpha"]
+    );
+    assert_eq!(
+        snapshot_b["mcpServers"]
+            .as_object()
+            .expect("member B servers")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["beta"]
+    );
+    assert_ne!(path_a, path_b);
+
+    drop(prepared_a.into_cleanup());
+    drop(prepared_b.into_cleanup());
+    assert!(!path_a.exists());
+    assert!(!path_b.exists());
 }
 
 #[test]
@@ -811,7 +877,7 @@ async fn offline_pi_real_npx_smoke() {
     // Attempt to spawn - this will fail if npm cache is empty
     let result = tokio::time::timeout(
         Duration::from_secs(30),
-        pi.spawn(temp.path(), "real-smoke-test", &env),
+        spawn_prepared_pi(&pi, temp.path(), "real-smoke-test", &env),
     )
     .await;
 

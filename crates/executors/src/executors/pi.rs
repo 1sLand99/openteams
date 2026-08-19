@@ -16,7 +16,7 @@ use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
     AcpCapabilityProbe, AcpClientServicePolicy, AcpConfigOptionKind, AcpConfigOverride,
     AcpConfigValue, AcpExecutionOptions,
-    mcp::{AcpMcpPolicy, resolve_isolated_mcp_snapshot},
+    mcp::{AcpMcpPolicy, pin_mcp_run_environment, resolve_isolated_mcp_snapshot},
 };
 use crate::{
     approvals::ExecutorApprovalService,
@@ -58,6 +58,15 @@ const PI_AUTH_ENV_VARS: &[&str] = &[
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "OPENROUTER_API_KEY",
+];
+const PI_RUN_ENV_VARS: &[&str] = &[
+    "PI_ACP_PI_COMMAND",
+    "OPENTEAMS_PI_APPROVAL_EXTENSION",
+    "OPENTEAMS_PI_MCP_EXTENSION",
+    "OPENTEAMS_PI_MCP_SNAPSHOT",
+    "OPENTEAMS_PI_ENABLE_MCP_EXTENSION",
+    "OPENTEAMS_PI_SKILL_PATHS_JSON",
+    "OPENTEAMS_PI_DIAGNOSTIC_LOG",
 ];
 
 #[derive(Clone)]
@@ -331,10 +340,6 @@ pub struct Pi {
     #[ts(skip)]
     #[derivative(Debug = "ignore", PartialEq = "ignore")]
     pub approvals: Option<Arc<dyn ExecutorApprovalService>>,
-    #[serde(skip)]
-    #[ts(skip)]
-    #[derivative(Debug = "ignore", PartialEq = "ignore")]
-    runtime_snapshot: Option<Arc<PiRuntimeSnapshot>>,
 }
 
 impl Pi {
@@ -364,13 +369,6 @@ impl Pi {
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         apply_overrides(CommandBuilder::new(Self::default_command()), &self.cmd)
-    }
-
-    fn runtime_snapshot(&self) -> PiRuntimeSnapshot {
-        self.runtime_snapshot
-            .as_deref()
-            .cloned()
-            .unwrap_or_else(PiRuntimeSnapshot::empty)
     }
 
     async fn acp_harness(&self, env: &ExecutionEnv) -> Result<AcpAgentHarness, ExecutorError> {
@@ -419,26 +417,15 @@ impl Pi {
     }
 }
 
-fn validate_member_mcp_allowlist(
-    canonical: &serde_json::Value,
-    policy: &AcpMcpPolicy,
-) -> Result<(), ExecutorError> {
-    let Some(allowed) = policy.allowed_server_names.as_ref() else {
-        return Ok(());
-    };
-    let configured = canonical
-        .get("mcpServers")
-        .and_then(serde_json::Value::as_object);
-    if let Some(missing) = allowed
+fn ensure_pi_run_prepared(env: &ExecutionEnv) -> Result<(), ExecutorError> {
+    if PI_RUN_ENV_VARS
         .iter()
-        .find(|name| configured.is_none_or(|servers| !servers.contains_key(*name)))
+        .all(|key| env.get(key).is_some_and(|value| !value.trim().is_empty()))
     {
-        return Err(ExecutorError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("invalid Pi member configuration: MCP server `{missing}` is not configured"),
-        )));
+        Ok(())
+    } else {
+        Err(ExecutorError::McpIsolationNotImplemented)
     }
-    Ok(())
 }
 
 fn map_pi_follow_up_error(error: ExecutorError) -> ExecutorError {
@@ -626,16 +613,25 @@ impl StandardCodingAgentExecutor for Pi {
         &mut self,
         canonical: &MemberMcpConfig,
         context: &McpRunContext,
-        _env: &mut ExecutionEnv,
+        env: &mut ExecutionEnv,
     ) -> Result<PreparedMcpRun, ExecutorError> {
         let canonical_value = serde_json::to_value(canonical)?;
-        validate_member_mcp_allowlist(&canonical_value, &self.acp_mcp_policy)?;
-        let mcp_config = resolve_isolated_mcp_snapshot(&canonical_value, &self.acp_mcp_policy)?;
-        self.runtime_snapshot = Some(Arc::new(PiRuntimeSnapshot {
+        let mcp_config = resolve_isolated_mcp_snapshot(&canonical_value, &AcpMcpPolicy::default())?;
+        let snapshot = PiRuntimeSnapshot {
             skill_paths: context.authorized_skill_paths().to_vec(),
             mcp_config,
-        }));
-        PreparedMcpRun::new(canonical)
+        };
+        let current_dir = pi_acp_compatible_current_dir(context.current_dir());
+        let files = PiRunFiles::create(&current_dir, &snapshot)?;
+        *env = files.apply_to_env(env, &snapshot);
+        for key in PI_RUN_ENV_VARS {
+            let value = env
+                .get(key)
+                .cloned()
+                .expect("Pi run files populate every pinned environment value");
+            pin_mcp_run_environment(env, &mut self.cmd, key, value);
+        }
+        Ok(PreparedMcpRun::new(canonical)?.with_cleanup(files.into_cleanup()))
     }
 
     fn overlay_acp_execution_options(&mut self, higher_priority: &AcpExecutionOptions) {
@@ -688,15 +684,23 @@ impl StandardCodingAgentExecutor for Pi {
             Some(AcpAuthSelection::MethodId { method_id }) => Some(method_id.clone()),
             _ => None,
         });
-        let snapshot = self.runtime_snapshot();
+        let snapshot = PiRuntimeSnapshot::empty();
         let current_dir = pi_acp_compatible_current_dir(current_dir);
         let files = PiRunFiles::create(&current_dir, &snapshot)?;
-        let runtime_env = files.apply_to_env(env, &snapshot);
+        let mut runtime_env = files.apply_to_env(env, &snapshot);
+        let mut runtime_cmd = self.cmd.clone();
+        for key in PI_RUN_ENV_VARS {
+            let value = runtime_env
+                .get(key)
+                .cloned()
+                .expect("Pi probe files populate every pinned environment value");
+            pin_mcp_run_environment(&mut runtime_env, &mut runtime_cmd, key, value);
+        }
         let mut result = super::acp::runtime::probe_acp_command(
             self.build_command_builder()?.build_initial()?,
             &current_dir,
             &runtime_env,
-            &self.cmd,
+            &runtime_cmd,
             auth_method_id
                 .map(str::to_string)
                 .or(configured_auth_method_id),
@@ -722,24 +726,19 @@ impl StandardCodingAgentExecutor for Pi {
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let snapshot = self.runtime_snapshot();
+        ensure_pi_run_prepared(env)?;
         let current_dir = pi_acp_compatible_current_dir(current_dir);
-        let files = PiRunFiles::create(&current_dir, &snapshot)?;
-        let runtime_env = files.apply_to_env(env, &snapshot);
-        let mut spawned = self
-            .acp_harness(env)
+        self.acp_harness(env)
             .await?
             .spawn_with_command(
                 &current_dir,
                 self.append_prompt.combine_prompt(prompt),
                 self.build_command_builder()?.build_initial()?,
-                &runtime_env,
+                env,
                 &self.cmd,
                 approval::wrap(self.approvals.clone()),
             )
-            .await?;
-        spawned.cleanup = Some(files.into_cleanup());
-        Ok(spawned)
+            .await
     }
 
     async fn spawn_follow_up(
@@ -750,26 +749,21 @@ impl StandardCodingAgentExecutor for Pi {
         _reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let snapshot = self.runtime_snapshot();
+        ensure_pi_run_prepared(env)?;
         let current_dir = pi_acp_compatible_current_dir(current_dir);
-        let files = PiRunFiles::create(&current_dir, &snapshot)?;
-        let runtime_env = files.apply_to_env(env, &snapshot);
-        let mut spawned = self
-            .acp_harness(env)
+        self.acp_harness(env)
             .await?
             .spawn_follow_up_with_command(
                 &current_dir,
                 self.append_prompt.combine_prompt(prompt),
                 session_id,
                 self.build_command_builder()?.build_follow_up(&[])?,
-                &runtime_env,
+                env,
                 &self.cmd,
                 approval::wrap(self.approvals.clone()),
             )
             .await
-            .map_err(map_pi_follow_up_error)?;
-        spawned.cleanup = Some(files.into_cleanup());
-        Ok(spawned)
+            .map_err(map_pi_follow_up_error)
     }
 
     async fn spawn_structured(
@@ -780,24 +774,19 @@ impl StandardCodingAgentExecutor for Pi {
     ) -> Result<SpawnedChild, ExecutorError> {
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
-        let snapshot = self.runtime_snapshot();
+        ensure_pi_run_prepared(env)?;
         let current_dir = pi_acp_compatible_current_dir(current_dir);
-        let files = PiRunFiles::create(&current_dir, &snapshot)?;
-        let runtime_env = files.apply_to_env(env, &snapshot);
-        let mut spawned = self
-            .acp_harness(env)
+        self.acp_harness(env)
             .await?
             .spawn_structured_with_command(
                 &current_dir,
                 prompt,
                 self.build_command_builder()?.build_initial()?,
-                &runtime_env,
+                env,
                 &self.cmd,
                 approval::wrap(self.approvals.clone()),
             )
-            .await?;
-        spawned.cleanup = Some(files.into_cleanup());
-        Ok(spawned)
+            .await
     }
 
     async fn spawn_follow_up_structured(
@@ -810,26 +799,21 @@ impl StandardCodingAgentExecutor for Pi {
     ) -> Result<SpawnedChild, ExecutorError> {
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
-        let snapshot = self.runtime_snapshot();
+        ensure_pi_run_prepared(env)?;
         let current_dir = pi_acp_compatible_current_dir(current_dir);
-        let files = PiRunFiles::create(&current_dir, &snapshot)?;
-        let runtime_env = files.apply_to_env(env, &snapshot);
-        let mut spawned = self
-            .acp_harness(env)
+        self.acp_harness(env)
             .await?
             .spawn_follow_up_structured_with_command(
                 &current_dir,
                 prompt,
                 session_id,
                 self.build_command_builder()?.build_follow_up(&[])?,
-                &runtime_env,
+                env,
                 &self.cmd,
                 approval::wrap(self.approvals.clone()),
             )
             .await
-            .map_err(map_pi_follow_up_error)?;
-        spawned.cleanup = Some(files.into_cleanup());
-        Ok(spawned)
+            .map_err(map_pi_follow_up_error)
     }
 
     fn normalize_logs(&self, msg_store: Arc<MsgStore>, worktree_path: &Path) {
@@ -1560,6 +1544,51 @@ rl.on("close", () => {
 
         use super::super::acp::{AcpEvent, events::AcpRuntimeEvent};
 
+        async fn prepare_run(
+            pi: &Pi,
+            root: &Path,
+            env: &ExecutionEnv,
+        ) -> Result<(Pi, ExecutionEnv, PreparedMcpRun), ExecutorError> {
+            let mut pi = pi.clone();
+            let mut env = env.clone();
+            let context = McpRunContext::new(root, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())?;
+            let prepared = pi
+                .prepare_mcp_for_run(&MemberMcpConfig::default(), &context, &mut env)
+                .await?;
+            Ok((pi, env, prepared))
+        }
+
+        fn attach_cleanup(mut spawned: SpawnedChild, prepared: PreparedMcpRun) -> SpawnedChild {
+            spawned.cleanup =
+                ExecutorRunCleanup::combine(spawned.cleanup.take(), prepared.into_cleanup());
+            spawned
+        }
+
+        async fn spawn_prepared(
+            pi: &Pi,
+            root: &Path,
+            prompt: &str,
+            env: &ExecutionEnv,
+        ) -> Result<SpawnedChild, ExecutorError> {
+            let (pi, env, prepared) = prepare_run(pi, root, env).await?;
+            let spawned = pi.spawn(root, prompt, &env).await?;
+            Ok(attach_cleanup(spawned, prepared))
+        }
+
+        async fn spawn_prepared_follow_up(
+            pi: &Pi,
+            root: &Path,
+            prompt: &str,
+            session_id: &str,
+            env: &ExecutionEnv,
+        ) -> Result<SpawnedChild, ExecutorError> {
+            let (pi, env, prepared) = prepare_run(pi, root, env).await?;
+            let spawned = pi
+                .spawn_follow_up(root, prompt, session_id, None, &env)
+                .await?;
+            Ok(attach_cleanup(spawned, prepared))
+        }
+
         async fn finish_turn(
             mut spawned: SpawnedChild,
         ) -> (Vec<AcpEvent>, crate::executors::ExecutorExitResult) {
@@ -1633,8 +1662,7 @@ rl.on("close", () => {
         let temp = tempfile::tempdir().expect("offline pi-acp workspace");
         let (pi, env, prompts) = offline_pi_executor(temp.path(), true);
 
-        let first = pi
-            .spawn(temp.path(), "first", &env)
+        let first = spawn_prepared(&pi, temp.path(), "first", &env)
             .await
             .expect("fixed pi-acp session/new and prompt");
         let runtime_dir = temp.path().join(".openteams/tmp");
@@ -1663,8 +1691,7 @@ rl.on("close", () => {
         assert!(first_runtime_files.iter().all(|path| !path.exists()));
         assert_recorded_tree_terminated(&temp.path().join("pids.json")).await;
 
-        let follow_up = pi
-            .spawn_follow_up(temp.path(), "second", &session_id, None, &env)
+        let follow_up = spawn_prepared_follow_up(&pi, temp.path(), "second", &session_id, &env)
             .await
             .expect("fixed pi-acp session/load follow-up");
         let (follow_up_events, follow_up_exit) = finish_turn(follow_up).await;
@@ -1686,8 +1713,7 @@ rl.on("close", () => {
 
         let mut error_env = env.clone();
         error_env.insert("OPENTEAMS_FAKE_PI_ERROR", "1");
-        let failed = pi
-            .spawn(temp.path(), "provider-error", &error_env)
+        let failed = spawn_prepared(&pi, temp.path(), "provider-error", &error_env)
             .await
             .expect("fixed pi-acp provider error prompt");
         let (failed_events, failed_exit) = finish_turn(failed).await;
@@ -1707,8 +1733,7 @@ rl.on("close", () => {
 
         let mut cancel_env = env.clone();
         cancel_env.insert("OPENTEAMS_FAKE_PI_HANG", "1");
-        let mut cancelled = pi
-            .spawn(temp.path(), "cancel-me", &cancel_env)
+        let mut cancelled = spawn_prepared(&pi, temp.path(), "cancel-me", &cancel_env)
             .await
             .expect("fixed pi-acp cancellable prompt");
         cancelled
@@ -1740,7 +1765,7 @@ rl.on("close", () => {
         let (failed_pi, failed_env, _) = offline_pi_executor(failed_temp.path(), false);
         let error = tokio::time::timeout(
             Duration::from_secs(15),
-            failed_pi.spawn(failed_temp.path(), "must fail", &failed_env),
+            spawn_prepared(&failed_pi, failed_temp.path(), "must fail", &failed_env),
         )
         .await
         .expect("startup failure timeout")
@@ -2045,11 +2070,18 @@ rl.on("close", () => {
         let temp = tempfile::tempdir().expect("runtime directory");
         let mut pi = Pi::default();
         pi.cmd.base_command_override = Some("/bin/sh -c 'exit 7'".to_string());
-        let env = ExecutionEnv::new(Default::default(), false, String::new());
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        let context = McpRunContext::new(temp.path(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .expect("run context");
+        let prepared = pi
+            .prepare_mcp_for_run(&MemberMcpConfig::default(), &context, &mut env)
+            .await
+            .expect("Pi preparation");
 
         pi.spawn(temp.path(), "test", &env)
             .await
             .expect_err("ACP startup must fail");
+        drop(prepared.into_cleanup());
 
         let runtime_dir = temp.path().join(".openteams").join("tmp");
         let remaining = fs::read_dir(runtime_dir)
@@ -2060,22 +2092,6 @@ rl.on("close", () => {
             remaining.is_empty(),
             "Pi runtime files survived startup failure"
         );
-    }
-
-    #[test]
-    fn missing_allowlisted_mcp_server_is_a_member_configuration_error() {
-        let policy = AcpMcpPolicy {
-            allowed_server_names: Some(["missing".to_string()].into_iter().collect()),
-            disabled_server_names: Default::default(),
-        };
-        let error = validate_member_mcp_allowlist(&serde_json::json!({"mcpServers": {}}), &policy)
-            .expect_err("missing server must fail");
-        assert!(
-            error
-                .to_string()
-                .contains("invalid Pi member configuration")
-        );
-        assert!(!error.to_string().contains("mcpServers"));
     }
 
     #[tokio::test]
@@ -2095,25 +2111,57 @@ rl.on("close", () => {
             .collect(),
         };
         let mut env = ExecutionEnv::new(Default::default(), false, String::new());
-        let mut pi = Pi::default();
+        let mut pi = Pi {
+            acp_mcp_policy: AcpMcpPolicy {
+                allowed_server_names: Some(Default::default()),
+                disabled_server_names: Default::default(),
+            },
+            ..Pi::default()
+        };
 
         let prepared = pi
             .prepare_mcp_for_run(&canonical, &context, &mut env)
             .await
             .expect("Pi preparation");
-        let snapshot = pi.runtime_snapshot();
+        let snapshot_path = PathBuf::from(
+            env.get("OPENTEAMS_PI_MCP_SNAPSHOT")
+                .expect("Pi MCP snapshot path"),
+        );
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&fs::read(&snapshot_path).expect("read Pi MCP snapshot"))
+                .expect("parse Pi MCP snapshot");
 
         assert_eq!(prepared.server_names(), ["member-only"]);
-        assert_eq!(snapshot.skill_paths, [skill_path]);
-        assert!(
-            snapshot.mcp_config["mcpServers"]
-                .get("member-only")
-                .is_some()
-        );
         assert_eq!(
-            snapshot.mcp_config["settings"]["hostConfigDiscovery"],
-            "off"
+            serde_json::from_str::<Vec<PathBuf>>(
+                env.get("OPENTEAMS_PI_SKILL_PATHS_JSON")
+                    .expect("Pi skill paths")
+            )
+            .expect("parse Pi skill paths"),
+            [skill_path]
         );
+        assert!(snapshot["mcpServers"].get("member-only").is_some());
+        assert_eq!(snapshot["settings"]["hostConfigDiscovery"], "off");
+        assert_eq!(
+            env.get("OPENTEAMS_PI_ENABLE_MCP_EXTENSION")
+                .map(String::as_str),
+            Some("1")
+        );
+
+        drop(prepared.into_cleanup());
+        assert!(!snapshot_path.exists());
+    }
+
+    #[tokio::test]
+    async fn spawn_without_public_preparation_fails_closed() {
+        let temp = tempfile::tempdir().expect("workspace");
+        let pi = Pi::default();
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        assert!(matches!(
+            pi.spawn(temp.path(), "must-not-start", &env).await,
+            Err(ExecutorError::McpIsolationNotImplemented)
+        ));
     }
 
     #[test]

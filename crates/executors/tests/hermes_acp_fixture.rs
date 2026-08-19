@@ -11,14 +11,10 @@
 //! call, token usage, event projection, approval policies, MCP allowlist,
 //! secret redaction) rather than Hermes-specific implementation details.
 //!
-//! Process-level HOME isolation: the Hermes adapter resolves
-//! `~/.hermes/config.yaml` via `dirs::home_dir()`, which reads the *process*
-//! `HOME` environment variable rather than the child `ExecutionEnv`. To keep
-//! tests fully offline and deterministic regardless of the host machine's
-//! `~/.hermes` contents, `make_hermes_and_env` acquires a global mutex and
-//! points the process `HOME` at a per-test temporary directory for the
-//! duration of the returned guard. This serializes process-HOME mutation
-//! across parallel tests while preserving correctness.
+//! Process-level HOME isolation lets negative tests stage deterministic ambient
+//! Hermes configuration without touching a user's real `~/.hermes` directory.
+//! Public run preparation must ignore that vendor file and pass only the member
+//! canonical snapshot in ACP session parameters.
 
 use std::{
     fs,
@@ -31,15 +27,16 @@ use std::{
 use executors::{
     env::{ExecutionEnv, RepoContext},
     executors::{
-        AcpProbeAuthState, ExecutorExitResult, ExecutorPrompt, ExecutorPromptImage,
-        StandardCodingAgentExecutor,
+        AcpProbeAuthState, ExecutorError, ExecutorExitResult, ExecutorPrompt, ExecutorPromptImage,
+        ExecutorRunCleanup, SpawnedChild, StandardCodingAgentExecutor,
         acp::{
-            AcpEvent, AcpExecutionOptions,
-            events::AcpRuntimeEvent,
-            mcp::{AcpMcpPolicy, resolve_isolated_mcp_snapshot},
+            AcpEvent, AcpExecutionOptions, events::AcpRuntimeEvent,
+            mcp::PREPARED_ACP_MCP_SNAPSHOT_ENV,
         },
         hermes::Hermes,
     },
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun},
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -58,10 +55,8 @@ fn home_lock() -> &'static Mutex<()> {
 /// and restores the original value on drop. The guard also holds the global
 /// `HOME_ISOLATION_LOCK` so parallel tests cannot observe each other's `HOME`.
 ///
-/// This is required because the Hermes adapter resolves its MCP config path via
-/// `dirs::home_dir()`, which reads the process `HOME`, not the child
-/// `ExecutionEnv` that `make_hermes_and_env` populates. Without this guard, a
-/// host machine with a real `~/.hermes/config.yaml` would be read by the test.
+/// Tests use this guard only to stage or exclude ambient vendor configuration.
+/// The adapter must never use that configuration for a prepared run.
 pub(crate) struct HomeIsolationGuard {
     _lock: MutexGuard<'static, ()>,
     saved_home: Option<std::ffi::OsString>,
@@ -141,11 +136,8 @@ fn make_hermes_and_env(
     executable: bool,
 ) -> (Hermes, ExecutionEnv, OfflineHermesEnv, HomeIsolationGuard) {
     let env_info = install_offline_hermes_fixture(root, executable);
-    // Isolate the process-level HOME so `dirs::home_dir()` resolves to the
-    // per-test temporary directory. Without this, the Hermes adapter would
-    // read the host machine's `~/.hermes/config.yaml` instead of the isolated
-    // config, breaking offline guarantees on machines with a real Hermes
-    // installation.
+    // Keep process-level HOME deterministic so a regression that reintroduces
+    // vendor-file discovery cannot read a user's real Hermes configuration.
     let home_guard = HomeIsolationGuard::acquire(&env_info.home);
     let mut hermes = Hermes::default();
     let hermes_path = env_info.bin.join("hermes");
@@ -177,6 +169,80 @@ fn make_hermes_and_env(
         env_info.protocol_log.to_string_lossy().to_string(),
     );
     (hermes, env, env_info, home_guard)
+}
+
+async fn prepare_hermes_run(
+    hermes: &Hermes,
+    root: &Path,
+    env: &ExecutionEnv,
+    canonical: &MemberMcpConfig,
+) -> Result<(Hermes, ExecutionEnv, PreparedMcpRun), ExecutorError> {
+    let mut hermes = hermes.clone();
+    let mut env = env.clone();
+    let context = McpRunContext::new(root, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())?;
+    let prepared = hermes
+        .prepare_mcp_for_run(canonical, &context, &mut env)
+        .await?;
+    Ok((hermes, env, prepared))
+}
+
+fn attach_prepared_cleanup(mut spawned: SpawnedChild, prepared: PreparedMcpRun) -> SpawnedChild {
+    spawned.cleanup = ExecutorRunCleanup::combine(spawned.cleanup.take(), prepared.into_cleanup());
+    spawned
+}
+
+async fn spawn_prepared_hermes(
+    hermes: &Hermes,
+    root: &Path,
+    prompt: &str,
+    env: &ExecutionEnv,
+) -> Result<SpawnedChild, ExecutorError> {
+    let (hermes, env, prepared) =
+        prepare_hermes_run(hermes, root, env, &MemberMcpConfig::default()).await?;
+    let spawned = hermes.spawn(root, prompt, &env).await?;
+    Ok(attach_prepared_cleanup(spawned, prepared))
+}
+
+async fn spawn_prepared_hermes_follow_up(
+    hermes: &Hermes,
+    root: &Path,
+    prompt: &str,
+    session_id: &str,
+    env: &ExecutionEnv,
+) -> Result<SpawnedChild, ExecutorError> {
+    let (hermes, env, prepared) =
+        prepare_hermes_run(hermes, root, env, &MemberMcpConfig::default()).await?;
+    let spawned = hermes
+        .spawn_follow_up(root, prompt, session_id, None, &env)
+        .await?;
+    Ok(attach_prepared_cleanup(spawned, prepared))
+}
+
+async fn spawn_prepared_hermes_structured(
+    hermes: &Hermes,
+    root: &Path,
+    prompt: &ExecutorPrompt,
+    env: &ExecutionEnv,
+) -> Result<SpawnedChild, ExecutorError> {
+    let (hermes, env, prepared) =
+        prepare_hermes_run(hermes, root, env, &MemberMcpConfig::default()).await?;
+    let spawned = hermes.spawn_structured(root, prompt, &env).await?;
+    Ok(attach_prepared_cleanup(spawned, prepared))
+}
+
+async fn spawn_prepared_hermes_follow_up_structured(
+    hermes: &Hermes,
+    root: &Path,
+    prompt: &ExecutorPrompt,
+    session_id: &str,
+    env: &ExecutionEnv,
+) -> Result<SpawnedChild, ExecutorError> {
+    let (hermes, env, prepared) =
+        prepare_hermes_run(hermes, root, env, &MemberMcpConfig::default()).await?;
+    let spawned = hermes
+        .spawn_follow_up_structured(root, prompt, session_id, None, &env)
+        .await?;
+    Ok(attach_prepared_cleanup(spawned, prepared))
 }
 
 async fn finish_turn(
@@ -240,8 +306,7 @@ fn fake_hermes_fixture_script_is_executable() {
 async fn fake_hermes_does_not_contact_network_or_real_cli() {
     let temp = tempfile::tempdir().expect("offline workspace");
     let (hermes, env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
-    let spawned = hermes
-        .spawn(temp.path(), "verify-offline", &env)
+    let spawned = spawn_prepared_hermes(&hermes, temp.path(), "verify-offline", &env)
         .await
         .expect("spawn");
     let (events, exit) = finish_turn(spawned).await;
@@ -259,10 +324,17 @@ async fn offline_hermes_lifecycle_new_prompt_follow_up_cancel_and_startup_failur
     let temp = tempfile::tempdir().expect("workspace");
     let (hermes, env, env_info, _home_guard) = make_hermes_and_env(temp.path(), true);
 
-    let first = hermes
-        .spawn(temp.path(), "first", &env)
+    let first = spawn_prepared_hermes(&hermes, temp.path(), "first", &env)
         .await
         .expect("spawn first");
+    let runtime_dir = temp.path().join(".openteams/tmp");
+    assert!(
+        fs::read_dir(&runtime_dir)
+            .expect("first runtime directory")
+            .next()
+            .is_some(),
+        "prepared Hermes snapshot must live through the process"
+    );
     let (first_events, first_exit) = finish_turn(first).await;
     assert!(matches!(first_exit, ExecutorExitResult::Success));
     let session_id = first_events
@@ -276,15 +348,29 @@ async fn offline_hermes_lifecycle_new_prompt_follow_up_cancel_and_startup_failur
     assert!(first_events.iter().any(|e| matches!(e,
         AcpEvent::Message(m) if format!("{m:?}").contains("echo:first"))));
     assert!(first_events.iter().any(|e| matches!(e, AcpEvent::Done(_))));
+    assert!(
+        fs::read_dir(&runtime_dir)
+            .expect("first runtime directory")
+            .next()
+            .is_none(),
+        "successful Hermes exit must clean its snapshot"
+    );
 
-    let follow_up = hermes
-        .spawn_follow_up(temp.path(), "second", &session_id, None, &env)
-        .await
-        .expect("follow-up");
+    let follow_up =
+        spawn_prepared_hermes_follow_up(&hermes, temp.path(), "second", &session_id, &env)
+            .await
+            .expect("follow-up");
     let (fu_events, fu_exit) = finish_turn(follow_up).await;
     assert!(matches!(fu_exit, ExecutorExitResult::Success));
     assert!(fu_events.iter().any(|e| matches!(e,
         AcpEvent::Message(m) if format!("{m:?}").contains("echo:second"))));
+    assert!(
+        fs::read_dir(&runtime_dir)
+            .expect("follow-up runtime directory")
+            .next()
+            .is_none(),
+        "Hermes follow-up exit must clean its snapshot"
+    );
     assert_eq!(
         fs::read_to_string(&env_info.prompts)
             .expect("prompts")
@@ -295,8 +381,7 @@ async fn offline_hermes_lifecycle_new_prompt_follow_up_cancel_and_startup_failur
 
     let mut cancel_env = env.clone();
     cancel_env.insert("OPENTEAMS_FAKE_HERMES_HANG", "1");
-    let mut cancelled = hermes
-        .spawn(temp.path(), "cancel-me", &cancel_env)
+    let mut cancelled = spawn_prepared_hermes(&hermes, temp.path(), "cancel-me", &cancel_env)
         .await
         .expect("cancellable spawn");
     cancelled.cancel.as_ref().expect("cancel token").cancel();
@@ -309,6 +394,13 @@ async fn offline_hermes_lifecycle_new_prompt_follow_up_cancel_and_startup_failur
         ExecutorExitResult::Success
     ));
     drop(cancelled);
+    assert!(
+        fs::read_dir(&runtime_dir)
+            .expect("cancel runtime directory")
+            .next()
+            .is_none(),
+        "Hermes cancellation must clean its snapshot"
+    );
 
     let protocol_log = temp.path().join("protocol.jsonl");
     if protocol_log.exists() {
@@ -337,7 +429,7 @@ async fn offline_hermes_lifecycle_new_prompt_follow_up_cancel_and_startup_failur
     fail_env.insert("HOME", fail_env_info.home.to_string_lossy().to_string());
     let error = tokio::time::timeout(
         Duration::from_secs(15),
-        fail_hermes.spawn(fail_temp.path(), "must fail", &fail_env),
+        spawn_prepared_hermes(&fail_hermes, fail_temp.path(), "must fail", &fail_env),
     )
     .await
     .expect("timeout")
@@ -435,8 +527,7 @@ async fn offline_hermes_rejects_unsupported_security_options_and_setup_auth() {
         access_mode: Some(AcpAccessMode::WorkspaceOnly),
         ..Default::default()
     });
-    let error = hermes
-        .spawn(temp.path(), "workspace-only", &env)
+    let error = spawn_prepared_hermes(&hermes, temp.path(), "workspace-only", &env)
         .await
         .expect_err("workspace-only must be rejected");
     assert!(error.to_string().contains("workspace-only"));
@@ -445,8 +536,7 @@ async fn offline_hermes_rejects_unsupported_security_options_and_setup_auth() {
         additional_directories: Some(vec![temp.path().join("extra").display().to_string()]),
         ..Default::default()
     });
-    let error = hermes
-        .spawn(temp.path(), "additional-directory", &env)
+    let error = spawn_prepared_hermes(&hermes, temp.path(), "additional-directory", &env)
         .await
         .expect_err("additional directories must be rejected");
     assert!(error.to_string().contains("additional directories"));
@@ -457,8 +547,7 @@ async fn offline_hermes_rejects_unsupported_security_options_and_setup_auth() {
         }),
         ..Default::default()
     });
-    let error = hermes
-        .spawn(temp.path(), "setup", &env)
+    let error = spawn_prepared_hermes(&hermes, temp.path(), "setup", &env)
         .await
         .expect_err("setup marker must not be authenticated over ACP");
     assert!(error.to_string().contains("hermes acp --setup"));
@@ -514,8 +603,7 @@ async fn offline_hermes_list_models_returns_acp_probe_models() {
 async fn offline_hermes_token_usage_is_projected() {
     let temp = tempfile::tempdir().expect("token workspace");
     let (hermes, env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
-    let spawned = hermes
-        .spawn(temp.path(), "token-test", &env)
+    let spawned = spawn_prepared_hermes(&hermes, temp.path(), "token-test", &env)
         .await
         .expect("spawn");
     let (events, exit) = finish_turn(spawned).await;
@@ -537,8 +625,7 @@ async fn offline_hermes_tool_call_is_projected() {
     let temp = tempfile::tempdir().expect("tool workspace");
     let (hermes, mut env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
     env.insert("OPENTEAMS_FAKE_HERMES_TOOL_CALL", "use-tool");
-    let spawned = hermes
-        .spawn(temp.path(), "use-tool", &env)
+    let spawned = spawn_prepared_hermes(&hermes, temp.path(), "use-tool", &env)
         .await
         .expect("spawn");
     let (events, exit) = finish_turn(spawned).await;
@@ -563,8 +650,7 @@ async fn offline_hermes_structured_prompt_completes_and_echoes() {
             uri: Some("fixture://hermes-image".to_string()),
         }],
     };
-    let spawned = hermes
-        .spawn_structured(temp.path(), &prompt, &env)
+    let spawned = spawn_prepared_hermes_structured(&hermes, temp.path(), &prompt, &env)
         .await
         .expect("spawn structured");
     let (events, exit) = finish_turn(spawned).await;
@@ -588,8 +674,7 @@ async fn offline_hermes_structured_prompt_completes_and_echoes() {
 async fn offline_hermes_follow_up_structured_prompt_completes() {
     let temp = tempfile::tempdir().expect("structured follow-up workspace");
     let (hermes, env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
-    let first = hermes
-        .spawn(temp.path(), "initial", &env)
+    let first = spawn_prepared_hermes(&hermes, temp.path(), "initial", &env)
         .await
         .expect("spawn initial");
     let (first_events, _) = finish_turn(first).await;
@@ -605,10 +690,15 @@ async fn offline_hermes_follow_up_structured_prompt_completes() {
         text: "structured-follow-up".to_string(),
         images: Vec::new(),
     };
-    let spawned = hermes
-        .spawn_follow_up_structured(temp.path(), &prompt, &session_id, None, &env)
-        .await
-        .expect("spawn follow-up structured");
+    let spawned = spawn_prepared_hermes_follow_up_structured(
+        &hermes,
+        temp.path(),
+        &prompt,
+        &session_id,
+        &env,
+    )
+    .await
+    .expect("spawn follow-up structured");
     let (events, exit) = finish_turn(spawned).await;
     assert!(matches!(exit, ExecutorExitResult::Success));
     assert!(events.iter().any(|e| matches!(e,
@@ -699,8 +789,7 @@ async fn offline_hermes_stale_session_id_is_not_reused_verbatim() {
     let temp = tempfile::tempdir().expect("stale workspace");
     let (hermes, mut env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
     env.insert("OPENTEAMS_FAKE_HERMES_STALE_SESSION", "1");
-    let spawned = hermes
-        .spawn(temp.path(), "stale-check", &env)
+    let spawned = spawn_prepared_hermes(&hermes, temp.path(), "stale-check", &env)
         .await
         .expect("spawn");
     let (events, exit) = finish_turn(spawned).await;
@@ -731,7 +820,13 @@ async fn offline_hermes_stale_session_follow_up_is_classified_as_configuration_e
     let stale_session_id = "hermes-session-that-never-existed";
     let error = tokio::time::timeout(
         Duration::from_secs(15),
-        hermes.spawn_follow_up(temp.path(), "follow-up-stale", stale_session_id, None, &env),
+        spawn_prepared_hermes_follow_up(
+            &hermes,
+            temp.path(),
+            "follow-up-stale",
+            stale_session_id,
+            &env,
+        ),
     )
     .await
     .expect("follow-up must not exceed outer timeout")
@@ -767,16 +862,15 @@ async fn offline_hermes_stale_resume_refusal_is_not_reported_as_success() {
     let (hermes, mut env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
     env.insert("OPENTEAMS_FAKE_HERMES_STALE_RESUME_REFUSAL", "1");
     let stale_session_id = "hermes-session-that-was-expired";
-    let spawned = hermes
-        .spawn_follow_up(
-            temp.path(),
-            "follow-up-stale-refusal",
-            stale_session_id,
-            None,
-            &env,
-        )
-        .await
-        .expect("ACP startup must complete before the prompt reveals the stale session");
+    let spawned = spawn_prepared_hermes_follow_up(
+        &hermes,
+        temp.path(),
+        "follow-up-stale-refusal",
+        stale_session_id,
+        &env,
+    )
+    .await
+    .expect("ACP startup must complete before the prompt reveals the stale session");
     let (events, exit) = finish_turn(spawned).await;
     assert!(matches!(
         exit,
@@ -819,8 +913,7 @@ async fn offline_hermes_three_approval_policies_verify_permission_decisions() {
         });
         env.insert("OPENTEAMS_FAKE_HERMES_TOOL_CALL", "use-tool");
 
-        let spawned = hermes
-            .spawn(temp.path(), "use-tool", &env)
+        let spawned = spawn_prepared_hermes(&hermes, temp.path(), "use-tool", &env)
             .await
             .expect("spawn");
         let (events, exit) = finish_turn(spawned).await;
@@ -885,8 +978,7 @@ async fn offline_hermes_native_and_mcp_tools_verify_three_approval_policies() {
             });
             env.insert(trigger_env, "use-tool");
 
-            let spawned = hermes
-                .spawn(temp.path(), "use-tool", &env)
+            let spawned = spawn_prepared_hermes(&hermes, temp.path(), "use-tool", &env)
                 .await
                 .expect("spawn");
             let (events, exit) = finish_turn(spawned).await;
@@ -924,126 +1016,110 @@ async fn offline_hermes_native_and_mcp_tools_verify_three_approval_policies() {
     }
 }
 
-#[test]
-fn offline_hermes_mcp_snapshot_filters_unauthorized_and_disables_vendor_controls() {
-    let canonical = serde_json::json!({
-        "mcpServers": {
-            "authorized": {"command": "/bin/echo", "env": {"TOKEN": "fixture-token"}},
-            "unauthorized": {"command": "/bin/echo", "env": {"KEY": "fixture-key"}}
-        },
-        "settings": {"hostConfigDiscovery": "off"}
-    });
-    let policy = AcpMcpPolicy {
-        allowed_server_names: Some(["authorized".to_string()].into_iter().collect()),
-        disabled_server_names: Default::default(),
+#[tokio::test]
+async fn offline_hermes_public_preparation_injects_member_server_redacts_fake_secret_and_cleans_snapshot()
+ {
+    let temp = tempfile::tempdir().expect("member MCP workspace");
+    let (hermes, env, env_info, _home_guard) = make_hermes_and_env(temp.path(), true);
+    let fake_secret = "hermes-member-fake-secret-never-leak";
+    let canonical = MemberMcpConfig {
+        mcp_servers: [(
+            "member-only".to_string(),
+            serde_json::json!({
+                "command": "/bin/echo",
+                "env": {"TOKEN": fake_secret}
+            }),
+        )]
+        .into_iter()
+        .collect(),
     };
-    let snapshot = resolve_isolated_mcp_snapshot(&canonical, &policy).expect("snapshot");
-    let servers = snapshot.get("mcpServers").unwrap().as_object().unwrap();
-    assert!(
-        servers.contains_key("authorized"),
-        "authorized server must be present"
+    let (hermes, env, prepared) = prepare_hermes_run(&hermes, temp.path(), &env, &canonical)
+        .await
+        .expect("prepare member MCP");
+    let snapshot_path = PathBuf::from(
+        env.get(PREPARED_ACP_MCP_SNAPSHOT_ENV)
+            .expect("prepared snapshot path"),
     );
+    assert!(snapshot_path.exists(), "snapshot must exist before spawn");
+
+    let spawned = hermes
+        .spawn(temp.path(), "member-mcp", &env)
+        .await
+        .expect("spawn with member MCP");
+    let spawned = attach_prepared_cleanup(spawned, prepared);
+    let (events, exit) = finish_turn(spawned).await;
+    assert!(matches!(exit, ExecutorExitResult::Success));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AcpEvent::Message(message)
+            if format!("{message:?}").contains("mcp=member-only")
+    )));
     assert!(
-        !servers.contains_key("unauthorized"),
-        "unauthorized server must be filtered out"
+        !snapshot_path.exists(),
+        "successful exit must clean the private snapshot"
     );
-    assert_eq!(
-        snapshot
-            .get("settings")
-            .and_then(|s| s.get("hostConfigDiscovery"))
-            .and_then(|v| v.as_str()),
-        Some("off"),
-        "hostConfigDiscovery must be off"
+    let protocol_log = fs::read_to_string(env_info.protocol_log).expect("protocol log");
+    assert!(protocol_log.contains("member-only"));
+    assert!(protocol_log.contains(r#""skip_configured_mcp":"1""#));
+    assert!(
+        !protocol_log.contains(fake_secret),
+        "protocol diagnostics must redact the fake secret"
     );
 }
 
-#[test]
-fn offline_hermes_empty_mcp_allowlist_produces_empty_snapshot() {
-    let canonical = serde_json::json!({
-        "mcpServers": {
-            "server1": {"command": "/bin/echo"},
-            "server2": {"command": "/bin/echo"}
-        },
-        "settings": {"hostConfigDiscovery": "off"}
-    });
-    let policy = AcpMcpPolicy {
-        allowed_server_names: Some(Default::default()),
-        disabled_server_names: Default::default(),
+#[tokio::test]
+async fn offline_hermes_two_members_freeze_distinct_canonical_snapshots() {
+    let temp = tempfile::tempdir().expect("distinct member workspace");
+    let (hermes, env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
+    let alpha = MemberMcpConfig {
+        mcp_servers: [(
+            "alpha".to_string(),
+            serde_json::json!({"command": "/bin/echo"}),
+        )]
+        .into_iter()
+        .collect(),
     };
-    let snapshot = resolve_isolated_mcp_snapshot(&canonical, &policy).expect("snapshot");
-    let servers = snapshot
-        .get("mcpServers")
-        .and_then(|v| v.as_object())
-        .expect("servers");
-    assert!(
-        servers.is_empty(),
-        "empty allowlist must produce empty snapshot"
-    );
-}
-
-#[test]
-fn offline_hermes_two_members_have_different_mcp_snapshots() {
-    let secret = "hermes-member-secret-never-leak";
-    let canonical = serde_json::json!({
-        "mcpServers": {
-            "alpha": {"command": "/bin/echo", "env": {"TOKEN": secret}},
-            "beta": {"command": "/bin/echo", "env": {"KEY": secret}},
-            "gamma": {"command": "/bin/echo"}
-        },
-        "settings": {"hostConfigDiscovery": "off"}
-    });
-
-    let policy_a = AcpMcpPolicy {
-        allowed_server_names: Some(["alpha".to_string()].into_iter().collect()),
-        disabled_server_names: Default::default(),
+    let beta = MemberMcpConfig {
+        mcp_servers: [(
+            "beta".to_string(),
+            serde_json::json!({"command": "/bin/echo"}),
+        )]
+        .into_iter()
+        .collect(),
     };
-    let snapshot_a = resolve_isolated_mcp_snapshot(&canonical, &policy_a).expect("snapshot A");
-    let servers_a = snapshot_a.get("mcpServers").unwrap().as_object().unwrap();
-    assert!(
-        servers_a.contains_key("alpha"),
-        "member A should have alpha"
-    );
-    assert!(
-        !servers_a.contains_key("beta"),
-        "member A should NOT have beta"
-    );
-    assert!(
-        !servers_a.contains_key("gamma"),
-        "member A should NOT have gamma"
-    );
 
-    let policy_b = AcpMcpPolicy {
-        allowed_server_names: Some(["beta".to_string()].into_iter().collect()),
-        disabled_server_names: Default::default(),
-    };
-    let snapshot_b = resolve_isolated_mcp_snapshot(&canonical, &policy_b).expect("snapshot B");
-    let servers_b = snapshot_b.get("mcpServers").unwrap().as_object().unwrap();
-    assert!(servers_b.contains_key("beta"), "member B should have beta");
-    assert!(
-        !servers_b.contains_key("alpha"),
-        "member B should NOT have alpha"
+    let (_, alpha_env, alpha_prepared) = prepare_hermes_run(&hermes, temp.path(), &env, &alpha)
+        .await
+        .expect("prepare alpha MCP");
+    let (_, beta_env, beta_prepared) = prepare_hermes_run(&hermes, temp.path(), &env, &beta)
+        .await
+        .expect("prepare beta MCP");
+    let alpha_path = PathBuf::from(
+        alpha_env
+            .get(PREPARED_ACP_MCP_SNAPSHOT_ENV)
+            .expect("alpha snapshot path"),
     );
-    assert!(
-        !servers_b.contains_key("gamma"),
-        "member B should NOT have gamma"
+    let beta_path = PathBuf::from(
+        beta_env
+            .get(PREPARED_ACP_MCP_SNAPSHOT_ENV)
+            .expect("beta snapshot path"),
     );
+    let alpha_snapshot: serde_json::Value =
+        serde_json::from_slice(&fs::read(&alpha_path).expect("read alpha snapshot"))
+            .expect("parse alpha snapshot");
+    let beta_snapshot: serde_json::Value =
+        serde_json::from_slice(&fs::read(&beta_path).expect("read beta snapshot"))
+            .expect("parse beta snapshot");
+    assert!(alpha_snapshot["mcpServers"].get("alpha").is_some());
+    assert!(alpha_snapshot["mcpServers"].get("beta").is_none());
+    assert!(beta_snapshot["mcpServers"].get("beta").is_some());
+    assert!(beta_snapshot["mcpServers"].get("alpha").is_none());
+    assert_ne!(alpha_path, beta_path, "each run needs a private snapshot");
 
-    assert_ne!(
-        snapshot_a.get("mcpServers"),
-        snapshot_b.get("mcpServers"),
-        "member snapshots must differ"
-    );
-
-    for snapshot in [&snapshot_a, &snapshot_b] {
-        assert_eq!(
-            snapshot
-                .get("settings")
-                .and_then(|s| s.get("hostConfigDiscovery"))
-                .and_then(|v| v.as_str()),
-            Some("off"),
-            "hostConfigDiscovery must be off"
-        );
-    }
+    drop(alpha_prepared);
+    drop(beta_prepared);
+    assert!(!alpha_path.exists());
+    assert!(!beta_path.exists());
 }
 
 #[tokio::test]
@@ -1051,8 +1127,7 @@ async fn offline_hermes_protocol_log_records_all_methods() {
     let temp = tempfile::tempdir().expect("protocol workspace");
     let (hermes, env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
 
-    let spawned = hermes
-        .spawn(temp.path(), "proto-test", &env)
+    let spawned = spawn_prepared_hermes(&hermes, temp.path(), "proto-test", &env)
         .await
         .expect("spawn");
     let (events, exit) = finish_turn(spawned).await;
@@ -1065,8 +1140,7 @@ async fn offline_hermes_protocol_log_records_all_methods() {
         })
         .expect("session id");
 
-    let fu = hermes
-        .spawn_follow_up(temp.path(), "follow-up", &session_id, None, &env)
+    let fu = spawn_prepared_hermes_follow_up(&hermes, temp.path(), "follow-up", &session_id, &env)
         .await
         .expect("follow-up");
     let (_, fu_exit) = finish_turn(fu).await;
@@ -1117,8 +1191,7 @@ async fn offline_hermes_config_override_applies_legacy_session_model() {
         ..Default::default()
     });
 
-    let spawned = hermes
-        .spawn(temp.path(), "override-turn", &env)
+    let spawned = spawn_prepared_hermes(&hermes, temp.path(), "override-turn", &env)
         .await
         .expect("spawn");
     let (events, exit) = finish_turn(spawned).await;
@@ -1136,21 +1209,12 @@ async fn offline_hermes_config_override_applies_legacy_session_model() {
 }
 
 #[tokio::test]
-async fn offline_hermes_isolated_home_reads_per_test_mcp_config_not_host() {
-    // Regression: the Hermes adapter resolves `~/.hermes/config.yaml` via
-    // `dirs::home_dir()`, which reads the *process* HOME. This test proves the
-    // process HOME is isolated to the per-test temporary directory by writing a
-    // marker MCP config there and verifying the adapter reads it (the spawn
-    // fails with a parse error for the deliberately-broken server), while the
-    // host machine's `~/.hermes/config.yaml` is never touched.
+async fn offline_hermes_explicit_empty_member_map_ignores_ambient_vendor_mcp() {
+    // Stage a deliberately-invalid vendor config. Public preparation receives
+    // an explicit empty member map, so the run must neither parse nor merge it.
     let temp = tempfile::tempdir().expect("isolated home workspace");
-    let env_info = install_offline_hermes_fixture(temp.path(), true);
-    let home_guard = HomeIsolationGuard::acquire(&env_info.home);
+    let (hermes, env, env_info, _home_guard) = make_hermes_and_env(temp.path(), true);
 
-    // Write a marker config into the isolated ~/.hermes/config.yaml. The server
-    // command does not exist, so `parse_mcp_servers` returns an error. If the
-    // adapter were reading the host config instead, this error would not
-    // appear (the host config is either absent or different).
     let hermes_config_dir = env_info.home.join(".hermes");
     fs::create_dir_all(&hermes_config_dir).expect("hermes config dir");
     let marker_secret = "hermes-host-config-secret-never-leak";
@@ -1162,55 +1226,28 @@ async fn offline_hermes_isolated_home_reads_per_test_mcp_config_not_host() {
     )
     .expect("write marker mcp config");
 
-    let mut hermes = Hermes::default();
-    let hermes_path = env_info.bin.join("hermes");
-    hermes.cmd.base_command_override = Some(hermes_path.display().to_string());
-    let mut env = ExecutionEnv::new(
-        RepoContext::new(temp.path().to_path_buf(), Vec::new()),
-        false,
-        String::new(),
-    );
-    env.insert(
-        "PATH",
-        format!(
-            "{}:{}",
-            env_info.bin.display(),
-            std::env::var("PATH").unwrap_or_default(),
-        ),
-    );
-    env.insert("HOME", env_info.home.to_string_lossy().to_string());
-
-    let error = hermes
-        .spawn(temp.path(), "isolation-check", &env)
+    let spawned = spawn_prepared_hermes(&hermes, temp.path(), "isolation-check", &env)
         .await
-        .expect_err("spawn must fail because the marker server command is not found");
-    let error_string = error.to_string();
-
-    // The adapter read the isolated config (proving HOME isolation works).
-    assert!(
-        error_string.contains("marker-server")
-            || error_string.contains("openteams-marker-command-not-real")
-            || error_string.contains("command was not found"),
-        "spawn must surface the isolated marker-server MCP parse error: {error_string}"
-    );
-    // The sensitive token in the marker config must NOT leak into the error.
-    assert!(
-        !error_string.contains(marker_secret),
-        "sensitive MCP env token must not leak into the spawn error: {error_string}"
-    );
-
-    drop(home_guard);
+        .expect("member-empty preparation must ignore ambient Hermes MCP");
+    let (events, exit) = finish_turn(spawned).await;
+    assert!(matches!(exit, ExecutorExitResult::Success));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AcpEvent::Message(message)
+            if format!("{message:?}").contains("echo:isolation-check")
+                && format!("{message:?}").contains("mcp=")
+    )));
+    let protocol_log = fs::read_to_string(env_info.protocol_log).expect("Hermes protocol log");
+    assert!(protocol_log.contains(r#""mcp_servers":[]"#));
+    assert!(protocol_log.contains(r#""skip_configured_mcp":"1""#));
+    assert!(!protocol_log.contains("marker-server"));
+    assert!(!protocol_log.contains(marker_secret));
 }
 
 #[tokio::test]
-async fn offline_hermes_spawn_succeeds_when_host_mcp_config_would_be_illegal() {
-    // Regression: even if the *host* machine had an illegal `~/.hermes/config.yaml`,
-    // the test must not read it because the process HOME is isolated. This test
-    // proves the isolation by running a normal spawn under an isolated HOME
-    // that has NO `~/.hermes/config.yaml`. If the adapter were reading the host
-    // config, a host with an illegal config would break this test. Since the
-    // isolated HOME is empty, the adapter falls back to the empty template and
-    // the spawn succeeds.
+async fn offline_hermes_explicit_empty_member_map_succeeds_without_vendor_config() {
+    // A missing vendor config and an explicit empty member map have the same
+    // isolated result: the ACP session receives an empty server list.
     let temp = tempfile::tempdir().expect("empty home workspace");
     let (hermes, env, _, _home_guard) = make_hermes_and_env(temp.path(), true);
 
@@ -1220,8 +1257,7 @@ async fn offline_hermes_spawn_succeeds_when_host_mcp_config_would_be_illegal() {
         "isolated home must not have a .hermes/config.yaml by default"
     );
 
-    let spawned = hermes
-        .spawn(temp.path(), "empty-home-check", &env)
+    let spawned = spawn_prepared_hermes(&hermes, temp.path(), "empty-home-check", &env)
         .await
         .expect("spawn must succeed with empty isolated home");
     let (events, exit) = finish_turn(spawned).await;

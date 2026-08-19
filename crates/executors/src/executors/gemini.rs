@@ -11,7 +11,10 @@ use workspace_utils::msg_store::MsgStore;
 use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
     AcpCapabilityProbe, AcpClientServicePolicy, AcpExecutionOptions,
-    mcp::{AcpMcpPolicy, resolve_effective_mcp_config, write_mcp_isolation_settings},
+    mcp::{
+        AcpMcpPolicy, load_prepared_acp_mcp_config, pin_mcp_run_environment,
+        prepare_acp_mcp_for_run, write_mcp_isolation_settings,
+    },
 };
 use crate::{
     approvals::ExecutorApprovalService,
@@ -24,7 +27,8 @@ use crate::{
         StandardCodingAgentExecutor,
         utils::{dotenv_has_nonempty_value, json_has_nonempty_string, read_json_file},
     },
-    mcp_config::{McpConfig, read_canonical_mcp_config},
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun},
     model_discovery::{
         ProviderKind, cli_model_commands, discover_from_sources, runner_config_paths,
     },
@@ -69,6 +73,7 @@ pub struct Gemini {
 impl Gemini {
     const BASE_COMMAND: &'static str = "gemini";
     const TRUST_WORKSPACE_ENV: &'static str = "GEMINI_CLI_TRUST_WORKSPACE";
+    const SYSTEM_SETTINGS_ENV: &'static str = "GEMINI_CLI_SYSTEM_SETTINGS_PATH";
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
         let mut builder = CommandBuilder::new(Self::BASE_COMMAND);
@@ -127,7 +132,7 @@ impl Gemini {
         }))
     }
 
-    async fn acp_harness(&self) -> Result<AcpAgentHarness, ExecutorError> {
+    async fn acp_harness(&self, env: &ExecutionEnv) -> Result<AcpAgentHarness, ExecutorError> {
         let options = self.acp.clone().unwrap_or_default();
         let approval_policy = match options.approval_mode.unwrap_or_default() {
             AcpApprovalMode::Ask => AcpApprovalPolicy::Ask,
@@ -177,49 +182,13 @@ impl Gemini {
         for selection in config_overrides {
             harness = harness.with_config_override(selection);
         }
-        let config_path = self.default_mcp_config_path();
-        let canonical = match config_path {
-            Some(path) => read_canonical_mcp_config(&path, &McpConfig::canonical_acp()).await?,
-            None => serde_json::json!({ "mcpServers": {} }),
-        };
-        let effective = resolve_effective_mcp_config(&canonical, &self.acp_mcp_policy)?;
+        let effective = load_prepared_acp_mcp_config(env).await?;
         tracing::debug!(
             server_count = effective.servers.len(),
             config_hash = %effective.config_hash,
             "resolved effective ACP MCP configuration"
         );
         Ok(harness.with_mcp_servers(effective.servers))
-    }
-
-    async fn acp_runtime_env(
-        &self,
-        current_dir: &Path,
-        env: &ExecutionEnv,
-    ) -> Result<ExecutionEnv, ExecutorError> {
-        // Gemini CLI 0.52 creates a non-resumable transcript while loading an
-        // ACP session. Its next-process retention cleanup groups files by the
-        // session short ID and can delete the resumable transcript with that
-        // placeholder. Disable vendor cleanup for OpenTeams-managed ACP runs.
-        let mut settings = self.native_thinking_settings()?;
-        settings
-            .as_object_mut()
-            .expect("native Gemini settings are always an object")
-            .insert(
-                "general".to_string(),
-                json!({
-                    "sessionRetention": {
-                        "enabled": false
-                    }
-                }),
-            );
-        let path =
-            write_mcp_isolation_settings(current_dir, "gemini-acp-settings", settings).await?;
-        let mut runtime_env = Self::workspace_trusted_env(env);
-        runtime_env.insert(
-            "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
-            path.to_string_lossy().to_string(),
-        );
-        Ok(runtime_env)
     }
 }
 
@@ -274,6 +243,41 @@ fn invalid_thinking_effort(message: impl Into<String>) -> ExecutorError {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for Gemini {
+    async fn prepare_mcp_for_run(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        context: &McpRunContext,
+        env: &mut ExecutionEnv,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        let prepared =
+            prepare_acp_mcp_for_run(canonical, context, env, &mut self.cmd, "gemini-acp-mcp")?;
+        // Gemini CLI 0.52 creates a non-resumable transcript while loading an
+        // ACP session. Its next-process retention cleanup groups files by the
+        // session short ID and can delete the resumable transcript with that
+        // placeholder. Disable vendor cleanup for OpenTeams-managed ACP runs.
+        let mut settings = self.native_thinking_settings()?;
+        settings
+            .as_object_mut()
+            .expect("native Gemini settings are always an object")
+            .insert(
+                "general".to_string(),
+                json!({
+                    "sessionRetention": {
+                        "enabled": false
+                    }
+                }),
+            );
+        let (path, cleanup) =
+            write_mcp_isolation_settings(context, "gemini-acp-settings", settings)?;
+        pin_mcp_run_environment(
+            env,
+            &mut self.cmd,
+            Self::SYSTEM_SETTINGS_ENV,
+            path.to_string_lossy().into_owned(),
+        );
+        Ok(prepared.with_cleanup(cleanup))
+    }
+
     fn overlay_acp_execution_options(&mut self, higher_priority: &AcpExecutionOptions) {
         let inherited = self.acp.clone().unwrap_or_default();
         self.acp = Some(inherited.overlay(higher_priority));
@@ -369,8 +373,8 @@ impl StandardCodingAgentExecutor for Gemini {
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let harness = self.acp_harness().await?;
-        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
+        let runtime_env = Self::workspace_trusted_env(env);
+        let harness = self.acp_harness(&runtime_env).await?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
         let gemini_command = self.build_command_builder()?.build_initial()?;
         harness
@@ -393,8 +397,8 @@ impl StandardCodingAgentExecutor for Gemini {
         _reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let harness = self.acp_harness().await?;
-        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
+        let runtime_env = Self::workspace_trusted_env(env);
+        let harness = self.acp_harness(&runtime_env).await?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
         let gemini_command = self.build_command_builder()?.build_follow_up(&[])?;
         harness
@@ -416,8 +420,8 @@ impl StandardCodingAgentExecutor for Gemini {
         prompt: &ExecutorPrompt,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let harness = self.acp_harness().await?;
-        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
+        let runtime_env = Self::workspace_trusted_env(env);
+        let harness = self.acp_harness(&runtime_env).await?;
         let command = self.build_command_builder()?.build_initial()?;
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
@@ -441,8 +445,8 @@ impl StandardCodingAgentExecutor for Gemini {
         _reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let harness = self.acp_harness().await?;
-        let runtime_env = self.acp_runtime_env(current_dir, env).await?;
+        let runtime_env = Self::workspace_trusted_env(env);
+        let harness = self.acp_harness(&runtime_env).await?;
         let command = self.build_command_builder()?.build_follow_up(&[])?;
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
@@ -494,6 +498,11 @@ impl StandardCodingAgentExecutor for Gemini {
 mod tests {
     use super::*;
 
+    fn run_context(workspace: &Path) -> McpRunContext {
+        McpRunContext::new(workspace, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .expect("run context")
+    }
+
     #[test]
     fn workspace_is_trusted_by_default() {
         let env = ExecutionEnv::new(Default::default(), false, String::new());
@@ -531,12 +540,8 @@ mod tests {
 
     #[tokio::test]
     async fn acp_disables_gemini_session_retention_cleanup() {
-        let workspace =
-            std::env::temp_dir().join(format!("openteams-gemini-{}", uuid::Uuid::new_v4()));
-        tokio::fs::create_dir_all(&workspace)
-            .await
-            .expect("create workspace");
-        let gemini = Gemini {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut gemini = Gemini {
             append_prompt: AppendPrompt::default(),
             model: None,
             thinking_effort: None,
@@ -545,17 +550,22 @@ mod tests {
             acp_mcp_policy: AcpMcpPolicy::default(),
             approvals: None,
         };
-        let env = ExecutionEnv::new(Default::default(), false, String::new());
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
 
-        let runtime_env = gemini
-            .acp_runtime_env(&workspace, &env)
+        let prepared = gemini
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(workspace.path()),
+                &mut env,
+            )
             .await
-            .expect("ACP runtime environment");
-        let settings_path = runtime_env
-            .get("GEMINI_CLI_SYSTEM_SETTINGS_PATH")
-            .expect("Gemini system settings path");
+            .expect("Gemini MCP preparation");
+        let settings_path = std::path::PathBuf::from(
+            env.get(Gemini::SYSTEM_SETTINGS_ENV)
+                .expect("Gemini system settings path"),
+        );
         let settings: serde_json::Value = serde_json::from_slice(
-            &tokio::fs::read(settings_path)
+            &tokio::fs::read(&settings_path)
                 .await
                 .expect("read Gemini system settings"),
         )
@@ -572,9 +582,8 @@ mod tests {
                 .is_empty()
         );
 
-        tokio::fs::remove_dir_all(workspace)
-            .await
-            .expect("remove workspace");
+        drop(prepared.into_cleanup());
+        assert!(!settings_path.exists());
     }
 
     #[test]
@@ -597,12 +606,8 @@ mod tests {
 
     #[tokio::test]
     async fn acp_writes_native_gemini_thinking_fallback() {
-        let workspace =
-            std::env::temp_dir().join(format!("openteams-gemini-{}", uuid::Uuid::new_v4()));
-        tokio::fs::create_dir_all(&workspace)
-            .await
-            .expect("create workspace");
-        let gemini = Gemini {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut gemini = Gemini {
             append_prompt: AppendPrompt::default(),
             model: Some("gemini-3.1-pro-preview".to_string()),
             thinking_effort: Some("medium".to_string()),
@@ -611,17 +616,22 @@ mod tests {
             acp_mcp_policy: AcpMcpPolicy::default(),
             approvals: None,
         };
-        let env = ExecutionEnv::new(Default::default(), false, String::new());
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
 
-        let runtime_env = gemini
-            .acp_runtime_env(&workspace, &env)
+        let prepared = gemini
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(workspace.path()),
+                &mut env,
+            )
             .await
-            .expect("ACP runtime environment");
-        let settings_path = runtime_env
-            .get("GEMINI_CLI_SYSTEM_SETTINGS_PATH")
-            .expect("Gemini system settings path");
+            .expect("Gemini MCP preparation");
+        let settings_path = std::path::PathBuf::from(
+            env.get(Gemini::SYSTEM_SETTINGS_ENV)
+                .expect("Gemini system settings path"),
+        );
         let settings: Value = serde_json::from_slice(
-            &tokio::fs::read(settings_path)
+            &tokio::fs::read(&settings_path)
                 .await
                 .expect("read Gemini system settings"),
         )
@@ -637,9 +647,42 @@ mod tests {
             json!({ "thinkingLevel": "MEDIUM" })
         );
 
-        tokio::fs::remove_dir_all(workspace)
+        drop(prepared.into_cleanup());
+        assert!(!settings_path.exists());
+    }
+
+    #[tokio::test]
+    async fn public_preparation_uses_member_canonical_not_legacy_allowlist() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut gemini = Gemini {
+            append_prompt: AppendPrompt::default(),
+            model: None,
+            thinking_effort: None,
+            acp: None,
+            cmd: CmdOverrides::default(),
+            acp_mcp_policy: AcpMcpPolicy {
+                allowed_server_names: Some(Default::default()),
+                disabled_server_names: Default::default(),
+            },
+            approvals: None,
+        };
+        let canonical = MemberMcpConfig {
+            mcp_servers: [("member-only".to_string(), json!({"command": "/bin/echo"}))]
+                .into_iter()
+                .collect(),
+        };
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let prepared = gemini
+            .prepare_mcp_for_run(&canonical, &run_context(workspace.path()), &mut env)
             .await
-            .expect("remove workspace");
+            .expect("Gemini MCP preparation");
+        let effective = load_prepared_acp_mcp_config(&env)
+            .await
+            .expect("prepared member config");
+
+        assert_eq!(effective.server_names(), ["member-only".to_string()].into());
+        drop(prepared.into_cleanup());
     }
 
     #[test]
