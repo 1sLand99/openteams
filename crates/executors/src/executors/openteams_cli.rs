@@ -28,6 +28,8 @@ use crate::{
         StandardCodingAgentExecutor, openteams_cli::types::OpenTeamsCliExecutorEvent,
     },
     logs::utils::patch,
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun, PrivateMcpRunDirectory},
     skill_config::NativeSkillConfigBackend,
     stdout_dup::create_stdout_pipe_writer,
 };
@@ -41,9 +43,35 @@ mod types;
 use sdk::{LogWriter, RunConfig, generate_server_password, run_session, run_slash_command};
 use slash_commands::{OpenTeamsCliSlashCommand, hardcoded_slash_commands};
 
+use super::opencode::{build_opencode_compatible_mcp_servers, parse_inline_config};
+
 const FREE_MODEL_PROVIDER_ID: &str = "opencode";
 const CONFIG_CONTENT_ENV: &str = "OPENTEAMS_CONFIG_CONTENT";
+const CUSTOM_CONFIG_ENV: &str = "OPENTEAMS_CONFIG";
+const CUSTOM_CONFIG_DIR_ENV: &str = "OPENTEAMS_CONFIG_DIR";
+const DISABLE_PROJECT_CONFIG_ENV: &str = "OPENTEAMS_DISABLE_PROJECT_CONFIG";
+const ISOLATED_HOME_ENV: &str = "OPENTEAMS_TEST_HOME";
 const PUBLIC_API_KEY: &str = "public";
+
+#[derive(Clone)]
+struct OpenTeamsCliMcpRuntimeSnapshot {
+    config_content: String,
+    config_home: PathBuf,
+    mcp_servers: Value,
+}
+
+impl std::fmt::Debug for OpenTeamsCliMcpRuntimeSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenTeamsCliMcpRuntimeSnapshot")
+            .field(
+                "mcp_server_count",
+                &self.mcp_servers.as_object().map_or(0, serde_json::Map::len),
+            )
+            .field("has_private_config_home", &true)
+            .finish()
+    }
+}
 
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
@@ -68,6 +96,10 @@ pub struct OpenTeamsCli {
     #[ts(skip)]
     #[derivative(Debug = "ignore", PartialEq = "ignore")]
     pub approvals: Option<Arc<dyn ExecutorApprovalService>>,
+    #[serde(skip)]
+    #[ts(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    runtime_mcp_snapshot: Option<Arc<OpenTeamsCliMcpRuntimeSnapshot>>,
 }
 
 /// Represents a spawned OpenTeams CLI server with its base URL
@@ -197,6 +229,56 @@ impl OpenTeamsCli {
         apply_overrides(builder, &self.cmd)
     }
 
+    fn mcp_run_env(&self, env: &ExecutionEnv) -> Result<ExecutionEnv, ExecutorError> {
+        let snapshot = self
+            .runtime_mcp_snapshot
+            .as_ref()
+            .ok_or(ExecutorError::McpIsolationNotImplemented)?;
+        let mut env = env.clone();
+        env.insert(CONFIG_CONTENT_ENV, &snapshot.config_content);
+        env.insert(
+            "XDG_CONFIG_HOME",
+            snapshot.config_home.to_string_lossy().to_string(),
+        );
+        env.insert(
+            ISOLATED_HOME_ENV,
+            snapshot.config_home.to_string_lossy().to_string(),
+        );
+        env.insert(DISABLE_PROJECT_CONFIG_ENV, "true");
+        Ok(env)
+    }
+
+    fn apply_mcp_process_isolation(
+        &self,
+        command: &mut Command,
+        env: &ExecutionEnv,
+    ) -> Result<(), ExecutorError> {
+        let snapshot = self
+            .runtime_mcp_snapshot
+            .as_ref()
+            .ok_or(ExecutorError::McpIsolationNotImplemented)?;
+        let config_content = env.get(CONFIG_CONTENT_ENV).ok_or_else(|| {
+            ExecutorError::Configuration(
+                "OpenTeams CLI run-scoped MCP config content is missing".to_string(),
+            )
+        })?;
+        let config = parse_inline_config(Some(config_content), "OpenTeams CLI")?;
+        if config.get("mcp") != Some(&snapshot.mcp_servers) {
+            return Err(ExecutorError::Configuration(
+                "OpenTeams CLI run-scoped MCP config content was overridden".to_string(),
+            ));
+        }
+
+        command
+            .env(CONFIG_CONTENT_ENV, config_content)
+            .env("XDG_CONFIG_HOME", &snapshot.config_home)
+            .env(ISOLATED_HOME_ENV, &snapshot.config_home)
+            .env(DISABLE_PROJECT_CONFIG_ENV, "true")
+            .env_remove(CUSTOM_CONFIG_ENV)
+            .env_remove(CUSTOM_CONFIG_DIR_ENV);
+        Ok(())
+    }
+
     fn compute_models_cache_key(&self) -> String {
         serde_json::to_string(&self.cmd).unwrap_or_default()
     }
@@ -293,6 +375,9 @@ impl OpenTeamsCli {
         env.clone()
             .with_profile(&self.cmd)
             .apply_to_command(&mut command);
+        if self.runtime_mcp_snapshot.is_some() {
+            self.apply_mcp_process_isolation(&mut command, env)?;
+        }
 
         let child = command.group_spawn()?;
 
@@ -512,6 +597,42 @@ async fn wait_for_server_url(
 
 #[async_trait]
 impl StandardCodingAgentExecutor for OpenTeamsCli {
+    async fn prepare_mcp_for_run(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        context: &McpRunContext,
+        env: &mut ExecutionEnv,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        self.runtime_mcp_snapshot = None;
+        if self.cmd.base_command_override.is_some() {
+            return Err(ExecutorError::Configuration(
+                "OpenTeams CLI run-scoped MCP isolation cannot be verified for a custom base command"
+                    .to_string(),
+            ));
+        }
+        let mcp_servers =
+            build_opencode_compatible_mcp_servers(canonical, "openteams-cli", "OpenTeams CLI")?;
+        let effective_env = env.clone().with_profile(&self.cmd);
+        let mut config = parse_inline_config(
+            effective_env.get(CONFIG_CONTENT_ENV).map(String::as_str),
+            "OpenTeams CLI",
+        )?;
+        config.insert("mcp".to_string(), mcp_servers.clone());
+        let config_content = serde_json::to_string(&config)?;
+        let private_directory = PrivateMcpRunDirectory::create(context, "openteams-cli-mcp")?;
+        let config_home = private_directory.path().to_path_buf();
+        self.runtime_mcp_snapshot = Some(Arc::new(OpenTeamsCliMcpRuntimeSnapshot {
+            config_content: config_content.clone(),
+            config_home: config_home.clone(),
+            mcp_servers,
+        }));
+        env.insert(CONFIG_CONTENT_ENV, config_content);
+        env.insert("XDG_CONFIG_HOME", config_home.to_string_lossy().to_string());
+        env.insert(ISOLATED_HOME_ENV, config_home.to_string_lossy().to_string());
+        env.insert(DISABLE_PROJECT_CONFIG_ENV, "true");
+        Ok(PreparedMcpRun::new(canonical)?.with_cleanup(private_directory.into_cleanup()))
+    }
+
     fn is_authenticated(&self, _env: &ExecutionEnv) -> bool {
         true
     }
@@ -561,7 +682,8 @@ impl StandardCodingAgentExecutor for OpenTeamsCli {
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let env = setup_permissions_env(self.auto_approve, env);
+        let env = self.mcp_run_env(env)?;
+        let env = setup_permissions_env(self.auto_approve, &env);
         let env = setup_compaction_env(self.auto_compact, &env);
         let env = setup_builtin_provider_env(&env);
         self.spawn_inner(current_dir, prompt, None, &env).await
@@ -575,7 +697,8 @@ impl StandardCodingAgentExecutor for OpenTeamsCli {
         _reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let env = setup_permissions_env(self.auto_approve, env);
+        let env = self.mcp_run_env(env)?;
+        let env = setup_permissions_env(self.auto_approve, &env);
         let env = setup_compaction_env(self.auto_compact, &env);
         let env = setup_builtin_provider_env(&env);
         self.spawn_inner(current_dir, prompt, Some(session_id), &env)
@@ -806,15 +929,57 @@ fn merge_builtin_provider_config(existing_json: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::{collections::HashMap, fs, io};
 
     use serde_json::json;
+    use tempfile::TempDir;
+    use tokio::process::Command;
+    use uuid::Uuid;
 
     use super::{
-        OpenTeamsCli, executor_failure_message, merge_builtin_provider_config,
-        parse_models_command_output,
+        CONFIG_CONTENT_ENV, CUSTOM_CONFIG_DIR_ENV, CUSTOM_CONFIG_ENV, DISABLE_PROJECT_CONFIG_ENV,
+        ISOLATED_HOME_ENV, OpenTeamsCli, executor_failure_message, merge_builtin_provider_config,
+        parse_models_command_output, setup_builtin_provider_env, setup_compaction_env,
     };
-    use crate::executors::ExecutorError;
+    use crate::{
+        env::{ExecutionEnv, RepoContext},
+        executors::{ExecutorError, StandardCodingAgentExecutor},
+        mcp_config::MemberMcpConfig,
+        mcp_run::McpRunContext,
+    };
+
+    fn test_openteams_cli() -> OpenTeamsCli {
+        serde_json::from_value(json!({})).expect("deserialize OpenTeams CLI test config")
+    }
+
+    fn run_context(workspace: &TempDir) -> McpRunContext {
+        McpRunContext::new(workspace.path(), Uuid::new_v4(), Uuid::new_v4())
+            .expect("create MCP run context")
+    }
+
+    fn execution_env(workspace: &TempDir) -> ExecutionEnv {
+        ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        )
+    }
+
+    fn command_env_value(command: &Command, key: &str) -> Option<String> {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == key)
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().to_string())
+    }
+
+    fn command_env_is_removed(command: &Command, key: &str) -> bool {
+        command
+            .as_std()
+            .get_envs()
+            .any(|(name, value)| name == key && value.is_none())
+    }
 
     #[test]
     fn missing_bundled_cli_falls_back_to_native_command() {
@@ -834,6 +999,274 @@ mod tests {
         assert_eq!(
             executor_failure_message(&error),
             "OpenTeamsCli request timed out after 2400s without session activity"
+        );
+    }
+
+    #[tokio::test]
+    async fn openteams_cli_mcp_merge_preserves_provider_compaction_and_other_fields() {
+        let workspace = TempDir::new().expect("create workspace");
+        let mut env = execution_env(&workspace);
+        env.insert(
+            CONFIG_CONTENT_ENV,
+            r#"{"provider":{"opencode":{"options":{"apiKey":"user-key","timeout":123}},"custom":{"name":"Custom"}},"compaction":{"prune":false},"theme":"dark","mcp":{"global":{"type":"local","command":["global"]}}}"#,
+        );
+        let canonical: MemberMcpConfig = serde_json::from_value(json!({
+            "mcpServers": {
+                "local": {
+                    "command": "/bin/echo",
+                    "args": ["serve"],
+                    "env": {"TOKEN": "member-secret"}
+                },
+                "remote": {
+                    "type": "http",
+                    "url": "https://example.test/mcp",
+                    "headers": {"Authorization": "Bearer member-secret"}
+                }
+            }
+        }))
+        .expect("deserialize canonical MCP config");
+        let mut cli = test_openteams_cli();
+        cli.prepare_mcp_for_run(&canonical, &run_context(&workspace), &mut env)
+            .await
+            .expect("prepare OpenTeams CLI MCP snapshot");
+
+        let run_env = cli.mcp_run_env(&env).expect("build run env");
+        let run_env = setup_compaction_env(true, &run_env);
+        let run_env = setup_builtin_provider_env(&run_env);
+        let config: serde_json::Value =
+            serde_json::from_str(run_env.get(CONFIG_CONTENT_ENV).unwrap()).unwrap();
+
+        assert!(config["mcp"].get("global").is_none());
+        assert_eq!(
+            config["mcp"]["local"]["command"],
+            json!(["/bin/echo", "serve"])
+        );
+        assert_eq!(
+            config["mcp"]["local"]["environment"]["TOKEN"],
+            json!("member-secret")
+        );
+        assert_eq!(
+            config["provider"]["opencode"]["options"]["apiKey"],
+            json!("user-key")
+        );
+        assert_eq!(
+            config["provider"]["opencode"]["options"]["timeout"],
+            json!(123)
+        );
+        assert_eq!(config["provider"]["custom"]["name"], json!("Custom"));
+        assert_eq!(config["compaction"]["prune"], json!(false));
+        assert_eq!(config["compaction"]["auto"], json!(true));
+        assert_eq!(config["theme"], json!("dark"));
+    }
+
+    #[tokio::test]
+    async fn openteams_cli_start_and_follow_up_reuse_frozen_isolated_process_config() {
+        let workspace = TempDir::new().expect("create workspace");
+        let canonical: MemberMcpConfig = serde_json::from_value(json!({
+            "mcpServers": {"local": {"command": "/bin/echo"}}
+        }))
+        .expect("deserialize canonical MCP config");
+        let mut cli = test_openteams_cli();
+        cli.cmd.env = Some(HashMap::from([
+            (
+                CUSTOM_CONFIG_ENV.to_string(),
+                "/user/config.json".to_string(),
+            ),
+            (
+                CUSTOM_CONFIG_DIR_ENV.to_string(),
+                "/user/config-dir".to_string(),
+            ),
+            ("XDG_CONFIG_HOME".to_string(), "/user/xdg".to_string()),
+            (ISOLATED_HOME_ENV.to_string(), "/user/home".to_string()),
+        ]));
+        let mut env = execution_env(&workspace);
+        cli.prepare_mcp_for_run(&canonical, &run_context(&workspace), &mut env)
+            .await
+            .expect("prepare OpenTeams CLI MCP snapshot");
+
+        let start_env = cli.mcp_run_env(&env).expect("build initial run env");
+        let mut tampered = env.clone();
+        tampered.insert(CONFIG_CONTENT_ENV, r#"{"mcp":{"tampered":{}}}"#);
+        let follow_up_env = cli.mcp_run_env(&tampered).expect("build follow-up run env");
+        assert_eq!(
+            start_env.get(CONFIG_CONTENT_ENV),
+            follow_up_env.get(CONFIG_CONTENT_ENV)
+        );
+
+        let final_env = setup_builtin_provider_env(&setup_compaction_env(true, &follow_up_env));
+        let mut command = Command::new("openteams-cli-test");
+        final_env
+            .clone()
+            .with_profile(&cli.cmd)
+            .apply_to_command(&mut command);
+        cli.apply_mcp_process_isolation(&mut command, &final_env)
+            .expect("apply OpenTeams CLI process isolation");
+
+        assert_eq!(
+            command_env_value(&command, DISABLE_PROJECT_CONFIG_ENV).as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            command_env_value(&command, "XDG_CONFIG_HOME"),
+            command_env_value(&command, ISOLATED_HOME_ENV)
+        );
+        assert!(command_env_is_removed(&command, CUSTOM_CONFIG_ENV));
+        assert!(command_env_is_removed(&command, CUSTOM_CONFIG_DIR_ENV));
+        let (_, args) = cli
+            .build_command_builder()
+            .unwrap()
+            .build_initial()
+            .unwrap()
+            .into_parts_for_test();
+        assert!(args.ends_with(&[
+            "serve".to_string(),
+            "--hostname".to_string(),
+            "127.0.0.1".to_string(),
+            "--port".to_string(),
+            "0".to_string(),
+        ]));
+    }
+
+    #[tokio::test]
+    async fn openteams_cli_explicit_empty_mcp_leaves_global_bytes_unchanged_and_cleans_up() {
+        let workspace = TempDir::new().expect("create workspace");
+        let user_home = workspace.path().join("user-home");
+        let user_config_dir = user_home.join(".openteams");
+        fs::create_dir_all(&user_config_dir).expect("create OpenTeams CLI config directory");
+        let global_config = user_config_dir.join("openteams.json");
+        let original = br#"{"mcp":{"global":{"type":"local","command":["global-secret"]}}}"#;
+        fs::write(&global_config, original).expect("write global config sentinel");
+        let mut cli = test_openteams_cli();
+        cli.cmd.env = Some(HashMap::from([(
+            ISOLATED_HOME_ENV.to_string(),
+            user_home.to_string_lossy().to_string(),
+        )]));
+        let mut env = execution_env(&workspace);
+
+        let prepared = cli
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(&workspace),
+                &mut env,
+            )
+            .await
+            .expect("prepare empty OpenTeams CLI MCP snapshot");
+        let snapshot = cli.runtime_mcp_snapshot.as_ref().unwrap();
+        let private_config_home = snapshot.config_home.clone();
+        let config: serde_json::Value =
+            serde_json::from_str(env.get(CONFIG_CONTENT_ENV).unwrap()).unwrap();
+        assert_eq!(config["mcp"], json!({}));
+        assert_ne!(snapshot.config_home, user_home);
+        assert_eq!(fs::read(&global_config).unwrap(), original);
+        assert!(private_config_home.exists());
+
+        drop(prepared.into_cleanup());
+        assert!(!private_config_home.exists());
+    }
+
+    #[tokio::test]
+    async fn openteams_cli_rejects_unverified_override_before_resource_creation() {
+        let workspace = TempDir::new().expect("create workspace");
+        let mut env = execution_env(&workspace);
+        let unsupported: MemberMcpConfig = serde_json::from_value(json!({
+            "mcpServers": {
+                "socket": {"type": "websocket", "command": "/bin/echo"}
+            }
+        }))
+        .expect("deserialize unsupported OpenTeams CLI transport");
+        let error = test_openteams_cli()
+            .prepare_mcp_for_run(&unsupported, &run_context(&workspace), &mut env)
+            .await
+            .expect_err("unsupported OpenTeams CLI transport must fail closed");
+        assert!(matches!(error, ExecutorError::McpNotSupported));
+
+        let mut cli = test_openteams_cli();
+        cli.cmd.base_command_override = Some("unverified-openteams-cli".to_string());
+
+        let error = cli
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(&workspace),
+                &mut env,
+            )
+            .await
+            .expect_err("custom OpenTeams CLI command must fail closed");
+
+        assert!(matches!(error, ExecutorError::Configuration(_)));
+        assert!(!workspace.path().join(".openteams").join("tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn openteams_cli_spawn_failure_releases_prepared_mcp_cleanup() {
+        let workspace = TempDir::new().expect("create workspace");
+        let mut cli = test_openteams_cli();
+        let mut env = execution_env(&workspace);
+        let prepared = cli
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(&workspace),
+                &mut env,
+            )
+            .await
+            .expect("prepare OpenTeams CLI MCP snapshot");
+        let private_config_home = cli
+            .runtime_mcp_snapshot
+            .as_ref()
+            .unwrap()
+            .config_home
+            .clone();
+        cli.cmd.base_command_override =
+            Some("definitely-not-a-real-openteams-cli-command".to_string());
+
+        let error = cli
+            .spawn(workspace.path(), "hello", &env)
+            .await
+            .expect_err("OpenTeams CLI spawn must fail");
+        assert!(matches!(error, ExecutorError::ExecutableNotFound { .. }));
+        assert!(private_config_home.exists());
+
+        drop(prepared);
+        assert!(!private_config_home.exists());
+    }
+
+    #[tokio::test]
+    async fn openteams_cli_secret_is_redacted_and_invalid_inline_config_fails_closed() {
+        let workspace = TempDir::new().expect("create workspace");
+        let secret = "openteams-cli-mcp-secret-never-log";
+        let canonical: MemberMcpConfig = serde_json::from_value(json!({
+            "mcpServers": {
+                "local": {"command": "/bin/echo", "env": {"TOKEN": secret}}
+            }
+        }))
+        .expect("deserialize canonical MCP config");
+        let mut cli = test_openteams_cli();
+        let mut env = execution_env(&workspace);
+        let prepared = cli
+            .prepare_mcp_for_run(&canonical, &run_context(&workspace), &mut env)
+            .await
+            .expect("prepare OpenTeams CLI MCP snapshot");
+        assert!(!format!("{cli:?}").contains(secret));
+        assert!(!format!("{prepared:?}").contains(secret));
+        assert!(!format!("{:?}", cli.runtime_mcp_snapshot.as_ref().unwrap()).contains(secret));
+
+        let invalid_workspace = TempDir::new().expect("create invalid workspace");
+        let mut invalid_env = execution_env(&invalid_workspace);
+        invalid_env.insert(CONFIG_CONTENT_ENV, format!("{{invalid-{secret}"));
+        let error = test_openteams_cli()
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(&invalid_workspace),
+                &mut invalid_env,
+            )
+            .await
+            .expect_err("invalid inline config must fail before spawn");
+        assert!(!error.to_string().contains(secret));
+        assert!(
+            !invalid_workspace
+                .path()
+                .join(".openteams")
+                .join("tmp")
+                .exists()
         );
     }
 

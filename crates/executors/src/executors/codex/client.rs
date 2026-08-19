@@ -1153,6 +1153,8 @@ fn is_sensitive_log_key(key: &str) -> bool {
             | "api_key"
             | "authorization"
             | "Authorization"
+            | "mcp_servers"
+            | "mcpServers"
     )
 }
 
@@ -1182,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_log_redaction_removes_auth_tokens() {
+    fn raw_log_redaction_removes_auth_tokens_and_mcp_config() {
         let raw = serde_json::json!({
             "id": 2,
             "result": {
@@ -1192,6 +1194,14 @@ mod tests {
                     "refreshToken": "refresh-secret",
                     "tokenUsage": {
                         "totalTokens": 123
+                    }
+                },
+                "config": {
+                    "mcp_servers": {
+                        "private": {
+                            "command": "/bin/private-server",
+                            "env": {"TOKEN": "mcp-secret"}
+                        }
                     }
                 }
             }
@@ -1204,8 +1214,10 @@ mod tests {
         assert_eq!(value["result"]["authToken"], "[redacted]");
         assert_eq!(value["result"]["nested"]["refreshToken"], "[redacted]");
         assert_eq!(value["result"]["nested"]["tokenUsage"]["totalTokens"], 123);
+        assert_eq!(value["result"]["config"]["mcp_servers"], "[redacted]");
         assert!(!redacted.contains("secret-token"));
         assert!(!redacted.contains("refresh-secret"));
+        assert!(!redacted.contains("mcp-secret"));
     }
 
     #[test]
