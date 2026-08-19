@@ -11,11 +11,11 @@ LANGUAGES = ("en", "zh", "ja", "ko", "fr", "es")
 TRANSLATED_KEYS = {"id", "name", "description", "workflow_steps"}
 ENGLISH_KEYS = TRANSLATED_KEYS | {"member_ids", "tier", "enabled"}
 EXPECTED_TEMPLATES = {
-    "ai_prompt_quality_team": 4,
     "architecture_governance_team": 4,
     "content_studio_team": 4,
     "fullstack_delivery_team": 5,
     "growth_marketing_team": 4,
+    "literature_research_team": 3,
     "product_discovery_team": 4,
     "rapid_bugfix_team": 4,
     "research_innovation_team": 5,
@@ -26,6 +26,7 @@ EXPECTED_ADVANCED = {"advanced-release-command", "advanced-growth-ops"}
 EXPECTED_LEADS = {
     "advanced-release-command": "coordinator_pmo",
     "advanced-growth-ops": "product_manager",
+    "literature_research_team": "literature-review-researcher",
 }
 PLACEHOLDERS = re.compile(r"\b(TODO|TBD|FIXME|PLACEHOLDER|待补|占位)\b", re.IGNORECASE)
 REQUIRED_LANGUAGE_MARKERS = {
@@ -34,13 +35,6 @@ REQUIRED_LANGUAGE_MARKERS = {
     "ko": re.compile(r"[\uac00-\ud7af]"),
 }
 BODY_REQUIRED_TERMS = {
-    "ai_prompt_quality_team": {
-        "zh": ["提示词工程", "质量验证和工程人员", "安全负责人", "证据"],
-        "ja": ["プロンプト設計", "品質検証とエンジニアリング", "安全担当", "証拠"],
-        "ko": ["프롬프트 엔지니어링", "품질 검증과 엔지니어링", "안전 담당자", "증거"],
-        "fr": ["L'ingénierie des invites", "La qualité et l'ingénierie", "La sûreté", "preuves"],
-        "es": ["ingeniería de instrucciones", "Calidad e ingeniería", "Seguridad", "evidencia"],
-    },
     "architecture_governance_team": {
         "zh": ["目标状态方案", "实现成本", "可维护性", "上线前置条件"],
         "ja": ["目標状態の提案", "実装コスト", "保守性", "展開前提条件"],
@@ -68,6 +62,13 @@ BODY_REQUIRED_TERMS = {
         "ko": ["캠페인 목표", "퍼널 지표", "창의 변형", "투자 수익률"],
         "fr": ["objectif de campagne", "indicateur de tunnel", "variantes créatives", "retour sur investissement"],
         "es": ["objetivo de campaña", "métrica de embudo", "variantes creativas", "retorno de inversión"],
+    },
+    "literature_research_team": {
+        "zh": ["研究负责人", "研究助理", "审查员", "最终接受权"],
+        "ja": ["Researcher", "Assistant", "Reviewer", "最終承認"],
+        "ko": ["Researcher", "Assistant", "Reviewer", "최종 승인"],
+        "fr": ["Researcher", "Assistant", "Reviewer", "acceptation finale"],
+        "es": ["Researcher", "Assistant", "Reviewer", "aceptación final"],
     },
     "product_discovery_team": {
         "zh": ["决策期限", "已观察信号与假设", "最小且有用", "测量计划"],
@@ -126,7 +127,10 @@ def validate() -> None:
     if root_markdown != ["team_collaboration_protocol.md"]:
         raise AssertionError(f"root protocol markdown should only contain the shared protocol, got {root_markdown}")
 
-    role_ids = {path.stem for path in ROOT.parent.joinpath("roles").glob("*.md")}
+    role_ids = {
+        parse_markdown(path)[0]["id"]
+        for path in ROOT.parent.joinpath("roles").glob("*.md")
+    }
     by_language: dict[str, set[str]] = {}
     english_by_id: dict[str, dict] = {}
     english_body_by_id: dict[str, str] = {}
