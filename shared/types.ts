@@ -54,11 +54,11 @@ export type ProjectDeliveryEvent = { id: string, project_id: string, session_id:
 
 export enum ProjectDeliveryEventType { feature = "feature", bugfix = "bugfix", test = "test" }
 
-export type ProjectWorkItem = { id: string, project_id: string, type: ProjectWorkItemType, status: ProjectWorkItemStatus, title: string, description: string | null, labels_json: string | null, priority: ProjectWorkItemPriority, source: ProjectWorkItemSource, created_by: string | null, created_at: Date, updated_at: Date, };
+export type ProjectWorkItem = { id: string, project_id: string, parent_id: string | null, type: ProjectWorkItemType, status: ProjectWorkItemStatus, title: string, description: string | null, labels_json: string | null, priority: ProjectWorkItemPriority, source: ProjectWorkItemSource, created_by: string | null, created_at: Date, updated_at: Date, };
 
-export type CreateProjectWorkItem = { type: ProjectWorkItemType, status?: ProjectWorkItemStatus, title: string, description: string | null, labels_json?: string, priority: ProjectWorkItemPriority, source: ProjectWorkItemSource, created_by: string | null, };
+export type CreateProjectWorkItem = { parent_id?: string | null, type: ProjectWorkItemType, status?: ProjectWorkItemStatus, title: string, description: string | null, labels_json?: string, priority: ProjectWorkItemPriority, source: ProjectWorkItemSource, created_by: string | null, };
 
-export type UpdateProjectWorkItem = { type: ProjectWorkItemType | null, status: ProjectWorkItemStatus | null, title: string | null, description: string | null, labels_json: string | null, priority: ProjectWorkItemPriority | null, };
+export type UpdateProjectWorkItem = { parent_id?: string | null, type: ProjectWorkItemType | null, status: ProjectWorkItemStatus | null, title: string | null, description: string | null, labels_json: string | null, priority: ProjectWorkItemPriority | null, };
 
 export enum ProjectWorkItemType { feature = "feature", bug = "bug", task = "task", deploy = "deploy", test = "test", doc = "doc", refactor = "refactor" }
 
@@ -747,12 +747,6 @@ capabilities: { [key in string]?: Array<BaseAgentCapability> }, executors: { [ke
 
 export type Environment = { os_type: string, os_version: string, os_architecture: string, bitness: string, };
 
-export type McpServerQuery = { executor: BaseCodingAgent, };
-
-export type UpdateMcpServersBody = { servers: { [key in string]?: JsonValue }, };
-
-export type GetMcpServerResponse = { mcp_config: McpConfig, config_path: string, };
-
 export type CheckEditorAvailabilityQuery = { editor_type: EditorType, };
 
 export type CheckEditorAvailabilityResponse = { available: boolean, };
@@ -1055,6 +1049,10 @@ runner_type: string | null,
  */
 recommended_model: string | null,
 /**
+ * Complete member-scoped execution settings copied when applying this preset.
+ */
+execution_config?: MemberExecutionConfig,
+/**
  * System prompt defining the agent's behavior
  */
 system_prompt: string,
@@ -1339,7 +1337,7 @@ export type TeamPresetListResponse = { teams: Array<TeamPresetSummary>, };
 
 export type TeamPresetLocaleQuery = { locale: string | null, };
 
-export type TeamPresetMemberWrite = { id: string, name: string, description: string | null, runner_type: string | null, recommended_model: string | null, system_prompt: string | null, default_workspace_path: string | null, selected_skill_ids: Array<string>, tools_enabled: JsonValue | null, enabled: boolean | null, };
+export type TeamPresetMemberWrite = { id: string, name: string, description: string | null, runner_type: string | null, recommended_model: string | null, execution_config?: MemberExecutionConfig, system_prompt: string | null, default_workspace_path: string | null, selected_skill_ids: Array<string>, tools_enabled: JsonValue | null, enabled: boolean | null, };
 
 export type CreateTeamPresetRequest = { id: string, name: string, description: string | null, lead_member_id: string | null, tier: ChatTeamTemplateTier | null, workflow_steps: Array<ChatWorkflowStep>, team_protocol: string | null, enabled: boolean | null, members: Array<TeamPresetMemberWrite>, };
 

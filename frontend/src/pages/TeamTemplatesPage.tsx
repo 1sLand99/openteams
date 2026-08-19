@@ -52,6 +52,11 @@ import {
   getRuntimeDisplayState,
   getRunnerLabel,
 } from "@/pages/agent-runtime/agentRuntimeViewModel";
+import {
+  memberMcpServersJson,
+  parseMemberMcpServers,
+  presentMemberMcpError,
+} from "@/pages/team/memberMcpConfig";
 import type {
   AgentRuntimeStatus,
   BackendChatSkill,
@@ -59,12 +64,12 @@ import type {
 } from "@/types";
 import { ProjectMemberType } from "../../../shared/types";
 import type {
-  BaseCodingAgent as ProjectBaseCodingAgent,
   ChatMemberPreset,
   ChatTeamTemplateTier,
   ChatTeamPreset,
   CreateTeamPresetRequest,
   JsonValue,
+  MemberExecutionConfig,
   ProjectMemberWithRuntime,
   TeamPresetSummary,
   UpdateTeamPresetRequest,
@@ -97,6 +102,8 @@ type MemberForm = {
   id: string;
   name: string;
   description: string;
+  executionConfig?: MemberExecutionConfig;
+  mcpConfigText: string;
   runnerType: string;
   recommendedModel: string;
   systemPrompt: string;
@@ -120,6 +127,7 @@ type EditorMode = "create" | "edit" | null;
 
 type DraftCommitOptions = {
   autoSave?: boolean;
+  validateMcp?: boolean;
   validateTools?: boolean;
 };
 
@@ -130,6 +138,7 @@ type FormValidationIssue = {
 };
 
 const emptyToolsEnabledText = "{}";
+const blankMcpConfigText = memberMcpServersJson({ id: "" });
 const defaultRunnerOptionId = "__default_runner";
 const defaultModelOptionId = "__default_model";
 
@@ -158,6 +167,7 @@ const blankMember = (index: number, t?: TranslateFn): MemberForm => ({
         ? translateWithFallback(t, "teamTemplates.members.defaultMemberName", "Member {count}", { count: index + 1 })
         : `Member ${index + 1}`,
   description: "",
+  mcpConfigText: blankMcpConfigText,
   runnerType: "",
   recommendedModel: "",
   systemPrompt: "",
@@ -193,6 +203,10 @@ const detailToForm = (detail: ChatTeamPreset): TeamPresetForm => ({
     id: member.id,
     name: member.name,
     description: member.description || "",
+    executionConfig: member.execution_config
+      ? structuredClone(member.execution_config)
+      : undefined,
+    mcpConfigText: memberMcpServersJson(member),
     runnerType: member.runner_type ?? "",
     recommendedModel: member.recommended_model ?? "",
     systemPrompt: member.system_prompt || "",
@@ -223,6 +237,25 @@ const normalizeWorkflowSteps = (
     }))
     .filter((step) => step.title || step.description);
 
+// Deep-copy the member's execution config and merge the MCP editor text into
+// its canonical `mcp` slot. Runner/model stay as stored; applying a template
+// later overrides only those two fields from runtime availability.
+const memberFormExecutionConfig = (
+  member: MemberForm,
+): MemberExecutionConfig | undefined => {
+  const base = member.executionConfig
+    ? structuredClone(member.executionConfig)
+    : undefined;
+  try {
+    return {
+      ...base,
+      mcp: { mcpServers: parseMemberMcpServers(member.mcpConfigText) },
+    };
+  } catch {
+    return base;
+  }
+};
+
 const formToPayload = (
   form: TeamPresetForm,
 ): CreateTeamPresetRequest | UpdateTeamPresetRequest => ({
@@ -244,6 +277,7 @@ const formToPayload = (
     default_workspace_path: null,
     selected_skill_ids: parseSkillIds(member.selectedSkillIdsText),
     tools_enabled: parseToolsEnabled(member.toolsEnabledText),
+    execution_config: memberFormExecutionConfig(member),
     enabled: true,
   })),
 });
@@ -336,6 +370,13 @@ const validateTeamPresetForm = (
     }
   }
 
+  for (const member of form.members) {
+    const mcpIssue = memberMcpConfigIssue(member, t);
+    if (mcpIssue) {
+      return { issue: mcpIssue };
+    }
+  }
+
   return { payload: formToPayload(form) };
 };
 
@@ -359,6 +400,48 @@ const validateMemberToolsEnabled = (
         : "Invalid JSON format. Please check your syntax.",
     };
   }
+};
+
+const memberMcpErrorMessages = (t?: TranslateFn) => ({
+  invalidJson: t
+    ? translateWithFallback(t, "teamTemplates.validation.invalidJson", "Invalid JSON format. Please check your syntax.")
+    : "Invalid JSON format. Please check your syntax.",
+  invalidShape: t
+    ? translateWithFallback(t, "teamTemplates.validation.invalidMcpShape", "MCP configuration must be a JSON object with an \"mcpServers\" object.")
+    : "MCP configuration must be a JSON object with an \"mcpServers\" object.",
+});
+
+// Validate the canonical MCP editor JSON. Error text comes from
+// presentMemberMcpError, which never echoes config values.
+const memberMcpConfigIssue = (
+  member: MemberForm,
+  t?: TranslateFn,
+): FormValidationIssue | null => {
+  try {
+    parseMemberMcpServers(member.mcpConfigText);
+    return null;
+  } catch (error) {
+    const messages = memberMcpErrorMessages(t);
+    return {
+      fieldKey: `member:${member.id}:mcp_config`,
+      memberId: member.id,
+      message: presentMemberMcpError(
+        error,
+        messages.invalidJson,
+        messages.invalidShape,
+      ),
+    };
+  }
+};
+
+const validateMemberMcpConfig = (
+  form: TeamPresetForm,
+  memberId: string,
+  t?: TranslateFn,
+): FormValidationIssue | null => {
+  const member = form.members.find((item) => item.id === memberId);
+  if (!member) return null;
+  return memberMcpConfigIssue(member, t);
 };
 
 const errorText = (error: unknown, fallback: string): string =>
@@ -946,6 +1029,7 @@ const memberFormToPreset = (member: MemberForm): ChatMemberPreset => {
     default_workspace_path: null,
     selected_skill_ids: parseSkillIds(member.selectedSkillIdsText),
     tools_enabled: toolsEnabled as JsonValue,
+    execution_config: memberFormExecutionConfig(member),
     is_builtin: false,
     enabled: true,
   };
@@ -979,6 +1063,7 @@ const formDirtySnapshot = (form: TeamPresetForm): string =>
       id: member.id,
       name: member.name,
       description: member.description,
+      mcpConfigText: member.mcpConfigText,
       runnerType: member.runnerType,
       recommendedModel: member.recommendedModel,
       systemPrompt: member.systemPrompt,
@@ -1038,6 +1123,7 @@ export const commitMemberSystemPromptDraft = (
 
 export const validateTeamPresetDraft = validateTeamPresetForm;
 export const validateMemberToolsEnabledDraft = validateMemberToolsEnabled;
+export const validateMemberMcpConfigDraft = validateMemberMcpConfig;
 export const teamPresetDraftToPayload = formToPayload;
 
 function MemberInfoSection({
@@ -1122,7 +1208,11 @@ function TemplateMemberInfoPage({
     member.system_prompt,
     roleDescription,
   );
-  const mcpConfig = formatMemberJsonConfig(member.tools_enabled);
+  const mcpServerCount = Object.keys(
+    member.execution_config?.mcp?.mcpServers ?? {},
+  ).length;
+  const mcpConfig = mcpServerCount > 0 ? memberMcpServersJson(member) : null;
+  const toolsConfig = formatMemberJsonConfig(member.tools_enabled);
   const memberKey = formMember?.id ?? member.id;
   const selectedSkillIds = useMemo(
     () => parseSkillIds(formMember?.selectedSkillIdsText ?? ""),
@@ -1440,6 +1530,47 @@ function TemplateMemberInfoPage({
               </span>
               <textarea
                 disabled={disabled}
+                value={formMember.mcpConfigText}
+                rows={6}
+                onBlur={() =>
+                  onMemberChange?.(
+                    { mcpConfigText: formMember.mcpConfigText },
+                    { validateMcp: true },
+                  )
+                }
+                onChange={(event) =>
+                  onMemberChange?.({ mcpConfigText: event.target.value })
+                }
+                className={[
+                  "team-template-field w-full resize-y rounded-[3px] border-x-0 border-t-0 bg-[var(--team-template-code-surface)] py-1.5 pl-10 pr-3 font-mono text-[13px] leading-relaxed text-[var(--team-template-code-text)] outline-none transition-colors duration-150 placeholder:text-[var(--team-template-muted)] focus:border-[var(--team-template-field-focus)] disabled:cursor-not-allowed disabled:opacity-60",
+                  fieldErrors[`member:${memberKey}:mcp_config`]
+                    ? "border-red-400/70"
+                    : "border-[var(--team-template-code-border)]",
+                ].join(" ")}
+              />
+              {fieldErrors[`member:${memberKey}:mcp_config`] && (
+                <p className="mt-1 text-[12px] text-red-400">
+                  {fieldErrors[`member:${memberKey}:mcp_config`]}
+                </p>
+              )}
+            </label>
+          </MemberInfoSection>
+
+          <MemberInfoSection meta="TOOLS" title={translateWithFallback(t, "teamTemplates.member.tools", "Tools configuration")}>
+            <label className="relative block">
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute left-3 top-2.5 select-none font-mono text-[11px] leading-relaxed text-[var(--team-template-index)]"
+              >
+                1<br />
+                2<br />
+                3<br />
+                4<br />
+                5<br />
+                6
+              </span>
+              <textarea
+                disabled={disabled}
                 value={formMember.toolsEnabledText}
                 rows={6}
                 onBlur={() =>
@@ -1545,6 +1676,18 @@ function TemplateMemberInfoPage({
           ) : (
             <p className="text-[13px] text-[var(--team-template-member-description)]">
               {translateWithFallback(t, "teamTemplates.member.noMcp", "No MCP configuration.")}
+            </p>
+          )}
+        </MemberInfoSection>
+
+        <MemberInfoSection meta="TOOLS" title={translateWithFallback(t, "teamTemplates.member.tools", "Tools configuration")}>
+          {toolsConfig ? (
+            <pre className="max-h-[220px] overflow-auto font-mono text-[12px] leading-relaxed text-[var(--team-template-code-text)] ot-scroll-area-styled">
+              {toolsConfig}
+            </pre>
+          ) : (
+            <p className="text-[13px] text-[var(--team-template-member-description)]">
+              {translateWithFallback(t, "teamTemplates.member.noTools", "No tool configuration.")}
             </p>
           )}
         </MemberInfoSection>
@@ -1787,6 +1930,7 @@ function TemplateDetailView({
   onFormChange,
   onAutoSave,
   onEditableMemberSelect,
+  onValidateMemberMcp,
   onValidateMemberTools,
   onRetryDetail,
   onSave,
@@ -1816,6 +1960,7 @@ function TemplateDetailView({
   onFormChange?: (form: TeamPresetForm, options?: DraftCommitOptions) => void;
   onAutoSave?: (form: TeamPresetForm) => void;
   onEditableMemberSelect?: (memberId: string | null) => void;
+  onValidateMemberMcp?: (form: TeamPresetForm, memberId: string) => void;
   onValidateMemberTools?: (form: TeamPresetForm, memberId: string) => void;
   onRetryDetail: () => void;
   onSave?: () => void;
@@ -1937,6 +2082,8 @@ function TemplateDetailView({
     onFormChange?.(nextForm, options);
     if (options?.validateTools && selectedFormMember?.id) {
       onValidateMemberTools?.(nextForm, selectedFormMember.id);
+    } else if (options?.validateMcp && selectedFormMember?.id) {
+      onValidateMemberMcp?.(nextForm, selectedFormMember.id);
     } else if (options?.autoSave) {
       onAutoSave?.(nextForm);
     }
@@ -2985,10 +3132,45 @@ export function TeamTemplatesPage() {
     [autoSaveTemplate, editorMode, t],
   );
 
+  const validateMemberMcpOnBlur = useCallback(
+    (draft: TeamPresetForm, memberId: string) => {
+      const issue = validateMemberMcpConfig(draft, memberId, t);
+      if (issue) {
+        setFormError(issue.message);
+        if (issue.fieldKey) {
+          setFieldErrors({ [issue.fieldKey]: issue.message });
+        }
+        if (issue.memberId) {
+          setEditorSelectedMemberId(issue.memberId);
+        }
+        return;
+      }
+
+      setFieldErrors((current) => {
+        const next = { ...current };
+        delete next[`member:${memberId}:mcp_config`];
+        return next;
+      });
+      const mcpMessages = memberMcpErrorMessages(t);
+      setFormError((current) =>
+        current === mcpMessages.invalidJson ||
+        current === mcpMessages.invalidShape
+          ? null
+          : current,
+      );
+
+      if (editorMode === "edit") {
+        void autoSaveTemplate(draft);
+      }
+    },
+    [autoSaveTemplate, editorMode, t],
+  );
+
   const deleteSelected = async () => {
     if (!selectedDetailForView || selectedDetailForView.is_builtin || deleting) {
       return;
     }
+
     const confirmed = window.confirm(
       translateWithFallback(t, "teamTemplates.deleteConfirm", `Delete "${selectedDetailForView.name}"? This removes the custom template and any private members only used by it.`, { name: selectedDetailForView.name }),
     );
@@ -3033,12 +3215,7 @@ export function TeamTemplatesPage() {
       display_order: BigInt(spec.displayOrder),
       default_workspace_path: spec.workspacePath,
       allowed_skill_ids: spec.allowedSkillIds,
-      execution_config: {
-        runner_type: spec.runnerType as unknown as ProjectBaseCodingAgent,
-        model_name: spec.modelName,
-        thinking_effort: null,
-        model_variant: null,
-      },
+      execution_config: structuredClone(spec.executionConfig),
       is_default: true,
     });
   };
@@ -3253,6 +3430,7 @@ export function TeamTemplatesPage() {
             }}
             onRetryDetail={() => undefined}
             onSave={() => void saveTemplate()}
+            onValidateMemberMcp={validateMemberMcpOnBlur}
             onValidateMemberTools={validateMemberToolsOnBlur}
             onUseTemplate={() => undefined}
           />

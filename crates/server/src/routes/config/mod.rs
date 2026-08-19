@@ -22,7 +22,6 @@ use executors::{
         AvailabilityInfo, BaseAgentCapability, BaseCodingAgent, CodingAgent,
         StandardCodingAgentExecutor,
     },
-    mcp_config::{McpConfig, read_agent_config, write_agent_config},
     model_sync::with_model,
     profile::{ExecutorConfigs, ExecutorProfileId, canonical_variant_key},
 };
@@ -37,7 +36,7 @@ use services::services::{
         normalize_custom_provider_entries, normalized_custom_provider_npm,
     },
     config::{
-        Config, ConfigError, SoundFile,
+        Config, SoundFile,
         editor::{EditorConfig, EditorType},
         save_config_to_file_atomic,
     },
@@ -102,7 +101,6 @@ pub fn router() -> Router<DeploymentImpl> {
         )
         .route("/config/cli/restart-service", post(restart_cli_service))
         .route("/sounds/{sound}", get(get_sound))
-        .route("/mcp-config", get(get_mcp_servers).post(update_mcp_servers))
         .route("/profiles", get(get_profiles).put(update_profiles))
         .route(
             "/editors/check-availability",
@@ -121,5 +119,4 @@ include!("providers.rs");
 include!("validation.rs");
 include!("tests.rs");
 include!("sounds.rs");
-include!("mcp.rs");
 include!("profiles.rs");

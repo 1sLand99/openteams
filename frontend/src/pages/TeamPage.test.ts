@@ -30,6 +30,19 @@ const configTabsSource = readFileSync(
   new URL("./team/TeamConfigTabs.tsx", import.meta.url),
   "utf8",
 );
+const memberMcpEditorSource = readFileSync(
+  new URL("./team/useMemberMcpEditor.ts", import.meta.url),
+  "utf8",
+);
+const memberMcpConfigSource = readFileSync(
+  new URL("./team/memberMcpConfig.ts", import.meta.url),
+  "utf8",
+);
+const apiSource = readFileSync(new URL("../lib/api.ts", import.meta.url), "utf8");
+const enTeamLocale = readFileSync(
+  new URL("../locales/en/team.json", import.meta.url),
+  "utf8",
+);
 const configTabStart = configTabsSource.indexOf("function ConfigTab(");
 const permissionsTabStart = configTabsSource.indexOf(
   "function PermissionsTab(",
@@ -127,8 +140,10 @@ check(
   source.includes("const autoSaveDelayMs = 700") &&
     source.includes("memberAutoSaveTimerRef.current = window.setTimeout") &&
     source.includes("void saveMember()") &&
-    source.includes("mcpAutoSaveTimerRef.current = window.setTimeout") &&
-    source.includes("void applyMcpServers()") &&
+    memberMcpEditorSource.includes(
+      "autoSaveTimerRef.current = window.setTimeout",
+    ) &&
+    memberMcpEditorSource.includes("void save()") &&
     source.includes(
       "teamProtocolAutoSaveTimerRef.current = window.setTimeout",
     ) &&
@@ -255,7 +270,6 @@ check(
 check(
   "skill selection does not reload the installed skills list after save",
   source.includes(".listNative(runnerType)") &&
-    source.includes("mcpServersApi\n      .load(runnerType)") &&
     source.includes("}, [runnerType, selectedMember?.id]);") &&
     !source.includes("}, [runnerType, selectedMember]);"),
   { source },
@@ -296,10 +310,69 @@ check(
 check(
   "member-level skill, MCP and ACP approval entries stay generic for PI",
   source.includes(".listNative(runnerType)") &&
-    source.includes("mcpServersApi\n      .load(runnerType)") &&
+    source.includes("useMemberMcpEditor({") &&
     !/pi[-_ ]?(skill|mcp)/iu.test(source) &&
-    !/pi[-_ ]?(skill|mcp)/iu.test(configTabsSource),
-  { source, configTabsSource },
+    !/pi[-_ ]?(skill|mcp)/iu.test(configTabsSource) &&
+    !/pi[-_ ]?(skill|mcp)/iu.test(memberMcpEditorSource),
+  { source, configTabsSource, memberMcpEditorSource },
+);
+
+check(
+  "MCP editor data flows from the selected member to the member update API",
+  source.includes("useMemberMcpEditor({") &&
+    source.includes("member: selectedMember") &&
+    source.includes("updateMember: projectApi.updateMember") &&
+    memberMcpEditorSource.includes("buildMemberMcpUpdate(snapshot, servers)") &&
+    memberMcpConfigSource.includes(
+      "...member.execution_config,\n    mcp: { mcpServers: servers },",
+    ) &&
+    !source.includes("mcpServersApi") &&
+    !source.includes("/api/mcp-config") &&
+    !apiSource.includes("mcpServersApi") &&
+    !apiSource.includes("/api/mcp-config"),
+  { source, apiSource },
+);
+
+check(
+  "member profile saves preserve the persisted member MCP config",
+  source.includes("mcp: selectedMember.execution_config?.mcp ?? null"),
+  { source },
+);
+
+check(
+  "member MCP saves are bound to member id and sequence with debounce cancellation",
+  memberMcpEditorSource.includes("const seq = ++saveSeqRef.current") &&
+    memberMcpEditorSource.includes("memberIdRef.current === memberId") &&
+    memberMcpEditorSource.includes("saveSeqRef.current === seq") &&
+    memberMcpEditorSource.includes("window.clearTimeout(autoSaveTimerRef.current)") &&
+    memberMcpEditorSource.includes("}, [memberId, clearAutoSaveTimer]);") &&
+    memberMcpEditorSource.includes("return clearAutoSaveTimer;") &&
+    memberMcpEditorSource.includes("runnerType,\n    save,") &&
+    source.includes("runnerType,\n    updateMember: projectApi.updateMember,"),
+  { memberMcpEditorSource },
+);
+
+check(
+  "MCP editor errors never interpolate raw config JSON",
+  memberMcpConfigSource.includes(
+    "if (/[{}]/u.test(err.message)) return fallbackMessage;",
+  ) &&
+    !memberMcpEditorSource.includes("console.log") &&
+    !memberMcpConfigSource.includes("console.log"),
+  { memberMcpConfigSource, memberMcpEditorSource },
+);
+
+check(
+  "runtime MCP config file path copy and vendor gallery are removed from the team UI",
+  !configTabsSource.includes("mcpConfigPath") &&
+    !configTabsSource.includes("savedToFile") &&
+    !configTabsSource.includes("builtinTitle") &&
+    !configTabsSource.includes("onToggleMcpServer") &&
+    !configTabsSource.includes("preconfigured") &&
+    configTabsSource.includes('t("teamPage.mcp.savedToMember")') &&
+    !enTeamLocale.includes("savedToFile") &&
+    enTeamLocale.includes("teamPage.mcp.savedToMember"),
+  { configTabsSource, enTeamLocale },
 );
 
 // Workflow nodes reference team members (whose runtime may be PI), so no
