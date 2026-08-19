@@ -69,7 +69,7 @@ use crate::{
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorExitResult, SlashCommandDescription,
         SpawnedChild, StandardCodingAgentExecutor,
-        opencode::ProcessOutputRedactor,
+        opencode::{FrozenProcessCommand, ProcessOutputRedactor},
         utils::{json_has_nonempty_string, read_json_file},
     },
     logs::utils::patch,
@@ -154,6 +154,7 @@ enum CodexSessionAction {
 struct CodexMcpRuntimeSnapshot {
     mcp_servers: Value,
     output_redactor: ProcessOutputRedactor,
+    process_command: FrozenProcessCommand,
 }
 
 impl std::fmt::Debug for CodexMcpRuntimeSnapshot {
@@ -211,6 +212,13 @@ pub struct Codex {
     #[ts(skip)]
     #[derivative(Debug = "ignore", PartialEq = "ignore")]
     runtime_mcp_snapshot: Option<Arc<CodexMcpRuntimeSnapshot>>,
+
+    #[cfg(test)]
+    #[serde(skip)]
+    #[ts(skip)]
+    #[schemars(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    test_base_command: Option<String>,
 }
 
 #[async_trait]
@@ -232,9 +240,12 @@ impl StandardCodingAgentExecutor for Codex {
         let output_redactor = ProcessOutputRedactor::from_config(&serde_json::json!({
             "mcp_servers": mcp_servers
         }));
+        let process_command =
+            FrozenProcessCommand::resolve(self.build_command_builder()?.build_initial()?).await?;
         self.runtime_mcp_snapshot = Some(Arc::new(CodexMcpRuntimeSnapshot {
             mcp_servers,
             output_redactor,
+            process_command,
         }));
         PreparedMcpRun::new(canonical)
     }
@@ -461,7 +472,15 @@ impl Codex {
     }
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        let mut builder = CommandBuilder::new(Self::base_command());
+        #[cfg(test)]
+        let base_command = self
+            .test_base_command
+            .clone()
+            .unwrap_or_else(|| Self::base_command().to_string());
+        #[cfg(not(test))]
+        let base_command = Self::base_command().to_string();
+
+        let mut builder = CommandBuilder::new(base_command);
         builder = builder.extend_params(["app-server"]);
         if self.oss.unwrap_or(false) {
             builder = builder.extend_params(["--oss"]);
@@ -666,7 +685,7 @@ impl Codex {
     async fn spawn_app_server<F, Fut>(
         &self,
         current_dir: &Path,
-        command_parts: CommandParts,
+        _command_parts: CommandParts,
         env: &ExecutionEnv,
         task: F,
     ) -> Result<SpawnedChild, ExecutorError>
@@ -674,16 +693,17 @@ impl Codex {
         F: FnOnce(Arc<AppServerClient>, ExitSignalSender) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), ExecutorError>> + Send + 'static,
     {
-        if self.runtime_mcp_snapshot.is_none() {
-            return Err(ExecutorError::McpIsolationNotImplemented);
-        }
-        let output_redactor = self
+        let snapshot = self
             .runtime_mcp_snapshot
             .as_ref()
-            .expect("MCP snapshot checked above")
-            .output_redactor
-            .clone();
-        let (program_path, args) = command_parts.into_resolved().await?;
+            .ok_or(ExecutorError::McpIsolationNotImplemented)?;
+        if self.cmd.base_command_override.is_some() {
+            return Err(ExecutorError::Configuration(
+                "Codex command changed after run-scoped MCP preparation".to_string(),
+            ));
+        }
+        let output_redactor = snapshot.output_redactor.clone();
+        let (program_path, args) = snapshot.process_command.parts();
 
         let mut process = Command::new(program_path);
         process
@@ -696,7 +716,7 @@ impl Codex {
             .env("NODE_NO_WARNINGS", "1")
             .env("NO_COLOR", "1")
             .env("RUST_LOG", "error")
-            .args(&args);
+            .args(args);
 
         env.clone()
             .with_profile(&self.cmd)
@@ -948,7 +968,15 @@ mod tests {
     };
 
     fn test_codex() -> Codex {
-        serde_json::from_value(json!({})).expect("deserialize Codex test config")
+        let mut codex: Codex =
+            serde_json::from_value(json!({})).expect("deserialize Codex test config");
+        codex.test_base_command = Some(
+            std::env::current_exe()
+                .expect("resolve current test executable")
+                .to_string_lossy()
+                .to_string(),
+        );
+        codex
     }
 
     fn run_context(workspace: &TempDir) -> McpRunContext {
@@ -1058,6 +1086,7 @@ mod tests {
             "#!/bin/sh\nIFS= read -r initialize_request\nprintf '%s\\n' '{\"id\":1,\"result\":{\"userAgent\":\"fake-codex\",\"codexHome\":\"/tmp/fake-codex-home\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}'\nIFS= read -r initialized_notification\nIFS= read -r thread_request\nprintf '%s' \"$thread_request\" > \"$CAPTURED_THREAD\"\nprintf '%s' \"$CODEX_HOME\" > \"$CAPTURED_HOME\"\nexit 0\n",
         );
         let mut codex = test_codex();
+        codex.test_base_command = Some(app_server_script.to_string_lossy().to_string());
         codex.cmd.env = Some(HashMap::from([
             (
                 "CODEX_HOME".to_string(),
@@ -1087,7 +1116,6 @@ mod tests {
 
         assert_eq!(params["config"]["mcp_servers"], json!({}));
         let thread_params = codex.build_thread_start_params(workspace.path());
-        codex.cmd.base_command_override = Some(app_server_script.to_string_lossy().to_string());
         let command_parts = codex
             .build_command_builder()
             .unwrap()
@@ -1168,6 +1196,38 @@ mod tests {
             .expect_err("unprepared Codex spawn must fail closed");
 
         assert!(matches!(error, ExecutorError::McpIsolationNotImplemented));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_rejects_base_command_added_after_preparation_before_spawn() {
+        let workspace = TempDir::new().expect("create workspace");
+        let marker = workspace.path().join("app-server-started");
+        let app_server_script = workspace.path().join("must-not-start-codex.sh");
+        write_executable_script(
+            &app_server_script,
+            "#!/bin/sh\nprintf started > \"$START_MARKER\"\nwhile :; do sleep 1; done\n",
+        );
+        let mut codex = test_codex();
+        let mut env = execution_env(&workspace);
+        let _prepared = codex
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(&workspace),
+                &mut env,
+            )
+            .await
+            .expect("prepare Codex MCP snapshot");
+        codex.cmd.base_command_override = Some(app_server_script.to_string_lossy().to_string());
+        env.insert("START_MARKER", marker.to_string_lossy().to_string());
+
+        let error = codex
+            .spawn(workspace.path(), "hello", &env)
+            .await
+            .expect_err("post-preparation Codex command override must fail");
+
+        assert!(matches!(error, ExecutorError::Configuration(_)));
+        assert!(!marker.exists());
     }
 
     #[tokio::test]
