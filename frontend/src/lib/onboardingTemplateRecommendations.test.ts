@@ -39,6 +39,12 @@ assert.equal(
   'research_innovation_team',
 );
 assert.equal(
+  recommendOnboardingTeamTemplate(OnboardingScenario.research, [
+    template('literature_research_team'),
+  ])?.id,
+  'literature_research_team',
+);
+assert.equal(
   recommendOnboardingTeamTemplate(OnboardingScenario.other, teams)?.id,
   'blank_team',
 );

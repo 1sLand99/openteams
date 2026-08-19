@@ -15,7 +15,7 @@ const scenarioTemplateHints = {
   ],
   [OnboardingScenario.research]: [
     'research_innovation_team',
-    'ai_prompt_quality_team',
+    'literature_research_team',
   ],
   [OnboardingScenario.other]: ['blank_team'],
 } as const;
