@@ -18,6 +18,7 @@ fn generate_types_content() -> String {
         db::models::project_member::ProjectMemberType::decl(),
         db::models::project_member::CreateProjectMember::decl(),
         db::models::project_member::UpdateProjectMember::decl(),
+        executors::mcp_config::MemberMcpConfig::decl(),
         db::models::member_execution_config::MemberExecutionConfig::decl(),
         db::models::project_path::ProjectPath::decl(),
         db::models::project_path::ProjectPathKind::decl(),

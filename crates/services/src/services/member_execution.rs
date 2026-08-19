@@ -436,6 +436,7 @@ mod tests {
                 thinking_effort: Some("high".to_string()),
                 model_variant: None,
                 acp: None,
+                mcp: None,
             }),
         )
         .expect("resolve config");

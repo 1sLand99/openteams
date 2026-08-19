@@ -18,7 +18,9 @@ export type CreateProjectMember = { member_type: ProjectMemberType, user_id: str
 
 export type UpdateProjectMember = { member_type: ProjectMemberType | null, user_id: string | null, agent_id: string | null, member_name?: string | null, role: string | null, display_order: bigint | null, default_workspace_path: string | null, allowed_skill_ids: Array<string> | null, execution_config: MemberExecutionConfig | null, is_default: boolean | null, };
 
-export type MemberExecutionConfig = { runner_type?: BaseCodingAgent | null, model_name?: string | null, thinking_effort?: string | null, model_variant?: string | null, acp?: AcpExecutionOptions | null, };
+export type MemberMcpConfig = { mcpServers: Record<string, unknown>, };
+
+export type MemberExecutionConfig = { runner_type?: BaseCodingAgent | null, model_name?: string | null, thinking_effort?: string | null, model_variant?: string | null, acp?: AcpExecutionOptions | null, mcp?: MemberMcpConfig | null, };
 
 export type ProjectPath = { id: string, project_id: string, path: string, label: string | null, kind: ProjectPathKind, is_default: boolean, created_at: Date, updated_at: Date, };
 

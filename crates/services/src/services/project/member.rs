@@ -167,6 +167,13 @@ impl ProjectMemberService {
         let existing = ProjectMember::find_by_id(pool, id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("project member not found"))?;
+        if let Some(mcp) = input
+            .execution_config
+            .as_ref()
+            .and_then(|config| config.mcp.as_ref())
+        {
+            mcp.validate(&id.to_string())?;
+        }
         if existing.member_type == ProjectMemberType::Agent {
             let agent_id = existing
                 .agent_id
@@ -474,6 +481,7 @@ mod tests {
         member_execution_config::MemberExecutionConfig,
         project_member::{ProjectMember, ProjectMemberType},
     };
+    use executors::mcp_config::MemberMcpConfig;
     use sqlx::SqlitePool;
     use uuid::Uuid;
 
@@ -1111,6 +1119,14 @@ mod tests {
                         thinking_effort: Some("high".to_string()),
                         model_variant: None,
                         acp: None,
+                        mcp: Some(
+                            serde_json::from_value(serde_json::json!({
+                                "mcpServers": {
+                                    "tools": {"command": "mcp-tool", "args": ["serve"]}
+                                }
+                            }))
+                            .expect("member MCP config"),
+                        ),
                     }),
                 },
             )
@@ -1264,6 +1280,19 @@ mod tests {
         .expect("read running workflow runtime ids");
 
         assert!(synced_config.contains("gpt-5.2-codex"));
+        let synced_config: MemberExecutionConfig =
+            serde_json::from_str(&synced_config).expect("parse synced execution config");
+        assert_eq!(
+            synced_config.mcp,
+            Some(
+                serde_json::from_value::<MemberMcpConfig>(serde_json::json!({
+                    "mcpServers": {
+                        "tools": {"command": "mcp-tool", "args": ["serve"]}
+                    }
+                }))
+                .expect("expected MCP config")
+            )
+        );
         assert_eq!(running_config, "{}");
         assert!(resumed_config.contains("gpt-5.2-codex"));
         assert_eq!(resumed_runtime_ids, (None, None));

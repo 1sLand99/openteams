@@ -551,6 +551,7 @@ async fn refreshes_workflow_member_execution_config_before_run() {
         thinking_effort: Some("high".to_string()),
         model_variant: None,
         acp: None,
+        mcp: None,
     };
     let member = ProjectMember::create(
         &db.pool,
@@ -584,6 +585,7 @@ async fn refreshes_workflow_member_execution_config_before_run() {
                 thinking_effort: None,
                 model_variant: None,
                 acp: None,
+                mcp: None,
             },
         },
         Uuid::new_v4(),
@@ -743,6 +745,7 @@ async fn leaves_non_project_session_execution_config_unchanged_before_run() {
                 thinking_effort: None,
                 model_variant: None,
                 acp: None,
+                mcp: None,
             },
         },
         Uuid::new_v4(),
