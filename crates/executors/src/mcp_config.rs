@@ -275,7 +275,31 @@ pub async fn read_canonical_mcp_config(
     mcp_config: &McpConfig,
 ) -> Result<Value, ExecutorError> {
     let raw = read_agent_config(config_path, mcp_config).await?;
-    let mut current = &raw;
+    canonical_mcp_config_from_raw(&raw, mcp_config)
+}
+
+/// Strict variant used by one-time application data migrations.
+///
+/// A missing file is distinct from a file that exists but cannot be read or
+/// parsed. This also keeps the migration's content read to one per runner.
+pub async fn read_canonical_mcp_config_if_exists(
+    config_path: &Path,
+    mcp_config: &McpConfig,
+) -> Result<Option<Value>, ExecutorError> {
+    let file_content = match fs::read_to_string(config_path).await {
+        Ok(file_content) => file_content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(ExecutorError::Io(error)),
+    };
+    let raw = parse_agent_config_content(config_path, mcp_config, &file_content)?;
+    canonical_mcp_config_from_raw(&raw, mcp_config).map(Some)
+}
+
+fn canonical_mcp_config_from_raw(
+    raw: &Value,
+    mcp_config: &McpConfig,
+) -> Result<Value, ExecutorError> {
+    let mut current = raw;
     for part in &mcp_config.servers_path {
         let Some(next) = current.get(part) else {
             return Ok(serde_json::json!({ "mcpServers": {} }));
@@ -296,33 +320,41 @@ pub async fn read_agent_config(
     mcp_config: &McpConfig,
 ) -> Result<Value, ExecutorError> {
     if let Ok(file_content) = fs::read_to_string(config_path).await {
-        if mcp_config.is_toml_config {
-            if file_content.trim().is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            let toml_val: toml::Value = toml::from_str(&file_content)?;
-            let json_string = serde_json::to_string(&toml_val)?;
-            Ok(serde_json::from_str(&json_string)?)
-        } else if is_jsonc_file(config_path) {
-            if file_content.trim().is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            match jsonc_parser::parse_to_serde_value(&file_content, &ParseOptions::default()) {
-                Ok(Some(value)) => Ok(value),
-                Ok(None) => Ok(serde_json::json!({})),
-                Err(_) => Ok(serde_json::from_str(&file_content)?),
-            }
-        } else if is_yaml_file(config_path) {
-            if file_content.trim().is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            let yaml_val: serde_yaml::Value = serde_yaml::from_str(&file_content)?;
-            Ok(serde_json::to_value(yaml_val)?)
-        } else {
-            Ok(serde_json::from_str(&file_content)?)
-        }
+        parse_agent_config_content(config_path, mcp_config, &file_content)
     } else {
         Ok(mcp_config.template.clone())
+    }
+}
+
+fn parse_agent_config_content(
+    config_path: &Path,
+    mcp_config: &McpConfig,
+    file_content: &str,
+) -> Result<Value, ExecutorError> {
+    if mcp_config.is_toml_config {
+        if file_content.trim().is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        let toml_val: toml::Value = toml::from_str(file_content)?;
+        let json_string = serde_json::to_string(&toml_val)?;
+        Ok(serde_json::from_str(&json_string)?)
+    } else if is_jsonc_file(config_path) {
+        if file_content.trim().is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        match jsonc_parser::parse_to_serde_value(file_content, &ParseOptions::default()) {
+            Ok(Some(value)) => Ok(value),
+            Ok(None) => Ok(serde_json::json!({})),
+            Err(_) => Ok(serde_json::from_str(file_content)?),
+        }
+    } else if is_yaml_file(config_path) {
+        if file_content.trim().is_empty() {
+            return Ok(serde_json::json!({}));
+        }
+        let yaml_val: serde_yaml::Value = serde_yaml::from_str(file_content)?;
+        Ok(serde_json::to_value(yaml_val)?)
+    } else {
+        Ok(serde_json::from_str(file_content)?)
     }
 }
 

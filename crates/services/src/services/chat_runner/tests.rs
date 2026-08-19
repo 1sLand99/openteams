@@ -4587,7 +4587,10 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
             workspace_path: Some(workspace.to_string_lossy().to_string()),
             allowed_skill_ids: Vec::new(),
             project_member_id: None,
-            execution_config: MemberExecutionConfig::default(),
+            execution_config: MemberExecutionConfig {
+                mcp: Some(Default::default()),
+                ..Default::default()
+            },
         },
         Uuid::new_v4(),
     )
@@ -4805,7 +4808,10 @@ async fn pi_member_isolation_through_build_effective_member_executor() {
             workspace_path: Some(workspace.to_string_lossy().to_string()),
             allowed_skill_ids: Vec::new(),
             project_member_id: None,
-            execution_config: MemberExecutionConfig::default(),
+            execution_config: MemberExecutionConfig {
+                mcp: Some(Default::default()),
+                ..Default::default()
+            },
         },
         Uuid::new_v4(),
     )
@@ -4836,7 +4842,10 @@ async fn pi_member_isolation_through_build_effective_member_executor() {
             workspace_path: Some(workspace.to_string_lossy().to_string()),
             allowed_skill_ids: Vec::new(),
             project_member_id: None,
-            execution_config: MemberExecutionConfig::default(),
+            execution_config: MemberExecutionConfig {
+                mcp: Some(Default::default()),
+                ..Default::default()
+            },
         },
         Uuid::new_v4(),
     )

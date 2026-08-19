@@ -26,7 +26,9 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::services::{
-    agent_runtime::apply_agent_runtime_config, native_skills::list_native_skills_for_runner,
+    agent_runtime::apply_agent_runtime_config,
+    member_scoped_mcp_migration::ensure_member_scoped_mcp_initialized,
+    native_skills::list_native_skills_for_runner,
 };
 
 pub const EXECUTOR_PROFILE_VARIANT_KEY: &str = "executor_profile_variant";
@@ -189,6 +191,7 @@ pub async fn build_effective_member_executor_for_run(
     session_agent: &ChatSessionAgent,
     env: &mut ExecutionEnv,
 ) -> Result<(EffectiveMemberExecutionConfig, CodingAgent)> {
+    ensure_member_scoped_mcp_initialized(&session_agent.execution_config.0)?;
     let (resolved, mut executor) = build_effective_member_executor(agent, session_agent, env)?;
     if let CodingAgent::Pi(config) = &mut executor {
         let skill_paths = resolve_pi_member_skill_paths(pool, session_agent, config).await?;

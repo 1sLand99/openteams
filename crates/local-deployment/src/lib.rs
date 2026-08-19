@@ -22,6 +22,7 @@ use services::services::{
     events::EventService,
     filesystem::FilesystemService,
     image::ImageService,
+    member_scoped_mcp_migration::run_member_scoped_mcp_migration,
     oauth_credentials::OAuthCredentials,
     project::ProjectService,
     queued_message::QueuedMessageService,
@@ -127,6 +128,15 @@ impl Deployment for LocalDeployment {
             );
             DBService::new_with_after_connect(hook).await?
         };
+        let mcp_migration = run_member_scoped_mcp_migration(&db.pool)
+            .await
+            .map_err(|error| DeploymentError::Other(error.into()))?;
+        tracing::info!(
+            already_completed = mcp_migration.already_completed,
+            migrated_members = mcp_migration.migrated_members,
+            runner_reads = mcp_migration.runner_reads,
+            "Member-scoped MCP application data migration completed before service startup"
+        );
         let expired_executor_approvals =
             services::services::approvals::executor_approvals::ExecutorApprovalBridge::expire_orphaned(
                 &db.pool,

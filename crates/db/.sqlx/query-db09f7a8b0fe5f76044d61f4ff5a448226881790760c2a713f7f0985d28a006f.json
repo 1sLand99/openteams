@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO application_data_migrations (name, status, error_summary)\n               VALUES ($1, 'pending', NULL)\n               ON CONFLICT(name) DO UPDATE\n               SET status = 'pending',\n                   error_summary = NULL,\n                   updated_at = datetime('now', 'subsec')\n               WHERE application_data_migrations.status <> 'completed'\n               RETURNING name",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "db09f7a8b0fe5f76044d61f4ff5a448226881790760c2a713f7f0985d28a006f"
+}

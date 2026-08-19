@@ -26,6 +26,7 @@ pub use github::{
 pub mod image;
 pub mod inbox;
 pub mod member_execution;
+pub mod member_scoped_mcp_migration;
 pub use build_stats::{model_pricing_sync, project_stats, token_cost_stats};
 pub mod native_skills;
 pub mod notification;
