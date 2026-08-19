@@ -39,7 +39,10 @@ use super::jsonrpc::{JsonRpcCallbacks, JsonRpcPeer};
 use crate::{
     approvals::{ExecutorApprovalError, ExecutorApprovalService},
     env::RepoContext,
-    executors::{ExecutorError, ExecutorExitResult, codex::normalize_logs::Approval},
+    executors::{
+        ExecutorError, ExecutorExitResult, codex::normalize_logs::Approval,
+        opencode::ProcessOutputRedactor,
+    },
 };
 
 pub struct AppServerClient {
@@ -771,13 +774,14 @@ impl AppServerClient {
                         && let Some(ref error) = turn.error
                         && !error.message.is_empty()
                     {
+                        let safe_message = self.log_writer.redact_text(&error.message);
                         tracing::warn!(
                             thread_id = %thread_id,
                             turn_id = %turn.id,
-                            error_message = %error.message,
+                            error_message = %safe_message,
                             "[codex-client] turn failed with error"
                         );
-                        *self.turn_error.lock().await = Some(error.message.clone());
+                        *self.turn_error.lock().await = Some(safe_message);
                     }
                     tracing::debug!(
                         thread_id = %thread_id,
@@ -1085,17 +1089,27 @@ async fn send_server_error(
 #[derive(Clone)]
 pub struct LogWriter {
     writer: Arc<Mutex<BufWriter<Box<dyn AsyncWrite + Send + Unpin>>>>,
+    output_redactor: ProcessOutputRedactor,
 }
 
 impl LogWriter {
     pub fn new(writer: impl AsyncWrite + Send + Unpin + 'static) -> Self {
+        Self::new_with_redactor(writer, ProcessOutputRedactor::default())
+    }
+
+    pub(super) fn new_with_redactor(
+        writer: impl AsyncWrite + Send + Unpin + 'static,
+        output_redactor: ProcessOutputRedactor,
+    ) -> Self {
         Self {
             writer: Arc::new(Mutex::new(BufWriter::new(Box::new(writer)))),
+            output_redactor,
         }
     }
 
     pub async fn log_raw(&self, raw: &str) -> Result<(), ExecutorError> {
         let raw = redact_sensitive_raw_log(raw);
+        let raw = self.output_redactor.redact(&raw);
         let mut guard = self.writer.lock().await;
         guard
             .write_all(raw.as_bytes())
@@ -1104,6 +1118,10 @@ impl LogWriter {
         guard.write_all(b"\n").await.map_err(ExecutorError::Io)?;
         guard.flush().await.map_err(ExecutorError::Io)?;
         Ok(())
+    }
+
+    pub(super) fn redact_text(&self, value: &str) -> String {
+        self.output_redactor.redact(value)
     }
 }
 
@@ -1164,12 +1182,12 @@ mod tests {
         JSONRPCNotification, Turn, TurnCompletedNotification, TurnItemsView, TurnStatus,
     };
     use codex_protocol::protocol::ReviewDecision;
-    use tokio::io::sink;
+    use tokio::io::{AsyncBufReadExt, BufReader, duplex, sink};
     use tokio_util::sync::CancellationToken;
     use workspace_utils::approvals::ApprovalStatus;
 
     use super::{AppServerClient, LogWriter, redact_sensitive_raw_log};
-    use crate::env::RepoContext;
+    use crate::{env::RepoContext, executors::opencode::ProcessOutputRedactor};
 
     fn build_client() -> std::sync::Arc<AppServerClient> {
         AppServerClient::new(
@@ -1218,6 +1236,39 @@ mod tests {
         assert!(!redacted.contains("secret-token"));
         assert!(!redacted.contains("refresh-secret"));
         assert!(!redacted.contains("mcp-secret"));
+    }
+
+    #[tokio::test]
+    async fn codex_log_writer_redacts_mcp_secret_from_non_json_and_message_values() {
+        let secret = "codex-dynamic-mcp-secret-never-log";
+        let output_redactor = ProcessOutputRedactor::from_config(&serde_json::json!({
+            "mcp_servers": {
+                "local": {"command": "/bin/echo", "env": {"TOKEN": secret}}
+            }
+        }));
+        let (writer, reader) = duplex(4096);
+        let log_writer = LogWriter::new_with_redactor(writer, output_redactor);
+
+        log_writer
+            .log_raw(&format!("vendor stderr contained {secret}"))
+            .await
+            .unwrap();
+        log_writer
+            .log_raw(
+                &serde_json::json!({"method": "error", "message": format!("failed: {secret}")})
+                    .to_string(),
+            )
+            .await
+            .unwrap();
+
+        let mut reader = BufReader::new(reader);
+        let mut first = String::new();
+        let mut second = String::new();
+        reader.read_line(&mut first).await.unwrap();
+        reader.read_line(&mut second).await.unwrap();
+        let output = format!("{first}{second}");
+        assert!(!output.contains(secret));
+        assert_eq!(output.matches("[redacted]").count(), 2);
     }
 
     #[test]

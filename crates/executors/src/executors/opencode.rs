@@ -57,6 +57,7 @@ struct OpencodeMcpRuntimeSnapshot {
     config_content: String,
     config_home: PathBuf,
     mcp_servers: Value,
+    output_redactor: ProcessOutputRedactor,
 }
 
 impl std::fmt::Debug for OpencodeMcpRuntimeSnapshot {
@@ -69,6 +70,98 @@ impl std::fmt::Debug for OpencodeMcpRuntimeSnapshot {
             )
             .field("has_private_config_home", &true)
             .finish()
+    }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct ProcessOutputRedactor {
+    secrets: Arc<Vec<String>>,
+}
+
+impl ProcessOutputRedactor {
+    pub(super) fn from_config(config: &Value) -> Self {
+        let mut secrets = Vec::new();
+        collect_sensitive_config_values(config, None, false, &mut secrets);
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+        secrets.dedup();
+        Self {
+            secrets: Arc::new(secrets),
+        }
+    }
+
+    pub(super) fn with_secret(&self, secret: &str) -> Self {
+        let mut secrets = self.secrets.as_ref().clone();
+        push_secret(&mut secrets, secret);
+        secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        secrets.dedup();
+        Self {
+            secrets: Arc::new(secrets),
+        }
+    }
+
+    pub(super) fn redact(&self, value: &str) -> String {
+        self.secrets.iter().fold(value.to_string(), |safe, secret| {
+            safe.replace(secret, "[redacted]")
+        })
+    }
+}
+
+fn collect_sensitive_config_values(
+    value: &Value,
+    key: Option<&str>,
+    inherited_sensitive: bool,
+    secrets: &mut Vec<String>,
+) {
+    let key_is_sensitive = key.is_some_and(is_sensitive_config_key);
+    let force_strings = inherited_sensitive || key_is_sensitive;
+    match value {
+        Value::String(value) if force_strings => push_secret(secrets, value),
+        Value::Array(values) => {
+            let skip_program = key.is_some_and(|key| key.eq_ignore_ascii_case("command"));
+            for (index, value) in values.iter().enumerate() {
+                collect_sensitive_config_values(
+                    value,
+                    None,
+                    force_strings || (skip_program && index > 0),
+                    secrets,
+                );
+            }
+        }
+        Value::Object(values) => {
+            for (child_key, value) in values {
+                collect_sensitive_config_values(value, Some(child_key), force_strings, secrets);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_config_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    matches!(
+        key.as_str(),
+        "env"
+            | "environment"
+            | "headers"
+            | "http_headers"
+            | "args"
+            | "url"
+            | "httpurl"
+            | "baseurl"
+            | "base_url"
+    ) || key.contains("secret")
+        || key.contains("token")
+        || key.contains("password")
+        || key.contains("authorization")
+        || key.contains("apikey")
+        || key.contains("api_key")
+        || key.contains("accesskey")
+}
+
+fn push_secret(secrets: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if value.len() >= 4 {
+        secrets.push(value.to_string());
     }
 }
 
@@ -290,10 +383,8 @@ impl Opencode {
             .map_err(ExecutorError::Io)?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(ExecutorError::Io(io::Error::other(format!(
-                "OpenCode CLI model discovery failed for provider {provider_id}: {}",
-                stderr.trim()
+                "OpenCode CLI model discovery failed for provider {provider_id}; vendor output was omitted"
             ))));
         }
 
@@ -361,15 +452,22 @@ impl Opencode {
     ) -> Result<OpencodeServer, ExecutorError> {
         let (mut child, server_password, startup_command, runtime_lease) =
             self.spawn_server_process(current_dir, env).await?;
+        let output_redactor = self
+            .runtime_mcp_snapshot
+            .as_ref()
+            .ok_or(ExecutorError::McpIsolationNotImplemented)?
+            .output_redactor
+            .with_secret(&server_password);
         let Some(server_stdout) = child.inner().stdout.take() else {
             let _ = workspace_utils::process::kill_process_group(&mut child).await;
             return Err(ExecutorError::Io(std::io::Error::other(
                 "OpenCode server missing stdout",
             )));
         };
-        let (stderr_lines, stderr_task) = collect_server_stderr(child.inner().stderr.take());
+        let (stderr_lines, stderr_task) =
+            collect_server_stderr(child.inner().stderr.take(), output_redactor.clone());
 
-        let base_url = match wait_for_server_url(server_stdout, None).await {
+        let base_url = match wait_for_server_url(server_stdout, None, output_redactor).await {
             Ok(base_url) => base_url,
             Err(err) => {
                 let server_logs = {
@@ -409,6 +507,12 @@ impl Opencode {
 
         let (mut child, server_password, _startup_command, runtime_lease) =
             self.spawn_server_process(current_dir, env).await?;
+        let output_redactor = self
+            .runtime_mcp_snapshot
+            .as_ref()
+            .ok_or(ExecutorError::McpIsolationNotImplemented)?
+            .output_redactor
+            .with_secret(&server_password);
         let Some(server_stdout) = child.inner().stdout.take() else {
             let _ = workspace_utils::process::kill_process_group(&mut child).await;
             return Err(ExecutorError::Io(std::io::Error::other(
@@ -443,12 +547,18 @@ impl Opencode {
         tokio::spawn(async move {
             let _runtime_lease = runtime_lease;
             // Wait for server to print listening URL
-            let base_url = match wait_for_server_url(server_stdout, Some(log_writer.clone())).await
+            let base_url = match wait_for_server_url(
+                server_stdout,
+                Some(log_writer.clone()),
+                output_redactor.clone(),
+            )
+            .await
             {
                 Ok(url) => url,
                 Err(err) => {
+                    let safe_error = output_redactor.redact(&err.to_string());
                     let _ = log_writer
-                        .log_error(format!("OpenCode startup error: {err}"))
+                        .log_error(format!("OpenCode startup error: {safe_error}"))
                         .await;
                     let _ = exit_signal_tx.send(ExecutorExitResult::Failure);
                     return;
@@ -482,8 +592,9 @@ impl Opencode {
             let exit_result = match result {
                 Ok(()) => ExecutorExitResult::Success,
                 Err(err) => {
+                    let safe_error = output_redactor.redact(&err.to_string());
                     let _ = log_writer
-                        .log_error(format!("OpenCode executor error: {err}"))
+                        .log_error(format!("OpenCode executor error: {safe_error}"))
                         .await;
                     ExecutorExitResult::Failure
                 }
@@ -503,6 +614,7 @@ impl Opencode {
 
 fn collect_server_stderr(
     stderr: Option<tokio::process::ChildStderr>,
+    output_redactor: ProcessOutputRedactor,
 ) -> (
     Arc<tokio::sync::Mutex<Vec<String>>>,
     Option<tokio::task::JoinHandle<()>>,
@@ -518,6 +630,7 @@ fn collect_server_stderr(
         loop {
             match stderr_lines.next_line().await {
                 Ok(Some(line)) => {
+                    let line = output_redactor.redact(&line);
                     tracing::debug!(line = %line, "OpenCode server stderr");
                     let mut captured = task_lines.lock().await;
                     captured.push(line);
@@ -1305,6 +1418,7 @@ fn format_tail(captured: Vec<String>) -> String {
 async fn wait_for_server_url(
     stdout: tokio::process::ChildStdout,
     log_writer: Option<LogWriter>,
+    output_redactor: ProcessOutputRedactor,
 ) -> Result<String, ExecutorError> {
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
@@ -1330,24 +1444,30 @@ async fn wait_for_server_url(
             Err(_) => continue,
         };
 
+        let url = line
+            .trim()
+            .strip_prefix("opencode server listening on ")
+            .map(str::trim)
+            .map(str::to_string);
+        let safe_line = output_redactor.redact(&line);
         if let Some(log_writer) = &log_writer {
             log_writer
                 .log_event(&OpencodeExecutorEvent::StartupLog {
-                    message: line.clone(),
+                    message: safe_line.clone(),
                 })
                 .await?;
         }
         if captured.len() < 64 {
-            captured.push(line.clone());
+            captured.push(safe_line);
         }
 
-        if let Some(url) = line.trim().strip_prefix("opencode server listening on ") {
+        if let Some(url) = url {
             // Keep draining stdout to avoid backpressure on the server, but don't block startup.
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(lines.into_inner()).lines();
                 while let Ok(Some(_)) = lines.next_line().await {}
             });
-            return Ok(url.trim().to_string());
+            return Ok(url);
         }
     }
 }
@@ -1375,12 +1495,14 @@ impl StandardCodingAgentExecutor for Opencode {
         )?;
         config.insert("mcp".to_string(), mcp_servers.clone());
         let config_content = serde_json::to_string(&config)?;
+        let output_redactor = ProcessOutputRedactor::from_config(&Value::Object(config.clone()));
         let private_directory = PrivateMcpRunDirectory::create(context, "opencode-mcp")?;
         let config_home = private_directory.path().to_path_buf();
         self.runtime_mcp_snapshot = Some(Arc::new(OpencodeMcpRuntimeSnapshot {
             config_content: config_content.clone(),
             config_home: config_home.clone(),
             mcp_servers,
+            output_redactor,
         }));
         env.insert(CONFIG_CONTENT_ENV, config_content);
         let config_home_value = config_home.to_string_lossy().to_string();
@@ -1790,6 +1912,16 @@ mod tests {
             .any(|(name, value)| name == key && value.is_none())
     }
 
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, body).expect("write fake OpenCode server");
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions).expect("make fake OpenCode server executable");
+    }
+
     #[tokio::test]
     async fn opencode_run_env_replaces_existing_mcp_and_preserves_other_config() {
         let workspace = TempDir::new().expect("create workspace");
@@ -1914,7 +2046,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opencode_explicit_empty_mcp_leaves_global_bytes_unchanged_and_cleans_up() {
+    #[cfg(unix)]
+    async fn opencode_real_server_process_preserves_global_and_project_config_bytes() {
         let workspace = TempDir::new().expect("create workspace");
         let user_config_home = workspace.path().join("user-config-home");
         let user_opencode_config = user_config_home.join("opencode");
@@ -1924,9 +2057,28 @@ mod tests {
         let legacy_config_dir = user_home.join(".opencode");
         fs::create_dir_all(&legacy_config_dir).expect("create legacy OpenCode config directory");
         let legacy_global_config = legacy_config_dir.join("opencode.json");
-        let original = br#"{"mcp":{"global":{"type":"local","command":["global-secret"]}}}"#;
-        fs::write(&global_config, original).expect("write global config sentinel");
-        fs::write(&legacy_global_config, original).expect("write legacy global config sentinel");
+        let project_config = workspace.path().join("opencode.json");
+        let dot_project_dir = workspace.path().join(".opencode");
+        fs::create_dir_all(&dot_project_dir).expect("create project OpenCode config directory");
+        let dot_project_config = dot_project_dir.join("opencode.json");
+        let global_bytes = br#"{"mcp":{"global":{"type":"local","command":["global-secret"]}}}"#;
+        let legacy_bytes = br#"{"mcp":{"legacy":{"type":"local","command":["legacy-secret"]}}}"#;
+        let project_bytes = br#"{"mcp":{"project":{"type":"local","command":["project-secret"]}}}"#;
+        let dot_project_bytes =
+            br#"{"mcp":{"dotProject":{"type":"local","command":["dot-project-secret"]}}}"#;
+        fs::write(&global_config, global_bytes).expect("write global config sentinel");
+        fs::write(&legacy_global_config, legacy_bytes)
+            .expect("write legacy global config sentinel");
+        fs::write(&project_config, project_bytes).expect("write project config sentinel");
+        fs::write(&dot_project_config, dot_project_bytes)
+            .expect("write dot-project config sentinel");
+        let captured_config = workspace.path().join("captured-opencode-config.json");
+        let captured_env = workspace.path().join("captured-opencode-env.txt");
+        let server_script = workspace.path().join("fake-opencode-server.sh");
+        write_executable_script(
+            &server_script,
+            "#!/bin/sh\nprintf '%s' \"$OPENCODE_CONFIG_CONTENT\" > \"$CAPTURED_CONFIG\"\nprintf '%s\\n%s\\n' \"$XDG_CONFIG_HOME\" \"$OPENCODE_DISABLE_PROJECT_CONFIG\" > \"$CAPTURED_ENV\"\nprintf '%s\\n' 'opencode server listening on http://127.0.0.1:43210'\nwhile :; do sleep 1; done\n",
+        );
         let mut opencode = test_opencode();
         opencode.cmd.env = Some(HashMap::from([
             (
@@ -1936,6 +2088,14 @@ mod tests {
             (
                 ISOLATED_HOME_ENV.to_string(),
                 user_home.to_string_lossy().to_string(),
+            ),
+            (
+                "CAPTURED_CONFIG".to_string(),
+                captured_config.to_string_lossy().to_string(),
+            ),
+            (
+                "CAPTURED_ENV".to_string(),
+                captured_env.to_string_lossy().to_string(),
             ),
         ]));
         let mut env = execution_env(&workspace);
@@ -1954,11 +2114,77 @@ mod tests {
             serde_json::from_str(env.get(CONFIG_CONTENT_ENV).unwrap()).unwrap();
         assert_eq!(config["mcp"], json!({}));
         assert_ne!(snapshot.config_home, user_config_home);
-        assert_eq!(fs::read(&global_config).unwrap(), original);
-        assert_eq!(fs::read(&legacy_global_config).unwrap(), original);
+        opencode.cmd.base_command_override = Some(server_script.to_string_lossy().to_string());
+        let run_env = setup_compaction_env(true, &opencode.mcp_run_env(&env).unwrap());
+        let mut server = opencode
+            .spawn_server(workspace.path(), &run_env)
+            .await
+            .expect("start fake OpenCode server through real process boundary");
+        assert_eq!(fs::read(&global_config).unwrap(), global_bytes);
+        assert_eq!(fs::read(&legacy_global_config).unwrap(), legacy_bytes);
+        assert_eq!(fs::read(&project_config).unwrap(), project_bytes);
+        assert_eq!(fs::read(&dot_project_config).unwrap(), dot_project_bytes);
+        let child_config: serde_json::Value =
+            serde_json::from_slice(&fs::read(&captured_config).unwrap()).unwrap();
+        assert_eq!(child_config["mcp"], json!({}));
+        let captured_env = fs::read_to_string(&captured_env).unwrap();
+        assert!(captured_env.starts_with(&private_config_home.to_string_lossy().to_string()));
+        assert!(captured_env.ends_with("true\n"));
         assert!(private_config_home.exists());
 
+        if let Some(mut child) = server.child.take() {
+            workspace_utils::process::kill_process_group(&mut child)
+                .await
+                .expect("stop fake OpenCode server");
+        }
+
         drop(prepared.into_cleanup());
+        assert!(!private_config_home.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_startup_stdout_stderr_and_error_tail_redact_mcp_secret_and_cleanup() {
+        let workspace = TempDir::new().expect("create workspace");
+        let secret = "opencode-real-startup-secret-never-log";
+        let canonical: MemberMcpConfig = serde_json::from_value(json!({
+            "mcpServers": {
+                "local": {"command": "/bin/echo", "env": {"TOKEN": secret}}
+            }
+        }))
+        .expect("deserialize canonical MCP config");
+        let server_script = workspace.path().join("failing-opencode-server.sh");
+        write_executable_script(
+            &server_script,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' 'stdout {secret}'\nprintf '%s\\n' 'stderr {secret}' >&2\nexit 17\n"
+            ),
+        );
+        let mut opencode = test_opencode();
+        let mut env = execution_env(&workspace);
+        let prepared = opencode
+            .prepare_mcp_for_run(&canonical, &run_context(&workspace), &mut env)
+            .await
+            .expect("prepare OpenCode MCP snapshot");
+        let private_config_home = opencode
+            .runtime_mcp_snapshot
+            .as_ref()
+            .unwrap()
+            .config_home
+            .clone();
+        opencode.cmd.base_command_override = Some(server_script.to_string_lossy().to_string());
+        let run_env = setup_compaction_env(true, &opencode.mcp_run_env(&env).unwrap());
+
+        let error = match opencode.spawn_server(workspace.path(), &run_env).await {
+            Ok(_) => panic!("fake OpenCode server must fail before announcing URL"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(!message.contains(secret));
+        assert!(message.contains("[redacted]"));
+        assert!(private_config_home.exists());
+
+        drop(prepared);
         assert!(!private_config_home.exists());
     }
 

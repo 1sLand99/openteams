@@ -69,6 +69,7 @@ use crate::{
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorExitResult, SlashCommandDescription,
         SpawnedChild, StandardCodingAgentExecutor,
+        opencode::ProcessOutputRedactor,
         utils::{json_has_nonempty_string, read_json_file},
     },
     logs::utils::patch,
@@ -152,6 +153,7 @@ enum CodexSessionAction {
 #[derive(Clone)]
 struct CodexMcpRuntimeSnapshot {
     mcp_servers: Value,
+    output_redactor: ProcessOutputRedactor,
 }
 
 impl std::fmt::Debug for CodexMcpRuntimeSnapshot {
@@ -227,7 +229,13 @@ impl StandardCodingAgentExecutor for Codex {
             ));
         }
         let mcp_servers = build_codex_mcp_servers(canonical)?;
-        self.runtime_mcp_snapshot = Some(Arc::new(CodexMcpRuntimeSnapshot { mcp_servers }));
+        let output_redactor = ProcessOutputRedactor::from_config(&serde_json::json!({
+            "mcp_servers": mcp_servers
+        }));
+        self.runtime_mcp_snapshot = Some(Arc::new(CodexMcpRuntimeSnapshot {
+            mcp_servers,
+            output_redactor,
+        }));
         PreparedMcpRun::new(canonical)
     }
 
@@ -669,6 +677,12 @@ impl Codex {
         if self.runtime_mcp_snapshot.is_none() {
             return Err(ExecutorError::McpIsolationNotImplemented);
         }
+        let output_redactor = self
+            .runtime_mcp_snapshot
+            .as_ref()
+            .expect("MCP snapshot checked above")
+            .output_redactor
+            .clone();
         let (program_path, args) = command_parts.into_resolved().await?;
 
         let mut process = Command::new(program_path);
@@ -676,7 +690,7 @@ impl Codex {
             .kill_on_drop(true)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .current_dir(current_dir)
             .env("NPM_CONFIG_LOGLEVEL", "error")
             .env("NODE_NO_WARNINGS", "1")
@@ -713,7 +727,7 @@ impl Codex {
 
         tokio::spawn(async move {
             let exit_signal_tx = ExitSignalSender::new(exit_signal_tx);
-            let log_writer = LogWriter::new(new_stdout);
+            let log_writer = LogWriter::new_with_redactor(new_stdout, output_redactor.clone());
 
             // Initialize the AppServerClient
             let client = AppServerClient::new(
@@ -749,8 +763,9 @@ impl Codex {
                         return;
                     }
                     ExecutorError::AuthRequired(message) => {
+                        let safe_message = output_redactor.redact(message);
                         log_writer
-                            .log_raw(&Error::auth_required(message.clone()).raw())
+                            .log_raw(&Error::auth_required(safe_message).raw())
                             .await
                             .ok();
                         exit_signal_tx
@@ -759,9 +774,10 @@ impl Codex {
                         return;
                     }
                     _ => {
-                        tracing::error!("Codex spawn error: {}", err);
+                        let safe_error = output_redactor.redact(&err.to_string());
+                        tracing::error!("Codex spawn error: {}", safe_error);
                         log_writer
-                            .log_raw(&Error::launch_error(err.to_string()).raw())
+                            .log_raw(&Error::launch_error(safe_error).raw())
                             .await
                             .ok();
                     }
@@ -911,7 +927,12 @@ fn codex_config_has_provider(path: &Path, env: &ExecutionEnv) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf};
+    use std::{
+        collections::HashMap,
+        fs,
+        path::{Path, PathBuf},
+        time::Duration,
+    };
 
     use serde_json::json;
     use tempfile::TempDir;
@@ -941,6 +962,16 @@ mod tests {
             false,
             String::new(),
         )
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, body).expect("write fake Codex app server");
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions).expect("make fake Codex app server executable");
     }
 
     #[test]
@@ -1006,18 +1037,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_explicit_empty_mcp_override_leaves_global_config_bytes_unchanged() {
+    #[cfg(unix)]
+    async fn codex_real_app_server_preserves_global_and_project_config_bytes() {
         let workspace = TempDir::new().expect("create workspace");
         let codex_home = workspace.path().join("user-codex-home");
         std::fs::create_dir_all(&codex_home).expect("create Codex home");
         let global_config = codex_home.join("config.toml");
-        let original = b"[mcp_servers.global]\ncommand = \"global-secret\"\n";
-        std::fs::write(&global_config, original).expect("write global config sentinel");
+        let project_config_dir = workspace.path().join(".codex");
+        fs::create_dir_all(&project_config_dir).expect("create project Codex config directory");
+        let project_config = project_config_dir.join("config.toml");
+        let global_bytes = b"[mcp_servers.global]\ncommand = \"global-secret\"\n";
+        let project_bytes = b"[mcp_servers.project]\ncommand = \"project-secret\"\n";
+        std::fs::write(&global_config, global_bytes).expect("write global config sentinel");
+        std::fs::write(&project_config, project_bytes).expect("write project config sentinel");
+        let captured_thread = workspace.path().join("captured-thread-start.json");
+        let captured_home = workspace.path().join("captured-codex-home.txt");
+        let app_server_script = workspace.path().join("fake-codex-app-server.sh");
+        write_executable_script(
+            &app_server_script,
+            "#!/bin/sh\nIFS= read -r initialize_request\nprintf '%s\\n' '{\"id\":1,\"result\":{\"userAgent\":\"fake-codex\",\"codexHome\":\"/tmp/fake-codex-home\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}'\nIFS= read -r initialized_notification\nIFS= read -r thread_request\nprintf '%s' \"$thread_request\" > \"$CAPTURED_THREAD\"\nprintf '%s' \"$CODEX_HOME\" > \"$CAPTURED_HOME\"\nexit 0\n",
+        );
         let mut codex = test_codex();
-        codex.cmd.env = Some(HashMap::from([(
-            "CODEX_HOME".to_string(),
-            codex_home.to_string_lossy().to_string(),
-        )]));
+        codex.cmd.env = Some(HashMap::from([
+            (
+                "CODEX_HOME".to_string(),
+                codex_home.to_string_lossy().to_string(),
+            ),
+            (
+                "CAPTURED_THREAD".to_string(),
+                captured_thread.to_string_lossy().to_string(),
+            ),
+            (
+                "CAPTURED_HOME".to_string(),
+                captured_home.to_string_lossy().to_string(),
+            ),
+        ]));
         let mut env = execution_env(&workspace);
 
         let prepared = codex
@@ -1032,7 +1086,41 @@ mod tests {
             .expect("serialize thread start params");
 
         assert_eq!(params["config"]["mcp_servers"], json!({}));
-        assert_eq!(std::fs::read(&global_config).unwrap(), original);
+        let thread_params = codex.build_thread_start_params(workspace.path());
+        codex.cmd.base_command_override = Some(app_server_script.to_string_lossy().to_string());
+        let command_parts = codex
+            .build_command_builder()
+            .unwrap()
+            .build_initial()
+            .unwrap();
+        let mut spawned = codex
+            .spawn_app_server(
+                workspace.path(),
+                command_parts,
+                &env,
+                move |client, _| async move {
+                    client.start_thread(thread_params).await?;
+                    Ok(())
+                },
+            )
+            .await
+            .expect("spawn fake Codex app server through real process boundary");
+        let exit_signal = spawned.exit_signal.take().expect("Codex exit signal");
+        tokio::time::timeout(Duration::from_secs(5), exit_signal)
+            .await
+            .expect("fake Codex app server exit timeout")
+            .expect("receive fake Codex app server exit");
+
+        assert_eq!(std::fs::read(&global_config).unwrap(), global_bytes);
+        assert_eq!(std::fs::read(&project_config).unwrap(), project_bytes);
+        assert_eq!(
+            fs::read_to_string(&captured_home).unwrap(),
+            codex_home.to_string_lossy()
+        );
+        let thread_request: serde_json::Value =
+            serde_json::from_slice(&fs::read(&captured_thread).unwrap()).unwrap();
+        assert_eq!(thread_request["method"], json!("thread/start"));
+        assert_eq!(thread_request["params"]["config"]["mcp_servers"], json!({}));
         assert!(prepared.into_cleanup().is_none());
     }
 
