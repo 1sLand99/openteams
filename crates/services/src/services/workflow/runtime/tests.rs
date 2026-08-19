@@ -494,6 +494,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_uses_the_common_member_mcp_preparation_contract() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("test database");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let (mut session_agents, mut agents) = sample_agent_views();
+        let mut session_agent = session_agents.remove(0);
+        session_agent.execution_config.0.mcp = Some(Default::default());
+        let mut agent = agents.remove(0);
+        agent.runner_type = "DEEPSEEK_HARNESS".to_string();
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+
+        let (effective, _executor, prepared) = build_effective_member_executor_for_run(
+            &pool,
+            &agent,
+            &session_agent,
+            workspace.path(),
+            Uuid::new_v4(),
+            &mut env,
+        )
+        .await
+        .expect("workflow preparation");
+
+        assert_eq!(effective.runner_type.to_string(), "DEEPSEEK_HARNESS");
+        assert_eq!(prepared.server_count(), 0);
+    }
+
+    #[tokio::test]
     async fn workflow_resolve_workspace_path_lazy_creates_worktree_for_first_isolated_run() {
         let db = setup_runtime_worktree_db().await;
         let tmp = tempfile::TempDir::new().expect("temp dir");
@@ -893,7 +925,10 @@ mod tests {
                 workspace_path: None,
                 allowed_skill_ids: vec![],
                 project_member_id,
-                execution_config: MemberExecutionConfig::default(),
+                execution_config: MemberExecutionConfig {
+                    mcp: Some(Default::default()),
+                    ..Default::default()
+                },
             },
             Uuid::new_v4(),
         )
@@ -2422,7 +2457,10 @@ mod tests {
                 workspace_path: Some(workspace.to_string_lossy().to_string()),
                 allowed_skill_ids: Vec::new(),
                 project_member_id: None,
-                execution_config: MemberExecutionConfig::default(),
+                execution_config: MemberExecutionConfig {
+                    mcp: Some(Default::default()),
+                    ..Default::default()
+                },
             },
             Uuid::new_v4(),
         )

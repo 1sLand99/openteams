@@ -36,7 +36,8 @@ use crate::{
         qwen::QwenCode,
     },
     logs::utils::patch,
-    mcp_config::McpConfig,
+    mcp_config::{McpConfig, MemberMcpConfig},
+    mcp_run::{McpRunContext, PreparedMcpRun},
     skill_config::{
         NativeDiscoveredSkill, NativeSkillConfigBackend, list_native_skills,
         set_native_skill_enabled,
@@ -137,6 +138,10 @@ pub enum ExecutorError {
     AuthRequired(String),
     #[error("Configuration error: {0}")]
     Configuration(String),
+    #[error("MCP is not supported by this executor")]
+    McpNotSupported,
+    #[error("Run-scoped MCP isolation is not implemented by this executor")]
+    McpIsolationNotImplemented,
 }
 
 #[enum_dispatch]
@@ -502,6 +507,22 @@ pub trait StandardCodingAgentExecutor {
     // MCP configuration methods
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf>;
 
+    async fn prepare_mcp_for_run(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        _context: &McpRunContext,
+        _env: &mut ExecutionEnv,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        let prepared = PreparedMcpRun::new(canonical)?;
+        if self.default_mcp_config_path().is_some() {
+            return Err(ExecutorError::McpIsolationNotImplemented);
+        }
+        if prepared.server_count() > 0 {
+            return Err(ExecutorError::McpNotSupported);
+        }
+        Ok(prepared)
+    }
+
     fn default_skill_config_path(&self) -> Option<std::path::PathBuf> {
         None
     }
@@ -604,22 +625,68 @@ impl AsyncRead for ExecutorOutput {
     }
 }
 
-/// Files whose lifetime must match the executor process rather than command startup.
+#[derive(Debug)]
+enum ExecutorRunCleanupResource {
+    File(PathBuf),
+    PrivateDirectory(PathBuf),
+}
+
+/// Private resources whose lifetime must match the executor process rather than command startup.
 #[derive(Debug)]
 pub struct ExecutorRunCleanup {
-    paths: Vec<PathBuf>,
+    resources: Vec<ExecutorRunCleanupResource>,
 }
 
 impl ExecutorRunCleanup {
     pub(crate) fn new(paths: Vec<PathBuf>) -> Self {
-        Self { paths }
+        Self {
+            resources: paths
+                .into_iter()
+                .map(ExecutorRunCleanupResource::File)
+                .collect(),
+        }
+    }
+
+    pub(crate) fn private_directory(path: PathBuf) -> Self {
+        Self {
+            resources: vec![ExecutorRunCleanupResource::PrivateDirectory(path)],
+        }
+    }
+
+    pub fn combine(first: Option<Self>, second: Option<Self>) -> Option<Self> {
+        match (first, second) {
+            (Some(mut first), Some(second)) => {
+                first.merge(second);
+                Some(first)
+            }
+            (Some(cleanup), None) | (None, Some(cleanup)) => Some(cleanup),
+            (None, None) => None,
+        }
+    }
+
+    pub fn merge(&mut self, mut other: Self) {
+        self.resources.append(&mut other.resources);
     }
 }
 
 impl Drop for ExecutorRunCleanup {
     fn drop(&mut self) {
-        for path in &self.paths {
-            let _ = fs::remove_file(path);
+        for resource in &self.resources {
+            if let ExecutorRunCleanupResource::File(path) = resource {
+                let _ = fs::remove_file(path);
+            }
+        }
+        let mut directories = self
+            .resources
+            .iter()
+            .filter_map(|resource| match resource {
+                ExecutorRunCleanupResource::PrivateDirectory(path) => Some(path),
+                ExecutorRunCleanupResource::File(_) => None,
+            })
+            .collect::<Vec<_>>();
+        directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        for path in directories {
+            let _ = fs::remove_dir_all(path);
         }
     }
 }

@@ -26,7 +26,8 @@ use crate::{
         AcpModelFallback, AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorPrompt,
         ExecutorRunCleanup, SpawnedChild, StandardCodingAgentExecutor,
     },
-    mcp_config::{McpConfig, read_canonical_mcp_config},
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun},
 };
 
 mod approval;
@@ -365,23 +366,6 @@ impl Pi {
         apply_overrides(CommandBuilder::new(Self::default_command()), &self.cmd)
     }
 
-    pub async fn freeze_runtime_snapshot(
-        &mut self,
-        skill_paths: Vec<PathBuf>,
-    ) -> Result<(), ExecutorError> {
-        let canonical = match self.default_mcp_config_path() {
-            Some(path) => read_canonical_mcp_config(&path, &McpConfig::canonical_acp()).await?,
-            None => serde_json::json!({ "mcpServers": {} }),
-        };
-        validate_member_mcp_allowlist(&canonical, &self.acp_mcp_policy)?;
-        let mcp_config = resolve_isolated_mcp_snapshot(&canonical, &self.acp_mcp_policy)?;
-        self.runtime_snapshot = Some(Arc::new(PiRuntimeSnapshot {
-            skill_paths,
-            mcp_config,
-        }));
-        Ok(())
-    }
-
     fn runtime_snapshot(&self) -> PiRuntimeSnapshot {
         self.runtime_snapshot
             .as_deref()
@@ -638,6 +622,22 @@ fn filter_pi_thinking_options(
 
 #[async_trait]
 impl StandardCodingAgentExecutor for Pi {
+    async fn prepare_mcp_for_run(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        context: &McpRunContext,
+        _env: &mut ExecutionEnv,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        let canonical_value = serde_json::to_value(canonical)?;
+        validate_member_mcp_allowlist(&canonical_value, &self.acp_mcp_policy)?;
+        let mcp_config = resolve_isolated_mcp_snapshot(&canonical_value, &self.acp_mcp_policy)?;
+        self.runtime_snapshot = Some(Arc::new(PiRuntimeSnapshot {
+            skill_paths: context.authorized_skill_paths().to_vec(),
+            mcp_config,
+        }));
+        PreparedMcpRun::new(canonical)
+    }
+
     fn overlay_acp_execution_options(&mut self, higher_priority: &AcpExecutionOptions) {
         let inherited = self.acp.clone().unwrap_or_default();
         self.acp = Some(inherited.overlay(higher_priority));
@@ -2076,6 +2076,44 @@ rl.on("close", () => {
                 .contains("invalid Pi member configuration")
         );
         assert!(!error.to_string().contains("mcpServers"));
+    }
+
+    #[tokio::test]
+    async fn public_run_preparation_freezes_the_member_snapshot() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let skill_path = workspace.path().join("registry/skill/SKILL.md");
+        let context =
+            McpRunContext::new(workspace.path(), uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+                .expect("run context")
+                .with_authorized_skill_paths(vec![skill_path.clone()]);
+        let canonical = MemberMcpConfig {
+            mcp_servers: [(
+                "member-only".to_string(),
+                serde_json::json!({"command": "/bin/echo"}),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        let mut pi = Pi::default();
+
+        let prepared = pi
+            .prepare_mcp_for_run(&canonical, &context, &mut env)
+            .await
+            .expect("Pi preparation");
+        let snapshot = pi.runtime_snapshot();
+
+        assert_eq!(prepared.server_names(), ["member-only"]);
+        assert_eq!(snapshot.skill_paths, [skill_path]);
+        assert!(
+            snapshot.mcp_config["mcpServers"]
+                .get("member-only")
+                .is_some()
+        );
+        assert_eq!(
+            snapshot.mcp_config["settings"]["hostConfigDiscovery"],
+            "off"
+        );
     }
 
     #[test]

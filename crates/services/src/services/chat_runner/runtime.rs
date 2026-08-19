@@ -2750,21 +2750,12 @@ impl ChatRunner {
     ) {
         let run_controls = self.run_controls.clone();
         tokio::spawn(async move {
-            let cleanup = args.cleanup;
-            Self::watch_executor_lifecycle_with_timeout(
-                args.child,
-                args.stop,
-                args.executor_cancel,
-                args.exit_signal,
-                args.msg_store,
-                args.completion_status,
-                args.terminal_failure_reason,
-                args.log_forwarders,
+            Self::watch_executor_lifecycle_and_cleanup_with_timeout(
+                args,
                 session_agent_id,
                 EXECUTOR_GRACEFUL_STOP_TIMEOUT,
             )
             .await;
-            drop(cleanup);
             let should_remove = run_controls
                 .get(&session_agent_id)
                 .is_some_and(|control| control.run_id == run_id);
@@ -2772,6 +2763,38 @@ impl ChatRunner {
                 run_controls.remove(&session_agent_id);
             }
         });
+    }
+
+    pub(super) async fn watch_executor_lifecycle_and_cleanup_with_timeout(
+        args: ExitWatcherArgs,
+        session_agent_id: Uuid,
+        graceful_timeout: std::time::Duration,
+    ) {
+        let ExitWatcherArgs {
+            child,
+            stop,
+            executor_cancel,
+            exit_signal,
+            cleanup,
+            msg_store,
+            completion_status,
+            terminal_failure_reason,
+            log_forwarders,
+        } = args;
+        Self::watch_executor_lifecycle_with_timeout(
+            child,
+            stop,
+            executor_cancel,
+            exit_signal,
+            msg_store,
+            completion_status,
+            terminal_failure_reason,
+            log_forwarders,
+            session_agent_id,
+            graceful_timeout,
+        )
+        .await;
+        drop(cleanup);
     }
 
     async fn wait_for_log_forwarders(log_forwarders: RunLogForwarders, msg_store: &MsgStore) {

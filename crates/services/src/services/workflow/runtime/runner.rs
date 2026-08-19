@@ -653,11 +653,21 @@ async fn run_workflow_agent_prompt_inner(
         env.insert("VK_CHAT_RUN_ID", record.run_id.to_string());
         env.insert("VK_WORKFLOW_RUN_ID", record.run_id.to_string());
     }
-    let (effective_execution, mut executor) =
+    let run_id = runtime_run_record
+        .as_ref()
+        .map(|record| record.run_id)
+        .ok_or_else(|| {
+            WorkflowRuntimeError::Validation(
+                "workflow MCP preparation requires a persisted run record".to_string(),
+            )
+        })?;
+    let (effective_execution, mut executor, prepared_mcp) =
         match build_effective_member_executor_for_run(
             &db.pool,
             agent,
             &effective_session_agent,
+            workspace_path.as_path(),
+            run_id,
             &mut env,
         )
         .await
@@ -748,6 +758,10 @@ async fn run_workflow_agent_prompt_inner(
             return Err(error.into());
         }
     };
+    spawned.cleanup = ExecutorRunCleanup::combine(
+        prepared_mcp.into_cleanup(),
+        spawned.cleanup.take(),
+    );
 
     // Register the cancel token so interrupt_step can terminate this process.
     if let Some(cancel) = spawned.cancel.clone() {
@@ -758,6 +772,7 @@ async fn run_workflow_agent_prompt_inner(
     let mut stdout_forwarder = match spawn_log_forwarders(&mut spawned, msg_store.clone()) {
         Ok(stdout_forwarder) => Some(stdout_forwarder),
         Err(error) => {
+            terminate_child(&mut spawned).await;
             clear_running_step(step_id, step_retry_count);
             let message = error.to_string();
             io_log.log_output("", Some(&message));

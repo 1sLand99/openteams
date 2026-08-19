@@ -2051,11 +2051,13 @@ impl ChatRunner {
                     .to_string_lossy()
                     .to_string(),
             );
-            let (effective_execution, mut executor) =
+            let (effective_execution, mut executor, prepared_mcp) =
                 build_effective_member_executor_for_run(
                     &self.db.pool,
                     &agent,
                     &session_agent,
+                    Path::new(&workspace_path),
+                    run_id,
                     &mut env,
                 )
                     .await
@@ -2135,6 +2137,10 @@ impl ChatRunner {
                 EXECUTOR_STARTUP_TIMEOUT,
             )
             .await?;
+            spawned.cleanup = ExecutorRunCleanup::combine(
+                prepared_mcp.into_cleanup(),
+                spawned.cleanup.take(),
+            );
             startup_timing
                 .mark_and_persist(
                     startup_timing::StartupMilestoneName::ExecutorSpawnReturned,

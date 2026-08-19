@@ -37,8 +37,8 @@ use db::{
 use executors::{
     env::{ExecutionEnv, RepoContext},
     executors::{
-        CancellationToken, ExecutorError, ExecutorExitResult, ExecutorExitSignal, SpawnedChild,
-        StandardCodingAgentExecutor,
+        CancellationToken, ExecutorError, ExecutorExitResult, ExecutorExitSignal,
+        ExecutorRunCleanup, SpawnedChild, StandardCodingAgentExecutor,
     },
     logs::{
         ActionType, NormalizedEntry, NormalizedEntryType, TokenUsageInfo, ToolStatus,
