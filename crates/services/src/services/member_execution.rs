@@ -20,7 +20,7 @@ use executors::{
         acp::{AcpExecutionOptions, mcp::AcpMcpPolicy},
     },
     mcp_config::MemberMcpConfig,
-    mcp_run::{McpRunContext, PreparedMcpRun},
+    mcp_run::{McpRunContext, McpRunPreparationError, PreparedMcpRun},
     model_sync::with_member_execution_overrides,
     profile::{ExecutorConfigs, ExecutorProfileId, canonical_variant_key},
 };
@@ -34,6 +34,10 @@ use crate::services::{
 };
 
 pub const EXECUTOR_PROFILE_VARIANT_KEY: &str = "executor_profile_variant";
+
+#[cfg(test)]
+pub(crate) const TEST_MCP_PREPARATION_DIAGNOSTIC_ENV: &str =
+    "OPENTEAMS_TEST_MCP_PREPARATION_DIAGNOSTIC";
 
 #[derive(Debug, Clone)]
 pub struct EffectiveMemberExecutionConfig {
@@ -200,12 +204,28 @@ pub async fn build_effective_member_executor_for_run(
     let authorized_skill_paths =
         resolve_member_native_skill_paths(pool, session_agent, resolved.runner_type, &executor)
             .await?;
-    let context = McpRunContext::new(current_dir, session_agent.id, run_id)?
+    let context = McpRunContext::new(current_dir, session_agent.id, run_id)
+        .map_err(|error| {
+            anyhow!(McpRunPreparationError::from_executor_error(
+                &canonical, error
+            ))
+        })?
         .with_authorized_skill_paths(authorized_skill_paths);
     let prepared = executor
         .prepare_mcp_for_run(&canonical, &context, env)
         .await
-        .map_err(|error| anyhow!(error.to_string()))?;
+        .map_err(|error| {
+            anyhow!(McpRunPreparationError::from_executor_error(
+                &canonical, error
+            ))
+        })?;
+    #[cfg(test)]
+    if let Some(diagnostic) = env.get(TEST_MCP_PREPARATION_DIAGNOSTIC_ENV).cloned() {
+        return Err(anyhow!(McpRunPreparationError::from_executor_error(
+            &canonical,
+            executors::executors::ExecutorError::Io(std::io::Error::other(diagnostic)),
+        )));
+    }
     tracing::info!(
         session_agent_id = %session_agent.id,
         run_id = %run_id,
@@ -218,7 +238,8 @@ pub async fn build_effective_member_executor_for_run(
 }
 
 fn freeze_member_mcp_snapshot(session_agent: &ChatSessionAgent) -> Result<MemberMcpConfig> {
-    ensure_member_scoped_mcp_initialized(&session_agent.execution_config.0)?;
+    ensure_member_scoped_mcp_initialized(&session_agent.execution_config.0)
+        .map_err(|_| anyhow!(McpRunPreparationError::not_initialized()))?;
     let canonical = session_agent
         .execution_config
         .0
@@ -227,7 +248,7 @@ fn freeze_member_mcp_snapshot(session_agent: &ChatSessionAgent) -> Result<Member
         .expect("member MCP initialization was checked");
     canonical
         .validate(&session_agent.member_name)
-        .map_err(|error| anyhow!(error.to_string()))?;
+        .map_err(|_| anyhow!(McpRunPreparationError::invalid_configuration(&canonical)))?;
     Ok(canonical)
 }
 
@@ -540,24 +561,30 @@ mod tests {
     #[test]
     fn mcp_snapshot_is_validated_without_exposing_secret_values() {
         let fake_secret = "member-mcp-secret-never-log";
+        let canonical = MemberMcpConfig {
+            mcp_servers: [(
+                "remote".to_string(),
+                serde_json::json!({
+                    "url": "https://example.test/mcp",
+                    "headers": {"Authorization": {"secret": fake_secret}}
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let expected_hash =
+            executors::mcp_run::canonical_mcp_server_map_hash(&canonical).expect("canonical hash");
         let member = session_agent(MemberExecutionConfig {
-            mcp: Some(MemberMcpConfig {
-                mcp_servers: [(
-                    "remote".to_string(),
-                    serde_json::json!({
-                        "url": "https://example.test/mcp",
-                        "headers": {"Authorization": {"secret": fake_secret}}
-                    }),
-                )]
-                .into_iter()
-                .collect(),
-            }),
+            mcp: Some(canonical),
             ..Default::default()
         });
 
         let error = freeze_member_mcp_snapshot(&member).expect_err("invalid header must fail");
         let message = error.to_string();
-        assert!(message.contains("headers.Authorization"));
+        assert!(message.contains("configuration is invalid"));
+        assert!(message.contains(&expected_hash));
+        assert!(message.contains("mcp_server_count=1"));
+        assert!(message.contains("remote"));
         assert!(!message.contains(fake_secret));
     }
 

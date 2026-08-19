@@ -55,6 +55,9 @@ pub use workflow::{
 pub mod workspace_change_capture;
 pub mod worktree_manager;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub(crate) const OPENTEAMS_PROMPT_SOURCE_MARKER: &str = "[OPENTEAMS_SOURCE=openteams]";
 
 pub(crate) fn mark_openteams_prompt(prompt: &str) -> String {

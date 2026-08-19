@@ -80,6 +80,8 @@ pub struct ChatRunner {
     executor_spawn_attempts: Arc<AtomicUsize>,
     #[cfg(test)]
     block_executor_spawn: Arc<AtomicBool>,
+    #[cfg(test)]
+    mcp_preparation_diagnostic: Arc<StdMutex<Option<String>>>,
 }
 
 impl ChatRunner {
@@ -107,6 +109,31 @@ impl ChatRunner {
             executor_spawn_attempts: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             block_executor_spawn: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            mcp_preparation_diagnostic: Arc::new(StdMutex::new(None)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_mcp_preparation_diagnostic_for_test(&self, diagnostic: Option<String>) {
+        *self
+            .mcp_preparation_diagnostic
+            .lock()
+            .expect("test MCP preparation diagnostic lock") = diagnostic;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_mcp_preparation_diagnostic_for_test(&self, env: &mut ExecutionEnv) {
+        if let Some(diagnostic) = self
+            .mcp_preparation_diagnostic
+            .lock()
+            .expect("test MCP preparation diagnostic lock")
+            .clone()
+        {
+            env.insert(
+                crate::services::member_execution::TEST_MCP_PREPARATION_DIAGNOSTIC_ENV,
+                diagnostic,
+            );
         }
     }
 
@@ -2059,6 +2086,8 @@ impl ChatRunner {
                     .to_string_lossy()
                     .to_string(),
             );
+            #[cfg(test)]
+            self.inject_mcp_preparation_diagnostic_for_test(&mut env);
             let (effective_execution, mut executor, prepared_mcp) =
                 build_effective_member_executor_for_run(
                     &self.db.pool,

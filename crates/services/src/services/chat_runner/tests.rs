@@ -23,7 +23,7 @@ use executors::{
     env::{ExecutionEnv, RepoContext},
     executors::{CancellationToken, ExecutorError, ExecutorRunCleanup},
     mcp_config::MemberMcpConfig,
-    mcp_run::{McpRunContext, PrivateMcpRunDirectory},
+    mcp_run::{McpRunContext, PrivateMcpRunDirectory, canonical_mcp_server_map_hash},
 };
 use git::GitService;
 use serde_json::json;
@@ -49,6 +49,10 @@ use crate::services::{
     config::UiLanguage,
     queued_message::{CreateQueuedMessage, QueuedMessageService},
     session_worktree::SessionWorktreeService,
+    test_support::{
+        ADAPTER_DIAGNOSTIC_SECRET, CANONICAL_MCP_SECRET, TracingCapture,
+        canonical_mcp_config_with_fake_secrets,
+    },
 };
 
 fn test_message_with_sender(
@@ -373,6 +377,17 @@ async fn setup_chat_runner_db() -> DBService {
             .expect("execute setup statement");
     }
 
+    DBService { pool }
+}
+
+async fn setup_migrated_chat_runner_db() -> DBService {
+    let pool = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("create migrated sqlite memory pool");
+    sqlx::migrate!("../db/migrations")
+        .run(&pool)
+        .await
+        .expect("run chat lifecycle test migrations");
     DBService { pool }
 }
 
@@ -4861,18 +4876,33 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
     }
 }
 
+struct ChatStartupBoundaryResult {
+    _workspace: tempfile::TempDir,
+    db: DBService,
+    session_id: Uuid,
+    session_agent_id: Uuid,
+    error: String,
+    spawn_attempts: usize,
+    state: ChatSessionAgentState,
+    tracing: String,
+    events: Vec<ChatStreamEvent>,
+}
+
 async fn run_chat_startup_until_spawn_boundary(
     runner_type: &str,
     mcp: Option<MemberMcpConfig>,
-) -> (String, usize, ChatSessionAgentState) {
+    adapter_diagnostic: Option<String>,
+) -> ChatStartupBoundaryResult {
     let workspace = tempfile::tempdir().expect("workspace");
-    let db = setup_chat_runner_db().await;
+    let db = setup_migrated_chat_runner_db().await;
     let runner = ChatRunner::new(db.clone());
     runner
         .block_executor_spawn
         .store(true, std::sync::atomic::Ordering::Relaxed);
+    runner.set_mcp_preparation_diagnostic_for_test(adapter_diagnostic);
     let session_id = Uuid::new_v4();
     insert_test_chat_session(&db, session_id).await;
+    let mut events = runner.subscribe(session_id);
     let agent = insert_test_chat_agent(&db, "McpTarget").await;
     sqlx::query("UPDATE chat_agents SET runner_type = ?2 WHERE id = ?1")
         .bind(agent.id)
@@ -4909,12 +4939,14 @@ async fn run_chat_startup_until_spawn_boundary(
     .await
     .expect("create MCP test message");
 
+    let tracing = TracingCapture::start();
     let error = runner
         .run_agent_for_mention(session_id, "McpTarget", 0, &message)
         .await
         .expect_err("startup must stop at the expected boundary")
         .to_string();
-    let attempts = runner
+    let tracing = tracing.finish();
+    let spawn_attempts = runner
         .executor_spawn_attempts
         .load(std::sync::atomic::Ordering::Relaxed);
     let state = ChatSessionAgent::find_by_id(&db.pool, session_agent.id)
@@ -4922,26 +4954,135 @@ async fn run_chat_startup_until_spawn_boundary(
         .expect("read MCP target")
         .expect("MCP target exists")
         .state;
-    (error, attempts, state)
+    let events = std::iter::from_fn(|| events.try_recv().ok()).collect();
+    ChatStartupBoundaryResult {
+        _workspace: workspace,
+        db,
+        session_id,
+        session_agent_id: session_agent.id,
+        error,
+        spawn_attempts,
+        state,
+        tracing,
+        events,
+    }
 }
 
 #[tokio::test]
 async fn chat_lifecycle_prepares_mcp_before_any_executor_spawn() {
-    let (missing_error, missing_attempts, missing_state) =
-        run_chat_startup_until_spawn_boundary("CODEX", None).await;
-    assert!(missing_error.contains("not initialized"));
-    assert_eq!(missing_attempts, 0);
-    assert_eq!(missing_state, ChatSessionAgentState::Dead);
+    let missing = run_chat_startup_until_spawn_boundary("CODEX", None, None).await;
+    assert!(missing.error.contains("not initialized"));
+    assert_eq!(missing.spawn_attempts, 0);
+    assert_eq!(missing.state, ChatSessionAgentState::Dead);
 
-    let (isolation_error, isolation_attempts, isolation_state) =
-        run_chat_startup_until_spawn_boundary("CODEX", Some(Default::default())).await;
-    assert!(isolation_error.contains("isolation is not implemented"));
-    assert_eq!(isolation_attempts, 0);
-    assert_eq!(isolation_state, ChatSessionAgentState::Dead);
+    let isolation = run_chat_startup_until_spawn_boundary(
+        "CODEX",
+        Some(Default::default()),
+        None,
+    )
+    .await;
+    assert!(isolation.error.contains("isolation is not implemented"));
+    assert_eq!(isolation.spawn_attempts, 0);
+    assert_eq!(isolation.state, ChatSessionAgentState::Dead);
 
-    let (spawn_error, spawn_attempts, spawn_state) =
-        run_chat_startup_until_spawn_boundary("PI", Some(Default::default())).await;
-    assert!(spawn_error.contains("test blocked executor spawn"));
-    assert_eq!(spawn_attempts, 1);
-    assert_eq!(spawn_state, ChatSessionAgentState::Dead);
+    let spawn =
+        run_chat_startup_until_spawn_boundary("PI", Some(Default::default()), None).await;
+    assert!(spawn.error.contains("test blocked executor spawn"));
+    assert_eq!(spawn.spawn_attempts, 1);
+    assert_eq!(spawn.state, ChatSessionAgentState::Dead);
+}
+
+#[tokio::test]
+async fn chat_mcp_preparation_failure_redacts_canonical_and_adapter_secrets_everywhere() {
+    let canonical = canonical_mcp_config_with_fake_secrets();
+    let expected_hash = canonical_mcp_server_map_hash(&canonical).expect("canonical MCP hash");
+    let result = run_chat_startup_until_spawn_boundary(
+        "PI",
+        Some(canonical),
+        Some(format!(
+            "adapter stderr echoed {ADAPTER_DIAGNOSTIC_SECRET} and {CANONICAL_MCP_SECRET}"
+        )),
+    )
+    .await;
+
+    assert_eq!(result.spawn_attempts, 0);
+    assert_eq!(result.state, ChatSessionAgentState::Dead);
+
+    let event_surface = serde_json::to_string(&result.events).expect("serialize chat events");
+    let messages = sqlx::query_as::<_, (String, String)>(
+        "SELECT content, CAST(meta AS TEXT) FROM chat_messages WHERE session_id = ?1",
+    )
+    .bind(result.session_id)
+    .fetch_all(&result.db.pool)
+    .await
+    .expect("read chat transcript surfaces");
+    let queue_failures = sqlx::query_scalar::<_, String>(
+        "SELECT COALESCE(failure_reason, '') FROM chat_message_queue WHERE session_agent_id = ?1",
+    )
+    .bind(result.session_agent_id)
+    .fetch_all(&result.db.pool)
+    .await
+    .expect("read queue failure surfaces");
+    let inbox_items = sqlx::query_as::<_, (String, String)>(
+        "SELECT title, COALESCE(body, '') FROM inbox_items WHERE session_id = ?1",
+    )
+    .bind(result.session_id)
+    .fetch_all(&result.db.pool)
+    .await
+    .expect("read inbox failure surfaces");
+    let run = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+        r#"
+        SELECT run_dir, meta_path, raw_log_path, retention_summary_json
+        FROM chat_runs
+        WHERE session_agent_id = ?1
+        ORDER BY run_index DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(result.session_agent_id)
+    .fetch_one(&result.db.pool)
+    .await
+    .expect("read failed chat run");
+    let mut artifacts = String::new();
+    for entry in std::fs::read_dir(&run.0).expect("read failed chat run directory") {
+        let path = entry.expect("run artifact entry").path();
+        if path.is_file()
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            artifacts.push_str(&content);
+        }
+    }
+    for path in [run.1.as_deref(), run.2.as_deref()].into_iter().flatten() {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            artifacts.push_str(&content);
+        }
+    }
+    let persisted_surface = serde_json::to_string(&serde_json::json!({
+        "messages": messages,
+        "queue_failures": queue_failures,
+        "inbox_items": inbox_items,
+        "retention_summary": run.3,
+        "artifacts": artifacts,
+    }))
+    .expect("serialize persisted chat surfaces");
+
+    for (label, surface) in [
+        ("returned error", result.error.as_str()),
+        ("tracing", result.tracing.as_str()),
+        ("stream events", event_surface.as_str()),
+        ("persisted chat records", persisted_surface.as_str()),
+    ] {
+        assert!(
+            !surface.contains(CANONICAL_MCP_SECRET),
+            "{label} leaked the canonical MCP secret: {surface}"
+        );
+        assert!(
+            !surface.contains(ADAPTER_DIAGNOSTIC_SECRET),
+            "{label} leaked the adapter diagnostic secret: {surface}"
+        );
+        assert!(surface.contains(&expected_hash), "{label} omitted the safe MCP hash");
+        assert!(surface.contains("mcp_server_count=2"), "{label} omitted the server count");
+        assert!(surface.contains("local-safe-name"), "{label} omitted a safe server name");
+        assert!(surface.contains("remote-safe-name"), "{label} omitted a safe server name");
+    }
 }

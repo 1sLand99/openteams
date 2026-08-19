@@ -7,6 +7,7 @@ use std::{
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
@@ -70,6 +71,108 @@ pub struct PreparedMcpRun {
     config_hash: String,
     server_names: Vec<String>,
     cleanup: Option<ExecutorRunCleanup>,
+}
+
+/// Secret-safe failure metadata for the public run-scoped MCP preparation boundary.
+///
+/// Adapter errors are deliberately classified and dropped rather than retained as a
+/// source: diagnostics may contain command arguments, headers, or environment values.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error(
+    "Run-scoped MCP preparation failed: {kind}; mcp_config_hash={config_hash}; mcp_server_count={server_count}; mcp_server_names={server_names:?}"
+)]
+pub struct McpRunPreparationError {
+    kind: McpRunPreparationFailureKind,
+    config_hash: String,
+    server_count: usize,
+    server_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum McpRunPreparationFailureKind {
+    #[error("member MCP configuration is not initialized")]
+    NotInitialized,
+    #[error("member MCP configuration is invalid")]
+    InvalidConfiguration,
+    #[error("MCP is not supported by this executor")]
+    NotSupported,
+    #[error("run-scoped MCP isolation is not implemented by this executor")]
+    IsolationNotImplemented,
+    #[error("executor rejected run-scoped MCP preparation")]
+    AdapterRejected,
+    #[error("run-scoped MCP resource preparation failed")]
+    ResourcePreparationFailed,
+}
+
+impl McpRunPreparationError {
+    pub fn not_initialized() -> Self {
+        Self {
+            kind: McpRunPreparationFailureKind::NotInitialized,
+            config_hash: "unavailable".to_string(),
+            server_count: 0,
+            server_names: Vec::new(),
+        }
+    }
+
+    pub fn invalid_configuration(canonical: &MemberMcpConfig) -> Self {
+        Self::from_kind(
+            McpRunPreparationFailureKind::InvalidConfiguration,
+            canonical,
+        )
+    }
+
+    pub fn from_executor_error(canonical: &MemberMcpConfig, error: ExecutorError) -> Self {
+        let kind = match error {
+            ExecutorError::McpNotSupported => McpRunPreparationFailureKind::NotSupported,
+            ExecutorError::McpIsolationNotImplemented => {
+                McpRunPreparationFailureKind::IsolationNotImplemented
+            }
+            ExecutorError::Io(_)
+            | ExecutorError::SpawnError(_)
+            | ExecutorError::Json(_)
+            | ExecutorError::TomlSerialize(_)
+            | ExecutorError::TomlDeserialize(_)
+            | ExecutorError::Yaml(_)
+            | ExecutorError::CommandBuild(_)
+            | ExecutorError::ExecutableNotFound { .. } => {
+                McpRunPreparationFailureKind::ResourcePreparationFailed
+            }
+            ExecutorError::FollowUpNotSupported(_)
+            | ExecutorError::UnknownExecutorType(_)
+            | ExecutorError::ExecutorApprovalError(_)
+            | ExecutorError::SetupHelperNotSupported
+            | ExecutorError::AuthRequired(_)
+            | ExecutorError::Configuration(_) => McpRunPreparationFailureKind::AdapterRejected,
+        };
+        Self::from_kind(kind, canonical)
+    }
+
+    pub fn kind(&self) -> McpRunPreparationFailureKind {
+        self.kind
+    }
+
+    pub fn config_hash(&self) -> &str {
+        &self.config_hash
+    }
+
+    pub fn server_count(&self) -> usize {
+        self.server_count
+    }
+
+    pub fn server_names(&self) -> &[String] {
+        &self.server_names
+    }
+
+    fn from_kind(kind: McpRunPreparationFailureKind, canonical: &MemberMcpConfig) -> Self {
+        let server_names = canonical.mcp_servers.keys().cloned().collect::<Vec<_>>();
+        Self {
+            kind,
+            config_hash: canonical_mcp_server_map_hash(canonical)
+                .unwrap_or_else(|_| "unavailable".to_string()),
+            server_count: server_names.len(),
+            server_names,
+        }
+    }
 }
 
 impl PreparedMcpRun {
@@ -362,6 +465,47 @@ mod tests {
         assert!(debug.contains("alpha"));
         assert!(!debug.contains("fake-secret"));
         assert!(!debug.contains("/bin/echo"));
+    }
+
+    #[test]
+    fn adapter_diagnostics_are_dropped_at_the_public_preparation_boundary() {
+        let canonical_secret = "MCP_CANONICAL_SECRET_NEVER_EXPOSE";
+        let adapter_secret = "MCP_ADAPTER_DIAGNOSTIC_SECRET_NEVER_EXPOSE";
+        let canonical = MemberMcpConfig {
+            mcp_servers: [(
+                "safe-server-name".to_string(),
+                json!({
+                    "command": format!("/tmp/{canonical_secret}"),
+                    "args": [canonical_secret],
+                    "env": {"TOKEN": canonical_secret}
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let expected_hash =
+            canonical_mcp_server_map_hash(&canonical).expect("canonical config hash");
+
+        let error = McpRunPreparationError::from_executor_error(
+            &canonical,
+            ExecutorError::Io(std::io::Error::other(format!(
+                "adapter stderr echoed {adapter_secret} and {canonical_secret}"
+            ))),
+        );
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+
+        for output in [&display, &debug] {
+            assert!(!output.contains(canonical_secret));
+            assert!(!output.contains(adapter_secret));
+            assert!(output.contains(&expected_hash));
+            assert!(output.contains("safe-server-name"));
+        }
+        assert_eq!(
+            error.kind(),
+            McpRunPreparationFailureKind::ResourcePreparationFailed
+        );
+        assert_eq!(error.server_count(), 1);
     }
 
     #[test]

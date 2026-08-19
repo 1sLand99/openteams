@@ -649,6 +649,18 @@ async fn run_workflow_agent_prompt_inner(
     env.insert("VK_WORKFLOW_SESSION_ID", session.id.to_string());
     env.insert("VK_WORKFLOW_AGENT_ID", agent.id.to_string());
     env.insert("VK_WORKFLOW_SESSION_AGENT_ID", session_agent.id.to_string());
+    #[cfg(test)]
+    if let Some(chat_runner) = stream_context
+        .as_ref()
+        .map(|context| &context.chat_runner)
+        .or_else(|| {
+            plan_stream_context
+                .as_ref()
+                .map(|context| &context.chat_runner)
+        })
+    {
+        chat_runner.inject_mcp_preparation_diagnostic_for_test(&mut env);
+    }
     if let Some(record) = runtime_run_record.as_ref() {
         env.insert("VK_CHAT_RUN_ID", record.run_id.to_string());
         env.insert("VK_WORKFLOW_RUN_ID", record.run_id.to_string());

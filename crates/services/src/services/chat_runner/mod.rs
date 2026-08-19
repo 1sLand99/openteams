@@ -1,5 +1,5 @@
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
+use std::sync::{Mutex as StdMutex, atomic::AtomicUsize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     future::Future,
