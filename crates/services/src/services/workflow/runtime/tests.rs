@@ -494,7 +494,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workflow_uses_the_common_member_mcp_preparation_contract() {
+    async fn common_member_mcp_preparation_returns_workflow_metadata() {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
             .expect("test database");
@@ -2337,7 +2337,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn pi_workflow_step_executes_through_runtime_and_projects_records() {
+    async fn workflow_runner_prepares_mcp_before_spawn_and_projects_pi_records() {
         use crate::services::chat_runner::ChatRunner;
         use db::models::{
             chat_agent::{ChatAgent, CreateChatAgent},
@@ -2457,10 +2457,7 @@ mod tests {
                 workspace_path: Some(workspace.to_string_lossy().to_string()),
                 allowed_skill_ids: Vec::new(),
                 project_member_id: None,
-                execution_config: MemberExecutionConfig {
-                    mcp: Some(Default::default()),
-                    ..Default::default()
-                },
+                execution_config: MemberExecutionConfig::default(),
             },
             Uuid::new_v4(),
         )
@@ -2575,6 +2572,72 @@ mod tests {
         .expect("create step");
 
         let chat_runner = ChatRunner::new(db.clone());
+
+        let preparation_error = super::run_workflow_step_agent_prompt(
+            &db,
+            &chat_runner,
+            &session,
+            &agent,
+            &session_agent,
+            Some(&workflow_session),
+            "workflow pi test",
+            &step,
+        )
+        .await
+        .expect_err("mcp=None must fail before workflow spawn");
+        assert!(preparation_error.to_string().contains("not initialized"));
+        assert!(
+            !proto_log.exists(),
+            "workflow executor was spawned before MCP preparation"
+        );
+        assert!(!prompts.exists(), "workflow prompt reached executor before MCP preparation");
+        assert!(!pids.exists(), "workflow child process started before MCP preparation");
+
+        let session_agent = ChatSessionAgent::update_execution_config_for_next_run(
+            &db.pool,
+            session_agent.id,
+            None,
+            MemberExecutionConfig {
+                mcp: Some(Default::default()),
+                runner_type: Some(executors::executors::BaseCodingAgent::Codex),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("initialize MCP for adapter refusal");
+
+        let isolation_error = super::run_workflow_step_agent_prompt(
+            &db,
+            &chat_runner,
+            &session,
+            &agent,
+            &session_agent,
+            Some(&workflow_session),
+            "workflow pi test",
+            &step,
+        )
+        .await
+        .expect_err("an adapter without isolation must fail before workflow spawn");
+        assert!(isolation_error.to_string().contains("isolation is not implemented"));
+        assert!(
+            !proto_log.exists(),
+            "workflow executor was spawned after adapter preparation failed"
+        );
+        assert!(!prompts.exists(), "workflow prompt reached a rejected adapter");
+        assert!(!pids.exists(), "workflow child process started for a rejected adapter");
+
+        let session_agent = ChatSessionAgent::update_execution_config_for_next_run(
+            &db.pool,
+            session_agent.id,
+            None,
+            MemberExecutionConfig {
+                mcp: Some(Default::default()),
+                runner_type: Some(executors::executors::BaseCodingAgent::Pi),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("initialize MCP before the successful workflow run");
 
         let result = super::run_workflow_step_agent_prompt(
             &db,

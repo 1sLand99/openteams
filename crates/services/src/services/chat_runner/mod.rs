@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     future::Future,

@@ -20,7 +20,9 @@ use db::{
     },
 };
 use executors::{
+    env::{ExecutionEnv, RepoContext},
     executors::{CancellationToken, ExecutorError, ExecutorRunCleanup},
+    mcp_config::MemberMcpConfig,
     mcp_run::{McpRunContext, PrivateMcpRunDirectory},
 };
 use git::GitService;
@@ -529,7 +531,7 @@ async fn active_workflow_blocks_plan_generation_without_overwriting_its_card() {
 }
 
 #[tokio::test]
-async fn refreshes_workflow_member_execution_config_before_run() {
+async fn refreshes_workflow_member_config_and_freezes_each_run_snapshot() {
     let db = setup_chat_runner_db().await;
     let project_id = Uuid::new_v4();
     let session_id = Uuid::new_v4();
@@ -550,12 +552,19 @@ async fn refreshes_workflow_member_execution_config_before_run() {
     .expect("insert project chat session");
 
     let member_config = MemberExecutionConfig {
-        runner_type: Some(executors::executors::BaseCodingAgent::Gemini),
+        runner_type: Some(executors::executors::BaseCodingAgent::Pi),
         model_name: Some("new-model".to_string()),
         thinking_effort: Some("high".to_string()),
         model_variant: None,
         acp: None,
-        mcp: Some(Default::default()),
+        mcp: Some(MemberMcpConfig {
+            mcp_servers: [(
+                "run-one".to_string(),
+                serde_json::json!({"command": "/bin/echo"}),
+            )]
+            .into_iter()
+            .collect(),
+        }),
     };
     let member = ProjectMember::create(
         &db.pool,
@@ -662,7 +671,7 @@ async fn refreshes_workflow_member_execution_config_before_run() {
     .expect("resolve refreshed execution config");
     assert_eq!(
         effective.runner_type,
-        executors::executors::BaseCodingAgent::Gemini
+        executors::executors::BaseCodingAgent::Pi
     );
     assert_eq!(effective.model_name.as_deref(), Some("new-model"));
     let refreshed_workflow_session = WorkflowAgentSession::find_by_id(&db.pool, workflow_session.id)
@@ -671,6 +680,25 @@ async fn refreshes_workflow_member_execution_config_before_run() {
         .expect("workflow session exists");
     assert_eq!(refreshed_workflow_session.agent_session_id, None);
     assert_eq!(refreshed_workflow_session.agent_message_id, None);
+
+    let run_workspace = tempfile::tempdir().expect("run workspace");
+    let mut run_one_env = ExecutionEnv::new(
+        RepoContext::new(run_workspace.path().to_path_buf(), Vec::new()),
+        false,
+        String::new(),
+    );
+    let (_, _, run_one_snapshot) =
+        crate::services::member_execution::build_effective_member_executor_for_run(
+            &db.pool,
+            &agent,
+            &synced,
+            run_workspace.path(),
+            Uuid::new_v4(),
+            &mut run_one_env,
+        )
+        .await
+        .expect("prepare run one snapshot");
+    assert_eq!(run_one_snapshot.server_names(), ["run-one"]);
 
     sqlx::query(
         r#"
@@ -726,6 +754,59 @@ async fn refreshes_workflow_member_execution_config_before_run() {
         unchanged_workflow_session.agent_session_id.as_deref(),
         Some("current-workflow-session")
     );
+
+    let next_member_config = MemberExecutionConfig {
+        mcp: Some(MemberMcpConfig {
+            mcp_servers: [(
+                "run-two".to_string(),
+                serde_json::json!({"command": "/bin/echo"}),
+            )]
+            .into_iter()
+            .collect(),
+        }),
+        ..member_config.clone()
+    };
+    sqlx::query("UPDATE project_members SET execution_config = ?2 WHERE id = ?1")
+        .bind(member.id)
+        .bind(sqlx::types::Json(next_member_config.clone()))
+        .execute(&db.pool)
+        .await
+        .expect("update project member for run two");
+
+    let run_two_refresh =
+        crate::services::member_execution::refresh_session_agent_execution_config_before_run(
+            &db.pool,
+            &session,
+            unchanged.session_agent,
+            agent.id,
+            Some(workflow_session.id),
+        )
+        .await
+        .expect("refresh before run two");
+    assert!(run_two_refresh.changed);
+    assert_eq!(run_two_refresh.session_agent.execution_config.0, next_member_config);
+    assert_eq!(run_two_refresh.session_agent.agent_session_id, None);
+
+    let mut run_two_env = ExecutionEnv::new(
+        RepoContext::new(run_workspace.path().to_path_buf(), Vec::new()),
+        false,
+        String::new(),
+    );
+    let (_, _, run_two_snapshot) =
+        crate::services::member_execution::build_effective_member_executor_for_run(
+            &db.pool,
+            &agent,
+            &run_two_refresh.session_agent,
+            run_workspace.path(),
+            Uuid::new_v4(),
+            &mut run_two_env,
+        )
+        .await
+        .expect("prepare run two snapshot");
+
+    assert_eq!(run_one_snapshot.server_names(), ["run-one"]);
+    assert_eq!(run_two_snapshot.server_names(), ["run-two"]);
+    assert_ne!(run_one_snapshot.config_hash(), run_two_snapshot.config_hash());
 }
 
 #[tokio::test]
@@ -4780,49 +4861,87 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
     }
 }
 
-#[tokio::test]
-async fn supports_mcp_adapter_without_public_preparation_fails_closed() {
-    use crate::services::member_execution::build_effective_member_executor_for_run;
-    use executors::env::RepoContext;
+async fn run_chat_startup_until_spawn_boundary(
+    runner_type: &str,
+    mcp: Option<MemberMcpConfig>,
+) -> (String, usize, ChatSessionAgentState) {
     let workspace = tempfile::tempdir().expect("workspace");
     let db = setup_chat_runner_db().await;
-    let mut agent = test_agent("Codex", "test");
-    agent.runner_type = "CODEX".to_string();
-    let session_agent = ChatSessionAgent {
-        id: Uuid::new_v4(),
-        session_id: Uuid::new_v4(),
-        agent_id: agent.id,
-        state: ChatSessionAgentState::Idle,
-        workspace_path: Some(workspace.path().to_string_lossy().to_string()),
-        pty_session_key: None,
-        agent_session_id: None,
-        agent_message_id: None,
-        project_member_id: None,
-        member_name: "Codex".to_string(),
-        execution_config: sqlx::types::Json(MemberExecutionConfig {
-            mcp: Some(Default::default()),
-            ..Default::default()
-        }),
-        allowed_skill_ids: sqlx::types::Json(Vec::new()),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
-    let mut env = executors::env::ExecutionEnv::new(
-        RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
-        false,
-        String::new(),
-    );
-
-    let error = build_effective_member_executor_for_run(
+    let runner = ChatRunner::new(db.clone());
+    runner
+        .block_executor_spawn
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "McpTarget").await;
+    sqlx::query("UPDATE chat_agents SET runner_type = ?2 WHERE id = ?1")
+        .bind(agent.id)
+        .bind(runner_type)
+        .execute(&db.pool)
+        .await
+        .expect("set test runner type");
+    let session_agent = ChatSessionAgent::create(
         &db.pool,
-        &agent,
-        &session_agent,
-        workspace.path(),
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: Some("McpTarget".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig {
+                mcp,
+                ..Default::default()
+            },
+        },
         Uuid::new_v4(),
-        &mut env,
     )
     .await
-    .expect_err("Codex must not fall back to its vendor MCP config");
+    .expect("create MCP target");
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@McpTarget verify preparation order".to_string(),
+        None,
+    )
+    .await
+    .expect("create MCP test message");
 
-    assert!(error.to_string().contains("isolation is not implemented"));
+    let error = runner
+        .run_agent_for_mention(session_id, "McpTarget", 0, &message)
+        .await
+        .expect_err("startup must stop at the expected boundary")
+        .to_string();
+    let attempts = runner
+        .executor_spawn_attempts
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let state = ChatSessionAgent::find_by_id(&db.pool, session_agent.id)
+        .await
+        .expect("read MCP target")
+        .expect("MCP target exists")
+        .state;
+    (error, attempts, state)
+}
+
+#[tokio::test]
+async fn chat_lifecycle_prepares_mcp_before_any_executor_spawn() {
+    let (missing_error, missing_attempts, missing_state) =
+        run_chat_startup_until_spawn_boundary("CODEX", None).await;
+    assert!(missing_error.contains("not initialized"));
+    assert_eq!(missing_attempts, 0);
+    assert_eq!(missing_state, ChatSessionAgentState::Dead);
+
+    let (isolation_error, isolation_attempts, isolation_state) =
+        run_chat_startup_until_spawn_boundary("CODEX", Some(Default::default())).await;
+    assert!(isolation_error.contains("isolation is not implemented"));
+    assert_eq!(isolation_attempts, 0);
+    assert_eq!(isolation_state, ChatSessionAgentState::Dead);
+
+    let (spawn_error, spawn_attempts, spawn_state) =
+        run_chat_startup_until_spawn_boundary("PI", Some(Default::default())).await;
+    assert!(spawn_error.contains("test blocked executor spawn"));
+    assert_eq!(spawn_attempts, 1);
+    assert_eq!(spawn_state, ChatSessionAgentState::Dead);
 }

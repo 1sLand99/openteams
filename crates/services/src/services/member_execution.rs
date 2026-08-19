@@ -407,7 +407,7 @@ mod tests {
     };
     use executors::{
         env::RepoContext,
-        executors::{BaseCodingAgent, acp::AcpAccessMode},
+        executors::{BaseCodingAgent as RunnerKind, acp::AcpAccessMode},
     };
     use sqlx::types::Json;
     use uuid::Uuid;
@@ -456,7 +456,7 @@ mod tests {
                 .expect("resolve config");
 
         assert!(!resolved.has_member_config);
-        assert_eq!(resolved.runner_type, BaseCodingAgent::Codex);
+        assert_eq!(resolved.runner_type, RunnerKind::Codex);
         assert_eq!(resolved.model_name.as_deref(), Some("legacy-model"));
         assert!(resolved.profile_id.to_string().contains("HIGH_REASONING"));
     }
@@ -466,7 +466,7 @@ mod tests {
         let resolved = resolve_effective_member_execution_config(
             &agent(),
             &session_agent(MemberExecutionConfig {
-                runner_type: Some(BaseCodingAgent::Gemini),
+                runner_type: Some(RunnerKind::Gemini),
                 model_name: Some("gemini-3-pro-preview".to_string()),
                 thinking_effort: Some("high".to_string()),
                 model_variant: None,
@@ -477,7 +477,7 @@ mod tests {
         .expect("resolve config");
 
         assert!(resolved.has_member_config);
-        assert_eq!(resolved.runner_type, BaseCodingAgent::Gemini);
+        assert_eq!(resolved.runner_type, RunnerKind::Gemini);
         assert_eq!(resolved.model_name.as_deref(), Some("gemini-3-pro-preview"));
         assert_eq!(resolved.thinking_effort.as_deref(), Some("high"));
         assert_eq!(resolved.profile_id.to_string(), "GEMINI");
@@ -488,7 +488,7 @@ mod tests {
         for raw in ["OPEN_TEAMS_CLI", "OPENTEAMS_CLI", "openteams-cli"] {
             assert_eq!(
                 parse_runner_type(raw).expect("parse runner"),
-                BaseCodingAgent::OpenTeamsCli
+                RunnerKind::OpenTeamsCli
             );
         }
     }
@@ -704,12 +704,12 @@ mod tests {
         let profiles = ExecutorConfigs::from_defaults();
 
         for runner in [
-            BaseCodingAgent::Gemini,
-            BaseCodingAgent::QwenCode,
-            BaseCodingAgent::KimiCode,
-            BaseCodingAgent::QoderCli,
-            BaseCodingAgent::Hermes,
-            BaseCodingAgent::DeepseekHarness,
+            RunnerKind::Gemini,
+            RunnerKind::QwenCode,
+            RunnerKind::KimiCode,
+            RunnerKind::QoderCli,
+            RunnerKind::Hermes,
+            RunnerKind::DeepseekHarness,
         ] {
             let executor = profiles.get_coding_agent_or_default(&ExecutorProfileId::new(runner));
             assert!(executor_acp_full_access_enabled(&executor), "{runner}");
@@ -724,7 +724,7 @@ mod tests {
         let (_, executor) = build_effective_member_executor(
             &deepseek_agent,
             &session_agent(MemberExecutionConfig {
-                runner_type: Some(BaseCodingAgent::DeepseekHarness),
+                runner_type: Some(RunnerKind::DeepseekHarness),
                 acp: Some(AcpExecutionOptions {
                     access_mode: Some(AcpAccessMode::WorkspaceOnly),
                     ..AcpExecutionOptions::default()

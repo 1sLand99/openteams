@@ -76,6 +76,10 @@ pub struct ChatRunner {
     workspace_janitor_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     #[cfg(test)]
     stop_after_queue_binding: Arc<AtomicBool>,
+    #[cfg(test)]
+    executor_spawn_attempts: Arc<AtomicUsize>,
+    #[cfg(test)]
+    block_executor_spawn: Arc<AtomicBool>,
 }
 
 impl ChatRunner {
@@ -99,6 +103,10 @@ impl ChatRunner {
             workspace_janitor_locks: Arc::new(DashMap::new()),
             #[cfg(test)]
             stop_after_queue_binding: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            executor_spawn_attempts: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            block_executor_spawn: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -2101,6 +2109,15 @@ impl ChatRunner {
                 )
                 .await;
             let spawn = async {
+                #[cfg(test)]
+                {
+                    self.executor_spawn_attempts.fetch_add(1, Ordering::Relaxed);
+                    if self.block_executor_spawn.load(Ordering::Relaxed) {
+                        return Err(ExecutorError::Io(std::io::Error::other(
+                            "test blocked executor spawn",
+                        )));
+                    }
+                }
                 if session_agent.state != ChatSessionAgentState::Dead {
                     if let Some(agent_session_id) = session_agent.agent_session_id.as_deref() {
                         executor
