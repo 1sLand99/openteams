@@ -859,6 +859,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_empty_member_map_overrides_ambient_kimi_mcp() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source_home = workspace.path().join("source-kimi-home");
+        tokio::fs::create_dir_all(&source_home)
+            .await
+            .expect("source Kimi home");
+        let ambient_path = source_home.join("mcp.json");
+        tokio::fs::write(
+            &ambient_path,
+            br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
+        )
+        .await
+        .expect("ambient Kimi MCP");
+        let mut executor = kimi();
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+        env.insert(
+            KimiCode::CODE_HOME_ENV,
+            source_home.to_string_lossy().into_owned(),
+        );
+
+        let prepared = executor
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(workspace.path()),
+                &mut env,
+            )
+            .await
+            .expect("empty Kimi MCP preparation");
+        let run_home = PathBuf::from(env.get(KimiCode::CODE_HOME_ENV).expect("run Kimi home"));
+        let run_vendor_mcp: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(run_home.join("mcp.json"))
+                .await
+                .expect("run vendor MCP"),
+        )
+        .expect("parse run vendor MCP");
+        let effective = load_prepared_acp_mcp_config(&env)
+            .await
+            .expect("prepared empty Kimi MCP");
+
+        assert!(ambient_path.is_file());
+        assert_ne!(run_home, source_home);
+        assert!(effective.server_names().is_empty());
+        assert!(
+            run_vendor_mcp["mcpServers"]
+                .as_object()
+                .expect("Kimi run MCP override")
+                .is_empty()
+        );
+
+        drop(prepared.into_cleanup());
+        assert!(!run_home.exists());
+        assert!(ambient_path.is_file(), "ambient MCP must remain untouched");
+    }
+
+    #[tokio::test]
     async fn legacy_kimi_share_dir_provides_models_and_default() {
         let temp = TempDir::new().expect("create legacy Kimi home");
         tokio::fs::write(

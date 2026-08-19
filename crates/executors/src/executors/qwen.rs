@@ -691,6 +691,65 @@ mod tests {
         drop(prepared.into_cleanup());
     }
 
+    #[tokio::test]
+    async fn explicit_empty_member_map_overrides_ambient_qwen_mcp() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let home = workspace.path().join("home");
+        let vendor_dir = home.join(".qwen");
+        tokio::fs::create_dir_all(&vendor_dir)
+            .await
+            .expect("Qwen vendor directory");
+        let ambient_path = vendor_dir.join("settings.json");
+        tokio::fs::write(
+            &ambient_path,
+            br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
+        )
+        .await
+        .expect("ambient Qwen settings");
+        let mut qwen = qwen_with_approval(None);
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert("HOME", home.to_string_lossy().into_owned());
+
+        let prepared = qwen
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(workspace.path()),
+                &mut env,
+            )
+            .await
+            .expect("empty Qwen MCP preparation");
+        let effective = load_prepared_acp_mcp_config(&env)
+            .await
+            .expect("prepared empty Qwen MCP");
+        let settings_path = std::path::PathBuf::from(
+            env.get(QWEN_SYSTEM_SETTINGS_ENV)
+                .expect("Qwen system settings path"),
+        );
+        let settings: Value = serde_json::from_slice(
+            &tokio::fs::read(&settings_path)
+                .await
+                .expect("read Qwen system settings"),
+        )
+        .expect("parse Qwen system settings");
+
+        assert!(ambient_path.is_file());
+        assert_ne!(settings_path, ambient_path);
+        assert!(effective.server_names().is_empty());
+        assert!(
+            settings["mcpServers"]
+                .as_object()
+                .expect("Qwen system MCP override")
+                .is_empty()
+        );
+
+        drop(prepared.into_cleanup());
+        assert!(!settings_path.exists());
+        assert!(
+            ambient_path.is_file(),
+            "ambient settings must remain untouched"
+        );
+    }
+
     #[test]
     fn all_structured_approval_modes_keep_qwen_permission_requests_enabled() {
         for mode in [

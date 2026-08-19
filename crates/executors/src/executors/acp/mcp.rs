@@ -572,6 +572,34 @@ mod tests {
     }
 
     #[test]
+    fn temporary_file_creation_failure_cleans_partial_run_and_redacts_fake_secret() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let context = McpRunContext::new(workspace.path(), Uuid::new_v4(), Uuid::new_v4())
+            .expect("run context");
+        let directory = PrivateMcpRunDirectory::create(&context, "acp-create-failure")
+            .expect("private run directory");
+        let private_root = directory.path().to_path_buf();
+        let fake_secret = "acp-temporary-file-failure-fake-secret-never-leak";
+        directory
+            .write_file("mcp.json", fake_secret.as_bytes())
+            .expect("first private file");
+
+        let error = directory
+            .write_file("mcp.json", b"duplicate")
+            .expect_err("create_new must fail closed on a duplicate file");
+        let error_display = error.to_string();
+        let error_debug = format!("{error:?}");
+
+        assert!(!error_display.contains(fake_secret));
+        assert!(!error_debug.contains(fake_secret));
+        drop(directory);
+        assert!(
+            !private_root.exists(),
+            "temporary file failure must clean the partially-created run directory"
+        );
+    }
+
+    #[test]
     fn effective_policy_filters_servers_before_validation() {
         let value = serde_json::json!({
             "mcpServers": {

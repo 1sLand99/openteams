@@ -518,6 +518,67 @@ async fn offline_hermes_session_metadata_failure_keeps_initialize_metadata() {
 }
 
 #[tokio::test]
+async fn offline_hermes_session_new_protocol_failure_cleans_snapshot_and_redacts_fake_secret() {
+    let temp = tempfile::tempdir().expect("Hermes protocol failure workspace");
+    let (hermes, mut env, env_info, _home_guard) = make_hermes_and_env(temp.path(), true);
+    env.insert("OPENTEAMS_FAKE_HERMES_SESSION_PROBE_FAIL", "1");
+    let fake_secret = "hermes-protocol-failure-fake-secret-never-leak";
+    let canonical = MemberMcpConfig {
+        mcp_servers: [(
+            "member-failure".to_string(),
+            serde_json::json!({
+                "command": "/bin/echo",
+                "env": {"TOKEN": fake_secret}
+            }),
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let (hermes, env, prepared) = prepare_hermes_run(&hermes, temp.path(), &env, &canonical)
+        .await
+        .expect("prepare Hermes protocol failure run");
+    let snapshot_path = PathBuf::from(
+        env.get(PREPARED_ACP_MCP_SNAPSHOT_ENV)
+            .expect("Hermes snapshot path"),
+    );
+    let snapshot_parent = snapshot_path
+        .parent()
+        .expect("Hermes snapshot parent")
+        .to_path_buf();
+    assert!(
+        fs::read_to_string(&snapshot_path)
+            .expect("Hermes snapshot")
+            .contains(fake_secret),
+        "fixture must stage the fake secret before exercising redaction"
+    );
+
+    let error = hermes
+        .spawn(temp.path(), "must-not-run", &env)
+        .await
+        .expect_err("session/new protocol failure must fail closed");
+    let error_display = error.to_string();
+    let error_debug = format!("{error:?}");
+    let protocol_output = fs::read_to_string(env_info.protocol_log).expect("Hermes protocol log");
+
+    assert!(error_display.contains("Hermes provider metadata unavailable"));
+    assert!(protocol_output.contains("session/new"));
+    assert!(protocol_output.contains(r#""skip_configured_mcp":"1""#));
+    for output in [&error_display, &error_debug, &protocol_output] {
+        assert!(
+            !output.contains(fake_secret),
+            "Hermes protocol failure output exposed the fake secret"
+        );
+    }
+
+    drop(prepared.into_cleanup());
+    assert!(!snapshot_path.exists());
+    assert!(
+        !snapshot_parent.exists(),
+        "Hermes protocol failure must remove its private run directory"
+    );
+}
+
+#[tokio::test]
 async fn offline_hermes_rejects_unsupported_security_options_and_setup_auth() {
     use executors::executors::acp::{AcpAccessMode, AcpAuthSelection};
 

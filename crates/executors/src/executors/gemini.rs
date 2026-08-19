@@ -685,6 +685,73 @@ mod tests {
         drop(prepared.into_cleanup());
     }
 
+    #[tokio::test]
+    async fn explicit_empty_member_map_overrides_ambient_gemini_mcp() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let home = workspace.path().join("home");
+        let vendor_dir = home.join(".gemini");
+        tokio::fs::create_dir_all(&vendor_dir)
+            .await
+            .expect("Gemini vendor directory");
+        let ambient_path = vendor_dir.join("settings.json");
+        tokio::fs::write(
+            &ambient_path,
+            br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
+        )
+        .await
+        .expect("ambient Gemini settings");
+        let mut gemini = Gemini {
+            append_prompt: AppendPrompt::default(),
+            model: None,
+            thinking_effort: None,
+            acp: None,
+            cmd: CmdOverrides::default(),
+            acp_mcp_policy: AcpMcpPolicy::default(),
+            approvals: None,
+        };
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert("HOME", home.to_string_lossy().into_owned());
+
+        let prepared = gemini
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(workspace.path()),
+                &mut env,
+            )
+            .await
+            .expect("empty Gemini MCP preparation");
+        let effective = load_prepared_acp_mcp_config(&env)
+            .await
+            .expect("prepared empty Gemini MCP");
+        let settings_path = std::path::PathBuf::from(
+            env.get(Gemini::SYSTEM_SETTINGS_ENV)
+                .expect("Gemini system settings path"),
+        );
+        let settings: Value = serde_json::from_slice(
+            &tokio::fs::read(&settings_path)
+                .await
+                .expect("read Gemini system settings"),
+        )
+        .expect("parse Gemini system settings");
+
+        assert!(ambient_path.is_file());
+        assert_ne!(settings_path, ambient_path);
+        assert!(effective.server_names().is_empty());
+        assert!(
+            settings["mcpServers"]
+                .as_object()
+                .expect("Gemini system MCP override")
+                .is_empty()
+        );
+
+        drop(prepared.into_cleanup());
+        assert!(!settings_path.exists());
+        assert!(
+            ambient_path.is_file(),
+            "ambient settings must remain untouched"
+        );
+    }
+
     #[test]
     fn command_builder_uses_current_acp_flag() {
         let gemini = Gemini {

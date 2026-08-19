@@ -24,9 +24,28 @@ use executors::{
     mcp_config::MemberMcpConfig,
     mcp_run::{McpRunContext, PreparedMcpRun},
 };
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    sync::{Mutex, MutexGuard},
+};
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pi_acp");
+const PI_RUN_FILE_ENV_KEYS: [&str; 5] = [
+    "PI_ACP_PI_COMMAND",
+    "OPENTEAMS_PI_APPROVAL_EXTENSION",
+    "OPENTEAMS_PI_MCP_EXTENSION",
+    "OPENTEAMS_PI_MCP_SNAPSHOT",
+    "OPENTEAMS_PI_DIAGNOSTIC_LOG",
+];
+
+// The fixture starts a three-process Node chain. Serializing those tests keeps
+// the fixed ACP initialization deadline from becoming a host-load race while
+// leaving pure snapshot tests parallel.
+static PI_PROCESS_LOCK: Mutex<()> = Mutex::const_new(());
+
+async fn pi_process_lock() -> MutexGuard<'static, ()> {
+    PI_PROCESS_LOCK.lock().await
+}
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(FIXTURE_DIR).join(name)
@@ -106,7 +125,11 @@ fn install_offline_pi_fixture(root: &Path, executable: bool) -> OfflinePiEnv {
     }
 }
 
-fn make_pi_and_env(root: &Path, executable: bool) -> (Pi, ExecutionEnv, PathBuf) {
+fn make_pi_and_env(
+    _process_guard: &MutexGuard<'static, ()>,
+    root: &Path,
+    executable: bool,
+) -> (Pi, ExecutionEnv, PathBuf) {
     let env_info = install_offline_pi_fixture(root, executable);
     let mut pi = Pi::default();
     let npx_path = env_info.bin.join("npx");
@@ -151,6 +174,18 @@ fn make_pi_and_env(root: &Path, executable: bool) -> (Pi, ExecutionEnv, PathBuf)
         env_info.protocol_log.to_string_lossy().to_string(),
     );
     (pi, env, env_info.prompts)
+}
+
+fn pi_run_file_paths(env: &ExecutionEnv) -> Vec<PathBuf> {
+    PI_RUN_FILE_ENV_KEYS
+        .iter()
+        .map(|key| {
+            PathBuf::from(
+                env.get(key)
+                    .unwrap_or_else(|| panic!("missing prepared Pi run path: {key}")),
+            )
+        })
+        .collect()
 }
 
 async fn prepare_pi_run(
@@ -229,8 +264,9 @@ async fn finish_turn(
 
 #[tokio::test]
 async fn fake_npx_does_not_contact_npm_or_public_network() {
+    let process_guard = pi_process_lock().await;
     let temp = tempfile::tempdir().expect("offline workspace");
-    let (pi, env, _) = make_pi_and_env(temp.path(), true);
+    let (pi, env, _) = make_pi_and_env(&process_guard, temp.path(), true);
     let spawned = spawn_prepared_pi(&pi, temp.path(), "verify-offline", &env)
         .await
         .expect("spawn");
@@ -246,18 +282,22 @@ async fn fake_npx_does_not_contact_npm_or_public_network() {
 
 #[tokio::test]
 async fn offline_pi_lifecycle_new_prompt_follow_up_cancel_and_startup_failure() {
+    let process_guard = pi_process_lock().await;
     let temp = tempfile::tempdir().expect("workspace");
-    let (pi, env, prompts) = make_pi_and_env(temp.path(), true);
+    let (pi, env, prompts) = make_pi_and_env(&process_guard, temp.path(), true);
 
-    let first = spawn_prepared_pi(&pi, temp.path(), "first", &env)
+    let (first_pi, first_env, first_prepared) =
+        prepare_pi_run(&pi, temp.path(), &env, &MemberMcpConfig::default())
+            .await
+            .expect("prepare first run");
+    let first_files = pi_run_file_paths(&first_env);
+    assert_eq!(first_files.len(), PI_RUN_FILE_ENV_KEYS.len());
+    assert!(first_files.iter().all(|path| path.is_file()));
+    let first = first_pi
+        .spawn(temp.path(), "first", &first_env)
         .await
         .expect("spawn first");
-    let runtime_dir = temp.path().join(".openteams/tmp");
-    let first_files: Vec<_> = fs::read_dir(&runtime_dir)
-        .expect("runtime files")
-        .map(|e| e.expect("entry").path())
-        .collect();
-    assert_eq!(first_files.len(), 5);
+    let first = attach_prepared_cleanup(first, first_prepared);
     let (first_events, first_exit) = finish_turn(first).await;
     assert!(matches!(first_exit, ExecutorExitResult::Success));
     let session_id = first_events
@@ -273,9 +313,17 @@ async fn offline_pi_lifecycle_new_prompt_follow_up_cancel_and_startup_failure() 
     assert!(first_events.iter().any(|e| matches!(e, AcpEvent::Done(_))));
     assert!(first_files.iter().all(|p| !p.exists()));
 
-    let follow_up = spawn_prepared_pi_follow_up(&pi, temp.path(), "second", &session_id, &env)
+    let (follow_up_pi, follow_up_env, follow_up_prepared) =
+        prepare_pi_run(&pi, temp.path(), &env, &MemberMcpConfig::default())
+            .await
+            .expect("prepare follow-up run");
+    let follow_up_files = pi_run_file_paths(&follow_up_env);
+    assert!(follow_up_files.iter().all(|path| path.is_file()));
+    let follow_up = follow_up_pi
+        .spawn_follow_up(temp.path(), "second", &session_id, None, &follow_up_env)
         .await
         .expect("follow-up");
+    let follow_up = attach_prepared_cleanup(follow_up, follow_up_prepared);
     let (fu_events, fu_exit) = finish_turn(follow_up).await;
     assert!(matches!(fu_exit, ExecutorExitResult::Success));
     assert!(fu_events.iter().any(|e| matches!(e,
@@ -287,17 +335,25 @@ async fn offline_pi_lifecycle_new_prompt_follow_up_cancel_and_startup_failure() 
             .collect::<Vec<_>>(),
         ["first", "second"]
     );
+    assert!(
+        follow_up_files.iter().all(|path| !path.exists()),
+        "follow-up must clean every owned Pi run asset"
+    );
 
     let mut cancel_env = env.clone();
     cancel_env.insert("OPENTEAMS_FAKE_PI_HANG", "1");
-    let mut cancelled = spawn_prepared_pi(&pi, temp.path(), "cancel-me", &cancel_env)
+    let (cancel_pi, cancel_env, cancel_prepared) =
+        prepare_pi_run(&pi, temp.path(), &cancel_env, &MemberMcpConfig::default())
+            .await
+            .expect("prepare cancellable run");
+    let cancel_files = pi_run_file_paths(&cancel_env);
+    assert_eq!(cancel_files.len(), PI_RUN_FILE_ENV_KEYS.len());
+    assert!(cancel_files.iter().all(|path| path.is_file()));
+    let cancelled = cancel_pi
+        .spawn(temp.path(), "cancel-me", &cancel_env)
         .await
         .expect("cancellable spawn");
-    let cancel_files: Vec<_> = fs::read_dir(&runtime_dir)
-        .expect("cancel runtime files")
-        .map(|entry| entry.expect("cancel runtime entry").path())
-        .collect();
-    assert_eq!(cancel_files.len(), 5);
+    let mut cancelled = attach_prepared_cleanup(cancelled, cancel_prepared);
     cancelled.cancel.as_ref().expect("cancel token").cancel();
     let cancel_exit = cancelled.exit_signal.take().expect("cancel exit");
     assert!(matches!(
@@ -323,27 +379,37 @@ async fn offline_pi_lifecycle_new_prompt_follow_up_cancel_and_startup_failure() 
     }
 
     let fail_temp = tempfile::tempdir().expect("fail workspace");
-    let (fail_pi, fail_env, _) = make_pi_and_env(fail_temp.path(), false);
+    let (fail_pi, fail_env, _) = make_pi_and_env(&process_guard, fail_temp.path(), false);
+    let (fail_pi, fail_env, fail_prepared) = prepare_pi_run(
+        &fail_pi,
+        fail_temp.path(),
+        &fail_env,
+        &MemberMcpConfig::default(),
+    )
+    .await
+    .expect("prepare failing run");
+    let fail_files = pi_run_file_paths(&fail_env);
+    assert!(fail_files.iter().all(|path| path.is_file()));
     let error = tokio::time::timeout(
         Duration::from_secs(15),
-        spawn_prepared_pi(&fail_pi, fail_temp.path(), "must fail", &fail_env),
+        fail_pi.spawn(fail_temp.path(), "must fail", &fail_env),
     )
     .await
     .expect("timeout")
     .expect_err("must fail");
     assert!(error.to_string().contains("ACP startup failed"));
+    drop(fail_prepared.into_cleanup());
     assert!(
-        fs::read_dir(fail_temp.path().join(".openteams/tmp"))
-            .expect("runtime dir")
-            .next()
-            .is_none()
+        fail_files.iter().all(|path| !path.exists()),
+        "startup failure must clean only this run's prepared files"
     );
 }
 
 #[tokio::test]
 async fn offline_pi_model_refresh_and_initialize_events() {
+    let process_guard = pi_process_lock().await;
     let temp = tempfile::tempdir().expect("probe workspace");
-    let (pi, env, _) = make_pi_and_env(temp.path(), true);
+    let (pi, env, _) = make_pi_and_env(&process_guard, temp.path(), true);
     let probe = pi
         .probe_acp(temp.path(), &env, None)
         .await
@@ -357,8 +423,9 @@ async fn offline_pi_model_refresh_and_initialize_events() {
 
 #[tokio::test]
 async fn offline_pi_token_usage_is_projected() {
+    let process_guard = pi_process_lock().await;
     let temp = tempfile::tempdir().expect("token workspace");
-    let (pi, env, _) = make_pi_and_env(temp.path(), true);
+    let (pi, env, _) = make_pi_and_env(&process_guard, temp.path(), true);
     let spawned = spawn_prepared_pi(&pi, temp.path(), "token-test", &env)
         .await
         .expect("spawn");
@@ -370,8 +437,9 @@ async fn offline_pi_token_usage_is_projected() {
 
 #[tokio::test]
 async fn offline_pi_tool_call_is_projected() {
+    let process_guard = pi_process_lock().await;
     let temp = tempfile::tempdir().expect("tool workspace");
-    let (pi, mut env, _) = make_pi_and_env(temp.path(), true);
+    let (pi, mut env, _) = make_pi_and_env(&process_guard, temp.path(), true);
     env.insert("OPENTEAMS_FAKE_PI_TOOL_CALL", "use-tool");
     let spawned = spawn_prepared_pi(&pi, temp.path(), "use-tool", &env)
         .await
@@ -426,6 +494,7 @@ fn offline_pi_fixture_scripts_are_executable() {
 async fn offline_pi_three_approval_policies_verify_permission_decisions() {
     use executors::executors::acp::AcpApprovalMode;
 
+    let process_guard = pi_process_lock().await;
     let expectations = [
         (AcpApprovalMode::AutoAllow, "allowed"),
         (AcpApprovalMode::AutoReject, "rejected"),
@@ -434,7 +503,7 @@ async fn offline_pi_three_approval_policies_verify_permission_decisions() {
 
     for (mode, expected_decision) in expectations {
         let temp = tempfile::tempdir().expect("approval workspace");
-        let (mut pi, mut env, _) = make_pi_and_env(temp.path(), true);
+        let (mut pi, mut env, _) = make_pi_and_env(&process_guard, temp.path(), true);
         pi.acp = Some(executors::executors::acp::AcpExecutionOptions {
             approval_mode: Some(mode),
             ..Default::default()
@@ -484,6 +553,7 @@ async fn offline_pi_three_approval_policies_verify_permission_decisions() {
 async fn offline_pi_native_and_mcp_tools_verify_three_approval_policies() {
     use executors::executors::acp::AcpApprovalMode;
 
+    let process_guard = pi_process_lock().await;
     let cases = [
         ("native", "OPENTEAMS_FAKE_PI_TOOL_CALL", "bash"),
         ("mcp", "OPENTEAMS_FAKE_PI_MCP_TOOL_CALL", "mcp__test__read"),
@@ -498,7 +568,7 @@ async fn offline_pi_native_and_mcp_tools_verify_three_approval_policies() {
     for (tool_kind, trigger_env, expected_tool) in cases {
         for (mode, expected_decision) in policies {
             let temp = tempfile::tempdir().expect("approval workspace");
-            let (mut pi, mut env, _) = make_pi_and_env(temp.path(), true);
+            let (mut pi, mut env, _) = make_pi_and_env(&process_guard, temp.path(), true);
             pi.acp = Some(executors::executors::acp::AcpExecutionOptions {
                 approval_mode: Some(mode),
                 ..Default::default()
@@ -600,13 +670,25 @@ async fn offline_pi_public_preparation_redacts_fake_secret_and_ignores_legacy_al
 }
 
 #[tokio::test]
-async fn offline_pi_explicit_empty_member_map_disables_extension_and_cleans_all_files() {
+async fn offline_pi_explicit_empty_member_map_ignores_ambient_and_cleans_exact_run_files() {
     let temp = tempfile::tempdir().expect("empty MCP workspace");
     let pi = Pi::default();
-    let env = ExecutionEnv::new(
+    let ambient_dir = temp.path().join("ambient-pi-agent");
+    fs::create_dir_all(&ambient_dir).expect("ambient Pi directory");
+    let ambient_path = ambient_dir.join("mcp.json");
+    fs::write(
+        &ambient_path,
+        r#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
+    )
+    .expect("ambient Pi MCP");
+    let mut env = ExecutionEnv::new(
         RepoContext::new(temp.path().to_path_buf(), Vec::new()),
         false,
         String::new(),
+    );
+    env.insert(
+        "PI_CODING_AGENT_DIR",
+        ambient_dir.to_string_lossy().into_owned(),
     );
 
     let (_, prepared_env, prepared) =
@@ -621,8 +703,9 @@ async fn offline_pi_explicit_empty_member_map_disables_extension_and_cleans_all_
     let snapshot: serde_json::Value =
         serde_json::from_slice(&fs::read(&snapshot_path).expect("read Pi snapshot"))
             .expect("parse Pi snapshot");
-    let runtime_dir = temp.path().join(".openteams/tmp");
+    let run_files = pi_run_file_paths(&prepared_env);
 
+    assert!(ambient_path.is_file());
     assert!(
         snapshot["mcpServers"]
             .as_object()
@@ -636,26 +719,89 @@ async fn offline_pi_explicit_empty_member_map_disables_extension_and_cleans_all_
             .map(String::as_str),
         Some("0")
     );
-    assert_eq!(
-        fs::read_dir(&runtime_dir)
-            .expect("runtime directory")
-            .count(),
-        5
-    );
+    assert_eq!(run_files.len(), PI_RUN_FILE_ENV_KEYS.len());
+    assert!(run_files.iter().all(|path| path.is_file()));
 
     drop(prepared.into_cleanup());
     assert!(
-        fs::read_dir(&runtime_dir)
-            .expect("runtime directory")
-            .next()
-            .is_none()
+        run_files.iter().all(|path| !path.exists()),
+        "empty-member cleanup must remove every owned Pi run file"
+    );
+    assert!(ambient_path.is_file(), "ambient MCP must remain untouched");
+}
+
+#[tokio::test]
+async fn offline_pi_provider_protocol_failure_cleans_exact_run_resources_and_redacts_fake_secret() {
+    let process_guard = pi_process_lock().await;
+    let temp = tempfile::tempdir().expect("Pi protocol failure workspace");
+    let (pi, mut env, _) = make_pi_and_env(&process_guard, temp.path(), true);
+    env.insert("OPENTEAMS_FAKE_PI_ERROR", "1");
+    let fake_secret = "pi-protocol-failure-fake-secret-never-leak";
+    let canonical = MemberMcpConfig {
+        mcp_servers: [(
+            "member-failure".to_string(),
+            serde_json::json!({
+                "command": "/bin/echo",
+                "env": {"TOKEN": fake_secret}
+            }),
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let (pi, env, prepared) = prepare_pi_run(&pi, temp.path(), &env, &canonical)
+        .await
+        .expect("prepare Pi protocol failure run");
+    let run_files = pi_run_file_paths(&env);
+    let snapshot_path = PathBuf::from(
+        env.get("OPENTEAMS_PI_MCP_SNAPSHOT")
+            .expect("Pi snapshot path"),
+    );
+    assert!(run_files.iter().all(|path| path.is_file()));
+    assert!(
+        fs::read_to_string(&snapshot_path)
+            .expect("Pi snapshot")
+            .contains(fake_secret),
+        "fixture must stage the fake secret before exercising redaction"
+    );
+
+    let spawned = pi
+        .spawn(temp.path(), "provider-error", &env)
+        .await
+        .expect("Pi must reach the prompt protocol failure");
+    let spawned = attach_prepared_cleanup(spawned, prepared);
+    let (events, exit) = finish_turn(spawned).await;
+    let event_output = format!("{events:?}");
+    let exit_output = format!("{exit:?}");
+    let protocol_output =
+        fs::read_to_string(temp.path().join("protocol.jsonl")).expect("Pi protocol log");
+
+    assert!(matches!(exit, ExecutorExitResult::Failure));
+    assert!(events.iter().any(|event| {
+        matches!(event, AcpEvent::Error(message) if message.contains("Pi provider connection failed"))
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AcpEvent::Done(_)))
+    );
+    assert!(protocol_output.contains("session/prompt"));
+    for output in [&event_output, &exit_output, &protocol_output] {
+        assert!(
+            !output.contains(fake_secret),
+            "Pi protocol failure output exposed the fake secret"
+        );
+    }
+    assert!(
+        run_files.iter().all(|path| !path.exists()),
+        "Pi protocol failure must remove every owned run resource"
     );
 }
 
 #[tokio::test]
 async fn offline_pi_launcher_chain_produces_real_pids() {
+    let process_guard = pi_process_lock().await;
     let temp = tempfile::tempdir().expect("launcher workspace");
-    let (pi, env, _) = make_pi_and_env(temp.path(), true);
+    let (pi, env, _) = make_pi_and_env(&process_guard, temp.path(), true);
     let spawned = spawn_prepared_pi(&pi, temp.path(), "pid-test", &env)
         .await
         .expect("spawn");
@@ -689,8 +835,9 @@ async fn offline_pi_launcher_chain_produces_real_pids() {
 
 #[tokio::test]
 async fn offline_pi_protocol_log_records_all_methods() {
+    let process_guard = pi_process_lock().await;
     let temp = tempfile::tempdir().expect("protocol workspace");
-    let (pi, env, _) = make_pi_and_env(temp.path(), true);
+    let (pi, env, _) = make_pi_and_env(&process_guard, temp.path(), true);
 
     // New session
     let spawned = spawn_prepared_pi(&pi, temp.path(), "proto-test", &env)

@@ -1564,15 +1564,34 @@ rl.on("close", () => {
             spawned
         }
 
+        fn prepared_run_paths(env: &ExecutionEnv) -> Vec<PathBuf> {
+            [
+                "PI_ACP_PI_COMMAND",
+                "OPENTEAMS_PI_APPROVAL_EXTENSION",
+                "OPENTEAMS_PI_MCP_EXTENSION",
+                "OPENTEAMS_PI_MCP_SNAPSHOT",
+                "OPENTEAMS_PI_DIAGNOSTIC_LOG",
+            ]
+            .into_iter()
+            .map(|key| {
+                PathBuf::from(
+                    env.get(key)
+                        .unwrap_or_else(|| panic!("missing prepared Pi run path: {key}")),
+                )
+            })
+            .collect()
+        }
+
         async fn spawn_prepared(
             pi: &Pi,
             root: &Path,
             prompt: &str,
             env: &ExecutionEnv,
-        ) -> Result<SpawnedChild, ExecutorError> {
+        ) -> Result<(SpawnedChild, Vec<PathBuf>), ExecutorError> {
             let (pi, env, prepared) = prepare_run(pi, root, env).await?;
+            let paths = prepared_run_paths(&env);
             let spawned = pi.spawn(root, prompt, &env).await?;
-            Ok(attach_cleanup(spawned, prepared))
+            Ok((attach_cleanup(spawned, prepared), paths))
         }
 
         async fn spawn_prepared_follow_up(
@@ -1581,12 +1600,13 @@ rl.on("close", () => {
             prompt: &str,
             session_id: &str,
             env: &ExecutionEnv,
-        ) -> Result<SpawnedChild, ExecutorError> {
+        ) -> Result<(SpawnedChild, Vec<PathBuf>), ExecutorError> {
             let (pi, env, prepared) = prepare_run(pi, root, env).await?;
+            let paths = prepared_run_paths(&env);
             let spawned = pi
                 .spawn_follow_up(root, prompt, session_id, None, &env)
                 .await?;
-            Ok(attach_cleanup(spawned, prepared))
+            Ok((attach_cleanup(spawned, prepared), paths))
         }
 
         async fn finish_turn(
@@ -1662,14 +1682,9 @@ rl.on("close", () => {
         let temp = tempfile::tempdir().expect("offline pi-acp workspace");
         let (pi, env, prompts) = offline_pi_executor(temp.path(), true);
 
-        let first = spawn_prepared(&pi, temp.path(), "first", &env)
+        let (first, first_runtime_files) = spawn_prepared(&pi, temp.path(), "first", &env)
             .await
             .expect("fixed pi-acp session/new and prompt");
-        let runtime_dir = temp.path().join(".openteams/tmp");
-        let first_runtime_files = fs::read_dir(&runtime_dir)
-            .expect("first runtime files")
-            .map(|entry| entry.expect("runtime entry").path())
-            .collect::<Vec<_>>();
         assert_eq!(first_runtime_files.len(), 5);
         assert!(first_runtime_files.iter().all(|path| path.exists()));
         let (first_events, first_exit) = finish_turn(first).await;
@@ -1691,9 +1706,10 @@ rl.on("close", () => {
         assert!(first_runtime_files.iter().all(|path| !path.exists()));
         assert_recorded_tree_terminated(&temp.path().join("pids.json")).await;
 
-        let follow_up = spawn_prepared_follow_up(&pi, temp.path(), "second", &session_id, &env)
-            .await
-            .expect("fixed pi-acp session/load follow-up");
+        let (follow_up, follow_up_runtime_files) =
+            spawn_prepared_follow_up(&pi, temp.path(), "second", &session_id, &env)
+                .await
+                .expect("fixed pi-acp session/load follow-up");
         let (follow_up_events, follow_up_exit) = finish_turn(follow_up).await;
         assert!(matches!(
             follow_up_exit,
@@ -1702,6 +1718,7 @@ rl.on("close", () => {
         assert!(follow_up_events.iter().any(|event| {
             matches!(event, AcpEvent::Message(message) if format!("{message:?}").contains("echo:second"))
         }));
+        assert!(follow_up_runtime_files.iter().all(|path| !path.exists()));
         assert_recorded_tree_terminated(&temp.path().join("pids.json")).await;
         assert_eq!(
             fs::read_to_string(&prompts)
@@ -1713,9 +1730,10 @@ rl.on("close", () => {
 
         let mut error_env = env.clone();
         error_env.insert("OPENTEAMS_FAKE_PI_ERROR", "1");
-        let failed = spawn_prepared(&pi, temp.path(), "provider-error", &error_env)
-            .await
-            .expect("fixed pi-acp provider error prompt");
+        let (failed, failed_runtime_files) =
+            spawn_prepared(&pi, temp.path(), "provider-error", &error_env)
+                .await
+                .expect("fixed pi-acp provider error prompt");
         let (failed_events, failed_exit) = finish_turn(failed).await;
         assert!(
             matches!(failed_exit, crate::executors::ExecutorExitResult::Failure),
@@ -1729,13 +1747,15 @@ rl.on("close", () => {
                 .iter()
                 .any(|event| matches!(event, AcpEvent::Done(_)))
         );
+        assert!(failed_runtime_files.iter().all(|path| !path.exists()));
         assert_recorded_tree_terminated(&temp.path().join("pids.json")).await;
 
         let mut cancel_env = env.clone();
         cancel_env.insert("OPENTEAMS_FAKE_PI_HANG", "1");
-        let mut cancelled = spawn_prepared(&pi, temp.path(), "cancel-me", &cancel_env)
-            .await
-            .expect("fixed pi-acp cancellable prompt");
+        let (mut cancelled, cancelled_runtime_files) =
+            spawn_prepared(&pi, temp.path(), "cancel-me", &cancel_env)
+                .await
+                .expect("fixed pi-acp cancellable prompt");
         cancelled
             .cancel
             .as_ref()
@@ -1754,28 +1774,27 @@ rl.on("close", () => {
             .expect("reap cancelled pi-acp tree");
         drop(cancelled);
         assert_recorded_tree_terminated(&temp.path().join("pids.json")).await;
-        assert!(
-            fs::read_dir(&runtime_dir)
-                .expect("runtime directory after cancellation")
-                .next()
-                .is_none()
-        );
+        assert!(cancelled_runtime_files.iter().all(|path| !path.exists()));
 
         let failed_temp = tempfile::tempdir().expect("offline startup failure workspace");
         let (failed_pi, failed_env, _) = offline_pi_executor(failed_temp.path(), false);
+        let (failed_pi, failed_env, failed_prepared) =
+            prepare_run(&failed_pi, failed_temp.path(), &failed_env)
+                .await
+                .expect("prepare startup failure run");
+        let failed_runtime_files = prepared_run_paths(&failed_env);
         let error = tokio::time::timeout(
             Duration::from_secs(15),
-            spawn_prepared(&failed_pi, failed_temp.path(), "must fail", &failed_env),
+            failed_pi.spawn(failed_temp.path(), "must fail", &failed_env),
         )
         .await
         .expect("startup failure timeout")
         .expect_err("non-executable Pi must fail session/new");
         assert!(error.to_string().contains("ACP startup failed"));
+        drop(failed_prepared.into_cleanup());
         assert!(
-            fs::read_dir(failed_temp.path().join(".openteams/tmp"))
-                .expect("failed runtime directory")
-                .next()
-                .is_none()
+            failed_runtime_files.iter().all(|path| !path.exists()),
+            "startup failure must clean every owned Pi run file"
         );
     }
 

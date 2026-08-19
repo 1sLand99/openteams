@@ -601,10 +601,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_empty_member_map_keeps_strict_empty_override() {
+    async fn public_empty_member_map_keeps_strict_empty_override_and_ignores_ambient_mcp() {
         let workspace = tempfile::tempdir().expect("workspace");
+        let qoder_home = workspace.path().join("qoder-home");
+        tokio::fs::create_dir_all(&qoder_home)
+            .await
+            .expect("Qoder config directory");
+        let ambient_path = qoder_home.join("settings.json");
+        tokio::fs::write(
+            &ambient_path,
+            br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
+        )
+        .await
+        .expect("ambient Qoder settings");
         let mut executor = qoder();
         let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert(
+            "QODER_CONFIG_DIR",
+            qoder_home.to_string_lossy().into_owned(),
+        );
 
         let prepared = executor
             .prepare_mcp_for_run(
@@ -618,6 +633,9 @@ mod tests {
             .acp_harness(&env)
             .await
             .expect("Qoder empty ACP harness");
+        let effective = load_prepared_acp_mcp_config(&env)
+            .await
+            .expect("prepared empty Qoder MCP");
         let (_, args) = executor
             .build_command_builder(&allowed)
             .expect("Qoder command")
@@ -626,11 +644,18 @@ mod tests {
             .into_parts_for_test();
 
         assert!(allowed.is_empty());
+        assert!(effective.server_names().is_empty());
+        assert!(ambient_path.is_file());
+        assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
         assert!(
             args.windows(2)
                 .any(|pair| { pair[0] == "--allowed-mcp-server-names" && pair[1].is_empty() })
         );
         drop(prepared.into_cleanup());
+        assert!(
+            ambient_path.is_file(),
+            "ambient settings must remain untouched"
+        );
     }
 
     #[test]

@@ -486,6 +486,41 @@ mod tests {
         drop(prepared.into_cleanup());
     }
 
+    #[tokio::test]
+    async fn public_empty_member_map_injects_empty_set_and_pins_vendor_opt_out() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut executor = hermes();
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let prepared = executor
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(workspace.path()),
+                &mut env,
+            )
+            .await
+            .expect("empty Hermes MCP preparation");
+        let effective = load_prepared_acp_mcp_config(&env)
+            .await
+            .expect("prepared empty Hermes MCP");
+
+        assert!(effective.server_names().is_empty());
+        assert_eq!(
+            env.get(Hermes::SKIP_CONFIGURED_MCP_ENV).map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            executor
+                .cmd
+                .env
+                .as_ref()
+                .and_then(|values| values.get(Hermes::SKIP_CONFIGURED_MCP_ENV))
+                .map(String::as_str),
+            Some("1")
+        );
+        drop(prepared.into_cleanup());
+    }
+
     #[test]
     fn capabilities_only_advertise_implemented_hermes_features() {
         assert_eq!(
