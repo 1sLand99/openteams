@@ -616,7 +616,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supports_mcp_adapter_without_run_isolation_fails_before_spawn() {
+    async fn codex_prepares_an_empty_member_mcp_snapshot_before_spawn() {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
             .expect("test database");
@@ -631,7 +631,7 @@ mod tests {
             String::new(),
         );
 
-        let error = build_effective_member_executor_for_run(
+        let (effective, _executor, prepared) = build_effective_member_executor_for_run(
             &pool,
             &agent(),
             &member,
@@ -640,9 +640,10 @@ mod tests {
             &mut env,
         )
         .await
-        .expect_err("Codex isolation is connected by a later workflow node");
+        .expect("Codex must prepare its run-scoped MCP snapshot");
 
-        assert!(error.to_string().contains("isolation is not implemented"));
+        assert_eq!(effective.runner_type, RunnerKind::Codex);
+        assert_eq!(prepared.server_count(), 0);
     }
 
     #[tokio::test]

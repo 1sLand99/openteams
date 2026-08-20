@@ -2655,39 +2655,6 @@ mod tests {
         assert!(!prompts.exists(), "workflow prompt reached executor before MCP preparation");
         assert!(!pids.exists(), "workflow child process started before MCP preparation");
 
-        let session_agent = ChatSessionAgent::update_execution_config_for_next_run(
-            &db.pool,
-            session_agent.id,
-            None,
-            MemberExecutionConfig {
-                mcp: Some(Default::default()),
-                runner_type: Some(executors::executors::BaseCodingAgent::Codex),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("initialize MCP for adapter refusal");
-
-        let isolation_error = super::run_workflow_step_agent_prompt(
-            &db,
-            &chat_runner,
-            &session,
-            &agent,
-            &session_agent,
-            Some(&workflow_session),
-            "workflow pi test",
-            &step,
-        )
-        .await
-        .expect_err("an adapter without isolation must fail before workflow spawn");
-        assert!(isolation_error.to_string().contains("isolation is not implemented"));
-        assert!(
-            !proto_log.exists(),
-            "workflow executor was spawned after adapter preparation failed"
-        );
-        assert!(!prompts.exists(), "workflow prompt reached a rejected adapter");
-        assert!(!pids.exists(), "workflow child process started for a rejected adapter");
-
         let canonical = canonical_mcp_config_with_fake_secrets();
         let expected_hash =
             canonical_mcp_server_map_hash(&canonical).expect("canonical MCP hash");

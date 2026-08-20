@@ -4975,15 +4975,15 @@ async fn chat_lifecycle_prepares_mcp_before_any_executor_spawn() {
     assert_eq!(missing.spawn_attempts, 0);
     assert_eq!(missing.state, ChatSessionAgentState::Dead);
 
-    let isolation = run_chat_startup_until_spawn_boundary(
+    let codex = run_chat_startup_until_spawn_boundary(
         "CODEX",
         Some(Default::default()),
         None,
     )
     .await;
-    assert!(isolation.error.contains("isolation is not implemented"));
-    assert_eq!(isolation.spawn_attempts, 0);
-    assert_eq!(isolation.state, ChatSessionAgentState::Dead);
+    assert!(codex.error.contains("test blocked executor spawn"));
+    assert_eq!(codex.spawn_attempts, 1);
+    assert_eq!(codex.state, ChatSessionAgentState::Dead);
 
     let spawn =
         run_chat_startup_until_spawn_boundary("PI", Some(Default::default()), None).await;

@@ -489,7 +489,10 @@ mod tests {
         // Restore cwd
         std::env::set_current_dir(original_cwd).unwrap();
 
-        assert_eq!(path.unwrap(), cli_path);
+        assert_eq!(
+            path.unwrap().canonicalize().unwrap(),
+            cli_path.canonicalize().unwrap()
+        );
         assert_eq!(source.unwrap(), CliDiscoverySource::Development);
     }
 

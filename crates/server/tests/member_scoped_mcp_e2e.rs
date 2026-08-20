@@ -606,7 +606,7 @@ fn kill_child(spawned: &mut SpawnedChild) {
         cancel.cancel();
     }
     let _ = spawned.child.inner().start_kill();
-    let _ = spawned.child.inner().wait();
+    drop(spawned.child.inner().wait());
 }
 
 fn collect_private_dirs(workspace: &Path) -> Vec<PathBuf> {
@@ -647,6 +647,7 @@ async fn run_member(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_member_with(
     ctx: &ScenarioEnv,
     case: &CliMcpE2eCase,
@@ -807,13 +808,13 @@ fn scan_collected(secret: &str, outcomes: &[&RunOutcome]) -> Vec<String> {
                 ));
             }
         }
-        if let Ok(text) = fs::read_to_string(&outcome.protocol_log) {
-            if text.contains(secret) {
-                leaks.push(format!(
-                    "runner={} protocol log leaked the fake secret",
-                    runner_label(outcome.runner)
-                ));
-            }
+        if let Ok(text) = fs::read_to_string(&outcome.protocol_log)
+            && text.contains(secret)
+        {
+            leaks.push(format!(
+                "runner={} protocol log leaked the fake secret",
+                runner_label(outcome.runner)
+            ));
         }
     }
     leaks
