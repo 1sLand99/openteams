@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Error};
+use db::models::member_execution_config::MemberExecutionConfig;
 use executors::{executors::BaseCodingAgent, profile::ExecutorProfileId};
 use serde::{Deserialize, Deserializer, Serialize};
 use ts_rs::TS;
@@ -93,6 +94,10 @@ pub struct ChatMemberPreset {
     /// Optional recommended model identifier for the selected runner
     #[serde(default)]
     pub recommended_model: Option<String>,
+    /// Complete member-scoped execution settings copied when applying this preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub execution_config: Option<MemberExecutionConfig>,
     /// System prompt defining the agent's behavior
     pub system_prompt: String,
     /// Optional default workspace path
@@ -374,6 +379,7 @@ fn complete_chat_presets_with_builtins(chat_presets: &mut ChatPresetsConfig) {
             preset.description = default_preset.description.clone();
             preset.runner_type = default_preset.runner_type.clone();
             preset.recommended_model = default_preset.recommended_model.clone();
+            preset.execution_config = default_preset.execution_config.clone();
             preset.system_prompt = default_preset.system_prompt.clone();
             preset.selected_skill_ids =
                 normalize_selected_skill_ids(&default_preset.selected_skill_ids);
@@ -690,6 +696,7 @@ mod tests {
             description: "Custom member".to_string(),
             runner_type: None,
             recommended_model: None,
+            execution_config: None,
             system_prompt: "Prompt".to_string(),
             default_workspace_path: Some("E:/workspace/custom".to_string()),
             selected_skill_ids: vec![],
@@ -778,6 +785,11 @@ mod tests {
         assert_eq!(team.members[0].id, "lead");
         assert_eq!(team.members[1].id, "backend");
         assert_eq!(team.lead_member_id.as_deref(), Some("lead"));
+        assert!(
+            team.members
+                .iter()
+                .all(|member| member.execution_config.is_none())
+        );
     }
 
     #[test]
@@ -793,6 +805,25 @@ mod tests {
                     "system_prompt": "Lead the migrated team.",
                     "selected_skill_ids": ["planning"],
                     "tools_enabled": { "mcpServers": { "filesystem": true } },
+                    "execution_config": {
+                        "runner_type": "CODEX",
+                        "model_name": "fake-model",
+                        "thinking_effort": "high",
+                        "model_variant": "fake-variant",
+                        "acp": {
+                            "access_mode": "workspace_only",
+                            "approval_mode": "auto_reject",
+                            "additional_directories": []
+                        },
+                        "mcp": {
+                            "mcpServers": {
+                                "fake-local": {
+                                    "command": "fake-mcp-server",
+                                    "env": { "API_TOKEN": "fake-template-token" }
+                                }
+                            }
+                        }
+                    },
                     "is_builtin": false,
                     "enabled": true
                 },
@@ -824,7 +855,7 @@ mod tests {
             ]
         });
 
-        let config = Config::try_from_raw_config(&raw_config.to_string())
+        let mut config = Config::try_from_raw_config(&raw_config.to_string())
             .expect("legacy v9 config should migrate");
         let team = config
             .chat_presets
@@ -841,6 +872,30 @@ mod tests {
             team.members[0].tools_enabled,
             json!({ "mcpServers": { "filesystem": true } })
         );
+        let serialized_member =
+            serde_json::to_value(&team.members[0]).expect("serialize migrated member");
+        assert_eq!(
+            serialized_member["execution_config"],
+            json!({
+                "runner_type": "CODEX",
+                "model_name": "fake-model",
+                "thinking_effort": "high",
+                "model_variant": "fake-variant",
+                "acp": {
+                    "access_mode": "workspace_only",
+                    "approval_mode": "auto_reject",
+                    "additional_directories": []
+                },
+                "mcp": {
+                    "mcpServers": {
+                        "fake-local": {
+                            "command": "fake-mcp-server",
+                            "env": { "API_TOKEN": "fake-template-token" }
+                        }
+                    }
+                }
+            })
+        );
 
         let serialized = serde_json::to_value(&config).expect("serialize migrated config");
         let serialized_team = serialized["chat_presets"]["teams"]
@@ -854,6 +909,39 @@ mod tests {
         assert_eq!(
             serialized_team["members"][1]["tools_enabled"]["mcpServers"]["browser"],
             true
+        );
+        assert_eq!(
+            serialized_team["members"][0]["execution_config"],
+            serialized_member["execution_config"]
+        );
+
+        let source_execution_config = config
+            .chat_presets
+            .members
+            .iter()
+            .find(|member| member.id == "legacy_lead")
+            .and_then(|member| member.execution_config.clone())
+            .expect("legacy lookup source should keep execution config");
+        config
+            .chat_presets
+            .teams
+            .iter_mut()
+            .find(|team| team.id == "legacy_team")
+            .expect("legacy team should remain")
+            .members[0]
+            .execution_config
+            .as_mut()
+            .expect("embedded member should keep execution config")
+            .thinking_effort = Some("changed-after-migration".to_string());
+        assert_eq!(
+            config
+                .chat_presets
+                .members
+                .iter()
+                .find(|member| member.id == "legacy_lead")
+                .and_then(|member| member.execution_config.as_ref()),
+            Some(&source_execution_config),
+            "legacy member_ids lookup must deep-clone embedded member execution config"
         );
     }
 
@@ -895,6 +983,10 @@ mod tests {
                     "name": "GlobalLead",
                     "description": "global",
                     "system_prompt": "global prompt",
+                    "execution_config": {
+                        "model_name": "global-model",
+                        "mcp": { "mcpServers": {} }
+                    },
                     "is_builtin": false,
                     "enabled": true
                 }
@@ -910,6 +1002,17 @@ mod tests {
                         "name": "EmbeddedLead",
                         "description": "embedded",
                         "system_prompt": "embedded prompt",
+                        "execution_config": {
+                            "model_name": "embedded-model",
+                            "mcp": {
+                                "mcpServers": {
+                                    "fake-local": {
+                                        "command": "fake-mcp-server",
+                                        "env": { "API_TOKEN": "fake-embedded-token" }
+                                    }
+                                }
+                            }
+                        },
                         "is_builtin": false,
                         "enabled": true
                     }],
@@ -924,6 +1027,15 @@ mod tests {
 
         assert_eq!(config.teams[0].members.len(), 1);
         assert_eq!(config.teams[0].members[0].id, "embedded_lead");
+        let execution_config = config.teams[0].members[0]
+            .execution_config
+            .as_ref()
+            .expect("embedded execution config should win");
+        assert_eq!(
+            execution_config.model_name.as_deref(),
+            Some("embedded-model")
+        );
+        assert!(execution_config.mcp.is_some());
     }
 
     #[test]
@@ -1176,6 +1288,7 @@ mod tests {
                 description: "Custom member".to_string(),
                 runner_type: None,
                 recommended_model: None,
+                execution_config: None,
                 system_prompt: "Custom prompt".to_string(),
                 default_workspace_path: None,
                 selected_skill_ids: vec![],
@@ -1207,6 +1320,7 @@ mod tests {
             description: "Stale member".to_string(),
             runner_type: None,
             recommended_model: None,
+            execution_config: None,
             system_prompt: "Stale prompt".to_string(),
             default_workspace_path: None,
             selected_skill_ids: vec![],

@@ -76,6 +76,12 @@ pub struct ChatRunner {
     workspace_janitor_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     #[cfg(test)]
     stop_after_queue_binding: Arc<AtomicBool>,
+    #[cfg(test)]
+    executor_spawn_attempts: Arc<AtomicUsize>,
+    #[cfg(test)]
+    block_executor_spawn: Arc<AtomicBool>,
+    #[cfg(test)]
+    mcp_preparation_diagnostic: Arc<StdMutex<Option<String>>>,
 }
 
 impl ChatRunner {
@@ -99,6 +105,35 @@ impl ChatRunner {
             workspace_janitor_locks: Arc::new(DashMap::new()),
             #[cfg(test)]
             stop_after_queue_binding: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            executor_spawn_attempts: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            block_executor_spawn: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            mcp_preparation_diagnostic: Arc::new(StdMutex::new(None)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_mcp_preparation_diagnostic_for_test(&self, diagnostic: Option<String>) {
+        *self
+            .mcp_preparation_diagnostic
+            .lock()
+            .expect("test MCP preparation diagnostic lock") = diagnostic;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_mcp_preparation_diagnostic_for_test(&self, env: &mut ExecutionEnv) {
+        if let Some(diagnostic) = self
+            .mcp_preparation_diagnostic
+            .lock()
+            .expect("test MCP preparation diagnostic lock")
+            .clone()
+        {
+            env.insert(
+                crate::services::member_execution::TEST_MCP_PREPARATION_DIAGNOSTIC_ENV,
+                diagnostic,
+            );
         }
     }
 
@@ -2051,11 +2086,15 @@ impl ChatRunner {
                     .to_string_lossy()
                     .to_string(),
             );
-            let (effective_execution, mut executor) =
+            #[cfg(test)]
+            self.inject_mcp_preparation_diagnostic_for_test(&mut env);
+            let (effective_execution, mut executor, prepared_mcp) =
                 build_effective_member_executor_for_run(
                     &self.db.pool,
                     &agent,
                     &session_agent,
+                    Path::new(&workspace_path),
+                    run_id,
                     &mut env,
                 )
                     .await
@@ -2099,6 +2138,15 @@ impl ChatRunner {
                 )
                 .await;
             let spawn = async {
+                #[cfg(test)]
+                {
+                    self.executor_spawn_attempts.fetch_add(1, Ordering::Relaxed);
+                    if self.block_executor_spawn.load(Ordering::Relaxed) {
+                        return Err(ExecutorError::Io(std::io::Error::other(
+                            "test blocked executor spawn",
+                        )));
+                    }
+                }
                 if session_agent.state != ChatSessionAgentState::Dead {
                     if let Some(agent_session_id) = session_agent.agent_session_id.as_deref() {
                         executor
@@ -2135,6 +2183,10 @@ impl ChatRunner {
                 EXECUTOR_STARTUP_TIMEOUT,
             )
             .await?;
+            spawned.cleanup = ExecutorRunCleanup::combine(
+                prepared_mcp.into_cleanup(),
+                spawned.cleanup.take(),
+            );
             startup_timing
                 .mark_and_persist(
                     startup_timing::StartupMilestoneName::ExecutorSpawnReturned,

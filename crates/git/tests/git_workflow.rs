@@ -127,10 +127,34 @@ fn commit_without_user_config_succeeds() {
     let repo_path = td.path().join("repo_no_user");
     let s = GitService::new();
     s.initialize_repo_with_main_branch(&repo_path).unwrap();
+    let effective = git2::Repository::open(&repo_path)
+        .unwrap()
+        .config()
+        .unwrap();
+    let expected_name = effective
+        .get_string("user.name")
+        .unwrap_or_else(|_| "openteams".to_string());
+    let expected_email = effective
+        .get_string("user.email")
+        .unwrap_or_else(|_| "noreply@openteams.com".to_string());
     write_file(&repo_path, "f.txt", "x\n");
     // No configure_user call here
     let res = s.commit(&repo_path, "no user config");
     assert!(res.is_ok());
+    let local = git2::Repository::open(&repo_path)
+        .unwrap()
+        .config()
+        .unwrap()
+        .open_level(git2::ConfigLevel::Local)
+        .unwrap();
+    assert_eq!(
+        local.get_string("user.name").as_deref(),
+        Ok(expected_name.as_str())
+    );
+    assert_eq!(
+        local.get_string("user.email").as_deref(),
+        Ok(expected_email.as_str())
+    );
 }
 
 #[test]

@@ -164,7 +164,9 @@ impl ProjectMember {
         let id = Uuid::new_v4();
         let member_name = normalize_member_name(member_name);
         let allowed_skill_ids = Json(allowed_skill_ids);
-        let execution_config = Json(execution_config.normalized());
+        let mut execution_config = execution_config.normalized();
+        execution_config.mcp.get_or_insert_with(Default::default);
+        let execution_config = Json(execution_config);
 
         sqlx::query_as::<_, ProjectMember>(
             r#"INSERT INTO project_members (
@@ -352,6 +354,7 @@ impl ProjectMember {
 
 #[cfg(test)]
 mod tests {
+    use executors::mcp_config::MemberMcpConfig;
     use sqlx::SqlitePool;
     use uuid::Uuid;
 
@@ -491,6 +494,14 @@ mod tests {
                 allowed_skill_ids: Some(vec!["read".to_string()]),
                 execution_config: Some(MemberExecutionConfig {
                     thinking_effort: Some("high".to_string()),
+                    mcp: Some(
+                        serde_json::from_value(serde_json::json!({
+                            "mcpServers": {
+                                "tools": {"command": "mcp-tool", "args": ["serve"]}
+                            }
+                        }))
+                        .expect("member MCP config"),
+                    ),
                     ..Default::default()
                 }),
                 is_default: Some(false),
@@ -506,6 +517,19 @@ mod tests {
             updated.execution_config.0.thinking_effort.as_deref(),
             Some("high")
         );
+        assert_eq!(
+            updated
+                .execution_config
+                .0
+                .mcp
+                .as_ref()
+                .expect("updated MCP config")
+                .mcp_servers
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["tools"]
+        );
         assert!(!updated.is_default);
 
         assert_eq!(
@@ -520,6 +544,41 @@ mod tests {
                 .expect("list default agents after delete")
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn project_member_create_persists_explicit_empty_mcp() {
+        let pool = setup_pool().await;
+        let member = ProjectMember::create(
+            &pool,
+            Uuid::new_v4(),
+            ProjectMemberType::Agent,
+            None,
+            Some(Uuid::new_v4()),
+            Some("Agent".to_string()),
+            Some("agent".to_string()),
+            0,
+            None,
+            Vec::new(),
+            MemberExecutionConfig::default(),
+            true,
+        )
+        .await
+        .expect("create project member");
+
+        assert_eq!(
+            member.execution_config.0.mcp,
+            Some(MemberMcpConfig::default())
+        );
+        let stored: String =
+            sqlx::query_scalar("SELECT execution_config FROM project_members WHERE id = ?1")
+                .bind(member.id)
+                .fetch_one(&pool)
+                .await
+                .expect("read stored execution config");
+        let stored: serde_json::Value =
+            serde_json::from_str(&stored).expect("parse stored execution config");
+        assert_eq!(stored["mcp"], serde_json::json!({"mcpServers": {}}));
     }
 
     #[tokio::test]

@@ -23,15 +23,36 @@ import {
   teamPresetDraftToPayload,
   teamPresetDraftToPreviewDetail,
   TeamTemplatesPage,
+  validateMemberMcpConfigDraft,
   validateMemberToolsEnabledDraft,
   validateTeamPresetDraft,
 } from './TeamTemplatesPage';
-import type {
-  ChatTeamPreset,
-  TeamPresetSummary,
+import {
+  AcpAccessMode,
+  AcpApprovalMode,
+  BaseCodingAgent,
+  type ChatMemberPreset,
+  type ChatTeamPreset,
+  type MemberExecutionConfig,
+  type TeamPresetSummary,
 } from '../../../shared/types';
 
 let failures = 0;
+// Fake secrets used by the fixtures. Failure diagnostics must redact them so
+// test logs never print config secrets.
+const FAKE_CONFIG_SECRETS = [
+  'fake-template-token',
+  'fake-template-header',
+  'mutated-after-submit',
+];
+const redactFakeConfigSecrets = (detail: unknown): string => {
+  let text =
+    typeof detail === 'string' ? detail : (JSON.stringify(detail) ?? '');
+  for (const secret of FAKE_CONFIG_SECRETS) {
+    text = text.split(secret).join('[REDACTED]');
+  }
+  return text;
+};
 const check = (label: string, cond: boolean, detail?: unknown) => {
   if (cond) {
     // eslint-disable-next-line no-console
@@ -39,8 +60,26 @@ const check = (label: string, cond: boolean, detail?: unknown) => {
   } else {
     failures += 1;
     // eslint-disable-next-line no-console
-    console.error(`  FAIL ${label}`, detail ?? '');
+    console.error(
+      `  FAIL ${label}`,
+      detail === undefined ? '' : redactFakeConfigSecrets(detail),
+    );
   }
+};
+
+// Spy on console output so the suite can prove no fake secret is ever printed.
+const consoleOutputLines: string[] = [];
+const originalConsoleLog = console.log;
+const originalConsoleError = console.error;
+// eslint-disable-next-line no-console
+console.log = (...args: unknown[]) => {
+  consoleOutputLines.push(args.map((arg) => String(arg)).join(' '));
+  originalConsoleLog(...args);
+};
+// eslint-disable-next-line no-console
+console.error = (...args: unknown[]) => {
+  consoleOutputLines.push(args.map((arg) => String(arg)).join(' '));
+  originalConsoleError(...args);
 };
 
 const source = readFileSync(new URL('./TeamTemplatesPage.tsx', import.meta.url), 'utf8');
@@ -53,6 +92,27 @@ const jsonResponse = (data: unknown) =>
     status: 200,
     headers: { 'Content-Type': 'application/json' },
   });
+
+const completeExecutionConfig: MemberExecutionConfig = {
+  runner_type: BaseCodingAgent.CODEX,
+  model_name: 'template-model',
+  thinking_effort: 'high',
+  model_variant: 'fake-variant',
+  acp: {
+    access_mode: AcpAccessMode.workspace_only,
+    approval_mode: AcpApprovalMode.auto_reject,
+    additional_directories: ['/fake/template/context'],
+  },
+  mcp: {
+    mcpServers: {
+      fake_local: {
+        command: 'fake-mcp-server',
+        env: { API_TOKEN: 'fake-template-token' },
+        headers: { Authorization: 'Bearer fake-template-header' },
+      },
+    },
+  },
+};
 
 const draft = createTeamPresetDraft();
 check(
@@ -164,8 +224,23 @@ const advancedDetail: ChatTeamPreset = {
   id: 'custom-advanced',
   name: 'Advanced custom team',
   description: '',
-  members: [],
-  lead_member_id: null,
+  members: [
+    {
+      id: 'advanced-lead',
+      name: 'Advanced lead',
+      description: '',
+      runner_type: 'CODEX',
+      recommended_model: 'test-model',
+      execution_config: completeExecutionConfig,
+      system_prompt: '',
+      default_workspace_path: null,
+      selected_skill_ids: [],
+      tools_enabled: { web_search: true },
+      is_builtin: false,
+      enabled: true,
+    },
+  ],
+  lead_member_id: 'advanced-lead',
   workflow_steps: [],
   team_protocol: '',
   is_builtin: false,
@@ -176,11 +251,115 @@ const advancedDraft = teamPresetDetailToDraft(advancedDetail);
 const advancedPayload = teamPresetDraftToPayload(advancedDraft);
 const advancedPreview = teamPresetDraftToPreviewDetail(advancedDraft);
 check(
-  'editing preserves an API-provided advanced tier in payload and preview',
+  'editing preserves an API-provided tier and complete execution config',
   advancedDraft.tier === 'advanced' &&
     advancedPayload.tier === 'advanced' &&
-    advancedPreview.tier === 'advanced',
+    advancedPreview.tier === 'advanced' &&
+    JSON.stringify(advancedPayload.members[0]?.execution_config) ===
+      JSON.stringify(completeExecutionConfig) &&
+    JSON.stringify(advancedPreview.members[0]?.execution_config) ===
+      JSON.stringify(completeExecutionConfig),
   { advancedDraft, advancedPayload, advancedPreview },
+);
+
+check(
+  'edit form echoes canonical MCP servers as editable JSON',
+  advancedDraft.members[0]?.mcpConfigText.includes('"fake_local"') === true &&
+    advancedDraft.members[0]?.mcpConfigText.includes('"mcpServers"') === true,
+);
+
+const editedMcpDraft = {
+  ...advancedDraft,
+  members: advancedDraft.members.map((member) => ({
+    ...member,
+    mcpConfigText: JSON.stringify(
+      { mcpServers: { fake_extra: { command: 'fake-extra-server' } } },
+      null,
+      2,
+    ),
+  })),
+};
+const editedMcpPayload = teamPresetDraftToPayload(editedMcpDraft);
+const editedMcpConfig = editedMcpPayload.members[0]?.execution_config;
+check(
+  'edited MCP JSON merges into a deep-copied execution config',
+  editedMcpConfig?.mcp?.mcpServers.fake_extra !== undefined &&
+    editedMcpConfig?.mcp?.mcpServers.fake_local === undefined &&
+    editedMcpConfig?.thinking_effort === 'high' &&
+    editedMcpConfig?.acp?.access_mode === 'workspace_only' &&
+    advancedDetail.members[0]?.execution_config?.mcp?.mcpServers
+      .fake_local !== undefined,
+);
+
+editedMcpDraft.members[0]!.mcpConfigText = JSON.stringify({
+  mcpServers: { fake_renamed: { command: 'fake-renamed-server' } },
+});
+check(
+  'draft edits after submit never mutate the submitted payload',
+  (
+    editedMcpPayload.members[0]?.execution_config?.mcp?.mcpServers
+      .fake_extra as { command: string } | undefined
+  )?.command === 'fake-extra-server' &&
+    editedMcpPayload.members[0]?.execution_config?.mcp?.mcpServers
+      .fake_renamed === undefined,
+);
+
+const renamedPayload = teamPresetDraftToPayload(editedMcpDraft);
+const renamedServer = renamedPayload.members[0]?.execution_config?.mcp
+  ?.mcpServers.fake_renamed as { command: string } | undefined;
+if (renamedServer) renamedServer.command = 'mutated-after-submit';
+const reparsedPayload = teamPresetDraftToPayload(editedMcpDraft);
+check(
+  'mutating a submitted payload never leaks back into the draft',
+  (
+    reparsedPayload.members[0]?.execution_config?.mcp?.mcpServers
+      .fake_renamed as { command: string } | undefined
+  )?.command === 'fake-renamed-server',
+);
+
+const brokenSecretDraft = {
+  ...draft,
+  name: 'Secret-bearing team',
+  members: [
+    {
+      ...draft.members[0]!,
+      mcpConfigText:
+        '{ "mcpServers": { "fake_local": { "env": { "API_TOKEN": "fake-template-token" } }',
+    },
+  ],
+};
+const brokenSecretResult = validateTeamPresetDraft(brokenSecretDraft);
+check(
+  'invalid canonical MCP JSON blocks submit with a member-scoped secret-free error',
+  brokenSecretResult.issue?.memberId === 'lead' &&
+    brokenSecretResult.issue.fieldKey === 'member:lead:mcp_config' &&
+    brokenSecretResult.issue.message ===
+      'Invalid JSON format. Please check your syntax.' &&
+    !brokenSecretResult.issue.message.includes('fake-template-token'),
+);
+
+const wrongShapeDraft = {
+  ...draft,
+  name: 'Secret-bearing team',
+  members: [
+    {
+      ...draft.members[0]!,
+      mcpConfigText: '{ "mcpServers": "fake-template-token" }',
+    },
+  ],
+};
+const wrongShapeResult = validateTeamPresetDraft(wrongShapeDraft);
+check(
+  'non-object MCP servers are rejected without echoing config values',
+  Boolean(wrongShapeResult.issue?.message) &&
+    !(wrongShapeResult.issue?.message ?? '').includes('fake-template-token'),
+);
+
+check(
+  'member-scoped MCP validation mirrors the tools blur path',
+  validateMemberMcpConfigDraft(createTeamPresetDraft(), 'lead') === null &&
+    validateMemberMcpConfigDraft(brokenSecretDraft, 'lead')?.fieldKey ===
+      'member:lead:mcp_config',
 );
 
 const invalidMemberName = validateTeamPresetDraft({
@@ -223,7 +402,7 @@ dom.window.matchMedia ??= () =>
   }) as MediaQueryList;
 
 const uiRequests: Array<{ body?: string; method: string; url: string }> = [];
-const uiLead = {
+const uiLead: ChatMemberPreset = {
   id: 'localized-lead',
   name: 'Localized lead',
   description: 'Leads the localized team.',
@@ -232,7 +411,8 @@ const uiLead = {
   system_prompt: 'Lead the team.',
   default_workspace_path: null,
   selected_skill_ids: [],
-  tools_enabled: {},
+  tools_enabled: { web_search: true },
+  execution_config: completeExecutionConfig,
   is_builtin: true,
   enabled: true,
 };
@@ -339,6 +519,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, options?: RequestInit) => {
 }) as typeof fetch;
 
 let setHarnessLocale: ((locale: Locale) => void) | null = null;
+const toastMessages: string[] = [];
 const WorkspaceHarness = () => {
   const [locale, setLocale] = useState<Locale>('en');
   setHarnessLocale = setLocale;
@@ -349,7 +530,9 @@ const WorkspaceHarness = () => {
     selectedProjectId: 'project-1',
     refreshMembers: async () => undefined,
     refreshSessions: async () => undefined,
-    showToast: () => undefined,
+    showToast: (message: string) => {
+      toastMessages.push(String(message));
+    },
     skills: [],
     t: (key: string) => key,
   } as unknown as WorkspaceContextProps;
@@ -437,8 +620,33 @@ const projectProtocolUpdate = uiRequests.find(
     request.url === '/api/projects/project-1/team-protocol' &&
     request.method === 'PUT',
 );
+const projectMemberCreate = uiRequests.find(
+  (request) =>
+    request.url === '/api/projects/project-1/members' &&
+    request.method === 'POST',
+);
+const agentCreate = uiRequests.find(
+  (request) =>
+    request.url === '/api/chat/agents' && request.method === 'POST',
+);
 const sessionUpdatePayload = JSON.parse(sessionUpdate?.body ?? '{}');
 const projectProtocolPayload = JSON.parse(projectProtocolUpdate?.body ?? '{}');
+const projectMemberPayload = JSON.parse(projectMemberCreate?.body ?? '{}');
+const agentPayload = JSON.parse(agentCreate?.body ?? '{}');
+check(
+  'rendered apply sends the complete execution config and keeps tools separate',
+  projectMemberPayload.execution_config?.runner_type === 'CODEX' &&
+    projectMemberPayload.execution_config?.model_name === 'test-model' &&
+    projectMemberPayload.execution_config?.thinking_effort === 'high' &&
+    projectMemberPayload.execution_config?.model_variant === 'fake-variant' &&
+    projectMemberPayload.execution_config?.acp?.access_mode ===
+      'workspace_only' &&
+    projectMemberPayload.execution_config?.mcp?.mcpServers?.fake_local?.env
+      ?.API_TOKEN === 'fake-template-token' &&
+    agentPayload.tools_enabled?.web_search === true &&
+    !('mcpServers' in (agentPayload.tools_enabled ?? {})),
+  { agentPayload, projectMemberPayload },
+);
 check(
   'rendered page applies the freshly fetched localized protocol to the project only',
   projectProtocolPayload.content === '中文协议' &&
@@ -455,6 +663,18 @@ check(
     sessionUpdate,
     uiRequests,
   },
+);
+check(
+  'rendered secret-bearing template shows no sensitive-value copy hint',
+  !/(sensitive|secret|敏感)/i.test(rootElement.textContent ?? ''),
+);
+check(
+  'toasts never print fake config secrets',
+  toastMessages.every(
+    (message) =>
+      !FAKE_CONFIG_SECRETS.some((secret) => message.includes(secret)),
+  ),
+  toastMessages,
 );
 await act(async () => {
   root.unmount();
@@ -481,7 +701,7 @@ check('shows member skills and role prompt details', source.includes('selected_s
 check(
   'keeps the localized lead label compact and on one line without inferring a fallback lead',
   source.includes(
-    'inline-flex shrink-0 items-center gap-1 whitespace-nowrap font-mono text-[9px] font-semibold uppercase tracking-[0.04em]',
+    'inline-flex shrink-0 items-center gap-1 whitespace-nowrap font-mono text-[10px] font-semibold uppercase tracking-[0.04em]',
   ) &&
     source.includes('const isLead = member.id === viewDetail.lead_member_id') &&
     !source.includes('viewDetail.lead_member_id ?? viewDetail.members[0]?.id'),
@@ -495,6 +715,11 @@ check('uses aggregate draft workflow steps', source.includes('workflowSteps') &&
 check('uses only backend workflow steps and has an explicit empty state', source.includes('const workflowSteps = isEditing && form ? form.workflowSteps : viewDetail.workflow_steps;') && source.includes('No workflow steps defined.') && !source.includes('presentation.workflow'));
 check('supports editable markdown fields rendered with AgentMarkdown', source.includes('function MarkdownEditableField') && source.includes('<AgentMarkdown content={value}'));
 check('edits member tool JSON through toolsEnabledText', source.includes('toolsEnabledText') && source.includes('parseToolsEnabled'));
+check('edits canonical member MCP JSON through mcpConfigText', source.includes('mcpConfigText') && source.includes('parseMemberMcpServers') && source.includes('memberMcpServersJson'));
+check('merges MCP edits into a deep-copied execution config', source.includes('memberFormExecutionConfig') && source.includes('structuredClone(member.executionConfig)'));
+check('validates canonical MCP on blur through a member-scoped path', source.includes('validateMemberMcpOnBlur') && source.includes('{ validateMcp: true }') && source.includes('onValidateMemberMcp?.(nextForm, selectedFormMember.id)'));
+check('keeps tools editing in its own section next to canonical MCP', source.includes('teamTemplates.member.tools') && source.includes('teamTemplates.member.noTools'));
+check('template UI never renders sensitive-value copy hints', !/(sensitive value|secret value|敏感)/i.test(source));
 check('validates required team and member fields before saving', source.includes('validateTeamPresetForm') && source.includes('Team name is required.') && source.includes('Member name is required.'));
 check('blocks invalid MCP JSON before payload submission', source.includes('Invalid JSON format. Please check your syntax.'));
 check('MCP blur validation sets visible member tool errors', source.includes('validateMemberToolsOnBlur') && source.includes('setFormError(issue.message)') && source.includes('setEditorSelectedMemberId(issue.memberId)'));
@@ -510,6 +735,12 @@ check('delete actions expose deleting state', source.includes('Deleting...') && 
 check('reuses TemplateDetailView for create and edit mode', !source.includes('<TemplateEditor') && source.includes('editorMode={editorMode}'));
 check('adds and auto-selects custom member drafts', source.includes('addCustomMember') && source.includes('setSelectedMemberId(nextMember.id)'));
 check('keeps readonly detail rendering isolated from editable controls', source.includes('const isEditing = Boolean(editorMode && form)') && source.includes('canEdit && !isEditing'));
+check(
+  'console output never prints fake config secrets',
+  consoleOutputLines.every(
+    (line) => !FAKE_CONFIG_SECRETS.some((secret) => line.includes(secret)),
+  ),
+);
 
 if (failures > 0) {
   // eslint-disable-next-line no-console

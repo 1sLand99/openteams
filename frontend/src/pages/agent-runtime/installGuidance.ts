@@ -63,6 +63,10 @@ const NODE_INSTALL_COMMANDS: Record<"posix" | "windows", string[]> = {
 
 const npmInstall = (pkg: string): string[] => [`npm install -g ${pkg}`];
 
+const DEEPSEEK_HARNESS_REVISION =
+  "99f6f02fecdb7dff40c3fbc9470f5907c29f74ca";
+const DEEPSEEK_HARNESS_PNPM_VERSION = "11.7.0";
+
 const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
   {
     CLAUDE_CODE: {
@@ -127,6 +131,31 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
       },
       authCommands: ["copilot"],
       authFollowUpCommand: "/login",
+    },
+    DEEPSEEK_HARNESS: {
+      requiresNode: true,
+      requiresNpm: false,
+      requiresNpx: false,
+      documentationUrl: "https://github.com/deepseek-ai/deepseek-harness",
+      windowsSupport: "supported",
+      installCommands: {
+        posix: [
+          `npm install --global pnpm@${DEEPSEEK_HARNESS_PNPM_VERSION}`,
+          'git clone https://github.com/deepseek-ai/deepseek-harness.git "$HOME/deepseek-harness"',
+          `git -C "$HOME/deepseek-harness" checkout ${DEEPSEEK_HARNESS_REVISION}`,
+          'pnpm --dir "$HOME/deepseek-harness" install --frozen-lockfile',
+          'pnpm --dir "$HOME/deepseek-harness" run build',
+        ],
+        windows: [
+          `npm install --global pnpm@${DEEPSEEK_HARNESS_PNPM_VERSION}`,
+          'git clone https://github.com/deepseek-ai/deepseek-harness.git "$HOME\\deepseek-harness"',
+          `git -C "$HOME\\deepseek-harness" checkout ${DEEPSEEK_HARNESS_REVISION}`,
+          'pnpm --dir "$HOME\\deepseek-harness" install --frozen-lockfile',
+          'pnpm --dir "$HOME\\deepseek-harness" run build',
+        ],
+      },
+      authCommands: null,
+      authEnvVars: ["DEEPSEEK_API_KEY"],
     },
     HERMES: {
       requiresNode: false,
@@ -335,10 +364,13 @@ export function resolveInstallGuide(
     }
   }
 
-  if (runnerNeedsAuth(runner) && entry.authCommands) {
+  if (
+    runnerNeedsAuth(runner) &&
+    (entry.authCommands || (entry.authEnvVars?.length ?? 0) > 0)
+  ) {
     steps.push({
       kind: "auth",
-      commands: entry.authCommands,
+      commands: entry.authCommands ?? [],
       authFollowUpCommand: entry.authFollowUpCommand,
     });
   }

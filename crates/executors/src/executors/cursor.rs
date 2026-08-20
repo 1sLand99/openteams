@@ -1,8 +1,15 @@
 use core::str;
-use std::{collections::HashMap, path::Path, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use command_group::AsyncCommandGroup;
+use derivative::Derivative;
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,6 +28,8 @@ use crate::{
     env::ExecutionEnv,
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, SpawnedChild, StandardCodingAgentExecutor,
+        acp::mcp::pin_mcp_run_environment,
+        opencode::FrozenProcessCommand,
         utils::{json_has_nonempty_string, read_json_file},
     },
     logs::{
@@ -29,6 +38,8 @@ use crate::{
         plain_text_processor::PlainTextLogProcessor,
         utils::{ConversationPatch, EntryIndexProvider},
     },
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun, PrivateMcpRunDirectory},
     model_discovery::{
         ProviderKind, cli_model_commands, discover_from_sources, runner_config_paths,
     },
@@ -37,7 +48,33 @@ use crate::{
 mod mcp;
 const CURSOR_AUTH_REQUIRED_MSG: &str = "Authentication required. Please run 'cursor-agent login' first, or set CURSOR_API_KEY environment variable.";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, JsonSchema)]
+#[derive(Clone)]
+struct CursorMcpRuntimeSnapshot {
+    run_home: PathBuf,
+    cursor_home: PathBuf,
+    config_path: PathBuf,
+    approval_path: PathBuf,
+    disabled_path: PathBuf,
+    process_command: FrozenProcessCommand,
+    server_count: usize,
+}
+
+impl std::fmt::Debug for CursorMcpRuntimeSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CursorMcpRuntimeSnapshot")
+            .field("run_home", &self.run_home)
+            .field("cursor_home", &self.cursor_home)
+            .field("config_path", &self.config_path)
+            .field("approval_path", &self.approval_path)
+            .field("disabled_path", &self.disabled_path)
+            .field("server_count", &self.server_count)
+            .finish()
+    }
+}
+
+#[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
+#[derivative(Debug, PartialEq)]
 pub struct CursorAgent {
     #[serde(default)]
     pub append_prompt: AppendPrompt,
@@ -51,6 +88,18 @@ pub struct CursorAgent {
     pub model: Option<String>,
     #[serde(flatten)]
     pub cmd: CmdOverrides,
+
+    #[serde(skip)]
+    #[ts(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    runtime_mcp_snapshot: Option<Arc<CursorMcpRuntimeSnapshot>>,
+
+    #[cfg(test)]
+    #[serde(skip)]
+    #[ts(skip)]
+    #[schemars(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    test_base_command: Option<String>,
 }
 
 impl CursorAgent {
@@ -59,8 +108,11 @@ impl CursorAgent {
     }
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
+        let configured_base = Self::base_command();
+        #[cfg(test)]
+        let configured_base = self.test_base_command.as_deref().unwrap_or(configured_base);
         let mut builder =
-            CommandBuilder::new(Self::base_command()).params(["-p", "--output-format=stream-json"]);
+            CommandBuilder::new(configured_base).params(["-p", "--output-format=stream-json"]);
 
         if self.force.unwrap_or(false) {
             builder = builder.extend_params(["--force"]);
@@ -72,6 +124,134 @@ impl CursorAgent {
 
         apply_overrides(builder, &self.cmd)
     }
+
+    async fn prepare_mcp_for_run_from(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        context: &McpRunContext,
+        env: &mut ExecutionEnv,
+        source_config_home: Option<&Path>,
+        source_data_home: Option<&Path>,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        self.runtime_mcp_snapshot = None;
+        if self.cmd.base_command_override.is_some() {
+            return Err(ExecutorError::Configuration(
+                "Cursor run-scoped MCP isolation cannot be verified for a custom base command"
+                    .to_string(),
+            ));
+        }
+        let prepared = PreparedMcpRun::new(canonical)?;
+        let directory = PrivateMcpRunDirectory::create(context, "cursor-mcp")?;
+        let overlay =
+            mcp::write_run_mcp_overlay(&directory, canonical, context.current_dir()).await?;
+        bridge_cursor_auth_and_session_state(
+            &directory,
+            source_config_home,
+            source_data_home,
+            &overlay.project_slug,
+        )
+        .await?;
+        let run_home = directory.path().to_path_buf();
+        let cursor_home = run_home.join(".cursor");
+        for (key, value) in [
+            ("HOME", run_home.to_string_lossy().into_owned()),
+            ("USERPROFILE", run_home.to_string_lossy().into_owned()),
+            (
+                "CURSOR_CONFIG_DIR",
+                cursor_home.to_string_lossy().into_owned(),
+            ),
+            (
+                "CURSOR_DATA_DIR",
+                cursor_home.to_string_lossy().into_owned(),
+            ),
+        ] {
+            pin_mcp_run_environment(env, &mut self.cmd, key, value);
+        }
+        let process_command =
+            FrozenProcessCommand::resolve(self.build_command_builder()?.build_initial()?).await?;
+        self.runtime_mcp_snapshot = Some(Arc::new(CursorMcpRuntimeSnapshot {
+            run_home,
+            cursor_home,
+            config_path: overlay.config_path,
+            approval_path: overlay.approval_path,
+            disabled_path: overlay.disabled_path,
+            process_command,
+            server_count: prepared.server_count(),
+        }));
+        Ok(prepared.with_cleanup(directory.into_cleanup()))
+    }
+}
+
+async fn copy_optional_cursor_file(
+    source: &Path,
+    relative_target: &Path,
+    directory: &PrivateMcpRunDirectory,
+) -> Result<(), ExecutorError> {
+    match tokio::fs::read(source).await {
+        Ok(contents) => {
+            directory.write_file(relative_target, &contents)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ExecutorError::Io(error)),
+    }
+}
+
+async fn bridge_cursor_auth_and_session_state(
+    directory: &PrivateMcpRunDirectory,
+    source_config_home: Option<&Path>,
+    source_data_home: Option<&Path>,
+    project_slug: &str,
+) -> Result<(), ExecutorError> {
+    if let Some(source_home) = source_config_home {
+        for name in ["auth.json", "credentials.json"] {
+            copy_optional_cursor_file(
+                &source_home.join(name),
+                &Path::new(".cursor").join(name),
+                directory,
+            )
+            .await?;
+        }
+        match tokio::fs::read(source_home.join("cli-config.json")).await {
+            Ok(contents) => {
+                let source: serde_json::Value = serde_json::from_slice(&contents)?;
+                let auth = cursor_auth_only_config(&source);
+                if auth.as_object().is_some_and(|object| !object.is_empty()) {
+                    directory.write_file(
+                        Path::new(".cursor").join("cli-config.json"),
+                        &serde_json::to_vec_pretty(&auth)?,
+                    )?;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ExecutorError::Io(error)),
+        }
+    }
+    if let Some(source_home) = source_data_home {
+        let source_project = source_home.join("projects").join(project_slug);
+        let target_project = Path::new(".cursor").join("projects").join(project_slug);
+        for name in ["agent-transcripts", "mcp-auth.json"] {
+            directory
+                .link_session_resource(target_project.join(name), source_project.join(name))?;
+        }
+        directory.link_session_resource(
+            Path::new(".cursor").join("chats"),
+            source_home.join("chats"),
+        )?;
+    }
+    Ok(())
+}
+
+fn cursor_auth_only_config(value: &serde_json::Value) -> serde_json::Value {
+    let mut auth = serde_json::Map::new();
+    if let Some(source) = value.as_object() {
+        for key in ["authInfo", "auth", "token", "accessToken", "refreshToken"] {
+            if let Some(value) = source.get(key) {
+                auth.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    serde_json::Value::Object(auth)
 }
 
 fn cursor_auth_value_has_credentials(value: &serde_json::Value) -> bool {
@@ -94,6 +274,38 @@ fn cursor_auth_value_has_credentials(value: &serde_json::Value) -> bool {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for CursorAgent {
+    async fn prepare_mcp_for_run(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        context: &McpRunContext,
+        env: &mut ExecutionEnv,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        let source_env = env.clone().with_profile(&self.cmd);
+        let default_cursor_home = source_env
+            .get("HOME")
+            .filter(|value| !value.trim().is_empty())
+            .map(|home| PathBuf::from(home).join(".cursor"))
+            .or_else(|| dirs::home_dir().map(|home| home.join(".cursor")));
+        let source_config_home = source_env
+            .get("CURSOR_CONFIG_DIR")
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| default_cursor_home.clone());
+        let source_data_home = source_env
+            .get("CURSOR_DATA_DIR")
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| source_config_home.clone());
+        self.prepare_mcp_for_run_from(
+            canonical,
+            context,
+            env,
+            source_config_home.as_deref(),
+            source_data_home.as_deref(),
+        )
+        .await
+    }
+
     fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
         let env = env.clone().with_profile(&self.cmd);
         let cli_login = dirs::home_dir().is_some_and(|home| {
@@ -137,11 +349,16 @@ impl StandardCodingAgentExecutor for CursorAgent {
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        mcp::ensure_mcp_server_trust(self, current_dir).await;
-
-        let command_parts = self.build_command_builder()?.build_initial()?;
-
-        let (executable_path, args) = command_parts.into_resolved().await?;
+        let snapshot = self
+            .runtime_mcp_snapshot
+            .as_ref()
+            .ok_or(ExecutorError::McpIsolationNotImplemented)?;
+        if self.cmd.base_command_override.is_some() {
+            return Err(ExecutorError::Configuration(
+                "Cursor command changed after run-scoped MCP preparation".to_string(),
+            ));
+        }
+        let (executable_path, args) = snapshot.process_command.parts();
 
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
 
@@ -153,11 +370,16 @@ impl StandardCodingAgentExecutor for CursorAgent {
             .stderr(Stdio::piped())
             .current_dir(current_dir)
             .env("NPM_CONFIG_LOGLEVEL", "error")
-            .args(&args);
+            .args(args);
 
         env.clone()
             .with_profile(&self.cmd)
             .apply_to_command(&mut command);
+        command
+            .env("HOME", &snapshot.run_home)
+            .env("USERPROFILE", &snapshot.run_home)
+            .env("CURSOR_CONFIG_DIR", &snapshot.cursor_home)
+            .env("CURSOR_DATA_DIR", &snapshot.cursor_home);
 
         let mut child = command.group_spawn()?;
 
@@ -177,12 +399,18 @@ impl StandardCodingAgentExecutor for CursorAgent {
         _reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        mcp::ensure_mcp_server_trust(self, current_dir).await;
-
-        let command_parts = self
-            .build_command_builder()?
-            .build_follow_up(&["--resume".to_string(), session_id.to_string()])?;
-        let (executable_path, args) = command_parts.into_resolved().await?;
+        let snapshot = self
+            .runtime_mcp_snapshot
+            .as_ref()
+            .ok_or(ExecutorError::McpIsolationNotImplemented)?;
+        if self.cmd.base_command_override.is_some() {
+            return Err(ExecutorError::Configuration(
+                "Cursor command changed after run-scoped MCP preparation".to_string(),
+            ));
+        }
+        let (executable_path, frozen_args) = snapshot.process_command.parts();
+        let mut args = frozen_args.to_vec();
+        args.extend(["--resume".to_string(), session_id.to_string()]);
 
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
 
@@ -199,6 +427,11 @@ impl StandardCodingAgentExecutor for CursorAgent {
         env.clone()
             .with_profile(&self.cmd)
             .apply_to_command(&mut command);
+        command
+            .env("HOME", &snapshot.run_home)
+            .env("USERPROFILE", &snapshot.run_home)
+            .env("CURSOR_CONFIG_DIR", &snapshot.cursor_home)
+            .env("CURSOR_DATA_DIR", &snapshot.cursor_home);
 
         let mut child = command.group_spawn()?;
 
@@ -1279,11 +1512,38 @@ Tests
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{fs, sync::Arc};
 
+    use tempfile::TempDir;
+    use uuid::Uuid;
     use workspace_utils::msg_store::MsgStore;
 
     use super::*;
+
+    fn test_cursor() -> CursorAgent {
+        let mut cursor: CursorAgent =
+            serde_json::from_value(serde_json::json!({})).expect("deserialize Cursor test config");
+        cursor.test_base_command = Some(
+            std::env::current_exe()
+                .expect("resolve current test executable")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        cursor
+    }
+
+    fn run_context(workspace: &TempDir) -> McpRunContext {
+        McpRunContext::new(workspace.path(), Uuid::new_v4(), Uuid::new_v4())
+            .expect("create Cursor MCP run context")
+    }
+
+    fn execution_env(workspace: &TempDir) -> ExecutionEnv {
+        ExecutionEnv::new(
+            crate::env::RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        )
+    }
 
     #[test]
     fn cursor_auth_requires_nonempty_credentials() {
@@ -1296,6 +1556,220 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cursor_private_overlay_bridges_only_auth_and_session_state() {
+        let workspace = TempDir::new().expect("create workspace");
+        let source = TempDir::new().expect("create source Cursor home");
+        fs::write(
+            source.path().join("auth.json"),
+            br#"{"token":"cursor-auth"}"#,
+        )
+        .expect("write auth fixture");
+        fs::write(
+            source.path().join("cli-config.json"),
+            br#"{"authInfo":{"authId":"id"},"permissions":{"ambient":true}}"#,
+        )
+        .expect("write config fixture");
+        let global_mcp = br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#;
+        fs::write(source.path().join("mcp.json"), global_mcp).expect("write global MCP fixture");
+        fs::create_dir(source.path().join("chats")).expect("create chats fixture");
+        fs::write(source.path().join("chats/session.json"), b"session")
+            .expect("write chat fixture");
+        let slug = mcp::cursor_project_slug(
+            &fs::canonicalize(workspace.path()).expect("canonical workspace"),
+        )
+        .expect("project slug");
+        let source_project = source.path().join("projects").join(&slug);
+        fs::create_dir_all(source_project.join("agent-transcripts"))
+            .expect("create transcript fixture");
+        fs::write(
+            source_project.join("agent-transcripts/session.json"),
+            b"transcript",
+        )
+        .expect("write transcript fixture");
+        fs::write(source_project.join(".workspace-trusted"), b"trusted")
+            .expect("write trust fixture");
+        let global_approval = source_project.join("mcp-approvals.json");
+        let global_approval_bytes = br#"["must-stay-global"]"#;
+        fs::write(&global_approval, global_approval_bytes).expect("write approval fixture");
+        let mut cursor = test_cursor();
+        let mut env = execution_env(&workspace);
+        env.insert(
+            "CURSOR_CONFIG_DIR",
+            source.path().to_string_lossy().into_owned(),
+        );
+        let canonical: MemberMcpConfig = serde_json::from_value(serde_json::json!({
+            "mcpServers": {
+                "member-only": {"command": "/bin/echo", "env": {"TOKEN": "cursor-mcp-secret"}}
+            }
+        }))
+        .expect("deserialize canonical MCP config");
+
+        let prepared = cursor
+            .prepare_mcp_for_run(&canonical, &run_context(&workspace), &mut env)
+            .await
+            .expect("prepare Cursor MCP run");
+        let snapshot = cursor
+            .runtime_mcp_snapshot
+            .as_ref()
+            .expect("runtime snapshot");
+        let config: serde_json::Value =
+            serde_json::from_slice(&fs::read(&snapshot.config_path).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"].as_object().unwrap().len(), 1);
+        assert_eq!(fs::read(&global_approval).unwrap(), global_approval_bytes);
+        assert_eq!(
+            fs::read(source.path().join("mcp.json")).unwrap(),
+            global_mcp
+        );
+        assert_ne!(snapshot.approval_path, global_approval);
+        assert_eq!(
+            fs::read(snapshot.cursor_home.join("auth.json")).unwrap(),
+            br#"{"token":"cursor-auth"}"#
+        );
+        let bridged_cli_config: serde_json::Value = serde_json::from_slice(
+            &fs::read(snapshot.cursor_home.join("cli-config.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(bridged_cli_config.get("authInfo").is_some());
+        assert!(bridged_cli_config.get("permissions").is_none());
+        assert!(
+            !snapshot
+                .cursor_home
+                .join("projects")
+                .join(&slug)
+                .join(".workspace-trusted")
+                .exists()
+        );
+        assert_eq!(
+            env.get("HOME"),
+            Some(&snapshot.run_home.to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            env.get("USERPROFILE"),
+            Some(&snapshot.run_home.to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            env.get("CURSOR_CONFIG_DIR"),
+            Some(&snapshot.cursor_home.to_string_lossy().into_owned())
+        );
+        assert!(!format!("{snapshot:?}").contains("cursor-mcp-secret"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&snapshot.run_home)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(&snapshot.config_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert!(
+                fs::symlink_metadata(snapshot.cursor_home.join("chats"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+
+        let run_home = snapshot.run_home.clone();
+        drop(prepared);
+        assert!(
+            !run_home.exists(),
+            "cancelled run must remove Cursor overlay"
+        );
+        assert!(source.path().join("chats/session.json").exists());
+        assert_eq!(fs::read(global_approval).unwrap(), global_approval_bytes);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cursor_spawn_failure_releases_private_mcp_overlay() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = TempDir::new().expect("create workspace");
+        let command_path = workspace.path().join("cursor-test-command");
+        fs::write(&command_path, b"#!/bin/sh\nexit 0\n").expect("write command fixture");
+        let mut permissions = fs::metadata(&command_path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&command_path, permissions).expect("make command executable");
+        let mut cursor = test_cursor();
+        cursor.test_base_command = Some(command_path.to_string_lossy().into_owned());
+        let mut env = execution_env(&workspace);
+        let prepared = cursor
+            .prepare_mcp_for_run_from(
+                &MemberMcpConfig::default(),
+                &run_context(&workspace),
+                &mut env,
+                None,
+                None,
+            )
+            .await
+            .expect("prepare Cursor MCP run");
+        let run_root = cursor
+            .runtime_mcp_snapshot
+            .as_ref()
+            .unwrap()
+            .run_home
+            .clone();
+
+        fs::remove_file(command_path).expect("remove command before spawn");
+        assert!(
+            cursor
+                .spawn(workspace.path(), "prompt", &env)
+                .await
+                .is_err()
+        );
+        drop(prepared);
+        assert!(!run_root.exists());
+    }
+
+    #[tokio::test]
+    async fn cursor_empty_config_still_writes_isolated_config_and_approval() {
+        let workspace = TempDir::new().expect("create workspace");
+        fs::create_dir(workspace.path().join(".cursor")).expect("create project config directory");
+        fs::write(
+            workspace.path().join(".cursor/mcp.json"),
+            br#"{"mcpServers":{"ambient":{"command":"must-not-run"}}}"#,
+        )
+        .expect("write project MCP fixture");
+        let mut cursor = test_cursor();
+        let mut env = execution_env(&workspace);
+        let prepared = cursor
+            .prepare_mcp_for_run_from(
+                &MemberMcpConfig::default(),
+                &run_context(&workspace),
+                &mut env,
+                None,
+                None,
+            )
+            .await
+            .expect("prepare empty Cursor MCP run");
+        let snapshot = cursor
+            .runtime_mcp_snapshot
+            .as_ref()
+            .expect("runtime snapshot");
+        let config: serde_json::Value =
+            serde_json::from_slice(&fs::read(&snapshot.config_path).unwrap()).unwrap();
+        let approvals: Vec<String> =
+            serde_json::from_slice(&fs::read(&snapshot.approval_path).unwrap()).unwrap();
+        let disabled: Vec<String> =
+            serde_json::from_slice(&fs::read(&snapshot.disabled_path).unwrap()).unwrap();
+        assert_eq!(config, serde_json::json!({"mcpServers": {}}));
+        assert!(approvals.is_empty());
+        assert_eq!(disabled, ["ambient"]);
+        drop(prepared);
+    }
+
+    #[tokio::test]
     async fn test_cursor_streaming_patch_generation() {
         // Avoid relying on feature flag in tests; construct with a dummy command
         let executor = CursorAgent {
@@ -1304,6 +1778,8 @@ mod tests {
             force: None,
             model: None,
             cmd: Default::default(),
+            runtime_mcp_snapshot: None,
+            test_base_command: None,
         };
         let msg_store = Arc::new(MsgStore::new());
         let current_dir = std::path::PathBuf::from("/tmp/test-worktree");

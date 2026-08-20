@@ -50,7 +50,7 @@ use command_group::AsyncCommandGroup;
 use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use strum_macros::AsRefStr;
 use tokio::process::Command;
 use ts_rs::TS;
@@ -69,9 +69,12 @@ use crate::{
     executors::{
         AppendPrompt, AvailabilityInfo, ExecutorError, ExecutorExitResult, SlashCommandDescription,
         SpawnedChild, StandardCodingAgentExecutor,
+        opencode::{FrozenProcessCommand, ProcessOutputRedactor},
         utils::{json_has_nonempty_string, read_json_file},
     },
     logs::utils::patch,
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun},
     model_discovery::{
         ProviderKind, cli_model_commands, discover_from_sources, model_slugs_from_models_json,
         read_config_value, runner_config_paths,
@@ -147,6 +150,25 @@ enum CodexSessionAction {
     Review { target: ReviewTarget },
 }
 
+#[derive(Clone)]
+struct CodexMcpRuntimeSnapshot {
+    mcp_servers: Value,
+    output_redactor: ProcessOutputRedactor,
+    process_command: FrozenProcessCommand,
+}
+
+impl std::fmt::Debug for CodexMcpRuntimeSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CodexMcpRuntimeSnapshot")
+            .field(
+                "mcp_server_count",
+                &self.mcp_servers.as_object().map_or(0, serde_json::Map::len),
+            )
+            .finish()
+    }
+}
+
 #[derive(Derivative, Clone, Serialize, Deserialize, TS, JsonSchema)]
 #[derivative(Debug, PartialEq)]
 pub struct Codex {
@@ -185,10 +207,49 @@ pub struct Codex {
     #[ts(skip)]
     #[derivative(Debug = "ignore", PartialEq = "ignore")]
     approvals: Option<Arc<dyn ExecutorApprovalService>>,
+
+    #[serde(skip)]
+    #[ts(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    runtime_mcp_snapshot: Option<Arc<CodexMcpRuntimeSnapshot>>,
+
+    #[cfg(test)]
+    #[serde(skip)]
+    #[ts(skip)]
+    #[schemars(skip)]
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    test_base_command: Option<String>,
 }
 
 #[async_trait]
 impl StandardCodingAgentExecutor for Codex {
+    async fn prepare_mcp_for_run(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        _context: &McpRunContext,
+        _env: &mut ExecutionEnv,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        self.runtime_mcp_snapshot = None;
+        if self.cmd.base_command_override.is_some() {
+            return Err(ExecutorError::Configuration(
+                "Codex run-scoped MCP isolation cannot be verified for a custom base command"
+                    .to_string(),
+            ));
+        }
+        let mcp_servers = build_codex_mcp_servers(canonical)?;
+        let output_redactor = ProcessOutputRedactor::from_config(&serde_json::json!({
+            "mcp_servers": mcp_servers
+        }));
+        let process_command =
+            FrozenProcessCommand::resolve(self.build_command_builder()?.build_initial()?).await?;
+        self.runtime_mcp_snapshot = Some(Arc::new(CodexMcpRuntimeSnapshot {
+            mcp_servers,
+            output_redactor,
+            process_command,
+        }));
+        PreparedMcpRun::new(canonical)
+    }
+
     fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
         let env = env.clone().with_profile(&self.cmd);
         let Some(home) = codex_home() else {
@@ -411,7 +472,15 @@ impl Codex {
     }
 
     fn build_command_builder(&self) -> Result<CommandBuilder, CommandBuildError> {
-        let mut builder = CommandBuilder::new(Self::base_command());
+        #[cfg(test)]
+        let base_command = self
+            .test_base_command
+            .clone()
+            .unwrap_or_else(|| Self::base_command().to_string());
+        #[cfg(not(test))]
+        let base_command = Self::base_command().to_string();
+
+        let mut builder = CommandBuilder::new(base_command);
         builder = builder.extend_params(["app-server"]);
         if self.oss.unwrap_or(false) {
             builder = builder.extend_params(["--oss"]);
@@ -462,6 +531,14 @@ impl Codex {
     fn build_config_overrides(&self) -> Option<HashMap<String, Value>> {
         let mut overrides = HashMap::new();
 
+        overrides.insert(
+            "mcp_servers".to_string(),
+            self.runtime_mcp_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.mcp_servers.clone())
+                .unwrap_or_else(|| Value::Object(Map::new())),
+        );
+
         if let Some(effort) = &self.model_reasoning_effort {
             overrides.insert(
                 "model_reasoning_effort".to_string(),
@@ -505,10 +582,26 @@ impl Codex {
             );
         }
 
-        if overrides.is_empty() {
-            None
-        } else {
-            Some(overrides)
+        Some(overrides)
+    }
+
+    fn build_thread_resume_params(
+        thread_params: ThreadStartParams,
+        session_id: String,
+        rollout_path: PathBuf,
+    ) -> ThreadResumeParams {
+        ThreadResumeParams {
+            thread_id: session_id,
+            path: Some(rollout_path),
+            model: thread_params.model,
+            model_provider: thread_params.model_provider,
+            cwd: thread_params.cwd,
+            approval_policy: thread_params.approval_policy,
+            sandbox: thread_params.sandbox,
+            config: thread_params.config,
+            base_instructions: thread_params.base_instructions,
+            developer_instructions: thread_params.developer_instructions,
+            ..Default::default()
         }
     }
 
@@ -564,20 +657,11 @@ impl Codex {
                 let (rollout_path, _forked_session_id) =
                     SessionHandler::fork_rollout_file(&session_id)
                         .map_err(|e| ExecutorError::FollowUpNotSupported(e.to_string()))?;
-                let overrides = thread_params;
-                let params = ThreadResumeParams {
-                    thread_id: session_id,
-                    path: Some(rollout_path.clone()),
-                    model: overrides.model,
-                    model_provider: overrides.model_provider,
-                    cwd: overrides.cwd,
-                    approval_policy: overrides.approval_policy,
-                    sandbox: overrides.sandbox,
-                    config: overrides.config,
-                    base_instructions: overrides.base_instructions,
-                    developer_instructions: overrides.developer_instructions,
-                    ..Default::default()
-                };
+                let params = Self::build_thread_resume_params(
+                    thread_params,
+                    session_id,
+                    rollout_path.clone(),
+                );
                 let response = client.resume_thread(params).await?;
                 tracing::debug!(
                     rollout_path = %rollout_path.display(),
@@ -601,7 +685,7 @@ impl Codex {
     async fn spawn_app_server<F, Fut>(
         &self,
         current_dir: &Path,
-        command_parts: CommandParts,
+        _command_parts: CommandParts,
         env: &ExecutionEnv,
         task: F,
     ) -> Result<SpawnedChild, ExecutorError>
@@ -609,20 +693,30 @@ impl Codex {
         F: FnOnce(Arc<AppServerClient>, ExitSignalSender) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), ExecutorError>> + Send + 'static,
     {
-        let (program_path, args) = command_parts.into_resolved().await?;
+        let snapshot = self
+            .runtime_mcp_snapshot
+            .as_ref()
+            .ok_or(ExecutorError::McpIsolationNotImplemented)?;
+        if self.cmd.base_command_override.is_some() {
+            return Err(ExecutorError::Configuration(
+                "Codex command changed after run-scoped MCP preparation".to_string(),
+            ));
+        }
+        let output_redactor = snapshot.output_redactor.clone();
+        let (program_path, args) = snapshot.process_command.parts();
 
         let mut process = Command::new(program_path);
         process
             .kill_on_drop(true)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .current_dir(current_dir)
             .env("NPM_CONFIG_LOGLEVEL", "error")
             .env("NODE_NO_WARNINGS", "1")
             .env("NO_COLOR", "1")
             .env("RUST_LOG", "error")
-            .args(&args);
+            .args(args);
 
         env.clone()
             .with_profile(&self.cmd)
@@ -653,7 +747,7 @@ impl Codex {
 
         tokio::spawn(async move {
             let exit_signal_tx = ExitSignalSender::new(exit_signal_tx);
-            let log_writer = LogWriter::new(new_stdout);
+            let log_writer = LogWriter::new_with_redactor(new_stdout, output_redactor.clone());
 
             // Initialize the AppServerClient
             let client = AppServerClient::new(
@@ -689,8 +783,9 @@ impl Codex {
                         return;
                     }
                     ExecutorError::AuthRequired(message) => {
+                        let safe_message = output_redactor.redact(message);
                         log_writer
-                            .log_raw(&Error::auth_required(message.clone()).raw())
+                            .log_raw(&Error::auth_required(safe_message).raw())
                             .await
                             .ok();
                         exit_signal_tx
@@ -699,9 +794,10 @@ impl Codex {
                         return;
                     }
                     _ => {
-                        tracing::error!("Codex spawn error: {}", err);
+                        let safe_error = output_redactor.redact(&err.to_string());
+                        tracing::error!("Codex spawn error: {}", safe_error);
                         log_writer
-                            .log_raw(&Error::launch_error(err.to_string()).raw())
+                            .log_raw(&Error::launch_error(safe_error).raw())
                             .await
                             .ok();
                     }
@@ -719,6 +815,105 @@ impl Codex {
             cancel: Some(cancel),
             cleanup: None,
         })
+    }
+}
+
+fn build_codex_mcp_servers(canonical: &MemberMcpConfig) -> Result<Value, ExecutorError> {
+    canonical.validate("codex").map_err(|_| {
+        ExecutorError::Configuration("Codex rejected invalid member MCP configuration".to_string())
+    })?;
+
+    let mut servers = Map::new();
+    for (name, definition) in &canonical.mcp_servers {
+        let server = definition.as_object().ok_or_else(|| {
+            ExecutorError::Configuration(
+                "Codex rejected invalid member MCP configuration".to_string(),
+            )
+        })?;
+        let is_remote = server.contains_key("url")
+            || server.contains_key("httpUrl")
+            || matches!(
+                server.get("type").and_then(Value::as_str),
+                Some("http" | "sse")
+            );
+        let allowed = if is_remote {
+            ["type", "url", "httpUrl", "headers", "enabled", "disabled"].as_slice()
+        } else {
+            ["type", "command", "args", "env", "enabled", "disabled"].as_slice()
+        };
+        if server.keys().any(|key| !allowed.contains(&key.as_str())) {
+            return Err(ExecutorError::Configuration(
+                "Codex cannot safely translate a member MCP server field".to_string(),
+            ));
+        }
+
+        let mut converted = Map::new();
+        if is_remote {
+            if server.get("type").and_then(Value::as_str) == Some("sse") {
+                return Err(ExecutorError::McpNotSupported);
+            }
+            let url = match (server.get("url"), server.get("httpUrl")) {
+                (Some(url), Some(http_url)) if url != http_url => {
+                    return Err(ExecutorError::Configuration(
+                        "Codex rejected ambiguous member MCP remote URL fields".to_string(),
+                    ));
+                }
+                (Some(url), _) | (_, Some(url)) => url.clone(),
+                (None, None) => return Err(ExecutorError::McpNotSupported),
+            };
+            if url.as_str().is_none_or(|url| url.trim().is_empty()) {
+                return Err(ExecutorError::Configuration(
+                    "Codex rejected an empty member MCP remote URL".to_string(),
+                ));
+            }
+            converted.insert("url".to_string(), url);
+            if let Some(headers) = server.get("headers") {
+                converted.insert("http_headers".to_string(), headers.clone());
+            }
+        } else {
+            if !matches!(
+                server.get("type").and_then(Value::as_str),
+                None | Some("stdio" | "local")
+            ) {
+                return Err(ExecutorError::McpNotSupported);
+            }
+            let command = server.get("command").cloned().ok_or_else(|| {
+                ExecutorError::Configuration(
+                    "Codex rejected a member MCP server without a command".to_string(),
+                )
+            })?;
+            if command
+                .as_str()
+                .is_none_or(|command| command.trim().is_empty())
+            {
+                return Err(ExecutorError::Configuration(
+                    "Codex rejected an empty member MCP command".to_string(),
+                ));
+            }
+            converted.insert("command".to_string(), command);
+            for field in ["args", "env"] {
+                if let Some(value) = server.get(field) {
+                    converted.insert(field.to_string(), value.clone());
+                }
+            }
+        }
+        if let Some(enabled) = effective_mcp_enabled(server) {
+            converted.insert("enabled".to_string(), Value::Bool(enabled));
+        }
+        servers.insert(name.clone(), Value::Object(converted));
+    }
+    Ok(Value::Object(servers))
+}
+
+fn effective_mcp_enabled(server: &Map<String, Value>) -> Option<bool> {
+    match (
+        server.get("enabled").and_then(Value::as_bool),
+        server.get("disabled").and_then(Value::as_bool),
+    ) {
+        (_, Some(true)) => Some(false),
+        (Some(enabled), _) => Some(enabled),
+        (None, Some(false)) => Some(true),
+        (None, None) => None,
     }
 }
 
@@ -752,10 +947,60 @@ fn codex_config_has_provider(path: &Path, env: &ExecutionEnv) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::TempDir;
+    use std::{
+        collections::HashMap,
+        fs,
+        path::{Path, PathBuf},
+        time::Duration,
+    };
 
-    use super::{CODEX_MODEL_FALLBACKS, Codex, codex_config_has_provider};
-    use crate::env::ExecutionEnv;
+    use serde_json::json;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    use super::{CODEX_MODEL_FALLBACKS, Codex, build_codex_mcp_servers, codex_config_has_provider};
+    use crate::{
+        command::CmdOverrides,
+        env::{ExecutionEnv, RepoContext},
+        executors::{ExecutorError, StandardCodingAgentExecutor},
+        mcp_config::MemberMcpConfig,
+        mcp_run::McpRunContext,
+    };
+
+    fn test_codex() -> Codex {
+        let mut codex: Codex =
+            serde_json::from_value(json!({})).expect("deserialize Codex test config");
+        codex.test_base_command = Some(
+            std::env::current_exe()
+                .expect("resolve current test executable")
+                .to_string_lossy()
+                .to_string(),
+        );
+        codex
+    }
+
+    fn run_context(workspace: &TempDir) -> McpRunContext {
+        McpRunContext::new(workspace.path(), Uuid::new_v4(), Uuid::new_v4())
+            .expect("create MCP run context")
+    }
+
+    fn execution_env(workspace: &TempDir) -> ExecutionEnv {
+        ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        )
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, body).expect("write fake Codex app server");
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path, permissions).expect("make fake Codex app server executable");
+    }
 
     #[test]
     fn base_command_uses_codex_0_147_0() {
@@ -767,6 +1012,259 @@ mod tests {
         assert!(CODEX_MODEL_FALLBACKS.contains(&"gpt-5.6-sol"));
         assert!(CODEX_MODEL_FALLBACKS.contains(&"gpt-5.6-terra"));
         assert!(CODEX_MODEL_FALLBACKS.contains(&"gpt-5.6-luna"));
+    }
+
+    #[tokio::test]
+    async fn codex_thread_start_and_resume_use_same_frozen_mcp_override() {
+        let workspace = TempDir::new().expect("create workspace");
+        let mut codex = test_codex();
+        let mut env = execution_env(&workspace);
+        let mut canonical: MemberMcpConfig = serde_json::from_value(json!({
+            "mcpServers": {
+                "local": {
+                    "command": "/bin/echo",
+                    "args": ["serve"],
+                    "env": {"TOKEN": "fixed-secret"}
+                },
+                "remote": {
+                    "type": "http",
+                    "url": "https://example.test/mcp",
+                    "headers": {"Authorization": "Bearer fixed-secret"}
+                }
+            }
+        }))
+        .expect("deserialize canonical MCP config");
+        codex
+            .prepare_mcp_for_run(&canonical, &run_context(&workspace), &mut env)
+            .await
+            .expect("prepare Codex MCP snapshot");
+
+        canonical.mcp_servers.clear();
+        let start = codex.build_thread_start_params(workspace.path());
+        let start_wire = serde_json::to_value(&start).expect("serialize thread start params");
+        let resume = Codex::build_thread_resume_params(
+            start,
+            "thread-valid".to_string(),
+            PathBuf::from("/tmp/rollout.jsonl"),
+        );
+        let resume_wire = serde_json::to_value(&resume).expect("serialize thread resume params");
+
+        assert_eq!(
+            start_wire["config"]["mcp_servers"],
+            resume_wire["config"]["mcp_servers"]
+        );
+        assert_eq!(resume_wire["threadId"], json!("thread-valid"));
+        assert_eq!(
+            start_wire["config"]["mcp_servers"]["local"]["env"]["TOKEN"],
+            json!("fixed-secret")
+        );
+        assert_eq!(
+            start_wire["config"]["mcp_servers"]["remote"]["http_headers"]["Authorization"],
+            json!("Bearer fixed-secret")
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn codex_real_app_server_preserves_global_and_project_config_bytes() {
+        let workspace = TempDir::new().expect("create workspace");
+        let codex_home = workspace.path().join("user-codex-home");
+        std::fs::create_dir_all(&codex_home).expect("create Codex home");
+        let global_config = codex_home.join("config.toml");
+        let project_config_dir = workspace.path().join(".codex");
+        fs::create_dir_all(&project_config_dir).expect("create project Codex config directory");
+        let project_config = project_config_dir.join("config.toml");
+        let global_bytes = b"[mcp_servers.global]\ncommand = \"global-secret\"\n";
+        let project_bytes = b"[mcp_servers.project]\ncommand = \"project-secret\"\n";
+        std::fs::write(&global_config, global_bytes).expect("write global config sentinel");
+        std::fs::write(&project_config, project_bytes).expect("write project config sentinel");
+        let captured_thread = workspace.path().join("captured-thread-start.json");
+        let captured_home = workspace.path().join("captured-codex-home.txt");
+        let app_server_script = workspace.path().join("fake-codex-app-server.sh");
+        write_executable_script(
+            &app_server_script,
+            "#!/bin/sh\nIFS= read -r initialize_request\nprintf '%s\\n' '{\"id\":1,\"result\":{\"userAgent\":\"fake-codex\",\"codexHome\":\"/tmp/fake-codex-home\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}'\nIFS= read -r initialized_notification\nIFS= read -r thread_request\nprintf '%s' \"$thread_request\" > \"$CAPTURED_THREAD\"\nprintf '%s' \"$CODEX_HOME\" > \"$CAPTURED_HOME\"\nexit 0\n",
+        );
+        let mut codex = test_codex();
+        codex.test_base_command = Some(app_server_script.to_string_lossy().to_string());
+        codex.cmd.env = Some(HashMap::from([
+            (
+                "CODEX_HOME".to_string(),
+                codex_home.to_string_lossy().to_string(),
+            ),
+            (
+                "CAPTURED_THREAD".to_string(),
+                captured_thread.to_string_lossy().to_string(),
+            ),
+            (
+                "CAPTURED_HOME".to_string(),
+                captured_home.to_string_lossy().to_string(),
+            ),
+        ]));
+        let mut env = execution_env(&workspace);
+
+        let prepared = codex
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(&workspace),
+                &mut env,
+            )
+            .await
+            .expect("prepare empty Codex MCP snapshot");
+        let params = serde_json::to_value(codex.build_thread_start_params(workspace.path()))
+            .expect("serialize thread start params");
+
+        assert_eq!(params["config"]["mcp_servers"], json!({}));
+        let thread_params = codex.build_thread_start_params(workspace.path());
+        let command_parts = codex
+            .build_command_builder()
+            .unwrap()
+            .build_initial()
+            .unwrap();
+        let mut spawned = codex
+            .spawn_app_server(
+                workspace.path(),
+                command_parts,
+                &env,
+                move |client, _| async move {
+                    client.start_thread(thread_params).await?;
+                    Ok(())
+                },
+            )
+            .await
+            .expect("spawn fake Codex app server through real process boundary");
+        let exit_signal = spawned.exit_signal.take().expect("Codex exit signal");
+        tokio::time::timeout(Duration::from_secs(5), exit_signal)
+            .await
+            .expect("fake Codex app server exit timeout")
+            .expect("receive fake Codex app server exit");
+
+        assert_eq!(std::fs::read(&global_config).unwrap(), global_bytes);
+        assert_eq!(std::fs::read(&project_config).unwrap(), project_bytes);
+        assert_eq!(
+            fs::read_to_string(&captured_home).unwrap(),
+            codex_home.to_string_lossy()
+        );
+        let thread_request: serde_json::Value =
+            serde_json::from_slice(&fs::read(&captured_thread).unwrap()).unwrap();
+        assert_eq!(thread_request["method"], json!("thread/start"));
+        assert_eq!(thread_request["params"]["config"]["mcp_servers"], json!({}));
+        assert!(prepared.into_cleanup().is_none());
+    }
+
+    #[tokio::test]
+    async fn codex_rejects_unsupported_transport_and_unverified_command_override() {
+        let workspace = TempDir::new().expect("create workspace");
+        let mut env = execution_env(&workspace);
+        let sse: MemberMcpConfig = serde_json::from_value(json!({
+            "mcpServers": {
+                "events": {"type": "sse", "url": "https://example.test/events"}
+            }
+        }))
+        .expect("deserialize SSE config");
+        let error = test_codex()
+            .prepare_mcp_for_run(&sse, &run_context(&workspace), &mut env)
+            .await
+            .expect_err("Codex must reject SSE before spawn");
+        assert!(matches!(error, ExecutorError::McpNotSupported));
+
+        let mut overridden = test_codex();
+        overridden.cmd = CmdOverrides {
+            base_command_override: Some("unverified-codex".to_string()),
+            ..Default::default()
+        };
+        let error = overridden
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(&workspace),
+                &mut env,
+            )
+            .await
+            .expect_err("custom Codex command must fail closed");
+        assert!(matches!(error, ExecutorError::Configuration(_)));
+    }
+
+    #[tokio::test]
+    async fn codex_spawn_fails_closed_before_command_resolution_without_preparation() {
+        let workspace = TempDir::new().expect("create workspace");
+        let mut codex = test_codex();
+        codex.cmd.base_command_override = Some("definitely-not-a-real-codex-command".to_string());
+
+        let error = codex
+            .spawn(workspace.path(), "hello", &execution_env(&workspace))
+            .await
+            .expect_err("unprepared Codex spawn must fail closed");
+
+        assert!(matches!(error, ExecutorError::McpIsolationNotImplemented));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_rejects_base_command_added_after_preparation_before_spawn() {
+        let workspace = TempDir::new().expect("create workspace");
+        let marker = workspace.path().join("app-server-started");
+        let app_server_script = workspace.path().join("must-not-start-codex.sh");
+        write_executable_script(
+            &app_server_script,
+            "#!/bin/sh\nprintf started > \"$START_MARKER\"\nwhile :; do sleep 1; done\n",
+        );
+        let mut codex = test_codex();
+        let mut env = execution_env(&workspace);
+        let _prepared = codex
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(&workspace),
+                &mut env,
+            )
+            .await
+            .expect("prepare Codex MCP snapshot");
+        codex.cmd.base_command_override = Some(app_server_script.to_string_lossy().to_string());
+        env.insert("START_MARKER", marker.to_string_lossy().to_string());
+
+        let error = codex
+            .spawn(workspace.path(), "hello", &env)
+            .await
+            .expect_err("post-preparation Codex command override must fail");
+
+        assert!(matches!(error, ExecutorError::Configuration(_)));
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn codex_runtime_snapshot_debug_redacts_mcp_secrets() {
+        let workspace = TempDir::new().expect("create workspace");
+        let secret = "codex-mcp-secret-never-log";
+        let canonical: MemberMcpConfig = serde_json::from_value(json!({
+            "mcpServers": {
+                "local": {"command": "/bin/echo", "env": {"TOKEN": secret}}
+            }
+        }))
+        .expect("deserialize secret config");
+        let mut codex = test_codex();
+        let mut env = execution_env(&workspace);
+        let prepared = codex
+            .prepare_mcp_for_run(&canonical, &run_context(&workspace), &mut env)
+            .await
+            .expect("prepare Codex snapshot");
+
+        let snapshot_debug = format!("{:?}", codex.runtime_mcp_snapshot.as_ref().unwrap());
+        assert!(!snapshot_debug.contains(secret));
+        assert!(!format!("{codex:?}").contains(secret));
+        assert!(!format!("{prepared:?}").contains(secret));
+    }
+
+    #[test]
+    fn codex_mcp_translation_rejects_unknown_fields_without_echoing_secrets() {
+        let secret = "unknown-field-secret";
+        let canonical: MemberMcpConfig = serde_json::from_value(json!({
+            "mcpServers": {
+                "local": {"command": "/bin/echo", "vendorSecret": secret}
+            }
+        }))
+        .expect("deserialize config");
+
+        let error = build_codex_mcp_servers(&canonical).expect_err("unknown field must fail");
+        assert!(!error.to_string().contains(secret));
     }
 
     #[test]

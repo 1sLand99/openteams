@@ -5,27 +5,33 @@
 // Exits non-zero if any acceptance scenario fails.
 
 import { readFileSync } from 'node:fs';
-import { teamPresetsApi } from '../lib/api';
+import { chatSessionsApi, teamPresetsApi } from '../lib/api';
+import { memberMcpServersJson } from './team/memberMcpConfig';
 import {
   addCustomMemberDraft,
   buildTemplateMemberSpecs,
   commitMemberSystemPromptDraft,
   commitTeamProtocolDraft,
   createTeamPresetDraft,
+  teamPresetDetailToDraft,
   teamPresetDraftToPayload,
   teamTemplateSessionUpdatePayload,
   validateMemberToolsEnabledDraft,
   validateTeamPresetDraft,
 } from './TeamTemplatesPage';
 import type { AgentRuntimeStatus } from '../types';
-import type {
-  ChatMemberPreset,
-  ChatTeamPreset,
-  CreateTeamPresetRequest,
-  TeamPresetListResponse,
-  TeamPresetMemberWrite,
-  TeamPresetSummary,
-  UpdateTeamPresetRequest,
+import {
+  AcpAccessMode,
+  AcpApprovalMode,
+  BaseCodingAgent,
+  type ChatMemberPreset,
+  type ChatTeamPreset,
+  type CreateTeamPresetRequest,
+  type MemberExecutionConfig,
+  type TeamPresetListResponse,
+  type TeamPresetMemberWrite,
+  type TeamPresetSummary,
+  type UpdateTeamPresetRequest,
 } from '../../../shared/types';
 
 type AcceptanceStatus = 'PASS' | 'FAIL';
@@ -41,6 +47,48 @@ type AcceptanceRecord = {
 
 const records: AcceptanceRecord[] = [];
 let failures = 0;
+
+// Fake secrets used by the fixtures. Failure logs and the printed acceptance
+// snapshot must redact them so test output never prints config secrets.
+const FAKE_CONFIG_SECRETS = [
+  'fake-template-token',
+  'fake-template-header',
+  'mutated-after-apply',
+  'mutated-after-reapply',
+  'mutated-on-template',
+];
+const redactFakeConfigSecretsInText = (text: string): string => {
+  let redacted = text;
+  for (const secret of FAKE_CONFIG_SECRETS) {
+    redacted = redacted.split(secret).join('[REDACTED]');
+  }
+  return redacted;
+};
+const redactFakeConfigSecrets = (value: unknown): string =>
+  redactFakeConfigSecretsInText(
+    typeof value === 'string' ? value : (JSON.stringify(value) ?? ''),
+  );
+
+const fakeExecutionConfig: MemberExecutionConfig = {
+  runner_type: BaseCodingAgent.CODEX,
+  model_name: 'template-model',
+  thinking_effort: 'high',
+  model_variant: 'fake-variant',
+  acp: {
+    access_mode: AcpAccessMode.workspace_only,
+    approval_mode: AcpApprovalMode.auto_reject,
+    additional_directories: ['/fake/template/context'],
+  },
+  mcp: {
+    mcpServers: {
+      fake_local: {
+        command: 'fake-mcp-server',
+        env: { API_TOKEN: 'fake-template-token' },
+        headers: { Authorization: 'Bearer fake-template-header' },
+      },
+    },
+  },
+};
 
 const source = readFileSync(new URL('./TeamTemplatesPage.tsx', import.meta.url), 'utf8');
 const backendMigrationSource = readFileSync(
@@ -84,7 +132,9 @@ const assertAcceptance: (
 ) => void = (condition, message, detail) => {
   if (!condition) {
     throw new Error(
-      detail === undefined ? message : `${message}: ${JSON.stringify(detail)}`,
+      detail === undefined
+        ? message
+        : `${message}: ${redactFakeConfigSecrets(detail)}`,
     );
   }
 };
@@ -126,6 +176,9 @@ const memberWriteToPreset = (member: TeamPresetMemberWrite): ChatMemberPreset =>
   default_workspace_path: member.default_workspace_path ?? null,
   selected_skill_ids: member.selected_skill_ids,
   tools_enabled: member.tools_enabled ?? {},
+  execution_config: member.execution_config
+    ? structuredClone(member.execution_config)
+    : undefined,
   is_builtin: false,
   enabled: member.enabled ?? true,
 });
@@ -161,6 +214,54 @@ globalThis.fetch = (async (input: RequestInfo | URL, options?: RequestInit) => {
     const team = writeToTeam(payload);
     savedTeams.set(team.id, team);
     return apiResponse(team);
+  }
+
+  if (
+    url === '/api/chat/sessions/session-export-1/presets/snapshot' &&
+    method === 'POST'
+  ) {
+    const exportedTeam: ChatTeamPreset = {
+      id: 'session_export_team',
+      name: 'Exported session team',
+      description: '',
+      members: [
+        {
+          id: 'export_lead',
+          name: 'Exported lead',
+          description: '',
+          runner_type: 'GEMINI',
+          recommended_model: 'gemini-template-model',
+          execution_config: structuredClone(fakeExecutionConfig),
+          system_prompt: 'Exported lead prompt.',
+          default_workspace_path: null,
+          selected_skill_ids: [],
+          tools_enabled: { web_search: true },
+          is_builtin: false,
+          enabled: true,
+        },
+        {
+          id: 'export_legacy',
+          name: 'Exported legacy',
+          description: '',
+          runner_type: null,
+          recommended_model: null,
+          system_prompt: '',
+          default_workspace_path: null,
+          selected_skill_ids: [],
+          tools_enabled: {},
+          is_builtin: false,
+          enabled: true,
+        },
+      ],
+      lead_member_id: 'export_lead',
+      workflow_steps: [],
+      team_protocol: 'Exported protocol.',
+      is_builtin: false,
+      enabled: true,
+      tier: 'standard',
+    };
+    savedTeams.set(exportedTeam.id, exportedTeam);
+    return apiResponse({ team: exportedTeam, overwritten: false });
   }
 
   if (url.startsWith('/api/team-presets/')) {
@@ -262,7 +363,12 @@ const buildCompleteCreatePayload = (): CreateTeamPresetRequest => {
           recommendedModel: 'gpt-5.2-codex',
           systemPrompt: '### Lead Role\nCoordinate the template rollout.',
           selectedSkillIdsText: 'planning, review',
-          toolsEnabledText: '{"mcpServers":{"filesystem":{"enabled":true}}}',
+          toolsEnabledText: '{"web_search":true}',
+          executionConfig: fakeExecutionConfig,
+          mcpConfigText: memberMcpServersJson({
+            id: 'lead',
+            execution_config: fakeExecutionConfig,
+          }),
         };
       }
       return {
@@ -272,7 +378,7 @@ const buildCompleteCreatePayload = (): CreateTeamPresetRequest => {
         recommendedModel: 'gpt-5.2-codex',
         description: 'Owns validation',
         selectedSkillIdsText: 'qa, smoke',
-        toolsEnabledText: '{"mcpServers":{"browser":{"enabled":true}}}',
+        toolsEnabledText: '{"browser":true}',
       };
     }),
   };
@@ -295,7 +401,7 @@ await runScenario(
   [
     '从新建入口构造聚合 draft。',
     '填写团队名、描述、流程步骤、团队协议。',
-    '添加自定义成员并编辑成员名、职责、技能和 MCP。',
+    '添加自定义成员并编辑成员名、职责、技能、工具和 execution config。',
     '通过 teamPresetsApi.create 保存，并通过 list/get 模拟刷新回填。',
   ],
   async () => {
@@ -318,6 +424,12 @@ await runScenario(
       refreshedDetail.workflow_steps.length === 2,
       'blank workflow steps should be filtered',
       refreshedDetail.workflow_steps,
+    );
+    assertAcceptance(
+      JSON.stringify(refreshedDetail.members[0]?.execution_config) ===
+        JSON.stringify(fakeExecutionConfig),
+      'complete execution config should survive create and refresh',
+      refreshedDetail.members[0],
     );
     assertAcceptance(
       source.includes('<AgentMarkdown content={viewDetail.team_protocol}') &&
@@ -369,11 +481,11 @@ await runScenario(
   '3. 编辑自定义模板流',
   {
     template: createPayload.id,
-    edit: 'protocol/workflow/member role/skills/MCP/add/delete member',
+    edit: 'protocol/workflow/member role/skills/tools/add/delete member',
   },
   [
     '加载已创建自定义模板详情。',
-    '修改团队协议、流程、成员职责、技能和 MCP。',
+    '修改团队协议、流程、成员职责、技能和工具设置。',
     '添加成员后再删除一个成员并保存。',
     '通过 get 模拟刷新后确认改动持久化。',
   ],
@@ -398,7 +510,8 @@ await runScenario(
           system_prompt: '### Updated Lead\nOwn the final acceptance call.',
           default_workspace_path: null,
           selected_skill_ids: ['planning', 'release'],
-          tools_enabled: { mcpServers: { git: { enabled: true } } },
+          tools_enabled: { git: true },
+          execution_config: current.members[0]?.execution_config,
           enabled: true,
         },
         {
@@ -410,7 +523,7 @@ await runScenario(
           system_prompt: 'Review the release checklist.',
           default_workspace_path: null,
           selected_skill_ids: ['review'],
-          tools_enabled: { mcpServers: { browser: { enabled: true } } },
+          tools_enabled: { browser: true },
           enabled: true,
         },
       ],
@@ -431,18 +544,24 @@ await runScenario(
       refreshed.members,
     );
     assertAcceptance(
+      JSON.stringify(refreshed.members[0]?.execution_config) ===
+        JSON.stringify(fakeExecutionConfig),
+      'complete execution config should survive update and refresh',
+      refreshed.members[0],
+    );
+    assertAcceptance(
       validateMemberToolsEnabledDraft(createTeamPresetDraft(), 'lead') === null,
-      'member-scoped MCP validation should accept default JSON',
+      'member-scoped tools validation should accept default JSON',
     );
     assertAcceptance(
       source.includes('Invalid JSON format. Please check your syntax.'),
-      'invalid MCP JSON should have a visible save-blocking error',
+      'invalid tools JSON should have a visible save-blocking error',
     );
 
     return [
-      '自定义模板更新后刷新仍保留新团队协议、流程、成员职责、技能和 MCP。',
+      '自定义模板更新后刷新仍保留协议、流程、职责、技能、工具和 execution config。',
       '新增成员 release_reviewer 持久化，原 Template QA 已删除。',
-      '非法 MCP JSON 错误文案和成员级校验路径仍存在。',
+      '非法工具 JSON 错误文案和成员级校验路径仍存在。',
     ];
   },
 );
@@ -536,8 +655,36 @@ await runScenario(
     );
     assertAcceptance(
       JSON.stringify(specs[0]?.toolsEnabled) === JSON.stringify(detail.members[0]?.tools_enabled),
-      'MCP/tool config should be copied',
+      'tools config should be copied independently of MCP',
       specs[0],
+    );
+    assertAcceptance(
+      JSON.stringify(specs[0]?.executionConfig) ===
+        JSON.stringify({
+          ...fakeExecutionConfig,
+          runner_type: BaseCodingAgent.CODEX,
+          model_name: 'gpt-5.2-codex',
+        }),
+      'runtime fallback should replace only runner and model in the complete config',
+      specs[0],
+    );
+    assertAcceptance(
+      JSON.stringify(specs[1]?.executionConfig.mcp) ===
+        JSON.stringify({ mcpServers: {} }),
+      'legacy missing execution config should become explicit empty MCP',
+      specs[1],
+    );
+    const appliedFakeServer = specs[0]?.executionConfig.mcp?.mcpServers
+      .fake_local as { env: { API_TOKEN: string } };
+    appliedFakeServer.env.API_TOKEN = 'mutated-after-apply';
+    assertAcceptance(
+      (
+        detail.members[0]?.execution_config?.mcp?.mcpServers.fake_local as {
+          env: { API_TOKEN: string };
+        }
+      ).env.API_TOKEN === 'fake-template-token',
+      'applied member config should not share nested objects with the template',
+      { detail: detail.members[0], spec: specs[0] },
     );
     assertAcceptance(
       projectProtocol.content === detail.team_protocol && projectProtocol.enabled,
@@ -546,14 +693,203 @@ await runScenario(
     );
 
     return [
-      `导入规格生成 ${specs.length} 个成员，名称、职责、技能和 MCP 与模板一致。`,
+      `导入规格生成 ${specs.length} 个成员，工具设置与完整 execution config 分离复制。`,
+      'fallback 仅覆盖 runner/model，legacy 成员获得显式空 MCP，深拷贝后模板不受成员修改影响。',
       '负责人角色写入会话，团队协议写入项目级唯一真源。',
     ];
   },
 );
 
+await runScenario(
+  '6. 会话导出再应用流',
+  {
+    session: 'session-export-1',
+    template: 'session_export_team',
+  },
+  [
+    '通过 chatSessionsApi.createPresetSnapshot 导出会话为自定义模板。',
+    '重新读取模板并回显到编辑草稿。',
+    '用可用 runtime 再应用模板，确认 MCP 保留且仅 runner/model 回退覆盖。',
+    '确认导出模板与项目成员配置双向互不影响。',
+  ],
+  async () => {
+    const snapshot = await chatSessionsApi.createPresetSnapshot(
+      'session-export-1',
+      {
+        team_preset_id: 'session_export_team',
+        name: 'Exported session team',
+        description: null,
+        overwrite_strategy: null,
+      },
+    );
+    const exportedDetail = await teamPresetsApi.get(snapshot.team.id);
+    const exportedDraft = teamPresetDetailToDraft(exportedDetail);
+    const specs = buildTemplateMemberSpecs(
+      exportedDetail,
+      '/workspace/exported',
+      [runtime],
+    );
+    const leadSpec = specs[0];
+
+    assertAcceptance(
+      snapshot.overwritten === false && snapshot.team.id === 'session_export_team',
+      'first export should create the custom template without overwrite',
+    );
+    assertAcceptance(
+      exportedDraft.members[0]?.mcpConfigText.includes('fake_local') ?? false,
+      'edit draft should echo the exported canonical MCP servers',
+    );
+    assertAcceptance(
+      leadSpec?.executionConfig.runner_type === BaseCodingAgent.CODEX &&
+        leadSpec.executionConfig.model_name === 'gpt-5.2-codex',
+      'unavailable template runner should fall back to the available runtime',
+    );
+    assertAcceptance(
+      Boolean(leadSpec?.executionConfig.mcp?.mcpServers.fake_local) &&
+        leadSpec?.executionConfig.thinking_effort === 'high' &&
+        leadSpec?.executionConfig.model_variant === 'fake-variant' &&
+        leadSpec?.executionConfig.acp?.access_mode === 'workspace_only',
+      'export re-apply should keep MCP and the remaining execution fields',
+    );
+    assertAcceptance(
+      JSON.stringify(specs[1]?.executionConfig.mcp) ===
+        JSON.stringify({ mcpServers: {} }),
+      'legacy exported member should get an explicit empty MCP',
+    );
+    assertAcceptance(
+      JSON.stringify(leadSpec?.toolsEnabled) ===
+        JSON.stringify({ web_search: true }),
+      'tools toggles should stay separate from MCP',
+    );
+
+    const appliedServer = leadSpec?.executionConfig.mcp?.mcpServers
+      .fake_local as { env: { API_TOKEN: string } };
+    appliedServer.env.API_TOKEN = 'mutated-after-reapply';
+    assertAcceptance(
+      (
+        exportedDetail.members[0]?.execution_config?.mcp?.mcpServers
+          .fake_local as { env: { API_TOKEN: string } }
+      ).env.API_TOKEN === 'fake-template-token',
+      're-applied member config must not share nested objects with the exported template',
+    );
+    const rebuiltSpecs = buildTemplateMemberSpecs(
+      exportedDetail,
+      '/workspace/exported',
+      [runtime],
+    );
+    assertAcceptance(
+      (
+        rebuiltSpecs[0]?.executionConfig.mcp?.mcpServers.fake_local as {
+          env: { API_TOKEN: string };
+        }
+      ).env.API_TOKEN === 'fake-template-token',
+      'rebuilding specs from the template should ignore earlier mutations',
+    );
+
+    // Reverse direction: mutating the exported template afterwards must not
+    // reach the member specs that were already created from it.
+    const templateSideServer = exportedDetail.members[0]?.execution_config?.mcp
+      ?.mcpServers.fake_local as { env: { API_TOKEN: string } };
+    templateSideServer.env.API_TOKEN = 'mutated-on-template';
+    assertAcceptance(
+      (
+        rebuiltSpecs[0]?.executionConfig.mcp?.mcpServers.fake_local as {
+          env: { API_TOKEN: string };
+        }
+      ).env.API_TOKEN === 'fake-template-token',
+      'mutating the exported template must not change already-created member specs',
+    );
+    assertAcceptance(
+      rebuiltSpecs[0]?.executionConfig.acp?.additional_directories?.length === 1,
+      'template-side edits must not leak into created member specs',
+    );
+
+    return [
+      '会话快照导出为自定义模板，编辑草稿回显 canonical MCP。',
+      '再应用时不可用 runner 回退到可用 runtime，仅覆盖 runner/model。',
+      'legacy 成员获得显式空 MCP，模板与已创建成员双向修改互不影响。',
+    ];
+  },
+);
+
+await runScenario(
+  '7. 敏感值无提示与错误脱敏流',
+  {
+    scope: 'template UI, locales, MCP validation',
+  },
+  [
+    '确认模板页面源码不含敏感值复制提示。',
+    '确认全部 locale 文案不含敏感值复制提示。',
+    '确认 MCP 校验错误不回显配置值。',
+    '确认验收快照与失败诊断不含固定假秘密。',
+  ],
+  () => {
+    assertAcceptance(
+      !/(sensitive value|secret value|敏感)/i.test(source),
+      'template page source should not contain sensitive-value copy hints',
+    );
+    for (const localeName of ['en', 'es', 'fr', 'ja', 'ko', 'zh']) {
+      const localeSource = readFileSync(
+        new URL(`../locales/${localeName}/team-templates.json`, import.meta.url),
+        'utf8',
+      );
+      assertAcceptance(
+        !/(sensitive|secret|敏感)/i.test(localeSource),
+        `locale ${localeName} should not contain sensitive-value copy hints`,
+      );
+    }
+
+    const secretDraft = createTeamPresetDraft();
+    const brokenSecretForm = {
+      ...secretDraft,
+      name: 'Secret-bearing team',
+      members: [
+        {
+          ...secretDraft.members[0]!,
+          mcpConfigText:
+            '{ "mcpServers": { "fake_local": { "env": { "API_TOKEN": "fake-template-token" } }',
+        },
+      ],
+    };
+    const mcpIssue = validateTeamPresetDraft(brokenSecretForm).issue;
+    assertAcceptance(
+      Boolean(mcpIssue) && !(mcpIssue?.message ?? '').includes('fake-template-token'),
+      'MCP validation errors must never echo config values',
+    );
+
+    const apiSource = readFileSync(new URL('../lib/api.ts', import.meta.url), 'utf8');
+    assertAcceptance(
+      apiSource.includes('/presets/snapshot') &&
+        apiSource.includes('createPresetSnapshot'),
+      'session export should use the preset snapshot endpoint',
+    );
+
+    const recordsSnapshot = JSON.stringify(records);
+    assertAcceptance(
+      !FAKE_CONFIG_SECRETS.some((secret) => recordsSnapshot.includes(secret)),
+      'acceptance records must not contain fake config secrets',
+    );
+    assertAcceptance(
+      redactFakeConfigSecrets({ token: 'fake-template-token' }).includes(
+        '[REDACTED]',
+      ) &&
+        !redactFakeConfigSecrets({ token: 'fake-template-token' }).includes(
+          'fake-template-token',
+        ),
+      'failure diagnostics should redact fake config secrets',
+    );
+
+    return [
+      '页面源码与 6 个 locale 均无敏感值复制提示。',
+      '非法 MCP JSON 的错误只含通用文案，不泄漏配置值。',
+      '会话导出走 /presets/snapshot 端点。',
+      '验收记录与失败诊断均经脱敏，不含固定假秘密。',
+    ];
+  },
+);
+
 console.log('TeamTemplatesAcceptance');
-console.log(JSON.stringify(records, null, 2));
+console.log(redactFakeConfigSecretsInText(JSON.stringify(records, null, 2)));
 
 if (failures > 0) {
   console.error(`\n${failures} acceptance scenario(s) FAILED`);

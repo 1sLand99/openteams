@@ -15,7 +15,10 @@ use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
     AcpCapabilityProbe, AcpClientServicePolicy, AcpConfigChoice, AcpConfigOptionKind,
     AcpConfigOptionSnapshot, AcpConfigSource, AcpExecutionOptions,
-    mcp::{AcpMcpPolicy, resolve_effective_mcp_config},
+    mcp::{
+        AcpMcpPolicy, load_prepared_acp_mcp_config, pin_mcp_run_environment,
+        prepare_acp_mcp_for_run,
+    },
 };
 use crate::{
     approvals::ExecutorApprovalService,
@@ -28,7 +31,8 @@ use crate::{
         StandardCodingAgentExecutor,
         utils::{json_has_nonempty_string, read_json_file},
     },
-    mcp_config::{McpConfig, read_canonical_mcp_config},
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun, PrivateMcpRunDirectory},
     model_discovery::{
         discover_model_map_from_cli_command, model_ids_from_model_map_json, read_config_value,
     },
@@ -62,6 +66,8 @@ pub struct KimiCode {
 impl KimiCode {
     const BASE_COMMAND: &'static str = "kimi";
     const TERMINAL_AUTH_METHOD: &'static str = "login";
+    const CODE_HOME_ENV: &'static str = "KIMI_CODE_HOME";
+    const SHARE_DIR_ENV: &'static str = "KIMI_SHARE_DIR";
 
     pub fn base_command() -> &'static str {
         Self::BASE_COMMAND
@@ -149,11 +155,7 @@ impl KimiCode {
             harness = harness.with_config_override(selection);
         }
 
-        let canonical = match kimi_mcp_config_path(Some(env)) {
-            Some(path) => read_canonical_mcp_config(&path, &McpConfig::canonical_acp()).await?,
-            None => serde_json::json!({ "mcpServers": {} }),
-        };
-        let effective = resolve_effective_mcp_config(&canonical, &self.acp_mcp_policy)?;
+        let effective = load_prepared_acp_mcp_config(env).await?;
         tracing::debug!(
             server_count = effective.servers.len(),
             config_hash = %effective.config_hash,
@@ -242,8 +244,68 @@ impl KimiCode {
     }
 }
 
+async fn copy_optional_kimi_run_file(
+    source_home: Option<&Path>,
+    relative_path: &Path,
+    directory: &PrivateMcpRunDirectory,
+) -> Result<(), ExecutorError> {
+    let Some(source_home) = source_home else {
+        return Ok(());
+    };
+    match tokio::fs::read(source_home.join(relative_path)).await {
+        Ok(contents) => {
+            directory.write_file(relative_path, &contents)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ExecutorError::Io(error)),
+    }
+}
+
 #[async_trait]
 impl StandardCodingAgentExecutor for KimiCode {
+    async fn prepare_mcp_for_run(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        context: &McpRunContext,
+        env: &mut ExecutionEnv,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        let source_env = env.clone().with_profile(&self.cmd);
+        let source_home = kimi_code_home(Some(&source_env));
+        let prepared =
+            prepare_acp_mcp_for_run(canonical, context, env, &mut self.cmd, "kimi-acp-mcp")?;
+        let directory = PrivateMcpRunDirectory::create(context, "kimi-code-home")?;
+        copy_optional_kimi_run_file(source_home.as_deref(), Path::new("config.toml"), &directory)
+            .await?;
+        copy_optional_kimi_run_file(
+            source_home.as_deref(),
+            Path::new("credentials/kimi-code.json"),
+            &directory,
+        )
+        .await?;
+        directory.write_file(
+            "mcp.json",
+            &serde_json::to_vec_pretty(&serde_json::json!({"mcpServers": {}}))?,
+        )?;
+        let run_home = directory.path().to_string_lossy().into_owned();
+        pin_mcp_run_environment(env, &mut self.cmd, Self::CODE_HOME_ENV, run_home.clone());
+        pin_mcp_run_environment(env, &mut self.cmd, Self::SHARE_DIR_ENV, run_home);
+        Ok(prepared.with_cleanup(directory.into_cleanup()))
+    }
+
+    fn overlay_acp_execution_options(&mut self, higher_priority: &AcpExecutionOptions) {
+        let inherited = self.acp.clone().unwrap_or_default();
+        self.acp = Some(inherited.overlay(higher_priority));
+    }
+
+    fn acp_full_access_enabled(&self) -> bool {
+        self.acp
+            .as_ref()
+            .and_then(|options| options.access_mode)
+            .unwrap_or_default()
+            == AcpAccessMode::FullAccess
+    }
+
     fn is_authenticated(&self, env: &ExecutionEnv) -> bool {
         let env = env.clone().with_profile(&self.cmd);
         let homes = kimi_code_homes(Some(&env));
@@ -553,6 +615,11 @@ mod tests {
     use super::*;
     use crate::env::RepoContext;
 
+    fn run_context(workspace: &Path) -> McpRunContext {
+        McpRunContext::new(workspace, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .expect("run context")
+    }
+
     fn kimi() -> KimiCode {
         KimiCode {
             append_prompt: AppendPrompt::default(),
@@ -679,8 +746,18 @@ mod tests {
                 ..Default::default()
             });
 
+            let mut run_env = env.clone();
+            let prepared = executor
+                .prepare_mcp_for_run(
+                    &MemberMcpConfig::default(),
+                    &run_context(temp.path()),
+                    &mut run_env,
+                )
+                .await
+                .expect("Kimi MCP preparation");
+
             let harness = executor
-                .acp_harness(&env)
+                .acp_harness(&run_env)
                 .await
                 .expect("build Kimi harness");
             let (option_id, value) = harness.required_session_mode().expect("required Kimi mode");
@@ -689,7 +766,287 @@ mod tests {
                 value,
                 &agent_client_protocol::schema::v1::SessionConfigOptionValue::value_id("default")
             );
+            drop(prepared.into_cleanup());
         }
+    }
+
+    #[tokio::test]
+    async fn public_preparation_builds_private_home_preserves_auth_and_clears_vendor_mcp() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source_home = workspace.path().join("source-kimi-home");
+        tokio::fs::create_dir_all(source_home.join("credentials"))
+            .await
+            .expect("credentials directory");
+        let source_config_path = source_home.join("config.toml");
+        let source_credentials_path = source_home.join("credentials/kimi-code.json");
+        let source_mcp_path = source_home.join("mcp.json");
+        tokio::fs::write(
+            &source_config_path,
+            "[providers.fixture]\ntype = \"openai\"\n",
+        )
+        .await
+        .expect("Kimi config");
+        tokio::fs::write(
+            &source_credentials_path,
+            r#"{"access_token":"fixture-login-token"}"#,
+        )
+        .await
+        .expect("Kimi credentials");
+        tokio::fs::write(
+            &source_mcp_path,
+            r#"{"mcpServers":{"ambient":{"command":"must-not-run"}}}"#,
+        )
+        .await
+        .expect("ambient Kimi MCP");
+        let original_config = tokio::fs::read(&source_config_path)
+            .await
+            .expect("read original Kimi config");
+        let original_credentials = tokio::fs::read(&source_credentials_path)
+            .await
+            .expect("read original Kimi credentials");
+        let original_mcp = tokio::fs::read(&source_mcp_path)
+            .await
+            .expect("read original Kimi MCP");
+        let mut executor = kimi();
+        executor.acp_mcp_policy = AcpMcpPolicy {
+            allowed_server_names: Some(Default::default()),
+            disabled_server_names: Default::default(),
+        };
+        let canonical = MemberMcpConfig {
+            mcp_servers: [(
+                "member-only".to_string(),
+                serde_json::json!({"command": "/bin/echo"}),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+        env.insert(
+            KimiCode::CODE_HOME_ENV,
+            source_home.to_string_lossy().into_owned(),
+        );
+
+        let prepared = executor
+            .prepare_mcp_for_run(&canonical, &run_context(workspace.path()), &mut env)
+            .await
+            .expect("Kimi MCP preparation");
+        let run_home = PathBuf::from(env.get(KimiCode::CODE_HOME_ENV).expect("run Kimi home"));
+        let snapshot_path = PathBuf::from(
+            env.get(super::super::acp::mcp::PREPARED_ACP_MCP_SNAPSHOT_ENV)
+                .expect("prepared snapshot"),
+        );
+        let vendor_mcp: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(run_home.join("mcp.json"))
+                .await
+                .expect("run vendor MCP"),
+        )
+        .expect("parse run vendor MCP");
+        let effective = load_prepared_acp_mcp_config(&env)
+            .await
+            .expect("prepared member MCP");
+
+        assert_ne!(run_home, source_home);
+        assert_eq!(
+            env.get(KimiCode::SHARE_DIR_ENV),
+            env.get(KimiCode::CODE_HOME_ENV)
+        );
+        assert!(
+            vendor_mcp["mcpServers"]
+                .as_object()
+                .expect("server map")
+                .is_empty()
+        );
+        assert!(run_home.join("config.toml").is_file());
+        assert!(run_home.join("credentials/kimi-code.json").is_file());
+        assert_eq!(
+            tokio::fs::read(run_home.join("config.toml"))
+                .await
+                .expect("read bridged Kimi config"),
+            original_config,
+            "Kimi run home must receive an exact config copy"
+        );
+        assert_eq!(
+            tokio::fs::read(run_home.join("credentials/kimi-code.json"))
+                .await
+                .expect("read bridged Kimi credentials"),
+            original_credentials,
+            "Kimi run home must receive an exact credentials copy"
+        );
+        assert_eq!(
+            tokio::fs::read(&source_config_path)
+                .await
+                .expect("read source Kimi config after preparation"),
+            original_config
+        );
+        assert_eq!(
+            tokio::fs::read(&source_credentials_path)
+                .await
+                .expect("read source Kimi credentials after preparation"),
+            original_credentials
+        );
+        assert_eq!(
+            tokio::fs::read(&source_mcp_path)
+                .await
+                .expect("read source Kimi MCP after preparation"),
+            original_mcp
+        );
+        assert!(executor.is_authenticated(&env));
+        assert_eq!(effective.server_names(), ["member-only".to_string()].into());
+
+        drop(prepared.into_cleanup());
+        assert!(!run_home.exists());
+        assert!(!snapshot_path.exists());
+        assert_eq!(
+            tokio::fs::read(&source_config_path)
+                .await
+                .expect("read source Kimi config after cleanup"),
+            original_config
+        );
+        assert_eq!(
+            tokio::fs::read(&source_credentials_path)
+                .await
+                .expect("read source Kimi credentials after cleanup"),
+            original_credentials
+        );
+        assert_eq!(
+            tokio::fs::read(&source_mcp_path)
+                .await
+                .expect("read source Kimi MCP after cleanup"),
+            original_mcp
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_empty_member_map_overrides_ambient_kimi_mcp() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source_home = workspace.path().join("source-kimi-home");
+        tokio::fs::create_dir_all(source_home.join("credentials"))
+            .await
+            .expect("source Kimi home");
+        let source_config_path = source_home.join("config.toml");
+        let source_credentials_path = source_home.join("credentials/kimi-code.json");
+        let ambient_path = source_home.join("mcp.json");
+        tokio::fs::write(
+            &source_config_path,
+            "[providers.fixture]\ntype = \"openai\"\n",
+        )
+        .await
+        .expect("Kimi config");
+        tokio::fs::write(
+            &source_credentials_path,
+            r#"{"access_token":"fixture-login-token"}"#,
+        )
+        .await
+        .expect("Kimi credentials");
+        tokio::fs::write(
+            &ambient_path,
+            br#"{"mcpServers":{"ambient-global":{"command":"must-not-run"}}}"#,
+        )
+        .await
+        .expect("ambient Kimi MCP");
+        let original_config = tokio::fs::read(&source_config_path)
+            .await
+            .expect("read original Kimi config");
+        let original_credentials = tokio::fs::read(&source_credentials_path)
+            .await
+            .expect("read original Kimi credentials");
+        let original_mcp = tokio::fs::read(&ambient_path)
+            .await
+            .expect("read original Kimi MCP");
+        let mut executor = kimi();
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+        env.insert(
+            KimiCode::CODE_HOME_ENV,
+            source_home.to_string_lossy().into_owned(),
+        );
+
+        let prepared = executor
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(workspace.path()),
+                &mut env,
+            )
+            .await
+            .expect("empty Kimi MCP preparation");
+        let run_home = PathBuf::from(env.get(KimiCode::CODE_HOME_ENV).expect("run Kimi home"));
+        let run_vendor_mcp: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(run_home.join("mcp.json"))
+                .await
+                .expect("run vendor MCP"),
+        )
+        .expect("parse run vendor MCP");
+        let effective = load_prepared_acp_mcp_config(&env)
+            .await
+            .expect("prepared empty Kimi MCP");
+
+        assert!(ambient_path.is_file());
+        assert_ne!(run_home, source_home);
+        assert!(effective.server_names().is_empty());
+        assert!(
+            run_vendor_mcp["mcpServers"]
+                .as_object()
+                .expect("Kimi run MCP override")
+                .is_empty()
+        );
+        assert_eq!(
+            tokio::fs::read(run_home.join("config.toml"))
+                .await
+                .expect("read bridged Kimi config"),
+            original_config
+        );
+        assert_eq!(
+            tokio::fs::read(run_home.join("credentials/kimi-code.json"))
+                .await
+                .expect("read bridged Kimi credentials"),
+            original_credentials
+        );
+        assert_eq!(
+            tokio::fs::read(&source_config_path)
+                .await
+                .expect("read source Kimi config after preparation"),
+            original_config
+        );
+        assert_eq!(
+            tokio::fs::read(&source_credentials_path)
+                .await
+                .expect("read source Kimi credentials after preparation"),
+            original_credentials
+        );
+        assert_eq!(
+            tokio::fs::read(&ambient_path)
+                .await
+                .expect("read source Kimi MCP after preparation"),
+            original_mcp
+        );
+
+        drop(prepared.into_cleanup());
+        assert!(!run_home.exists());
+        assert_eq!(
+            tokio::fs::read(&source_config_path)
+                .await
+                .expect("read source Kimi config after cleanup"),
+            original_config
+        );
+        assert_eq!(
+            tokio::fs::read(&source_credentials_path)
+                .await
+                .expect("read source Kimi credentials after cleanup"),
+            original_credentials
+        );
+        assert_eq!(
+            tokio::fs::read(&ambient_path)
+                .await
+                .expect("read source Kimi MCP after cleanup"),
+            original_mcp
+        );
     }
 
     #[tokio::test]

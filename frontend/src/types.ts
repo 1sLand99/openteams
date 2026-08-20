@@ -460,6 +460,7 @@ export interface ProjectIssueIntegrationsResponse {
 export interface ProjectWorkItem {
   id: string;
   project_id: string;
+  parent_id: string | null;
   type: ProjectWorkItemType;
   status: ProjectWorkItemStatus;
   title: string;

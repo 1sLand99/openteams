@@ -89,12 +89,54 @@ jobs:
           cargo test --workspace
           pnpm run backend:lint
 
+  member-scoped-mcp-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: ./.github/actions/setup-node
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2025-12-04
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+          cache-provider: "github"
+          cache-on-failure: true
+          shared-key: "shared"
+          cache-all-crates: true
+
+      - name: Install sqlx-cli
+        uses: taiki-e/cache-cargo-install-action@v3
+        with:
+          tool: sqlx-cli@0.8.6
+          no-default-features: true
+          features: sqlite,postgres
+
+      - name: Member-scoped MCP E2E (offline, 14 runners)
+        run: cargo test -p server --features qa-mode --test member_scoped_mcp_e2e -- --nocapture
+
   test:
     if: ${{ always() }}
     runs-on: ubuntu-latest
     needs:
       - frontend
       - backend
+      - member-scoped-mcp-e2e
     steps:
       - name: Check aggregate test result
         env:

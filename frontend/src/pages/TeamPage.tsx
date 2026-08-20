@@ -15,12 +15,10 @@ import {
   agentRuntimeApi,
   chatAgentsApi,
   chatSessionsApi,
-  mcpServersApi,
   projectApi,
   sessionAgentsApi,
   skillsApi,
 } from "@/lib/api";
-import { McpConfigStrategyGeneral } from "@/lib/mcpConfigStrategy";
 import {
   TEAM_MEMBER_INVITE_TARGET_CHANGED_EVENT,
   clearTeamMemberInviteTarget,
@@ -35,13 +33,13 @@ import type {
   BackendChatSkill,
   BaseCodingAgent,
   JsonValue,
-  McpConfig,
 } from "@/types";
 import {
   getRunnerLabel,
   getRuntimeDisplayState,
 } from "./agent-runtime/agentRuntimeViewModel";
 import { TeamConfigTabs } from "./team/TeamConfigTabs";
+import { useMemberMcpEditor } from "./team/useMemberMcpEditor";
 import {
   TeamAddMemberButton,
   TeamMemberSidebar,
@@ -69,6 +67,7 @@ import {
   ProjectMemberType,
   type BaseCodingAgent as ProjectBaseCodingAgent,
   type MemberExecutionConfig as ProjectMemberExecutionConfig,
+  type ProjectMemberWithRuntime,
 } from "../../../shared/types";
 
 const createRunnerOptions = (
@@ -448,14 +447,6 @@ export function TeamPage() {
   const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [mcpConfig, setMcpConfig] = useState<McpConfig | null>(null);
-  const [mcpServersJson, setMcpServersJson] = useState("{}");
-  const [originalMcpServersJson, setOriginalMcpServersJson] = useState("{}");
-  const [mcpConfigPath, setMcpConfigPath] = useState("");
-  const [mcpLoading, setMcpLoading] = useState(false);
-  const [mcpApplying, setMcpApplying] = useState(false);
-  const [mcpError, setMcpError] = useState<string | null>(null);
-  const [mcpSuccess, setMcpSuccess] = useState(false);
   const [teamProtocolContent, setTeamProtocolContent] = useState("");
   const [originalTeamProtocolContent, setOriginalTeamProtocolContent] =
     useState("");
@@ -469,10 +460,8 @@ export function TeamPage() {
   const [addMemberMenuRequestId, setAddMemberMenuRequestId] = useState(0);
   const loadRequestIdRef = useRef(0);
   const memberAutoSaveTimerRef = useRef<number | null>(null);
-  const mcpAutoSaveTimerRef = useRef<number | null>(null);
   const teamProtocolAutoSaveTimerRef = useRef<number | null>(null);
   const latestMemberDraftRef = useRef<MemberFormState | null>(null);
-  const latestMcpServersJsonRef = useRef(mcpServersJson);
   const latestTeamProtocolContentRef = useRef(teamProtocolContent);
   const memberFormSyncRef = useRef<{
     memberId: string;
@@ -625,9 +614,7 @@ export function TeamPage() {
     thinkingEffort,
     workspacePath,
   };
-  latestMcpServersJsonRef.current = mcpServersJson;
   latestTeamProtocolContentRef.current = teamProtocolContent;
-  const mcpDirty = mcpServersJson !== originalMcpServersJson;
   const teamProtocolDirty =
     teamProtocolContent !== originalTeamProtocolContent;
   const memberDirty =
@@ -655,20 +642,36 @@ export function TeamPage() {
   const teamDataReady = selectedProjectId
     ? membersProjectId === selectedProjectId
     : !projectSelectionPending;
-  const configuredMcpServerKeys = useMemo(() => {
-    if (!mcpConfig || mcpLoading) return [];
-    try {
-      const fullConfig = mcpServersJson.trim()
-        ? (JSON.parse(mcpServersJson) as JsonValue)
-        : {};
-      return McpConfigStrategyGeneral.configuredServerKeys(
-        mcpConfig,
-        fullConfig,
+
+  const handleMemberMcpUpdated = useCallback(
+    (updated: ProjectMemberWithRuntime) => {
+      setMembers((current) =>
+        current.map((member) =>
+          member.id === updated.id
+            ? (updated as ProjectMemberWithExecution)
+            : member,
+        ),
       );
-    } catch {
-      return [];
-    }
-  }, [mcpConfig, mcpLoading, mcpServersJson]);
+    },
+    [],
+  );
+  const {
+    mcpServersJson,
+    mcpDirty,
+    mcpApplying,
+    mcpError,
+    mcpSuccess,
+    handleMcpServersChange,
+  } = useMemberMcpEditor({
+    member: selectedMember,
+    projectId: selectedProjectId,
+    runnerType,
+    updateMember: projectApi.updateMember,
+    onMemberUpdated: handleMemberMcpUpdated,
+    autoSaveDelayMs,
+    pauseAutoSave: saving,
+    t,
+  });
 
   const consumeTeamMemberInviteTarget = useCallback(() => {
     if (!selectedProjectId || !teamDataReady) return;
@@ -771,12 +774,6 @@ export function TeamPage() {
   }, [memberSuccess]);
 
   useEffect(() => {
-    if (!mcpSuccess) return;
-    const timeoutId = window.setTimeout(() => setMcpSuccess(false), 2000);
-    return () => window.clearTimeout(timeoutId);
-  }, [mcpSuccess]);
-
-  useEffect(() => {
     if (!teamProtocolSuccess) return;
     const timeoutId = window.setTimeout(
       () => setTeamProtocolSuccess(false),
@@ -797,10 +794,6 @@ export function TeamPage() {
   useEffect(() => {
     if (memberDirty && memberSuccess) setMemberSuccess(false);
   }, [memberDirty, memberSuccess]);
-
-  useEffect(() => {
-    if (mcpDirty && mcpSuccess) setMcpSuccess(false);
-  }, [mcpDirty, mcpSuccess]);
 
   useEffect(() => {
     if (teamProtocolDirty && teamProtocolSuccess) {
@@ -985,13 +978,6 @@ export function TeamPage() {
       setRuntimeSkills([]);
       setRuntimeSkillsLoading(false);
       setRuntimeSkillsError(null);
-      setMcpConfig(null);
-      setMcpServersJson("{}");
-      setOriginalMcpServersJson("{}");
-      setMcpConfigPath("");
-      setMcpError(null);
-      setMcpLoading(false);
-      setMcpSuccess(false);
       return;
     }
 
@@ -1015,38 +1001,6 @@ export function TeamPage() {
       })
       .finally(() => {
         if (!cancelled) setRuntimeSkillsLoading(false);
-      });
-
-    setMcpLoading(true);
-    setMcpError(null);
-    setMcpSuccess(false);
-    void mcpServersApi
-      .load(runnerType)
-      .then((response) => {
-        if (cancelled) return;
-        const fullConfig = McpConfigStrategyGeneral.createFullConfig(
-          response.mcp_config,
-        );
-        const configJson = JSON.stringify(fullConfig, null, 2);
-        setMcpConfig(response.mcp_config);
-        setMcpServersJson(configJson);
-        setOriginalMcpServersJson(configJson);
-        setMcpConfigPath(response.config_path);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setMcpConfig(null);
-        setMcpServersJson("{}");
-        setOriginalMcpServersJson("{}");
-        setMcpConfigPath("");
-        setMcpError(
-          err instanceof Error
-            ? err.message
-            : t("teamPage.error.mcpConfigUnavailable"),
-        );
-      })
-      .finally(() => {
-        if (!cancelled) setMcpLoading(false);
       });
 
     return () => {
@@ -1098,6 +1052,9 @@ export function TeamPage() {
               !reasoningUnsupported && capability?.kind === "variant"
                 ? trimOrNull(draft.modelVariant)
                 : null,
+            // The backend replaces execution_config wholesale; carry the
+            // member's persisted MCP config so a profile save never wipes it.
+            mcp: selectedMember.execution_config?.mcp ?? null,
             acp:
               (acpProbeIsCurrent && acpProbe !== null) ||
               selectedMember.execution_config?.acp != null ||
@@ -1227,86 +1184,6 @@ export function TeamPage() {
     }
   };
 
-  const handleMcpServersChange = (value: string) => {
-    setMcpServersJson(value);
-    setMcpSuccess(false);
-    setMcpError(null);
-    if (!value.trim() || !mcpConfig) return;
-    try {
-      const parsed = JSON.parse(value) as JsonValue;
-      McpConfigStrategyGeneral.validateFullConfig(mcpConfig, parsed);
-    } catch (err) {
-      setMcpError(
-        err instanceof SyntaxError
-          ? t("teamPage.error.invalidJson")
-          : err instanceof Error
-            ? err.message
-            : t("teamPage.error.invalidMcpConfig"),
-      );
-    }
-  };
-
-  const toggleMcpServer = (serverKey: string) => {
-    if (!mcpConfig) return;
-    try {
-      const existing = mcpServersJson.trim()
-        ? (JSON.parse(mcpServersJson) as JsonValue)
-        : {};
-      const selected = McpConfigStrategyGeneral.hasPreconfiguredInConfig(
-        mcpConfig,
-        existing,
-        serverKey,
-      );
-      const updated = selected
-        ? McpConfigStrategyGeneral.removePreconfiguredFromConfig(
-            mcpConfig,
-            existing,
-            serverKey,
-          )
-        : McpConfigStrategyGeneral.addPreconfiguredToConfig(
-            mcpConfig,
-            existing,
-            serverKey,
-          );
-      setMcpServersJson(JSON.stringify(updated, null, 2));
-      setMcpError(null);
-      setMcpSuccess(false);
-    } catch (err) {
-      setMcpError(
-        err instanceof Error ? err.message : t("teamPage.error.addMcpServer"),
-      );
-    }
-  };
-
-  const applyMcpServers = async () => {
-    if (!mcpConfig) return;
-    setMcpApplying(true);
-    setMcpError(null);
-    setMcpSuccess(false);
-    try {
-      const draftJson = mcpServersJson;
-      const fullConfig = JSON.parse(draftJson) as JsonValue;
-      McpConfigStrategyGeneral.validateFullConfig(mcpConfig, fullConfig);
-      const servers = McpConfigStrategyGeneral.extractServersForApi(
-        mcpConfig,
-        fullConfig,
-      );
-      await mcpServersApi.save(runnerType, { servers });
-      setOriginalMcpServersJson(draftJson);
-      setMcpSuccess(latestMcpServersJsonRef.current === draftJson);
-    } catch (err) {
-      setMcpError(
-        err instanceof SyntaxError
-          ? t("teamPage.error.invalidJson")
-          : err instanceof Error
-            ? err.message
-            : t("teamPage.error.saveMcpConfig"),
-      );
-    } finally {
-      setMcpApplying(false);
-    }
-  };
-
   const handleRunnerTypeChange = (nextRunnerType: BaseCodingAgent) => {
     if (nextRunnerType === runnerType) return;
     const nextRuntime = runners.find(
@@ -1363,7 +1240,13 @@ export function TeamPage() {
       memberAutoSaveTimerRef.current = null;
     }
 
-    if (!memberDirty || saving || !selectedProjectId || !selectedMember) {
+    if (
+      !memberDirty ||
+      saving ||
+      mcpApplying ||
+      !selectedProjectId ||
+      !selectedMember
+    ) {
       return;
     }
 
@@ -1390,6 +1273,7 @@ export function TeamPage() {
     isLeader,
     memberDirty,
     memberNameValue,
+    mcpApplying,
     modelName,
     modelVariant,
     roleDefinition,
@@ -1399,43 +1283,6 @@ export function TeamPage() {
     selectedProjectId,
     thinkingEffort,
     workspacePath,
-  ]);
-
-  useEffect(() => {
-    if (mcpAutoSaveTimerRef.current !== null) {
-      window.clearTimeout(mcpAutoSaveTimerRef.current);
-      mcpAutoSaveTimerRef.current = null;
-    }
-
-    if (
-      !mcpDirty ||
-      mcpApplying ||
-      mcpLoading ||
-      !!mcpError ||
-      !mcpConfig
-    ) {
-      return;
-    }
-
-    mcpAutoSaveTimerRef.current = window.setTimeout(() => {
-      mcpAutoSaveTimerRef.current = null;
-      void applyMcpServers();
-    }, autoSaveDelayMs);
-
-    return () => {
-      if (mcpAutoSaveTimerRef.current !== null) {
-        window.clearTimeout(mcpAutoSaveTimerRef.current);
-        mcpAutoSaveTimerRef.current = null;
-      }
-    };
-  }, [
-    mcpApplying,
-    mcpConfig,
-    mcpDirty,
-    mcpError,
-    mcpLoading,
-    mcpServersJson,
-    runnerType,
   ]);
 
   useEffect(() => {
@@ -1725,7 +1572,6 @@ export function TeamPage() {
               acpProbeLoading={acpProbeLoading}
               reasoningUnsupported={reasoningUnsupported}
               capability={capability}
-              configuredMcpServerKeys={configuredMcpServerKeys}
               isLeader={isLeader}
               legacyModelName={modelName}
               legacyThinkingEffort={thinkingEffort}
@@ -1736,11 +1582,8 @@ export function TeamPage() {
               memberDirty={memberDirty}
               memberSuccess={memberSuccess}
               mcpApplying={mcpApplying}
-              mcpConfig={mcpConfig}
-              mcpConfigPath={mcpConfigPath}
               mcpDirty={mcpDirty}
               mcpError={mcpError}
-              mcpLoading={mcpLoading}
               mcpServersJson={mcpServersJson}
               mcpSuccess={mcpSuccess}
               modelOptions={modelOptions}
@@ -1767,7 +1610,6 @@ export function TeamPage() {
               onMcpServersChange={handleMcpServersChange}
               onAcpConfigValueChange={handleAcpConfigValueChange}
               onTeamProtocolChange={handleTeamProtocolChange}
-              onToggleMcpServer={toggleMcpServer}
               setAllowedSkillIds={setAllowedSkillIds}
               setAcpAccessMode={setAcpAccessMode}
               setAcpAdditionalDirectories={setAcpAdditionalDirectories}

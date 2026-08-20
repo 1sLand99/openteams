@@ -6,9 +6,8 @@ use std::{
 use serde_json::Value;
 use uuid::Uuid;
 
-pub fn fork_session(session_id: &str) -> io::Result<String> {
-    let root = sessions_root()?;
-    let source = find_session_file(&root, &format!("{session_id}.jsonl"))?;
+pub fn fork_session(root: &Path, session_id: &str) -> io::Result<String> {
+    let source = find_session_file(root, &format!("{session_id}.jsonl"))?;
     let contents = fs::read_to_string(&source)?;
     let ends_with_newline = contents.ends_with('\n');
 
@@ -33,25 +32,19 @@ pub fn fork_session(session_id: &str) -> io::Result<String> {
 
     let destination = source
         .parent()
-        .unwrap_or(root.as_path())
+        .unwrap_or(root)
         .join(format!("{new_session_id}.jsonl"));
     fs::write(&destination, output)?;
 
-    if let Ok(settings_source) = find_session_file(&root, &format!("{session_id}.settings.json")) {
+    if let Ok(settings_source) = find_session_file(root, &format!("{session_id}.settings.json")) {
         let settings_destination = settings_source
             .parent()
-            .unwrap_or(root.as_path())
+            .unwrap_or(root)
             .join(format!("{new_session_id}.settings.json"));
         let _ = fs::copy(settings_source, settings_destination);
     }
 
     Ok(new_session_id)
-}
-
-fn sessions_root() -> io::Result<PathBuf> {
-    dirs::home_dir()
-        .map(|home| home.join(".factory").join("sessions"))
-        .ok_or_else(|| io::Error::other("Unable to determine home directory"))
 }
 
 fn replace_session_id(line: &str, new_session_id: &str) -> String {
@@ -92,4 +85,33 @@ fn find_session_file(root: &Path, filename: &str) -> io::Result<PathBuf> {
         io::ErrorKind::NotFound,
         format!("Unable to locate {filename} in {}", root.display()),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fork_session_uses_only_the_explicit_session_root() {
+        let chosen = tempfile::tempdir().expect("chosen session root");
+        let ambient = tempfile::tempdir().expect("ambient session root");
+        let session_id = "source-session";
+        fs::write(
+            chosen.path().join(format!("{session_id}.jsonl")),
+            format!("{{\"type\":\"session_start\",\"id\":\"{session_id}\"}}\nchosen\n"),
+        )
+        .expect("chosen session fixture");
+        let ambient_path = ambient.path().join(format!("{session_id}.jsonl"));
+        fs::write(&ambient_path, b"ambient\n").expect("ambient session fixture");
+        let ambient_before = fs::read(&ambient_path).unwrap();
+
+        let forked = fork_session(chosen.path(), session_id).expect("fork selected session");
+
+        let forked_contents =
+            fs::read_to_string(chosen.path().join(format!("{forked}.jsonl"))).unwrap();
+        assert!(forked_contents.contains(&forked));
+        assert!(forked_contents.contains("chosen"));
+        assert_eq!(fs::read(ambient_path).unwrap(), ambient_before);
+        assert_eq!(fs::read_dir(ambient.path()).unwrap().count(), 1);
+    }
 }

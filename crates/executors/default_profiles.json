@@ -581,6 +581,11 @@
       "DEFAULT": {
         "HERMES": {}
       }
+    },
+    "DEEPSEEK_HARNESS": {
+      "DEFAULT": {
+        "DEEPSEEK_HARNESS": {}
+      }
     }
   }
 }

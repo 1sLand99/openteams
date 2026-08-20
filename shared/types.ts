@@ -18,7 +18,9 @@ export type CreateProjectMember = { member_type: ProjectMemberType, user_id: str
 
 export type UpdateProjectMember = { member_type: ProjectMemberType | null, user_id: string | null, agent_id: string | null, member_name?: string | null, role: string | null, display_order: bigint | null, default_workspace_path: string | null, allowed_skill_ids: Array<string> | null, execution_config: MemberExecutionConfig | null, is_default: boolean | null, };
 
-export type MemberExecutionConfig = { runner_type?: BaseCodingAgent | null, model_name?: string | null, thinking_effort?: string | null, model_variant?: string | null, acp?: AcpExecutionOptions | null, };
+export type MemberMcpConfig = { mcpServers: Record<string, unknown>, };
+
+export type MemberExecutionConfig = { runner_type?: BaseCodingAgent | null, model_name?: string | null, thinking_effort?: string | null, model_variant?: string | null, acp?: AcpExecutionOptions | null, mcp?: MemberMcpConfig | null, };
 
 export type ProjectPath = { id: string, project_id: string, path: string, label: string | null, kind: ProjectPathKind, is_default: boolean, created_at: Date, updated_at: Date, };
 
@@ -52,11 +54,11 @@ export type ProjectDeliveryEvent = { id: string, project_id: string, session_id:
 
 export enum ProjectDeliveryEventType { feature = "feature", bugfix = "bugfix", test = "test" }
 
-export type ProjectWorkItem = { id: string, project_id: string, type: ProjectWorkItemType, status: ProjectWorkItemStatus, title: string, description: string | null, labels_json: string | null, priority: ProjectWorkItemPriority, source: ProjectWorkItemSource, created_by: string | null, created_at: Date, updated_at: Date, };
+export type ProjectWorkItem = { id: string, project_id: string, parent_id: string | null, type: ProjectWorkItemType, status: ProjectWorkItemStatus, title: string, description: string | null, labels_json: string | null, priority: ProjectWorkItemPriority, source: ProjectWorkItemSource, created_by: string | null, created_at: Date, updated_at: Date, };
 
-export type CreateProjectWorkItem = { type: ProjectWorkItemType, status?: ProjectWorkItemStatus, title: string, description: string | null, labels_json?: string, priority: ProjectWorkItemPriority, source: ProjectWorkItemSource, created_by: string | null, };
+export type CreateProjectWorkItem = { parent_id?: string | null, type: ProjectWorkItemType, status?: ProjectWorkItemStatus, title: string, description: string | null, labels_json?: string, priority: ProjectWorkItemPriority, source: ProjectWorkItemSource, created_by: string | null, };
 
-export type UpdateProjectWorkItem = { type: ProjectWorkItemType | null, status: ProjectWorkItemStatus | null, title: string | null, description: string | null, labels_json: string | null, priority: ProjectWorkItemPriority | null, };
+export type UpdateProjectWorkItem = { parent_id?: string | null, type: ProjectWorkItemType | null, status: ProjectWorkItemStatus | null, title: string | null, description: string | null, labels_json: string | null, priority: ProjectWorkItemPriority | null, };
 
 export enum ProjectWorkItemType { feature = "feature", bug = "bug", task = "task", deploy = "deploy", test = "test", doc = "doc", refactor = "refactor" }
 
@@ -745,12 +747,6 @@ capabilities: { [key in string]?: Array<BaseAgentCapability> }, executors: { [ke
 
 export type Environment = { os_type: string, os_version: string, os_architecture: string, bitness: string, };
 
-export type McpServerQuery = { executor: BaseCodingAgent, };
-
-export type UpdateMcpServersBody = { servers: { [key in string]?: JsonValue }, };
-
-export type GetMcpServerResponse = { mcp_config: McpConfig, config_path: string, };
-
 export type CheckEditorAvailabilityQuery = { editor_type: EditorType, };
 
 export type CheckEditorAvailabilityResponse = { available: boolean, };
@@ -1053,6 +1049,10 @@ runner_type: string | null,
  */
 recommended_model: string | null,
 /**
+ * Complete member-scoped execution settings copied when applying this preset.
+ */
+execution_config?: MemberExecutionConfig,
+/**
  * System prompt defining the agent's behavior
  */
 system_prompt: string,
@@ -1337,7 +1337,7 @@ export type TeamPresetListResponse = { teams: Array<TeamPresetSummary>, };
 
 export type TeamPresetLocaleQuery = { locale: string | null, };
 
-export type TeamPresetMemberWrite = { id: string, name: string, description: string | null, runner_type: string | null, recommended_model: string | null, system_prompt: string | null, default_workspace_path: string | null, selected_skill_ids: Array<string>, tools_enabled: JsonValue | null, enabled: boolean | null, };
+export type TeamPresetMemberWrite = { id: string, name: string, description: string | null, runner_type: string | null, recommended_model: string | null, execution_config?: MemberExecutionConfig, system_prompt: string | null, default_workspace_path: string | null, selected_skill_ids: Array<string>, tools_enabled: JsonValue | null, enabled: boolean | null, };
 
 export type CreateTeamPresetRequest = { id: string, name: string, description: string | null, lead_member_id: string | null, tier: ChatTeamTemplateTier | null, workflow_steps: Array<ChatWorkflowStep>, team_protocol: string | null, enabled: boolean | null, members: Array<TeamPresetMemberWrite>, };
 
@@ -1391,9 +1391,9 @@ export type ScriptRequest = { script: string, language: ScriptRequestLanguage, c
 
 export type ScriptRequestLanguage = "Bash";
 
-export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", OPEN_TEAMS_CLI = "OPEN_TEAMS_CLI", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", COPILOT = "COPILOT", DROID = "DROID", KIMI_CODE = "KIMI_CODE", QODER_CLI = "QODER_CLI", PI = "PI", HERMES = "HERMES" }
+export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", OPEN_TEAMS_CLI = "OPEN_TEAMS_CLI", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", COPILOT = "COPILOT", DROID = "DROID", KIMI_CODE = "KIMI_CODE", QODER_CLI = "QODER_CLI", PI = "PI", HERMES = "HERMES", DEEPSEEK_HARNESS = "DEEPSEEK_HARNESS" }
 
-export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli } | { "PI": Pi } | { "HERMES": Hermes };
+export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli } | { "PI": Pi } | { "HERMES": Hermes } | { "DEEPSEEK_HARNESS": DeepseekHarness };
 
 export type SlashCommandDescription = {
 /**
@@ -1423,7 +1423,7 @@ executor: BaseCodingAgent,
  */
 variant: string | null, };
 
-export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli } | { "PI": Pi } | { "HERMES": Hermes } };
+export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli } | { "PI": Pi } | { "HERMES": Hermes } | { "DEEPSEEK_HARNESS": DeepseekHarness } };
 
 export type ExecutorConfigs = { executors: { [key in BaseCodingAgent]?: ExecutorConfig }, };
 
@@ -1482,6 +1482,8 @@ export type KimiCode = { append_prompt: AppendPrompt, model?: string | null, thi
 export type Pi = { append_prompt: AppendPrompt, model?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Hermes = { append_prompt: AppendPrompt, model?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+
+export type DeepseekHarness = { append_prompt: AppendPrompt, model?: string | null, harness_path?: string | null, acp_config_path?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Autonomy = "normal" | "low" | "medium" | "high" | "skip-permissions-unsafe";
 

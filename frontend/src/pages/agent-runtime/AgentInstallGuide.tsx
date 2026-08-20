@@ -129,6 +129,9 @@ export function AgentInstallGuide({
     runner.installed && runner.auth_state !== "authenticated";
   const needsInstall = !runner.installed;
   const allCommandsText = joinGuideCommands(guide.steps, platform);
+  const hasCommands = guide.steps.some((step) => step.commands.length > 0);
+  const authUsesEnvironment =
+    !guide.entry.authCommands && (guide.entry.authEnvVars?.length ?? 0) > 0;
 
   const flashCopied = (key: number | "all") => {
     if (copiedTimerRef.current !== null) {
@@ -233,7 +236,11 @@ export function AgentInstallGuide({
           <div>
             <p className="font-medium">{t("agents.setup.authRequired")}</p>
             <p className="mt-0.5 text-amber-400/80">
-              {t("agents.setup.authHint")}
+              {authUsesEnvironment
+                ? t("agents.setup.authEnvHint", {
+                    vars: (guide.entry.authEnvVars ?? []).join(", "),
+                  })
+                : t("agents.setup.authHint")}
             </p>
           </div>
         </div>
@@ -260,7 +267,11 @@ export function AgentInstallGuide({
       <p className="mb-3 text-[12px] leading-relaxed text-[var(--ink-tertiary)]">
         {needsInstall
           ? t(guide.entry.installHintKey ?? "agents.setup.installHint")
-          : t("agents.setup.authHint")}
+          : authUsesEnvironment
+            ? t("agents.setup.authEnvHint", {
+                vars: (guide.entry.authEnvVars ?? []).join(", "),
+              })
+            : t("agents.setup.authHint")}
       </p>
 
       <div className="space-y-3">
@@ -269,12 +280,14 @@ export function AgentInstallGuide({
             <p className="mb-1.5 text-[12px] font-medium text-[var(--ink-subtle)]">
               {index + 1}. {stepTitle(step)}
             </p>
-            <GuideCommandBlock
-              step={step}
-              copied={copiedStep === index}
-              onCopy={() => void handleCopyStep(step, index)}
-              copyLabel={t("agents.setup.copy")}
-            />
+            {step.commands.length > 0 && (
+              <GuideCommandBlock
+                step={step}
+                copied={copiedStep === index}
+                onCopy={() => void handleCopyStep(step, index)}
+                copyLabel={t("agents.setup.copy")}
+              />
+            )}
             {stepHint(step) && (
               <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--ink-tertiary)]">
                 {stepHint(step)}
@@ -300,7 +313,7 @@ export function AgentInstallGuide({
       </div>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        {desktopTerminalAvailable && (
+        {desktopTerminalAvailable && hasCommands && (
           <button
             type="button"
             onClick={() => void handleOpenTerminal()}
@@ -313,20 +326,22 @@ export function AgentInstallGuide({
               : t("agents.setup.openTerminalAuth")}
           </button>
         )}
-        <button
-          type="button"
-          onClick={() => void handleCopyAll()}
-          className={cx(actionButtonClass, ghostActionClass)}
-        >
-          {copiedStep === "all" ? (
-            <Check className="h-3.5 w-3.5 text-[var(--success)]" />
-          ) : (
-            <Copy className="h-3.5 w-3.5" />
-          )}
-          {copiedStep === "all"
-            ? t("agents.setup.copied")
-            : t("agents.setup.copyAll")}
-        </button>
+        {hasCommands && (
+          <button
+            type="button"
+            onClick={() => void handleCopyAll()}
+            className={cx(actionButtonClass, ghostActionClass)}
+          >
+            {copiedStep === "all" ? (
+              <Check className="h-3.5 w-3.5 text-[var(--success)]" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" />
+            )}
+            {copiedStep === "all"
+              ? t("agents.setup.copied")
+              : t("agents.setup.copyAll")}
+          </button>
+        )}
         <button
           type="button"
           onClick={onRecheck}

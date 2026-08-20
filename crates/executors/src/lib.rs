@@ -5,6 +5,7 @@ pub mod env;
 pub mod executors;
 pub mod logs;
 pub mod mcp_config;
+pub mod mcp_run;
 pub mod model_discovery;
 pub mod model_identity;
 pub mod model_sync;

@@ -63,7 +63,6 @@ import type {
   InstalledNativeSkill,
   InterruptStepResponse,
   JsonValue,
-  McpConfig,
   OpenInExplorerResponse,
   ProjectDeliveryRecord,
   ProjectDeliveryStatsSummary,
@@ -129,6 +128,8 @@ import type {
   ChatTeamPreset,
   ChatSearchQuery,
   ChatSearchResponse,
+  CreatePresetSnapshotRequest,
+  CreatePresetSnapshotResponse,
   CreateProjectRequest,
   CreateTeamPresetRequest,
   DesktopUpdateContext,
@@ -661,35 +662,6 @@ export const agentRuntimeApi = {
   },
 };
 
-export interface McpConfigResponse {
-  mcp_config: McpConfig;
-  config_path: string;
-}
-
-export interface UpdateMcpServersBody {
-  servers: Record<string, JsonValue>;
-}
-
-export const mcpServersApi = {
-  load: async (runner: BaseCodingAgent): Promise<McpConfigResponse> => {
-    const r = await makeRequest(
-      `/api/mcp-config${qs({ executor: runner })}`,
-      { cache: "no-store" },
-    );
-    return handleApiResponse<McpConfigResponse>(r);
-  },
-  save: async (
-    runner: BaseCodingAgent,
-    data: UpdateMcpServersBody,
-  ): Promise<string> => {
-    const r = await makeRequest(
-      `/api/mcp-config${qs({ executor: runner })}`,
-      { method: "POST", body: jsonBody(data) },
-    );
-    return handleApiResponse<string>(r);
-  },
-};
-
 export const profilesApi = {
   load: async (): Promise<ProfilesContent> => {
     const r = await makeRequest("/api/profiles", { cache: "no-store" });
@@ -1165,6 +1137,16 @@ export const chatSessionsApi = {
       },
     );
     await handleApiResponse<void>(r);
+  },
+  createPresetSnapshot: async (
+    sessionId: string,
+    data: CreatePresetSnapshotRequest,
+  ): Promise<CreatePresetSnapshotResponse> => {
+    const r = await makeRequest(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/presets/snapshot`,
+      { method: "POST", body: jsonBody(data) },
+    );
+    return handleApiResponse<CreatePresetSnapshotResponse>(r);
   },
   archive: async (sessionId: string): Promise<BackendChatSession> => {
     const r = await makeRequest(
@@ -2968,7 +2950,6 @@ export const deliveryApi = {
 export const api = {
   system: systemApi,
   agentRuntime: agentRuntimeApi,
-  mcpServers: mcpServersApi,
   filesystem: filesystemApi,
   chatSessions: chatSessionsApi,
   chatQueues: chatQueuesApi,

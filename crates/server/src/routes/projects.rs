@@ -939,6 +939,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_project_member_create_persists_explicit_empty_mcp() {
+        let (app, pool) = setup_app().await;
+        let project = create_project(&pool, "mcp-create").await;
+        let agent = create_agent(&pool, "Codex").await;
+
+        let body = api_json(
+            &app,
+            Method::POST,
+            format!("/api/projects/{}/members", project.id),
+            json!({
+                "member_type": "agent",
+                "agent_id": agent.id,
+                "role": "agent"
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            response_data(&body)["execution_config"]["mcp"],
+            json!({"mcpServers": {}})
+        );
+    }
+
+    #[tokio::test]
+    async fn http_project_member_update_round_trips_canonical_mcp() {
+        let (app, pool) = setup_app().await;
+        let project = create_project(&pool, "mcp-update").await;
+        let agent = create_agent(&pool, "Codex").await;
+        let created = api_json(
+            &app,
+            Method::POST,
+            format!("/api/projects/{}/members", project.id),
+            json!({
+                "member_type": "agent",
+                "agent_id": agent.id,
+                "role": "agent"
+            }),
+        )
+        .await;
+        let member_id = response_data(&created)["id"].as_str().expect("member id");
+        let mcp = json!({
+            "mcpServers": {
+                "remote": {
+                    "type": "http",
+                    "url": "https://example.test/mcp",
+                    "headers": {"X-Mode": "test"},
+                    "enabled": true
+                },
+                "local": {
+                    "command": "mcp-tool",
+                    "args": ["serve"],
+                    "env": {"MODE": "test"},
+                    "disabled": false
+                },
+                "stream": {
+                    "type": "sse",
+                    "url": "https://example.test/events"
+                }
+            }
+        });
+
+        let updated = api_json(
+            &app,
+            Method::PUT,
+            format!("/api/projects/{}/members/{member_id}", project.id),
+            json!({"execution_config": {"mcp": mcp}}),
+        )
+        .await;
+
+        assert_eq!(response_data(&updated)["execution_config"]["mcp"], mcp);
+    }
+
+    #[tokio::test]
+    async fn http_project_member_update_rejects_invalid_mcp_with_secret_safe_error() {
+        let (app, pool) = setup_app().await;
+        let project = create_project(&pool, "mcp-invalid").await;
+        let agent = create_agent(&pool, "Codex").await;
+        let created = api_json(
+            &app,
+            Method::POST,
+            format!("/api/projects/{}/members", project.id),
+            json!({
+                "member_type": "agent",
+                "agent_id": agent.id,
+                "role": "agent"
+            }),
+        )
+        .await;
+        let member_id = response_data(&created)["id"].as_str().expect("member id");
+        let configured_value = ["configured", "-", "value"].concat();
+        let (status, error) = request_json(
+            &app,
+            Method::PUT,
+            format!("/api/projects/{}/members/{member_id}", project.id),
+            Some(json!({
+                "execution_config": {
+                    "mcp": {
+                        "mcpServers": {
+                            "remote": {
+                                "type": "http",
+                                "url": "https://example.test/mcp",
+                                "headers": {"Authorization": [configured_value.clone()]}
+                            }
+                        }
+                    }
+                }
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error = error.to_string();
+        assert!(error.contains(member_id));
+        assert!(error.contains("server `remote`"));
+        assert!(error.contains("field `mcpServers.remote.headers.Authorization`"));
+        assert!(
+            !error.contains(&configured_value),
+            "API error exposed a configured value"
+        );
+    }
+
+    #[tokio::test]
     async fn http_project_detail_members_session_and_stats_flow() {
         let (app, pool) = setup_app().await;
         let project = create_project(&pool, "project-a").await;

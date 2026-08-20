@@ -7,6 +7,7 @@ use services::services::{
     build_stats::model_pricing_sync::ModelPricingSyncService,
     config::{TeamTemplateCatalogService, TeamTemplateCatalogSyncResult, load_config_from_file},
     container::ContainerService,
+    member_scoped_mcp_migration::run_member_scoped_mcp_migration,
     output_validation::{OUTPUT_VALIDATION_ROUTE, configure_output_validation_url},
     project::migration::ProjectMigrationService,
 };
@@ -132,6 +133,15 @@ async fn main() -> Result<(), OpenTeamsError> {
     }
 
     let deployment = DeploymentImpl::new().await?;
+    let mcp_migration = run_member_scoped_mcp_migration(&deployment.db().pool)
+        .await
+        .map_err(AnyhowError::new)?;
+    tracing::info!(
+        already_completed = mcp_migration.already_completed,
+        migrated_members = mcp_migration.migrated_members,
+        runner_reads = mcp_migration.runner_reads,
+        "Member-scoped MCP application data migration is ready"
+    );
     let _ = sync_team_template_catalog_on_server_startup(
         deployment.db().pool.clone(),
         config_path().to_path_buf(),
@@ -270,6 +280,70 @@ async fn main() -> Result<(), OpenTeamsError> {
     perform_cleanup_actions(&deployment).await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod member_scoped_mcp_migration_tests {
+    use db::models::application_data_migration::{
+        ApplicationDataMigration, ApplicationDataMigrationStatus,
+    };
+    use services::services::member_scoped_mcp_migration::{
+        MEMBER_SCOPED_MCP_MIGRATION_NAME, run_member_scoped_mcp_migration,
+    };
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn member_scoped_mcp_migration_startup_gate_completes_on_an_empty_database() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect database");
+        sqlx::migrate!("../db/migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+
+        let report = run_member_scoped_mcp_migration(&pool)
+            .await
+            .expect("run startup migration");
+        assert!(!report.already_completed);
+        assert_eq!(report.migrated_members, 0);
+        assert_eq!(report.runner_reads, 0);
+        let marker =
+            ApplicationDataMigration::find_by_name(&pool, MEMBER_SCOPED_MCP_MIGRATION_NAME)
+                .await
+                .expect("read marker")
+                .expect("completed marker");
+        assert_eq!(marker.status, ApplicationDataMigrationStatus::Completed);
+    }
+
+    #[test]
+    fn member_scoped_mcp_migration_is_wired_before_other_startup_services() {
+        let source = include_str!("main.rs");
+        let deployment = source
+            .find("let deployment = DeploymentImpl::new().await?")
+            .expect("deployment initialization");
+        let migration = source
+            .find("let mcp_migration = run_member_scoped_mcp_migration")
+            .expect("MCP migration startup call");
+        let catalog = source
+            .find("let _ = sync_team_template_catalog_on_server_startup")
+            .expect("first existing startup business service");
+        assert!(deployment < migration && migration < catalog);
+
+        let local_deployment_source = include_str!("../../local-deployment/src/lib.rs");
+        let database = local_deployment_source
+            .find("DBService::new_with_after_connect(hook).await?")
+            .expect("database initialization");
+        let application_migration = local_deployment_source
+            .find("let mcp_migration = run_member_scoped_mcp_migration(&db.pool)")
+            .expect("pre-service MCP migration");
+        let first_business_service = local_deployment_source
+            .find("let expired_executor_approvals =")
+            .expect("first business service initialization");
+        assert!(database < application_migration && application_migration < first_business_service);
+    }
 }
 
 async fn sync_team_template_catalog_on_server_startup(

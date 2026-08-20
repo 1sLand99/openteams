@@ -96,6 +96,7 @@ const item = (
 ): ProjectWorkItem => ({
   id,
   project_id: 'project-1',
+  parent_id: null,
   type: status === 'blocked' ? 'bug' : 'task',
   status,
   title: `${status} item`,

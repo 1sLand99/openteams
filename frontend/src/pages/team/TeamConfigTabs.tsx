@@ -29,8 +29,6 @@ import type {
   AgentRuntimeReasoningCapability,
   BackendChatSkill,
   BaseCodingAgent,
-  JsonValue,
-  McpConfig,
 } from "@/types";
 import type {
   AcpConfigOptionSnapshot,
@@ -71,7 +69,6 @@ type TeamConfigTabsProps = {
   reasoningUnsupported: boolean;
   allowedSkillIds: string[];
   capability: AgentRuntimeReasoningCapability | null;
-  configuredMcpServerKeys: string[];
   isLeader: boolean;
   legacyModelName: string;
   legacyThinkingEffort: string;
@@ -80,11 +77,8 @@ type TeamConfigTabsProps = {
   memberDirty: boolean;
   memberSuccess: boolean;
   mcpApplying: boolean;
-  mcpConfig: McpConfig | null;
-  mcpConfigPath: string;
   mcpDirty: boolean;
   mcpError: string | null;
-  mcpLoading: boolean;
   mcpServersJson: string;
   mcpSuccess: boolean;
   modelOptions: DropdownSelectOption[];
@@ -115,7 +109,6 @@ type TeamConfigTabsProps = {
     value: AcpConfigValue,
   ) => void;
   onTeamProtocolChange: (value: string) => void;
-  onToggleMcpServer: (serverKey: string) => void;
   setAllowedSkillIds: (ids: string[]) => void;
   setAcpAccessMode: (value: string) => void;
   setAcpAdditionalDirectories: (value: string) => void;
@@ -559,17 +552,12 @@ function ConfigTab({
   memberNamePlaceholder,
 }: Omit<
   TeamConfigTabsProps,
-  | "configuredMcpServerKeys"
   | "mcpApplying"
-  | "mcpConfig"
-  | "mcpConfigPath"
   | "mcpDirty"
   | "mcpError"
-  | "mcpLoading"
   | "mcpServersJson"
   | "mcpSuccess"
   | "onMcpServersChange"
-  | "onToggleMcpServer"
   | "teamProtocolContent"
   | "teamProtocolDirty"
   | "teamProtocolError"
@@ -928,32 +916,45 @@ function PermissionsTab({
 
       <SettingRow
         title="认证方法"
-        description="留空时自动使用 CLI 已有登录状态；指定值必须由 ACP Agent 公布。"
+        description={
+          runnerType === "DEEPSEEK_HARNESS"
+            ? "使用 Agents 页面配置的 DEEPSEEK_API_KEY；上游 ACP 不公布登录方法。"
+            : "留空时自动使用 CLI 已有登录状态；指定值必须由 ACP Agent 公布。"
+        }
       >
         <div className="space-y-2">
           <DropdownSelect
             value={acpAuthMode}
             options={[
               { id: "", label: "继承全局设置" },
-              { id: "auto", label: "自动（使用 CLI 登录态）" },
-              { id: "method_id", label: "指定 auth_method_id" },
+              {
+                id: "auto",
+                label:
+                  runnerType === "DEEPSEEK_HARNESS"
+                    ? "自动（使用环境变量）"
+                    : "自动（使用 CLI 登录态）",
+              },
+              ...(runnerType === "DEEPSEEK_HARNESS"
+                ? []
+                : [{ id: "method_id", label: "指定 auth_method_id" }]),
             ]}
             showSearch={false}
             className={dropdownClassName}
             onChange={setAcpAuthMode}
           />
-          {acpAuthMode === "method_id" && (
-            <input
-              value={acpAuthMethodId}
-              onChange={(event) => setAcpAuthMethodId(event.target.value)}
-              placeholder="auth_method_id"
-              className={inputClassName}
-            />
-          )}
+          {runnerType !== "DEEPSEEK_HARNESS" &&
+            acpAuthMode === "method_id" && (
+              <input
+                value={acpAuthMethodId}
+                onChange={(event) => setAcpAuthMethodId(event.target.value)}
+                placeholder="auth_method_id"
+                className={inputClassName}
+              />
+            )}
         </div>
       </SettingRow>
 
-      {runnerType !== "HERMES" && (
+      {runnerType !== "HERMES" && runnerType !== "DEEPSEEK_HARNESS" && (
         <SettingRow
           title="附加目录"
           description="启用覆盖后，每行一个绝对目录；空列表会显式清除全局附加目录。"
@@ -1055,56 +1056,18 @@ function SkillsTab({
   );
 }
 
-type McpMeta = {
-  description?: string;
-  icon?: string;
-  name?: string;
-  url?: string;
-};
-
-const getMcpIconSrc = (icon?: string) =>
-  icon ? `/${icon.replace(/^\/+/u, "")}` : null;
-
 function McpConfigTab({
-  configuredMcpServerKeys,
-  mcpConfig,
-  mcpConfigPath,
   mcpError,
-  mcpLoading,
   mcpServersJson,
   onMcpServersChange,
-  onToggleMcpServer,
   t,
 }: Pick<
   TeamConfigTabsProps,
-  | "configuredMcpServerKeys"
-  | "mcpConfig"
-  | "mcpConfigPath"
-  | "mcpError"
-  | "mcpLoading"
-  | "mcpServersJson"
-  | "onMcpServersChange"
-  | "onToggleMcpServer"
-  | "t"
+  "mcpError" | "mcpServersJson" | "onMcpServersChange" | "t"
 >) {
-  const preconfiguredObj = (mcpConfig?.preconfigured ?? {}) as Record<
-    string,
-    JsonValue | undefined
-  >;
-  const meta =
-    typeof preconfiguredObj.meta === "object" &&
-    preconfiguredObj.meta !== null &&
-    !Array.isArray(preconfiguredObj.meta)
-      ? (preconfiguredObj.meta as Record<string, McpMeta>)
-      : {};
-  const servers = Object.fromEntries(
-    Object.entries(preconfiguredObj).filter(([key]) => key !== "meta"),
-  );
-  const unsupported = mcpError?.includes("support MCP") ?? false;
-
   return (
     <div className="space-y-6">
-      {mcpError && !unsupported && (
+      {mcpError && (
         <div className="rounded-[8px] border border-red-500/20 bg-red-500/10 p-3 text-[14px] text-red-400">
           {t("teamPage.mcp.error", { error: mcpError })}
         </div>
@@ -1114,33 +1077,17 @@ function McpConfigTab({
         title={t("teamPage.mcp.title")}
         description={t("teamPage.mcp.desc")}
       >
-        {unsupported ? (
-          <div className="m-4 rounded-[8px] border border-amber-500/30 bg-amber-500/10 p-4 text-[14px] leading-[1.5] text-amber-300">
-            <p className="font-medium">{t("teamPage.mcp.unsupported")}</p>
-            <p className="mt-1 text-[13px]">{mcpError}</p>
-          </div>
-        ) : (
-          <>
-            <SettingRow
-              title={t("teamPage.mcp.serverConfig")}
-              wide
-              description={
-                mcpLoading
-                  ? t("teamPage.mcp.loadingCurrent")
-                  : t("teamPage.mcp.savedToFile")
-              }
-            >
-              <textarea
-                value={
-                  mcpLoading
-                    ? t("teamPage.mcp.loadingTextarea")
-                    : mcpServersJson
-                }
-                onChange={(event) => onMcpServersChange(event.target.value)}
-                disabled={mcpLoading}
-                rows={16}
-                spellCheck={false}
-                placeholder='{
+        <SettingRow
+          title={t("teamPage.mcp.serverConfig")}
+          wide
+          description={t("teamPage.mcp.savedToMember")}
+        >
+          <textarea
+            value={mcpServersJson}
+            onChange={(event) => onMcpServersChange(event.target.value)}
+            rows={16}
+            spellCheck={false}
+            placeholder='{
   "mcpServers": {
     "server-name": {
       "command": "npx",
@@ -1148,75 +1095,9 @@ function McpConfigTab({
     }
   }
 }'
-                className="block w-full resize-y rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-4 py-3 font-mono text-[13px] leading-relaxed text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-tertiary)] focus:ring-2 focus:ring-[var(--primary-focus)]/50 disabled:opacity-70"
-              />
-              {mcpConfigPath && !mcpLoading && (
-                <p className="mt-2 truncate font-mono text-[12px] text-[var(--ink-tertiary)]">
-                  {mcpConfigPath}
-                </p>
-              )}
-            </SettingRow>
-
-            {mcpConfig?.preconfigured &&
-              typeof mcpConfig.preconfigured === "object" &&
-              Object.keys(servers).length > 0 && (
-                <SettingRow
-                  title={t("teamPage.mcp.builtinTitle")}
-                  wide
-                  description={t("teamPage.mcp.builtinDesc")}
-                >
-                  <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                    {Object.entries(servers).map(([key]) => {
-                      const metaObj = meta[key] ?? {};
-                      const name = metaObj.name || key;
-                      const description =
-                        metaObj.description || t("teamPage.fallback.noDesc");
-                      const icon = getMcpIconSrc(metaObj.icon);
-                      const selected = configuredMcpServerKeys.includes(key);
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() => onToggleMcpServer(key)}
-                          className={cx(
-                            "group flex min-w-0 items-start gap-3 rounded-[8px] border p-3 text-left transition-colors",
-                            selected
-                              ? "border-[var(--primary)]/45 bg-[var(--primary-tint)]"
-                              : "border-[var(--hairline)] bg-[var(--surface-1)] hover:border-[var(--hairline-strong)] hover:bg-[var(--surface-3)]",
-                          )}
-                        >
-                          <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-[8px] bg-[var(--surface-1)]">
-                            {icon ? (
-                              <img
-                                src={icon}
-                                alt=""
-                                className="h-full w-full object-contain"
-                              />
-                            ) : (
-                              <Server className="h-4 w-4 text-[var(--ink-tertiary)]" />
-                            )}
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-[14px] font-medium text-[var(--ink)]">
-                              {name}
-                            </span>
-                            <span className="mt-1 line-clamp-2 block text-[12px] leading-[1.4] text-[var(--ink-subtle)]">
-                              {description}
-                            </span>
-                          </span>
-                          {selected ? (
-                            <Check className="mt-1 h-3.5 w-3.5 shrink-0 text-[var(--primary)]" />
-                          ) : (
-                            <PackagePlus className="mt-1 h-3.5 w-3.5 shrink-0 text-[var(--ink-tertiary)] transition-colors group-hover:text-[var(--primary)]" />
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </SettingRow>
-              )}
-          </>
-        )}
+            className="block w-full resize-y rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-4 py-3 font-mono text-[13px] leading-relaxed text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-tertiary)] focus:ring-2 focus:ring-[var(--primary-focus)]/50 disabled:opacity-70"
+          />
+        </SettingRow>
       </ConfigSection>
     </div>
   );
@@ -1416,14 +1297,9 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
           />
         ) : effectiveActiveTab === "mcp" ? (
           <McpConfigTab
-            configuredMcpServerKeys={props.configuredMcpServerKeys}
-            mcpConfig={props.mcpConfig}
-            mcpConfigPath={props.mcpConfigPath}
             mcpError={props.mcpError}
-            mcpLoading={props.mcpLoading}
             mcpServersJson={props.mcpServersJson}
             onMcpServersChange={props.onMcpServersChange}
-            onToggleMcpServer={props.onToggleMcpServer}
             t={t}
           />
         ) : (

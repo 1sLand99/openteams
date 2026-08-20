@@ -26,6 +26,7 @@ pub use github::{
 pub mod image;
 pub mod inbox;
 pub mod member_execution;
+pub mod member_scoped_mcp_migration;
 pub use build_stats::{model_pricing_sync, project_stats, token_cost_stats};
 pub mod native_skills;
 pub mod notification;
@@ -53,6 +54,9 @@ pub use workflow::{
 };
 pub mod workspace_change_capture;
 pub mod worktree_manager;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub(crate) const OPENTEAMS_PROMPT_SOURCE_MARKER: &str = "[OPENTEAMS_SOURCE=openteams]";
 

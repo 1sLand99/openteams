@@ -146,6 +146,7 @@ console.log("Team ACP config matching: PASS");
 // --- Runner ACP support classification ---------------------------------
 
 const acpRunners = [
+  "DEEPSEEK_HARNESS",
   "GEMINI",
   "HERMES",
   "QWEN_CODE",

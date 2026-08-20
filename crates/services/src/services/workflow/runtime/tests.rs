@@ -494,6 +494,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn common_member_mcp_preparation_returns_workflow_metadata() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("test database");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let (mut session_agents, mut agents) = sample_agent_views();
+        let mut session_agent = session_agents.remove(0);
+        session_agent.execution_config.0.mcp = Some(Default::default());
+        let mut agent = agents.remove(0);
+        agent.runner_type = "DEEPSEEK_HARNESS".to_string();
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+
+        let (effective, _executor, prepared) = build_effective_member_executor_for_run(
+            &pool,
+            &agent,
+            &session_agent,
+            workspace.path(),
+            Uuid::new_v4(),
+            &mut env,
+        )
+        .await
+        .expect("workflow preparation");
+
+        assert_eq!(effective.runner_type.to_string(), "DEEPSEEK_HARNESS");
+        assert_eq!(prepared.server_count(), 0);
+    }
+
+    #[tokio::test]
     async fn workflow_resolve_workspace_path_lazy_creates_worktree_for_first_isolated_run() {
         let db = setup_runtime_worktree_db().await;
         let tmp = tempfile::TempDir::new().expect("temp dir");
@@ -893,7 +925,10 @@ mod tests {
                 workspace_path: None,
                 allowed_skill_ids: vec![],
                 project_member_id,
-                execution_config: MemberExecutionConfig::default(),
+                execution_config: MemberExecutionConfig {
+                    mcp: Some(Default::default()),
+                    ..Default::default()
+                },
             },
             Uuid::new_v4(),
         )
@@ -2302,8 +2337,15 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn pi_workflow_step_executes_through_runtime_and_projects_records() {
-        use crate::services::chat_runner::ChatRunner;
+    async fn workflow_runner_prepares_mcp_before_spawn_and_projects_pi_records() {
+        use crate::services::{
+            chat_runner::ChatRunner,
+            test_support::{
+                ADAPTER_DIAGNOSTIC_SECRET, CANONICAL_MCP_SECRET, TracingCapture,
+                canonical_mcp_config_with_fake_secrets,
+            },
+            workflow::workflow_orchestrator::{StepOutcome, WorkflowOrchestrator, reducer},
+        };
         use db::models::{
             chat_agent::{ChatAgent, CreateChatAgent},
             chat_session::{ChatSession, ChatSessionWorktreeMode},
@@ -2315,8 +2357,11 @@ mod tests {
             workflow_plan_revision::{CreateWorkflowPlanRevision, WorkflowPlanRevision},
             workflow_round::{CreateWorkflowRound, WorkflowRound},
             workflow_step::{CreateWorkflowStep, WorkflowStep},
+            workflow_event::WorkflowEvent,
+            workflow_transcript::WorkflowTranscript,
             workflow_types::*,
         };
+        use executors::mcp_run::canonical_mcp_server_map_hash;
         use std::os::unix::fs::PermissionsExt;
 
         let _fixture_lock =
@@ -2429,6 +2474,22 @@ mod tests {
         .await
         .expect("create session agent");
 
+        let secret_session_agent = ChatSessionAgent::create(
+            &db.pool,
+            &CreateChatSessionAgent {
+                session_id,
+                agent_id: agent.id,
+                member_name: Some("PiSecretWorker".to_string()),
+                workspace_path: Some(workspace.to_string_lossy().to_string()),
+                allowed_skill_ids: Vec::new(),
+                project_member_id: None,
+                execution_config: MemberExecutionConfig::default(),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create isolated secret failure session agent");
+
         let plan_json = r#"{"nodes":[],"edges":[],"loops":[]}"#.to_string();
         let plan = WorkflowPlan::create(
             &db.pool,
@@ -2512,6 +2573,18 @@ mod tests {
         .await
         .expect("create workflow session");
 
+        let secret_workflow_session = WorkflowAgentSession::create(
+            &db.pool,
+            &CreateWorkflowAgentSession {
+                workflow_execution_id: execution.id,
+                session_agent_id: secret_session_agent.id,
+                role: WorkflowAgentSessionRole::Worker,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create isolated secret failure workflow session");
+
         let step = WorkflowStep::create(
             &db.pool,
             &CreateWorkflowStep {
@@ -2536,7 +2609,211 @@ mod tests {
         .await
         .expect("create step");
 
+        let secret_failure_step = WorkflowStep::create(
+            &db.pool,
+            &CreateWorkflowStep {
+                execution_id: execution.id,
+                round_id: round.id,
+                compiled_revision_id: Some(revision.id),
+                step_key: "pi-secret-failure".to_string(),
+                step_type: WorkflowStepType::Task,
+                title: "Pi secret-safe failure".to_string(),
+                instructions: "Fail MCP preparation without exposing secrets".to_string(),
+                assigned_workflow_agent_session_id: Some(secret_workflow_session.id),
+                max_retry: 0,
+                round_index: 1,
+                display_order: 1,
+                loop_id: None,
+                lead_review_required: Some(false),
+                user_review_required: Some(false),
+                revision_context: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create secret failure step");
+
         let chat_runner = ChatRunner::new(db.clone());
+
+        let preparation_error = super::run_workflow_step_agent_prompt(
+            &db,
+            &chat_runner,
+            &session,
+            &agent,
+            &session_agent,
+            Some(&workflow_session),
+            "workflow pi test",
+            &step,
+        )
+        .await
+        .expect_err("mcp=None must fail before workflow spawn");
+        assert!(preparation_error.to_string().contains("not initialized"));
+        assert!(
+            !proto_log.exists(),
+            "workflow executor was spawned before MCP preparation"
+        );
+        assert!(!prompts.exists(), "workflow prompt reached executor before MCP preparation");
+        assert!(!pids.exists(), "workflow child process started before MCP preparation");
+
+        let canonical = canonical_mcp_config_with_fake_secrets();
+        let expected_hash =
+            canonical_mcp_server_map_hash(&canonical).expect("canonical MCP hash");
+        let secret_session_agent = ChatSessionAgent::update_execution_config_for_next_run(
+            &db.pool,
+            secret_session_agent.id,
+            None,
+            MemberExecutionConfig {
+                mcp: Some(canonical),
+                runner_type: Some(executors::executors::BaseCodingAgent::Pi),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("initialize secret-bearing MCP fixture");
+        chat_runner.set_mcp_preparation_diagnostic_for_test(Some(format!(
+            "adapter stderr echoed {ADAPTER_DIAGNOSTIC_SECRET} and {CANONICAL_MCP_SECRET}"
+        )));
+        let execution_for_failure = WorkflowExecution::find_by_id(&db.pool, execution.id)
+            .await
+            .expect("read workflow execution")
+            .expect("workflow execution exists");
+        let execution_for_failure = reducer::transition_execution(
+            &db.pool,
+            &execution_for_failure,
+            WorkflowExecutionStatus::Running,
+        )
+        .await
+        .expect("start workflow execution through reducer")
+        .entity;
+        let secret_failure_step = reducer::transition_step(
+            &db.pool,
+            &execution_for_failure,
+            &secret_failure_step,
+            WorkflowStepStatus::Ready,
+        )
+        .await
+        .expect("make secret failure step ready through reducer")
+        .entity;
+        let workflow_sessions = vec![workflow_session.clone(), secret_workflow_session.clone()];
+        let session_agents = vec![session_agent.clone(), secret_session_agent.clone()];
+        let agents = vec![agent.clone()];
+        let current_steps = vec![step.clone(), secret_failure_step.clone()];
+        let tracing = TracingCapture::start();
+        let outcome = WorkflowOrchestrator::prepare_and_run_step(
+            &db,
+            &db.pool,
+            &chat_runner,
+            &execution_for_failure,
+            &secret_failure_step,
+            &workflow_sessions,
+            &session,
+            &session_agents,
+            &agents,
+            &plan,
+            &current_steps,
+            &[],
+        )
+        .await
+        .expect("workflow preparation failure must be projected safely");
+        let tracing = tracing.finish();
+        chat_runner.set_mcp_preparation_diagnostic_for_test(None);
+        let StepOutcome::Failed(failure_reason) = outcome else {
+            panic!("secret-bearing MCP preparation must fail the workflow step")
+        };
+
+        assert!(
+            !proto_log.exists(),
+            "workflow executor was spawned after secret-bearing preparation failed"
+        );
+        assert!(!prompts.exists(), "secret-bearing prompt reached workflow executor");
+        assert!(!pids.exists(), "secret-bearing failure started a child process");
+
+        let failed_step = WorkflowStep::find_by_id(&db.pool, secret_failure_step.id)
+            .await
+            .expect("read failed workflow step")
+            .expect("failed workflow step exists");
+        assert_eq!(failed_step.status, WorkflowStepStatus::Failed);
+        let transcripts = WorkflowTranscript::find_by_step(&db.pool, secret_failure_step.id)
+            .await
+            .expect("read failure transcripts");
+        assert!(!transcripts.is_empty(), "workflow failure transcript must be persisted");
+        let events = WorkflowEvent::find_by_execution(&db.pool, execution.id)
+            .await
+            .expect("read workflow failure events");
+        assert!(!events.is_empty(), "workflow failure events must be persisted");
+        let run = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            r#"
+            SELECT run_dir, meta_path, retention_summary_json
+            FROM chat_runs
+            WHERE session_agent_id = ?1
+            ORDER BY run_index DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(secret_session_agent.id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read workflow failure run record");
+        let mut run_artifacts = String::new();
+        for entry in std::fs::read_dir(&run.0).expect("read workflow run directory") {
+            let path = entry.expect("workflow run artifact entry").path();
+            if path.is_file()
+                && let Ok(content) = std::fs::read_to_string(&path)
+            {
+                run_artifacts.push_str(&content);
+            }
+        }
+        if let Some(meta_path) = run.1.as_deref()
+            && let Ok(content) = std::fs::read_to_string(meta_path)
+        {
+            run_artifacts.push_str(&content);
+        }
+        let transcript_surface = serde_json::to_string(&serde_json::json!({
+            "step_summary": failed_step.summary_text,
+            "transcripts": transcripts,
+        }))
+        .expect("serialize workflow transcript surface");
+        let run_record_surface = serde_json::to_string(&serde_json::json!({
+            "retention_summary": run.2,
+            "artifacts": run_artifacts,
+        }))
+        .expect("serialize workflow run record surface");
+        let event_surface = serde_json::to_string(&events).expect("serialize workflow events");
+
+        for (label, surface) in [
+            ("returned workflow error", failure_reason.as_str()),
+            ("workflow tracing and IO", tracing.as_str()),
+            ("workflow transcript", transcript_surface.as_str()),
+            ("workflow run record", run_record_surface.as_str()),
+        ] {
+            assert!(
+                !surface.contains(CANONICAL_MCP_SECRET),
+                "{label} leaked the canonical MCP secret: {surface}"
+            );
+            assert!(
+                !surface.contains(ADAPTER_DIAGNOSTIC_SECRET),
+                "{label} leaked the adapter diagnostic secret: {surface}"
+            );
+            assert!(surface.contains(&expected_hash), "{label} omitted the safe MCP hash");
+            assert!(surface.contains("mcp_server_count=2"), "{label} omitted server count");
+            assert!(surface.contains("local-safe-name"), "{label} omitted a safe server name");
+            assert!(surface.contains("remote-safe-name"), "{label} omitted a safe server name");
+        }
+        assert!(!event_surface.contains(CANONICAL_MCP_SECRET));
+        assert!(!event_surface.contains(ADAPTER_DIAGNOSTIC_SECRET));
+
+        let session_agent = ChatSessionAgent::update_execution_config_for_next_run(
+            &db.pool,
+            session_agent.id,
+            None,
+            MemberExecutionConfig {
+                mcp: Some(Default::default()),
+                runner_type: Some(executors::executors::BaseCodingAgent::Pi),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("initialize MCP before the successful workflow run");
 
         let result = super::run_workflow_step_agent_prompt(
             &db,

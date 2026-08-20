@@ -1,136 +1,95 @@
-use std::{collections::HashSet, env, io::ErrorKind, path::Path};
+use std::{
+    collections::BTreeSet,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use sha2::{Digest, Sha256};
-use tokio::fs;
-use tracing::warn;
 
-use super::CursorAgent;
-use crate::executors::{CodingAgent, ExecutorError, StandardCodingAgentExecutor};
+use crate::{
+    executors::ExecutorError, mcp_config::MemberMcpConfig, mcp_run::PrivateMcpRunDirectory,
+};
 
-pub async fn ensure_mcp_server_trust(cursor: &CursorAgent, current_dir: &Path) {
-    if let Err(err) = ensure_mcp_server_trust_impl(cursor, current_dir).await {
-        tracing::warn!(
-            error = %err,
-            "Cursor MCP approval bootstrap failed. MCP servers might be unavailable."
-        );
-    }
+pub(super) struct CursorMcpOverlay {
+    pub config_path: PathBuf,
+    pub approval_path: PathBuf,
+    pub disabled_path: PathBuf,
+    pub project_slug: String,
 }
 
-async fn ensure_mcp_server_trust_impl(
-    cursor: &CursorAgent,
+/// Materialize Cursor MCP state entirely below the private run home.
+///
+/// Approvals are derived only from the frozen member snapshot. The user's
+/// global approval file is deliberately neither read nor written.
+pub(super) async fn write_run_mcp_overlay(
+    directory: &PrivateMcpRunDirectory,
+    canonical: &MemberMcpConfig,
     current_dir: &Path,
-) -> Result<(), ExecutorError> {
-    let current_dir =
+) -> Result<CursorMcpOverlay, ExecutorError> {
+    let absolute_path =
         std::fs::canonicalize(current_dir).unwrap_or_else(|_| current_dir.to_path_buf());
-
-    let Some(config_path) = cursor.default_mcp_config_path() else {
-        return Ok(());
-    };
-
-    let Some(home_dir) = dirs::home_dir() else {
-        return Ok(());
-    };
-
-    let absolute_path = if current_dir.is_absolute() {
-        current_dir.to_path_buf()
-    } else {
-        match env::current_dir() {
-            Ok(cwd) => cwd.join(current_dir),
-            Err(_) => current_dir.to_path_buf(),
-        }
-    };
-
-    let worktree_path_str = absolute_path.to_string_lossy().to_string();
-    if worktree_path_str.is_empty() {
-        return Ok(());
-    }
-
-    let Some(project_slug) = cursor_project_slug(&absolute_path) else {
-        return Ok(());
-    };
-
-    let config_value: serde_json::Value = match fs::read_to_string(&config_path).await {
-        Ok(content) => match serde_json::from_str(&content) {
-            Ok(val) => val,
-            Err(err) => {
-                warn!(
-                    error = ?err,
-                    path = %config_path.display(),
-                    "Failed to parse Cursor MCP config; falling back to defaults for auto-approval bootstrap"
-                );
-                default_cursor_mcp_servers(cursor)
-            }
-        },
-        Err(err) if err.kind() == ErrorKind::NotFound => default_cursor_mcp_servers(cursor),
-        Err(err) => return Err(ExecutorError::Io(err)),
-    };
-
-    let Some(servers) = config_value
-        .get("mcpServers")
-        .and_then(|value| value.as_object())
-    else {
-        return Ok(());
-    };
-
-    let approvals_path = home_dir
-        .join(".cursor")
-        .join("projects")
-        .join(&project_slug)
-        .join("mcp-approvals.json");
-
-    let mut existing: Vec<String> = match fs::read_to_string(&approvals_path).await {
-        Ok(content) => match serde_json::from_str(&content) {
-            Ok(list) => list,
-            Err(err) => {
-                warn!(
-                    error = ?err,
-                    path = %approvals_path.display(),
-                    "Failed to parse existing Cursor MCP approvals; resetting file"
-                );
-                Vec::new()
-            }
-        },
-        Err(err) if err.kind() == ErrorKind::NotFound => Vec::new(),
-        Err(err) => return Err(ExecutorError::Io(err)),
-    };
-
-    let mut approvals_set: HashSet<String> = existing.iter().cloned().collect();
-    let mut newly_added = Vec::new();
-
-    for (server_name, definition) in servers {
-        if server_name == "meta" || !definition.is_object() {
-            continue;
-        }
-
-        if let Some(approval_id) =
-            compute_cursor_approval_id(server_name, definition, &worktree_path_str)
-            && approvals_set.insert(approval_id.clone())
-        {
-            newly_added.push(approval_id);
-        }
-    }
-
-    if newly_added.is_empty() {
-        return Ok(());
-    }
-
-    existing.extend(newly_added);
-
-    if let Some(parent) = approvals_path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(ExecutorError::Io)?;
-    }
-
-    let serialized = serde_json::to_string_pretty(&existing)?;
-    fs::write(&approvals_path, serialized)
-        .await
-        .map_err(ExecutorError::Io)?;
-
-    Ok(())
+    let project_slug = cursor_project_slug(&absolute_path).ok_or_else(|| {
+        ExecutorError::Configuration("Cursor MCP workspace path is empty".to_string())
+    })?;
+    let worktree_path = absolute_path.to_string_lossy();
+    let approvals = canonical
+        .mcp_servers
+        .iter()
+        .filter(|(name, definition)| name.as_str() != "meta" && definition.is_object())
+        .filter_map(|(name, definition)| {
+            compute_cursor_approval_id(name, definition, &worktree_path)
+        })
+        .collect::<Vec<_>>();
+    let disabled = project_mcp_servers_to_disable(current_dir, canonical).await?;
+    let project_dir = Path::new(".cursor").join("projects").join(&project_slug);
+    let config_path = directory.write_file(
+        Path::new(".cursor").join("mcp.json"),
+        &serde_json::to_vec_pretty(canonical)?,
+    )?;
+    let approval_path = directory.write_file(
+        project_dir.join("mcp-approvals.json"),
+        &serde_json::to_vec_pretty(&approvals)?,
+    )?;
+    let disabled_path = directory.write_file(
+        project_dir.join("mcp-disabled.json"),
+        &serde_json::to_vec_pretty(&disabled)?,
+    )?;
+    Ok(CursorMcpOverlay {
+        config_path,
+        approval_path,
+        disabled_path,
+        project_slug,
+    })
 }
 
-fn cursor_project_slug(path: &Path) -> Option<String> {
+async fn project_mcp_servers_to_disable(
+    current_dir: &Path,
+    canonical: &MemberMcpConfig,
+) -> Result<Vec<String>, ExecutorError> {
+    let project_path = current_dir.join(".cursor").join("mcp.json");
+    let contents = match tokio::fs::read(&project_path).await {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(ExecutorError::Io(error)),
+    };
+    let project: serde_json::Value = serde_json::from_slice(&contents)?;
+    let Some(servers) = project
+        .get("mcpServers")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Err(ExecutorError::Configuration(
+            "Cursor project MCP server definitions must be an object".to_string(),
+        ));
+    };
+    let disabled = servers
+        .iter()
+        .filter(|(name, definition)| canonical.mcp_servers.get(*name) != Some(*definition))
+        .map(|(name, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    Ok(disabled.into_iter().collect())
+}
+
+pub(super) fn cursor_project_slug(path: &Path) -> Option<String> {
     let raw = path.to_string_lossy();
     if raw.is_empty() {
         return None;
@@ -166,7 +125,55 @@ fn compute_cursor_approval_id(
     Some(format!("{server_name}-{}", &hex[..16]))
 }
 
-fn default_cursor_mcp_servers(cursor: &CursorAgent) -> serde_json::Value {
-    let mcpc = CodingAgent::CursorAgent(cursor.clone()).get_mcp_config();
-    serde_json::json!({ "mcpServers": mcpc.preconfigured })
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::mcp_run::McpRunContext;
+
+    #[tokio::test]
+    async fn overlay_trust_uses_only_snapshot_and_never_global_approval() {
+        let workspace = TempDir::new().expect("create workspace");
+        fs::create_dir(workspace.path().join(".cursor")).expect("create project cursor dir");
+        fs::write(
+            workspace.path().join(".cursor/mcp.json"),
+            br#"{"mcpServers":{"ambient":{"command":"must-not-run"},"member":{"command":"different"}}}"#,
+        )
+        .expect("write project MCP config");
+        let global_approval = workspace.path().join("global-mcp-approvals.json");
+        let global_bytes = br#"["global-approval"]"#;
+        fs::write(&global_approval, global_bytes).expect("write global approval fixture");
+        let context = McpRunContext::new(workspace.path(), Uuid::new_v4(), Uuid::new_v4())
+            .expect("create run context");
+        let directory = PrivateMcpRunDirectory::create(&context, "cursor-overlay-test")
+            .expect("create private directory");
+        let canonical: MemberMcpConfig = serde_json::from_value(serde_json::json!({
+            "mcpServers": {
+                "member": {"command": "/bin/echo", "env": {"TOKEN": "cursor-secret"}}
+            }
+        }))
+        .expect("deserialize canonical MCP config");
+
+        let overlay = write_run_mcp_overlay(&directory, &canonical, workspace.path())
+            .await
+            .expect("write Cursor overlay");
+        let config: serde_json::Value =
+            serde_json::from_slice(&fs::read(&overlay.config_path).unwrap()).unwrap();
+        let approvals: Vec<String> =
+            serde_json::from_slice(&fs::read(&overlay.approval_path).unwrap()).unwrap();
+        let disabled: Vec<String> =
+            serde_json::from_slice(&fs::read(&overlay.disabled_path).unwrap()).unwrap();
+        assert_eq!(config["mcpServers"].as_object().unwrap().len(), 1);
+        assert!(
+            approvals
+                .iter()
+                .any(|approval| approval.starts_with("member-"))
+        );
+        assert_eq!(disabled, ["ambient", "member"]);
+        assert_eq!(fs::read(global_approval).unwrap(), global_bytes);
+    }
 }

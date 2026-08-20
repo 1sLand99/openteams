@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
+use db::models::member_execution_config::MemberExecutionConfig;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool, types::Json};
 use uuid::Uuid;
@@ -293,14 +294,19 @@ async fn ensure_human_member(
             role,
             display_order,
             allowed_skill_ids,
+            execution_config,
             is_default
         )
-        VALUES (?1, ?2, 'human', ?3, 'owner', 0, '[]', 1)
+        VALUES (?1, ?2, 'human', ?3, 'owner', 0, '[]', ?4, 1)
         "#,
     )
     .bind(Uuid::new_v4())
     .bind(project_id)
     .bind(user_id)
+    .bind(Json(MemberExecutionConfig {
+        mcp: Some(Default::default()),
+        ..Default::default()
+    }))
     .execute(&mut **tx)
     .await?;
 
@@ -352,9 +358,10 @@ async fn ensure_agent_members(
                 display_order,
                 default_workspace_path,
                 allowed_skill_ids,
+                execution_config,
                 is_default
             )
-            VALUES (?1, ?2, 'agent', ?3, 'agent', ?4, ?5, ?6, 1)
+            VALUES (?1, ?2, 'agent', ?3, 'agent', ?4, ?5, ?6, ?7, 1)
             "#,
         )
         .bind(Uuid::new_v4())
@@ -363,6 +370,10 @@ async fn ensure_agent_members(
         .bind((index + 1) as i64)
         .bind(default_workspace_path)
         .bind(Json(agent.allowed_skill_ids.clone()))
+        .bind(Json(MemberExecutionConfig {
+            mcp: Some(Default::default()),
+            ..Default::default()
+        }))
         .execute(&mut **tx)
         .await?;
 
@@ -563,10 +574,13 @@ async fn set_project_default_workspace_path(
 
 #[cfg(test)]
 mod tests {
-    use sqlx::{Row, SqlitePool};
+    use db::models::member_execution_config::MemberExecutionConfig;
+    use executors::mcp_config::MemberMcpConfig;
+    use sqlx::{Row, SqlitePool, types::Json};
     use uuid::Uuid;
 
     use super::{MIGRATION_PROJECT_MARKER, MIGRATION_PROJECT_NAME, ProjectMigrationService};
+    use crate::services::member_scoped_mcp_migration::run_member_scoped_mcp_migration;
 
     async fn setup_pool() -> SqlitePool {
         let pool = SqlitePool::connect("sqlite::memory:")
@@ -674,6 +688,15 @@ mod tests {
                 label TEXT,
                 kind TEXT CHECK (kind IN ('workspace', 'artifact', 'external')),
                 is_default BOOLEAN DEFAULT false,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+            r#"
+            CREATE TABLE application_data_migrations (
+                name TEXT PRIMARY KEY NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
+                error_summary TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
             )
@@ -885,6 +908,70 @@ mod tests {
         assert_eq!(project_count, 1);
         assert_eq!(member_count, 2);
         assert_eq!(path_count, 3);
+    }
+
+    #[tokio::test]
+    async fn late_project_migration_members_keep_explicit_empty_mcp_after_restart() {
+        let pool = setup_pool().await;
+        let initial_mcp_migration = run_member_scoped_mcp_migration(&pool)
+            .await
+            .expect("complete member MCP migration before legacy project migration");
+        assert!(!initial_mcp_migration.already_completed);
+        assert_eq!(initial_mcp_migration.migrated_members, 0);
+
+        let (agent_id, _, _) = insert_legacy_fixture(&pool).await;
+        sqlx::query(
+            r#"
+            UPDATE chat_agents
+            SET tools_enabled = '{"mcpServers":{"ambient-global":{"command":"global-tool"}}}'
+            WHERE id = ?1
+            "#,
+        )
+        .bind(agent_id)
+        .execute(&pool)
+        .await
+        .expect("set legacy shared MCP config");
+
+        let report = ProjectMigrationService::new()
+            .migrate_legacy_sessions(&pool, "user-1")
+            .await
+            .expect("migrate legacy sessions after member MCP migration");
+        assert_eq!(report.inserted_human_members, 1);
+        assert_eq!(report.inserted_agent_members, 1);
+
+        let project_id = report.project_id.expect("migration project id");
+        let member_configs = sqlx::query_scalar::<_, Json<MemberExecutionConfig>>(
+            "SELECT execution_config FROM project_members WHERE project_id = ?1 ORDER BY display_order",
+        )
+        .bind(project_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read migrated member configs");
+        assert_eq!(member_configs.len(), 2);
+        assert!(
+            member_configs
+                .iter()
+                .all(|config| { config.0.mcp.as_ref() == Some(&MemberMcpConfig::default()) })
+        );
+
+        let restart = run_member_scoped_mcp_migration(&pool)
+            .await
+            .expect("restart completed member MCP migration");
+        assert!(restart.already_completed);
+        assert_eq!(restart.runner_reads, 0);
+
+        let restarted_configs = sqlx::query_scalar::<_, Json<MemberExecutionConfig>>(
+            "SELECT execution_config FROM project_members WHERE project_id = ?1 ORDER BY display_order",
+        )
+        .bind(project_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read member configs after restart");
+        assert!(
+            restarted_configs
+                .iter()
+                .all(|config| { config.0.mcp.as_ref() == Some(&MemberMcpConfig::default()) })
+        );
     }
 
     #[tokio::test]

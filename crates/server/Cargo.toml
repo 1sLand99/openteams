@@ -72,3 +72,9 @@ tower = { version = "0.5", features = ["util"] }
 [features]
 default = []
 qa-mode = ["services/qa-mode", "executors/qa-mode"]
+
+[[test]]
+name = "member_scoped_mcp_e2e"
+path = "tests/member_scoped_mcp_e2e.rs"
+harness = false
+required-features = ["qa-mode"]

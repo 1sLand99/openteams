@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO application_data_migrations (name, status, error_summary)\n               VALUES ($1, 'failed', $2)\n               ON CONFLICT(name) DO UPDATE\n               SET status = 'failed',\n                   error_summary = excluded.error_summary,\n                   updated_at = datetime('now', 'subsec')\n               WHERE application_data_migrations.status <> 'completed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "fa22be6ac6393a0f32f888eaa91854600a3ea87ded14ff84aefe481344c067f7"
+}

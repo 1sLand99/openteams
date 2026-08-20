@@ -796,16 +796,29 @@ async fn resolve_runtime_command_for_diagnostics(
 async fn resolve_runtime_command(
     executor: &CodingAgent,
 ) -> Result<Option<ResolvedRuntimeCommand>, String> {
-    let Some(base) = runtime_command_base(executor) else {
-        return Ok(None);
+    let parts = match executor
+        .runtime_command_for_diagnostics()
+        .map_err(|error| {
+            command_failure_detail(
+                "<configured command could not be built>",
+                "build runtime command",
+                error,
+            )
+        })? {
+        Some(parts) => parts,
+        None => {
+            let Some(base) = runtime_command_base(executor) else {
+                return Ok(None);
+            };
+            CommandBuilder::new(base).build_initial().map_err(|error| {
+                command_failure_detail(
+                    "<configured command could not be parsed>",
+                    "parse runtime command",
+                    error,
+                )
+            })?
+        }
     };
-    let parts = CommandBuilder::new(base).build_initial().map_err(|error| {
-        command_failure_detail(
-            "<configured command could not be parsed>",
-            "parse runtime command",
-            error,
-        )
-    })?;
     let unresolved_command = parts.redacted_display();
     let (executable, args) = parts.into_resolved().await.map_err(|error| {
         command_failure_detail(&unresolved_command, "resolve runtime executable", error)
@@ -1036,6 +1049,7 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
         CodingAgent::KimiCode(_) => "kimi".to_string(),
         CodingAgent::QoderCli(_) => "qodercli".to_string(),
         CodingAgent::Hermes(_) => "hermes".to_string(),
+        CodingAgent::DeepseekHarness(_) => return None,
         CodingAgent::Pi(_) => Pi::version_command(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => return None,
@@ -1060,6 +1074,7 @@ fn cmd_overrides_for_executor(executor: &CodingAgent) -> Option<&CmdOverrides> {
         CodingAgent::QoderCli(config) => Some(&config.cmd),
         CodingAgent::Pi(config) => Some(&config.cmd),
         CodingAgent::Hermes(config) => Some(&config.cmd),
+        CodingAgent::DeepseekHarness(config) => Some(&config.cmd),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => None,
         #[cfg(feature = "qa-mode")]
@@ -1722,7 +1737,8 @@ fn reasoning_capability_for_runner(
         | BaseCodingAgent::CursorAgent
         | BaseCodingAgent::Copilot
         | BaseCodingAgent::Pi
-        | BaseCodingAgent::Hermes => None,
+        | BaseCodingAgent::Hermes
+        | BaseCodingAgent::DeepseekHarness => None,
         #[cfg(feature = "qa-mode")]
         BaseCodingAgent::QaMock | BaseCodingAgent::AcpQa => None,
     }
@@ -1824,6 +1840,7 @@ fn model_name(config: &CodingAgent) -> Option<&str> {
         CodingAgent::QoderCli(config) => config.model.as_deref(),
         CodingAgent::Pi(config) => config.model.as_deref(),
         CodingAgent::Hermes(config) => config.model.as_deref(),
+        CodingAgent::DeepseekHarness(config) => config.model.as_deref(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => None,
         _ => None,
@@ -1924,6 +1941,7 @@ mod tests {
     use executors::executors::{
         AppendPrompt,
         acp::{AcpConfigChoice, AcpConfigOptionKind, AcpConfigOptionSnapshot, AcpConfigSource},
+        deepseek_harness::DeepseekHarness,
         kimi::KimiCode,
         pi::Pi,
         qoder::QoderCli,
@@ -1985,6 +2003,7 @@ mod tests {
             (BaseCodingAgent::Pi, "settings.json", "mcp.json"),
             (BaseCodingAgent::Droid, "settings.json", "mcp.json"),
         ];
+        let runtime_only_paths = [(BaseCodingAgent::DeepseekHarness, "cordis.yml")];
 
         for (runner, runtime_file_name, mcp_file_name) in separate_paths {
             let executor = profiles
@@ -2016,10 +2035,35 @@ mod tests {
             assert_ne!(runtime_path, mcp_path, "{runner}");
         }
 
+        for (runner, runtime_file_name) in runtime_only_paths {
+            let executor = profiles
+                .executors
+                .get(&runner)
+                .and_then(|config| {
+                    config
+                        .get_default()
+                        .or_else(|| config.configurations.values().next())
+                })
+                .unwrap_or_else(|| panic!("missing default executor for {runner}"));
+            let runtime_path = executor
+                .default_runtime_config_path()
+                .unwrap_or_else(|| panic!("missing runtime config path for {runner}"));
+
+            assert_eq!(
+                runtime_path.file_name().and_then(|name| name.to_str()),
+                Some(runtime_file_name),
+                "{runner}"
+            );
+            assert_eq!(executor.default_mcp_config_path(), None, "{runner}");
+        }
+
         for (runner, config) in &profiles.executors {
             if separate_paths
                 .iter()
                 .any(|(separate_runner, _, _)| separate_runner == runner)
+                || runtime_only_paths
+                    .iter()
+                    .any(|(runtime_only_runner, _)| runtime_only_runner == runner)
             {
                 continue;
             }
@@ -2103,6 +2147,7 @@ mod tests {
             BaseCodingAgent::KimiCode,
             BaseCodingAgent::QoderCli,
             BaseCodingAgent::Hermes,
+            BaseCodingAgent::DeepseekHarness,
         ] {
             assert_eq!(
                 runtime_dependency_requirement(runner),
@@ -3167,6 +3212,27 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_model_option_merges_into_executor() {
+        let runner = BaseCodingAgent::DeepseekHarness;
+        let mut runtime = default_config(runner);
+        runtime.executor_options = serde_json::json!({
+            "model": "deepseek-v4-flash"
+        });
+        let mut store = AgentRuntimeStore::default();
+        store.configs.insert(runner, runtime);
+        let mut executor = CodingAgent::DeepseekHarness(DeepseekHarness::default());
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        apply_config_to_executor_and_env(runner, &mut executor, &mut env, &store).unwrap();
+
+        assert_eq!(model_name(&executor), Some("deepseek-v4-flash"));
+        let CodingAgent::DeepseekHarness(config) = executor else {
+            panic!("expected DeepSeek Harness executor");
+        };
+        assert_eq!(config.model.as_deref(), Some("deepseek-v4-flash"));
+    }
+
+    #[test]
     fn session_env_wins_over_agent_env_on_conflict() {
         let runner = BaseCodingAgent::KimiCode;
         let mut runtime = default_config(runner);
@@ -3324,6 +3390,33 @@ mod tests {
                 executors::executors::hermes::Hermes::default()
             )),
             Some("hermes".to_string())
+        );
+    }
+
+    #[test]
+    fn deepseek_harness_is_registered_as_source_checkout_acp_runner() {
+        assert!(
+            ExecutorConfigs::from_defaults()
+                .executors
+                .contains_key(&BaseCodingAgent::DeepseekHarness),
+            "DeepSeek Harness must have a default profile"
+        );
+        assert_eq!(
+            reasoning_capability_for_runner(BaseCodingAgent::DeepseekHarness),
+            None,
+            "DeepSeek provider and model are configured by its Cordis composition"
+        );
+        assert_eq!(
+            runtime_dependency_requirement(BaseCodingAgent::DeepseekHarness),
+            RuntimeDependencyRequirement::None,
+            "the built checkout launches directly through Node without npm or npx"
+        );
+        assert_eq!(
+            version_command_base(&CodingAgent::DeepseekHarness(
+                executors::executors::deepseek_harness::DeepseekHarness::default()
+            )),
+            None,
+            "the ACP stdio server must not receive a generic --version argument"
         );
     }
 

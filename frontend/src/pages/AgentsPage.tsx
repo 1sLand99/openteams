@@ -54,6 +54,7 @@ import claudeCodeSchema from "../../../shared/schemas/claude_code.json";
 import codexSchema from "../../../shared/schemas/codex.json";
 import copilotSchema from "../../../shared/schemas/copilot.json";
 import cursorAgentSchema from "../../../shared/schemas/cursor_agent.json";
+import deepseekHarnessSchema from "../../../shared/schemas/deepseek_harness.json";
 import droidSchema from "../../../shared/schemas/droid.json";
 import geminiSchema from "../../../shared/schemas/gemini.json";
 import hermesSchema from "../../../shared/schemas/hermes.json";
@@ -119,6 +120,12 @@ const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
     logoMode: "mask",
     logoClassName: "h-[22px] w-[22px]",
   },
+  DEEPSEEK_HARNESS: {
+    title: "DeepSeek Harness",
+    logoSrc: "/logos/deepseek-logo.svg",
+    logoMode: "mask",
+    logoClassName: "h-[22px] w-[22px]",
+  },
   DROID: {
     title: "Droid",
     logoSrc: "/logos/droid-light.svg",
@@ -181,6 +188,7 @@ const agentConfigSchemas: Record<BaseCodingAgent, AgentJsonSchema> = {
   CODEX: codexSchema,
   COPILOT: copilotSchema,
   CURSOR_AGENT: cursorAgentSchema,
+  DEEPSEEK_HARNESS: deepseekHarnessSchema,
   DROID: droidSchema,
   GEMINI: geminiSchema,
   HERMES: hermesSchema,
@@ -218,6 +226,7 @@ const isHiddenConfigField = (
     (fieldKey === "variant" || fieldKey === "agent"));
 
 const isAcpRunner = (runner: BaseCodingAgent): boolean =>
+  runner === "DEEPSEEK_HARNESS" ||
   runner === "HERMES" ||
   runner === "GEMINI" ||
   runner === "QWEN_CODE" ||
@@ -615,6 +624,7 @@ function AcpRuntimeConfigField({
   t: TranslateFn;
 }) {
   const isHermes = runner === "HERMES";
+  const isDeepseekHarness = runner === "DEEPSEEK_HARNESS";
   const [pendingRiskyChange, setPendingRiskyChange] = useState<
     "full_access" | "auto_allow" | null
   >(null);
@@ -714,7 +724,14 @@ function AcpRuntimeConfigField({
           value={authMode}
           options={[
             { id: "auto", label: t("agents.acp.auth.auto") },
-            { id: "method_id", label: t("agents.acp.auth.methodId") },
+            ...(isDeepseekHarness
+              ? []
+              : [
+                  {
+                    id: "method_id",
+                    label: t("agents.acp.auth.methodId"),
+                  },
+                ]),
           ]}
           showSearch={false}
           className={dropdownClass}
@@ -728,7 +745,7 @@ function AcpRuntimeConfigField({
           }
         />
       </div>
-      {authMode === "method_id" && (
+      {!isDeepseekHarness && authMode === "method_id" && (
         <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
           <span className={labelClass}>
             {t("agents.acp.auth.methodIdLabel")}
@@ -741,10 +758,10 @@ function AcpRuntimeConfigField({
               onChange(
                 "acp",
                 merge({
-                auth: {
-                  type: "method_id",
-                  method_id: event.target.value,
-                },
+                  auth: {
+                    type: "method_id",
+                    method_id: event.target.value,
+                  },
                 }),
               )
             }
@@ -752,7 +769,7 @@ function AcpRuntimeConfigField({
           />
         </label>
       )}
-      {!isHermes && (
+      {!isHermes && !isDeepseekHarness && (
         <label className="grid grid-cols-[128px_minmax(0,1fr)] items-start gap-3 py-1.5">
           <span className={`${labelClass} pt-1`}>
             {t("agents.acp.directories.label")}

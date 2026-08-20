@@ -10,7 +10,10 @@ use workspace_utils::msg_store::MsgStore;
 use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
     AcpCapabilityProbe, AcpClientServicePolicy, AcpExecutionOptions, AcpResumePolicy,
-    mcp::{AcpMcpPolicy, resolve_effective_mcp_config},
+    mcp::{
+        AcpMcpPolicy, load_prepared_acp_mcp_config, pin_mcp_run_environment,
+        prepare_acp_mcp_for_run,
+    },
 };
 use crate::{
     approvals::ExecutorApprovalService,
@@ -20,7 +23,8 @@ use crate::{
         AcpModelFallback, AcpProbeAuthState, AcpProbeInterpretation, AppendPrompt,
         AvailabilityInfo, ExecutorError, ExecutorPrompt, SpawnedChild, StandardCodingAgentExecutor,
     },
-    mcp_config::{McpConfig, read_canonical_mcp_config},
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PreparedMcpRun},
 };
 
 mod probe;
@@ -58,7 +62,7 @@ impl Hermes {
         )
     }
 
-    async fn acp_harness(&self) -> Result<AcpAgentHarness, ExecutorError> {
+    async fn acp_harness(&self, env: &ExecutionEnv) -> Result<AcpAgentHarness, ExecutorError> {
         let options = self.acp.clone().unwrap_or_default();
         if options.access_mode == Some(AcpAccessMode::WorkspaceOnly) {
             return Err(ExecutorError::Configuration(
@@ -122,11 +126,7 @@ impl Hermes {
         for selection in config_overrides {
             harness = harness.with_config_override(selection);
         }
-        let canonical = match self.default_mcp_config_path() {
-            Some(path) => read_canonical_mcp_config(&path, &McpConfig::hermes()).await?,
-            None => serde_json::json!({ "mcpServers": {} }),
-        };
-        let effective = resolve_effective_mcp_config(&canonical, &self.acp_mcp_policy)?;
+        let effective = load_prepared_acp_mcp_config(env).await?;
         tracing::debug!(
             server_count = effective.servers.len(),
             config_hash = %effective.config_hash,
@@ -144,6 +144,31 @@ impl Hermes {
 
 #[async_trait]
 impl StandardCodingAgentExecutor for Hermes {
+    async fn prepare_mcp_for_run(
+        &mut self,
+        canonical: &MemberMcpConfig,
+        context: &McpRunContext,
+        env: &mut ExecutionEnv,
+    ) -> Result<PreparedMcpRun, ExecutorError> {
+        let prepared =
+            prepare_acp_mcp_for_run(canonical, context, env, &mut self.cmd, "hermes-acp-mcp")?;
+        pin_mcp_run_environment(env, &mut self.cmd, Self::SKIP_CONFIGURED_MCP_ENV, "1");
+        Ok(prepared)
+    }
+
+    fn overlay_acp_execution_options(&mut self, higher_priority: &AcpExecutionOptions) {
+        let inherited = self.acp.clone().unwrap_or_default();
+        self.acp = Some(inherited.overlay(higher_priority));
+    }
+
+    fn acp_full_access_enabled(&self) -> bool {
+        self.acp
+            .as_ref()
+            .and_then(|options| options.access_mode)
+            .unwrap_or_default()
+            == AcpAccessMode::FullAccess
+    }
+
     fn acp_model_fallback(&self) -> AcpModelFallback {
         AcpModelFallback::Disabled
     }
@@ -190,13 +215,25 @@ impl StandardCodingAgentExecutor for Hermes {
             Some(AcpAuthSelection::MethodId { method_id }) => Some(method_id.clone()),
             _ => None,
         });
-        let isolated_env = self.isolated_env(env);
+        let mut isolated_env = env.clone();
+        let mut isolated_cmd = self.cmd.clone();
+        pin_mcp_run_environment(
+            &mut isolated_env,
+            &mut isolated_cmd,
+            Self::SKIP_CONFIGURED_MCP_ENV,
+            "1",
+        );
+        let command = apply_overrides(
+            CommandBuilder::new(Self::BASE_COMMAND).extend_params(["acp"]),
+            &isolated_cmd,
+        )?
+        .build_initial()?;
         Ok(Some(
             probe::probe_hermes_acp_command(
-                self.build_command_builder()?.build_initial()?,
+                command,
                 current_dir,
                 &isolated_env,
-                &self.cmd,
+                &isolated_cmd,
                 auth_method_id
                     .map(str::to_string)
                     .or(configured_auth_method_id),
@@ -211,10 +248,10 @@ impl StandardCodingAgentExecutor for Hermes {
         prompt: &str,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let harness = self.acp_harness().await?;
+        let isolated_env = self.isolated_env(env);
+        let harness = self.acp_harness(&isolated_env).await?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
         let command = self.build_command_builder()?.build_initial()?;
-        let isolated_env = self.isolated_env(env);
         harness
             .spawn_with_command(
                 current_dir,
@@ -235,10 +272,10 @@ impl StandardCodingAgentExecutor for Hermes {
         _reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let harness = self.acp_harness().await?;
+        let isolated_env = self.isolated_env(env);
+        let harness = self.acp_harness(&isolated_env).await?;
         let combined_prompt = self.append_prompt.combine_prompt(prompt);
         let command = self.build_command_builder()?.build_follow_up(&[])?;
-        let isolated_env = self.isolated_env(env);
         harness
             .spawn_follow_up_with_command(
                 current_dir,
@@ -258,11 +295,11 @@ impl StandardCodingAgentExecutor for Hermes {
         prompt: &ExecutorPrompt,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let harness = self.acp_harness().await?;
+        let isolated_env = self.isolated_env(env);
+        let harness = self.acp_harness(&isolated_env).await?;
         let command = self.build_command_builder()?.build_initial()?;
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
-        let isolated_env = self.isolated_env(env);
         harness
             .spawn_structured_with_command(
                 current_dir,
@@ -283,11 +320,11 @@ impl StandardCodingAgentExecutor for Hermes {
         _reset_to_message_id: Option<&str>,
         env: &ExecutionEnv,
     ) -> Result<SpawnedChild, ExecutorError> {
-        let harness = self.acp_harness().await?;
+        let isolated_env = self.isolated_env(env);
+        let harness = self.acp_harness(&isolated_env).await?;
         let command = self.build_command_builder()?.build_follow_up(&[])?;
         let mut prompt = prompt.clone();
         prompt.text = self.append_prompt.combine_prompt(&prompt.text);
-        let isolated_env = self.isolated_env(env);
         harness
             .spawn_follow_up_structured_with_command(
                 current_dir,
@@ -321,6 +358,11 @@ impl StandardCodingAgentExecutor for Hermes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_context(workspace: &Path) -> McpRunContext {
+        McpRunContext::new(workspace, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
+            .expect("run context")
+    }
 
     fn hermes() -> Hermes {
         Hermes {
@@ -399,6 +441,84 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some(".hermes")
         );
+    }
+
+    #[tokio::test]
+    async fn public_preparation_injects_member_servers_and_pins_vendor_opt_out() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut executor = hermes();
+        executor.acp_mcp_policy = AcpMcpPolicy {
+            allowed_server_names: Some(Default::default()),
+            disabled_server_names: Default::default(),
+        };
+        let canonical = MemberMcpConfig {
+            mcp_servers: [(
+                "member-only".to_string(),
+                serde_json::json!({"command": "/bin/echo"}),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let prepared = executor
+            .prepare_mcp_for_run(&canonical, &run_context(workspace.path()), &mut env)
+            .await
+            .expect("Hermes MCP preparation");
+        let effective = load_prepared_acp_mcp_config(&env)
+            .await
+            .expect("prepared member MCP");
+
+        assert_eq!(effective.server_names(), ["member-only".to_string()].into());
+        assert_eq!(
+            env.get(Hermes::SKIP_CONFIGURED_MCP_ENV).map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            executor
+                .cmd
+                .env
+                .as_ref()
+                .and_then(|values| values.get(Hermes::SKIP_CONFIGURED_MCP_ENV))
+                .map(String::as_str),
+            Some("1")
+        );
+        drop(prepared.into_cleanup());
+    }
+
+    #[tokio::test]
+    async fn public_empty_member_map_injects_empty_set_and_pins_vendor_opt_out() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut executor = hermes();
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let prepared = executor
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(workspace.path()),
+                &mut env,
+            )
+            .await
+            .expect("empty Hermes MCP preparation");
+        let effective = load_prepared_acp_mcp_config(&env)
+            .await
+            .expect("prepared empty Hermes MCP");
+
+        assert!(effective.server_names().is_empty());
+        assert_eq!(
+            env.get(Hermes::SKIP_CONFIGURED_MCP_ENV).map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            executor
+                .cmd
+                .env
+                .as_ref()
+                .and_then(|values| values.get(Hermes::SKIP_CONFIGURED_MCP_ENV))
+                .map(String::as_str),
+            Some("1")
+        );
+        drop(prepared.into_cleanup());
     }
 
     #[test]

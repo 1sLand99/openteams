@@ -18,6 +18,7 @@ fn generate_types_content() -> String {
         db::models::project_member::ProjectMemberType::decl(),
         db::models::project_member::CreateProjectMember::decl(),
         db::models::project_member::UpdateProjectMember::decl(),
+        executors::mcp_config::MemberMcpConfig::decl(),
         db::models::member_execution_config::MemberExecutionConfig::decl(),
         db::models::project_path::ProjectPath::decl(),
         db::models::project_path::ProjectPathKind::decl(),
@@ -297,9 +298,6 @@ fn generate_types_content() -> String {
         server::routes::tags::TagSearchParams::decl(),
         server::routes::config::UserSystemInfo::decl(),
         server::routes::config::Environment::decl(),
-        server::routes::config::McpServerQuery::decl(),
-        server::routes::config::UpdateMcpServersBody::decl(),
-        server::routes::config::GetMcpServerResponse::decl(),
         server::routes::config::CheckEditorAvailabilityQuery::decl(),
         server::routes::config::CheckEditorAvailabilityResponse::decl(),
         server::routes::config::CheckAgentAvailabilityQuery::decl(),
@@ -511,6 +509,7 @@ fn generate_types_content() -> String {
         executors::executors::kimi::KimiCode::decl(),
         executors::executors::pi::Pi::decl(),
         executors::executors::hermes::Hermes::decl(),
+        executors::executors::deepseek_harness::DeepseekHarness::decl(),
         executors::executors::droid::Autonomy::decl(),
         executors::executors::droid::ReasoningEffortLevel::decl(),
         executors::executors::AppendPrompt::decl(),
@@ -642,6 +641,10 @@ fn generate_schemas() -> Result<HashMap<&'static str, String>, serde_json::Error
         (
             "hermes",
             generate_json_schema::<executors::executors::hermes::Hermes>()?,
+        ),
+        (
+            "deepseek_harness",
+            generate_json_schema::<executors::executors::deepseek_harness::DeepseekHarness>()?,
         ),
     ]);
     println!(

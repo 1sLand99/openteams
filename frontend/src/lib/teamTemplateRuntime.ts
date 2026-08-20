@@ -1,10 +1,16 @@
 import { getRuntimeDisplayState } from '@/pages/agent-runtime/agentRuntimeViewModel';
 import type { AgentRuntimeStatus, JsonValue } from '@/types';
-import type { ChatMemberPreset, ChatTeamPreset } from '../../../shared/types';
+import type {
+  BaseCodingAgent,
+  ChatMemberPreset,
+  ChatTeamPreset,
+  MemberExecutionConfig,
+} from '../../../shared/types';
 
 export type TemplateMemberBuild = {
   allowedSkillIds: string[];
   displayOrder: number;
+  executionConfig: MemberExecutionConfig;
   modelName: string | null;
   name: string;
   role: string;
@@ -72,11 +78,16 @@ export const buildTemplateMemberSpecs = (
   return selectedMembers.flatMap((member, index) => {
     const runtime = resolveTemplateMemberRuntime(member, runtimes);
     if (!runtime) return [];
+    const executionConfig = structuredClone(member.execution_config ?? {});
+    executionConfig.mcp ??= { mcpServers: {} };
+    executionConfig.runner_type = runtime.runnerType as BaseCodingAgent;
+    executionConfig.model_name = runtime.modelName;
 
     return [
       {
         allowedSkillIds: member.selected_skill_ids,
         displayOrder: index + 1,
+        executionConfig,
         modelName: runtime.modelName,
         name: member.name,
         role: member.id === leadMemberId ? 'lead' : 'agent',

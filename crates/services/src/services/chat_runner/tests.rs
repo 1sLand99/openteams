@@ -19,7 +19,12 @@ use db::{
         workflow_types::WorkflowAgentSessionRole,
     },
 };
-use executors::executors::{CancellationToken, ExecutorError};
+use executors::{
+    env::{ExecutionEnv, RepoContext},
+    executors::{CancellationToken, ExecutorError, ExecutorRunCleanup},
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, PrivateMcpRunDirectory, canonical_mcp_server_map_hash},
+};
 use git::GitService;
 use serde_json::json;
 use sqlx::SqlitePool;
@@ -36,13 +41,18 @@ use super::{
     ChatStreamEvent, LifecycleEvent, MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON,
     MAX_PROTOCOL_PARSE_RETRIES, PROTOCOL_OUTPUT_SCHEMA_JSON, RUNS_MAX_TOTAL_BYTES_PER_WORKSPACE,
     RUNS_PRUNE_TARGET_BYTES_PER_WORKSPACE, ResolvedPromptLanguage, RunCompletionStatus,
-    TokenUsageInfo, runtime::RunLogForwarders,
+    TokenUsageInfo,
+    runtime::{ExitWatcherArgs, RunLogForwarders},
 };
 use crate::services::{
     chat,
     config::UiLanguage,
     queued_message::{CreateQueuedMessage, QueuedMessageService},
     session_worktree::SessionWorktreeService,
+    test_support::{
+        ADAPTER_DIAGNOSTIC_SECRET, CANONICAL_MCP_SECRET, TracingCapture,
+        canonical_mcp_config_with_fake_secrets,
+    },
 };
 
 fn test_message_with_sender(
@@ -370,6 +380,17 @@ async fn setup_chat_runner_db() -> DBService {
     DBService { pool }
 }
 
+async fn setup_migrated_chat_runner_db() -> DBService {
+    let pool = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("create migrated sqlite memory pool");
+    sqlx::migrate!("../db/migrations")
+        .run(&pool)
+        .await
+        .expect("run chat lifecycle test migrations");
+    DBService { pool }
+}
+
 async fn insert_test_chat_session(db: &DBService, session_id: Uuid) -> ChatSession {
     sqlx::query(
         r#"
@@ -525,7 +546,7 @@ async fn active_workflow_blocks_plan_generation_without_overwriting_its_card() {
 }
 
 #[tokio::test]
-async fn refreshes_workflow_member_execution_config_before_run() {
+async fn refreshes_workflow_member_config_and_freezes_each_run_snapshot() {
     let db = setup_chat_runner_db().await;
     let project_id = Uuid::new_v4();
     let session_id = Uuid::new_v4();
@@ -546,11 +567,19 @@ async fn refreshes_workflow_member_execution_config_before_run() {
     .expect("insert project chat session");
 
     let member_config = MemberExecutionConfig {
-        runner_type: Some(executors::executors::BaseCodingAgent::Gemini),
+        runner_type: Some(executors::executors::BaseCodingAgent::Pi),
         model_name: Some("new-model".to_string()),
         thinking_effort: Some("high".to_string()),
         model_variant: None,
         acp: None,
+        mcp: Some(MemberMcpConfig {
+            mcp_servers: [(
+                "run-one".to_string(),
+                serde_json::json!({"command": "/bin/echo"}),
+            )]
+            .into_iter()
+            .collect(),
+        }),
     };
     let member = ProjectMember::create(
         &db.pool,
@@ -584,6 +613,7 @@ async fn refreshes_workflow_member_execution_config_before_run() {
                 thinking_effort: None,
                 model_variant: None,
                 acp: None,
+                mcp: None,
             },
         },
         Uuid::new_v4(),
@@ -656,7 +686,7 @@ async fn refreshes_workflow_member_execution_config_before_run() {
     .expect("resolve refreshed execution config");
     assert_eq!(
         effective.runner_type,
-        executors::executors::BaseCodingAgent::Gemini
+        executors::executors::BaseCodingAgent::Pi
     );
     assert_eq!(effective.model_name.as_deref(), Some("new-model"));
     let refreshed_workflow_session = WorkflowAgentSession::find_by_id(&db.pool, workflow_session.id)
@@ -665,6 +695,25 @@ async fn refreshes_workflow_member_execution_config_before_run() {
         .expect("workflow session exists");
     assert_eq!(refreshed_workflow_session.agent_session_id, None);
     assert_eq!(refreshed_workflow_session.agent_message_id, None);
+
+    let run_workspace = tempfile::tempdir().expect("run workspace");
+    let mut run_one_env = ExecutionEnv::new(
+        RepoContext::new(run_workspace.path().to_path_buf(), Vec::new()),
+        false,
+        String::new(),
+    );
+    let (_, _, run_one_snapshot) =
+        crate::services::member_execution::build_effective_member_executor_for_run(
+            &db.pool,
+            &agent,
+            &synced,
+            run_workspace.path(),
+            Uuid::new_v4(),
+            &mut run_one_env,
+        )
+        .await
+        .expect("prepare run one snapshot");
+    assert_eq!(run_one_snapshot.server_names(), ["run-one"]);
 
     sqlx::query(
         r#"
@@ -720,6 +769,59 @@ async fn refreshes_workflow_member_execution_config_before_run() {
         unchanged_workflow_session.agent_session_id.as_deref(),
         Some("current-workflow-session")
     );
+
+    let next_member_config = MemberExecutionConfig {
+        mcp: Some(MemberMcpConfig {
+            mcp_servers: [(
+                "run-two".to_string(),
+                serde_json::json!({"command": "/bin/echo"}),
+            )]
+            .into_iter()
+            .collect(),
+        }),
+        ..member_config.clone()
+    };
+    sqlx::query("UPDATE project_members SET execution_config = ?2 WHERE id = ?1")
+        .bind(member.id)
+        .bind(sqlx::types::Json(next_member_config.clone()))
+        .execute(&db.pool)
+        .await
+        .expect("update project member for run two");
+
+    let run_two_refresh =
+        crate::services::member_execution::refresh_session_agent_execution_config_before_run(
+            &db.pool,
+            &session,
+            unchanged.session_agent,
+            agent.id,
+            Some(workflow_session.id),
+        )
+        .await
+        .expect("refresh before run two");
+    assert!(run_two_refresh.changed);
+    assert_eq!(run_two_refresh.session_agent.execution_config.0, next_member_config);
+    assert_eq!(run_two_refresh.session_agent.agent_session_id, None);
+
+    let mut run_two_env = ExecutionEnv::new(
+        RepoContext::new(run_workspace.path().to_path_buf(), Vec::new()),
+        false,
+        String::new(),
+    );
+    let (_, _, run_two_snapshot) =
+        crate::services::member_execution::build_effective_member_executor_for_run(
+            &db.pool,
+            &agent,
+            &run_two_refresh.session_agent,
+            run_workspace.path(),
+            Uuid::new_v4(),
+            &mut run_two_env,
+        )
+        .await
+        .expect("prepare run two snapshot");
+
+    assert_eq!(run_one_snapshot.server_names(), ["run-one"]);
+    assert_eq!(run_two_snapshot.server_names(), ["run-two"]);
+    assert_ne!(run_one_snapshot.config_hash(), run_two_snapshot.config_hash());
 }
 
 #[tokio::test]
@@ -743,6 +845,7 @@ async fn leaves_non_project_session_execution_config_unchanged_before_run() {
                 thinking_effort: None,
                 model_variant: None,
                 acp: None,
+                mcp: None,
             },
         },
         Uuid::new_v4(),
@@ -782,6 +885,18 @@ fn empty_log_forwarders() -> RunLogForwarders {
         stdout: tokio::spawn(async {}),
         stderr: tokio::spawn(async {}),
     }
+}
+
+fn test_run_cleanup(workspace: &Path) -> (std::path::PathBuf, ExecutorRunCleanup) {
+    let context = McpRunContext::new(workspace, Uuid::new_v4(), Uuid::new_v4())
+        .expect("test MCP run context");
+    let directory =
+        PrivateMcpRunDirectory::create(&context, "chat-test").expect("private run directory");
+    directory
+        .write_file("mcp.json", b"{}")
+        .expect("private run file");
+    let path = directory.path().to_path_buf();
+    (path, directory.into_cleanup())
 }
 
 #[tokio::test]
@@ -2004,6 +2119,8 @@ async fn executor_startup_has_a_bounded_deadline() {
 
 #[tokio::test]
 async fn exit_signal_waits_for_cleanup_before_finished() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (cleanup_path, cleanup) = test_run_cleanup(workspace.path());
     let child = sleep_command(1).group_spawn().expect("spawn child");
     let stop = CancellationToken::new();
     let msg_store = Arc::new(MsgStore::new());
@@ -2014,21 +2131,25 @@ async fn exit_signal_waits_for_cleanup_before_finished() {
         .send(executors::executors::ExecutorExitResult::Success)
         .expect("send exit signal");
 
-    let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_with_timeout(
-        child,
-        stop,
-        None,
-        Some(exit_rx),
-        msg_store.clone(),
-        completion_status.clone(),
-        terminal_failure_reason,
-        empty_log_forwarders(),
+    let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
+        ExitWatcherArgs {
+            child,
+            stop,
+            executor_cancel: None,
+            exit_signal: Some(exit_rx),
+            cleanup: Some(cleanup),
+            msg_store: msg_store.clone(),
+            completion_status: completion_status.clone(),
+            terminal_failure_reason,
+            log_forwarders: empty_log_forwarders(),
+        },
         Uuid::new_v4(),
         std::time::Duration::from_secs(3),
     ));
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(finished_count(&msg_store), 0);
+    assert!(cleanup_path.exists());
 
     watcher.await.expect("watcher complete");
 
@@ -2037,10 +2158,13 @@ async fn exit_signal_waits_for_cleanup_before_finished() {
         RunCompletionStatus::from_atomic(&completion_status),
         RunCompletionStatus::Succeeded
     );
+    assert!(!cleanup_path.exists());
 }
 
 #[tokio::test]
 async fn exit_signal_preserves_authoritative_failure_reason() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (cleanup_path, cleanup) = test_run_cleanup(workspace.path());
     let child = sleep_command(30).group_spawn().expect("spawn child");
     let stop = CancellationToken::new();
     let msg_store = Arc::new(MsgStore::new());
@@ -2055,15 +2179,18 @@ async fn exit_signal_preserves_authoritative_failure_reason() {
         )
         .expect("send exit signal");
 
-    ChatRunner::watch_executor_lifecycle_with_timeout(
-        child,
-        stop,
-        None,
-        Some(exit_rx),
-        msg_store,
-        completion_status.clone(),
-        terminal_failure_reason.clone(),
-        empty_log_forwarders(),
+    ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
+        ExitWatcherArgs {
+            child,
+            stop,
+            executor_cancel: None,
+            exit_signal: Some(exit_rx),
+            cleanup: Some(cleanup),
+            msg_store,
+            completion_status: completion_status.clone(),
+            terminal_failure_reason: terminal_failure_reason.clone(),
+            log_forwarders: empty_log_forwarders(),
+        },
         Uuid::new_v4(),
         std::time::Duration::from_millis(100),
     )
@@ -2077,6 +2204,7 @@ async fn exit_signal_preserves_authoritative_failure_reason() {
         terminal_failure_reason.lock().await.as_deref(),
         Some("OpenTeamsCli request timed out after 2400s without session activity")
     );
+    assert!(!cleanup_path.exists());
 }
 
 #[tokio::test]
@@ -2102,6 +2230,8 @@ async fn lifecycle_wait_times_out_after_session_inactivity() {
 
 #[tokio::test]
 async fn stop_request_uses_same_cleanup_flow() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (cleanup_path, cleanup) = test_run_cleanup(workspace.path());
     let child = sleep_command(30).group_spawn().expect("spawn child");
     let stop = CancellationToken::new();
     let executor_cancel = CancellationToken::new();
@@ -2109,15 +2239,18 @@ async fn stop_request_uses_same_cleanup_flow() {
     let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
     let terminal_failure_reason = Arc::new(Mutex::new(None));
 
-    let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_with_timeout(
-        child,
-        stop.clone(),
-        Some(executor_cancel.clone()),
-        None,
-        msg_store.clone(),
-        completion_status.clone(),
-        terminal_failure_reason,
-        empty_log_forwarders(),
+    let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
+        ExitWatcherArgs {
+            child,
+            stop: stop.clone(),
+            executor_cancel: Some(executor_cancel.clone()),
+            exit_signal: None,
+            cleanup: Some(cleanup),
+            msg_store: msg_store.clone(),
+            completion_status: completion_status.clone(),
+            terminal_failure_reason,
+            log_forwarders: empty_log_forwarders(),
+        },
         Uuid::new_v4(),
         std::time::Duration::from_millis(100),
     ));
@@ -2125,6 +2258,7 @@ async fn stop_request_uses_same_cleanup_flow() {
     stop.cancel();
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     assert_eq!(finished_count(&msg_store), 0);
+    assert!(cleanup_path.exists());
 
     watcher.await.expect("watcher complete");
 
@@ -2134,6 +2268,44 @@ async fn stop_request_uses_same_cleanup_flow() {
         RunCompletionStatus::Stopped
     );
     assert_eq!(finished_count(&msg_store), 1);
+    assert!(!cleanup_path.exists());
+}
+
+#[tokio::test]
+async fn watcher_drop_releases_run_cleanup_without_touching_siblings() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let vendor_file = workspace.path().join("vendor-config.json");
+    std::fs::write(&vendor_file, "preserve").expect("vendor fixture");
+    let (cleanup_path, cleanup) = test_run_cleanup(workspace.path());
+    let child = sleep_command(1).group_spawn().expect("spawn child");
+    let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
+        ExitWatcherArgs {
+            child,
+            stop: CancellationToken::new(),
+            executor_cancel: None,
+            exit_signal: None,
+            cleanup: Some(cleanup),
+            msg_store: Arc::new(MsgStore::new()),
+            completion_status: Arc::new(AtomicU8::new(
+                RunCompletionStatus::Succeeded.as_u8(),
+            )),
+            terminal_failure_reason: Arc::new(Mutex::new(None)),
+            log_forwarders: empty_log_forwarders(),
+        },
+        Uuid::new_v4(),
+        std::time::Duration::from_millis(100),
+    ));
+    tokio::task::yield_now().await;
+    assert!(cleanup_path.exists());
+
+    watcher.abort();
+    let _ = watcher.await;
+
+    assert!(!cleanup_path.exists());
+    assert_eq!(
+        std::fs::read_to_string(vendor_file).expect("preserved vendor file"),
+        "preserve"
+    );
 }
 
 #[tokio::test]
@@ -4584,7 +4756,10 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
             workspace_path: Some(workspace.to_string_lossy().to_string()),
             allowed_skill_ids: Vec::new(),
             project_member_id: None,
-            execution_config: MemberExecutionConfig::default(),
+            execution_config: MemberExecutionConfig {
+                mcp: Some(Default::default()),
+                ..Default::default()
+            },
         },
         Uuid::new_v4(),
     )
@@ -4701,212 +4876,213 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
     }
 }
 
-#[cfg(unix)]
-#[tokio::test]
-async fn pi_member_isolation_through_build_effective_member_executor() {
-    use crate::services::member_execution::build_effective_member_executor_for_run;
-    use executors::env::RepoContext;
-    use executors::executors::{BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor};
-    use std::os::unix::fs::PermissionsExt;
+struct ChatStartupBoundaryResult {
+    _workspace: tempfile::TempDir,
+    db: DBService,
+    session_id: Uuid,
+    session_agent_id: Uuid,
+    error: String,
+    spawn_attempts: usize,
+    state: ChatSessionAgentState,
+    tracing: String,
+    events: Vec<ChatStreamEvent>,
+}
 
-    let _fixture_lock = super::PI_FIXTURE_TEST_LOCK.lock().await;
-
-    const PI_FIXTURE_DIR: &str =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../executors/tests/fixtures/pi_acp");
-
-    let temp = tempfile::tempdir().expect("member isolation workspace");
-    let root = temp.path();
-
-    let bin = root.join("bin");
-    let nm_bin = root.join("node_modules/.bin");
-    let pi_pkg = root.join("node_modules/@earendil-works/pi-coding-agent");
-    let mcp_pkg = root.join("node_modules/pi-mcp-adapter");
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::create_dir_all(&nm_bin).unwrap();
-    std::fs::create_dir_all(&pi_pkg).unwrap();
-    std::fs::create_dir_all(&mcp_pkg).unwrap();
-    std::fs::write(pi_pkg.join("package.json"), r#"{"version":"0.83.0"}"#).unwrap();
-    std::fs::write(mcp_pkg.join("package.json"), r#"{"version":"2.18.0"}"#).unwrap();
-    std::fs::write(mcp_pkg.join("index.ts"), "export default () => {};").unwrap();
-
-    let mode = 0o755;
-    let npx_path = bin.join("npx");
-    std::fs::write(&npx_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_npx.sh")).unwrap()).unwrap();
-    std::fs::set_permissions(&npx_path, std::fs::Permissions::from_mode(mode)).unwrap();
-    let pi_acp_path = bin.join("pi-acp");
-    std::fs::write(&pi_acp_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_acp.mjs")).unwrap()).unwrap();
-    std::fs::set_permissions(&pi_acp_path, std::fs::Permissions::from_mode(mode)).unwrap();
-    let pi_bin_path = nm_bin.join("pi");
-    std::fs::write(&pi_bin_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi.mjs")).unwrap()).unwrap();
-    std::fs::set_permissions(&pi_bin_path, std::fs::Permissions::from_mode(mode)).unwrap();
-    let mcp_bin_path = nm_bin.join("pi-mcp-adapter");
-    std::fs::write(&mcp_bin_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_mcp_adapter.mjs")).unwrap()).unwrap();
-    std::fs::set_permissions(&mcp_bin_path, std::fs::Permissions::from_mode(mode)).unwrap();
-
-    let workspace = root.join("workspace");
-    std::fs::create_dir_all(&workspace).unwrap();
-
-    let pi_agent_dir = root.join("home/.pi/agent");
-    std::fs::create_dir_all(&pi_agent_dir).unwrap();
-    std::fs::write(
-        pi_agent_dir.join("mcp.json"),
-        serde_json::json!({
-            "mcpServers": {
-                "alpha": {"command": "/bin/echo", "env": {"TOKEN": "alpha-secret"}},
-                "beta": {"command": "/bin/echo", "env": {"KEY": "beta-secret"}}
-            },
-            "settings": {"hostConfigDiscovery": "off"}
-        }).to_string(),
-    ).unwrap();
-
-    let prompts = root.join("prompts.txt");
-    let pids = root.join("pids.json");
-    let session_file = root.join("sessions/session.jsonl");
-    let perm_log = root.join("permissions.jsonl");
-    let proto_log = root.join("protocol.jsonl");
-
-    unsafe {
-        std::env::set_var("OPENTEAMS_PI_QA_NPX_PATH", &npx_path);
-        std::env::set_var("PATH", format!("{}:{}:{}", bin.display(), nm_bin.display(), std::env::var("PATH").unwrap_or_default()));
-        std::env::set_var("HOME", root.join("home"));
-        std::env::set_var("OPENTEAMS_FAKE_PI_PROMPTS", &prompts);
-        std::env::set_var("OPENTEAMS_FAKE_PI_CHILD_PID_FILE", &pids);
-        std::env::set_var("OPENTEAMS_FAKE_PI_SESSION_FILE", &session_file);
-        std::env::set_var("OPENTEAMS_FAKE_PI_PERMISSION_LOG", &perm_log);
-        std::env::set_var("OPENTEAMS_FAKE_PI_PROTOCOL_LOG", &proto_log);
-    }
-
-    let db = setup_chat_runner_db().await;
-
-    let agent = ChatAgent::create(
-        &db.pool,
-        &CreateChatAgent {
-            name: "Pi Member A".to_string(),
-            runner_type: "PI".to_string(),
-            system_prompt: Some("You are Pi.".to_string()),
-            tools_enabled: Some(json!({ "mcpServers": { "alpha": true } })),
-            model_name: None,
-            owner_project_id: None,
-        },
-        Uuid::new_v4(),
-    )
-    .await
-    .expect("create agent A");
-
-    let sa_a = ChatSessionAgent::create(
+async fn run_chat_startup_until_spawn_boundary(
+    runner_type: &str,
+    mcp: Option<MemberMcpConfig>,
+    adapter_diagnostic: Option<String>,
+) -> ChatStartupBoundaryResult {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let db = setup_migrated_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    runner
+        .block_executor_spawn
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    runner.set_mcp_preparation_diagnostic_for_test(adapter_diagnostic);
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let mut events = runner.subscribe(session_id);
+    let agent = insert_test_chat_agent(&db, "McpTarget").await;
+    sqlx::query("UPDATE chat_agents SET runner_type = ?2 WHERE id = ?1")
+        .bind(agent.id)
+        .bind(runner_type)
+        .execute(&db.pool)
+        .await
+        .expect("set test runner type");
+    let session_agent = ChatSessionAgent::create(
         &db.pool,
         &db::models::chat_session_agent::CreateChatSessionAgent {
-            session_id: Uuid::new_v4(),
+            session_id,
             agent_id: agent.id,
-            member_name: Some("MemberA".to_string()),
-            workspace_path: Some(workspace.to_string_lossy().to_string()),
+            member_name: Some("McpTarget".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
             allowed_skill_ids: Vec::new(),
             project_member_id: None,
-            execution_config: MemberExecutionConfig::default(),
+            execution_config: MemberExecutionConfig {
+                mcp,
+                ..Default::default()
+            },
         },
         Uuid::new_v4(),
     )
     .await
-    .expect("create sa A");
-
-    let agent_b = ChatAgent::create(
+    .expect("create MCP target");
+    let message = chat::create_message(
         &db.pool,
-        &CreateChatAgent {
-            name: "Pi Member B".to_string(),
-            runner_type: "PI".to_string(),
-            system_prompt: Some("You are Pi.".to_string()),
-            tools_enabled: Some(json!({ "mcpServers": { "beta": true } })),
-            model_name: None,
-            owner_project_id: None,
-        },
-        Uuid::new_v4(),
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@McpTarget verify preparation order".to_string(),
+        None,
     )
     .await
-    .expect("create agent B");
+    .expect("create MCP test message");
 
-    let sa_b = ChatSessionAgent::create(
-        &db.pool,
-        &db::models::chat_session_agent::CreateChatSessionAgent {
-            session_id: Uuid::new_v4(),
-            agent_id: agent_b.id,
-            member_name: Some("MemberB".to_string()),
-            workspace_path: Some(workspace.to_string_lossy().to_string()),
-            allowed_skill_ids: Vec::new(),
-            project_member_id: None,
-            execution_config: MemberExecutionConfig::default(),
-        },
-        Uuid::new_v4(),
-    )
-    .await
-    .expect("create sa B");
-
-    let mut env_a = executors::env::ExecutionEnv::new(
-        RepoContext::new(workspace.clone(), Vec::new()),
-        false,
-        String::new(),
-    );
-    let (config_a, executor_a) = build_effective_member_executor_for_run(
-        &db.pool, &agent, &sa_a, &mut env_a,
-    )
-    .await
-    .expect("build executor A");
-
-    let mut env_b = executors::env::ExecutionEnv::new(
-        RepoContext::new(workspace.clone(), Vec::new()),
-        false,
-        String::new(),
-    );
-    let (config_b, executor_b) = build_effective_member_executor_for_run(
-        &db.pool, &agent_b, &sa_b, &mut env_b,
-    )
-    .await
-    .expect("build executor B");
-
-    assert_eq!(config_a.runner_type, BaseCodingAgent::Pi);
-    assert_eq!(config_b.runner_type, BaseCodingAgent::Pi);
-
-    let pi_a = match &executor_a {
-        CodingAgent::Pi(pi) => pi,
-        _ => panic!("expected Pi executor for A"),
-    };
-    let pi_b = match &executor_b {
-        CodingAgent::Pi(pi) => pi,
-        _ => panic!("expected Pi executor for B"),
-    };
-
-    assert!(
-        pi_a.acp_mcp_policy.allowed_server_names.is_some(),
-        "Pi A must have an explicit MCP allowlist"
-    );
-    assert!(
-        pi_b.acp_mcp_policy.allowed_server_names.is_some(),
-        "Pi B must have an explicit MCP allowlist"
-    );
-
-    let allow_a = pi_a.acp_mcp_policy.allowed_server_names.as_ref().unwrap();
-    let allow_b = pi_b.acp_mcp_policy.allowed_server_names.as_ref().unwrap();
-    assert!(
-        allow_a.contains("alpha") && !allow_a.contains("beta"),
-        "Member A allowlist must contain alpha, not beta: {allow_a:?}"
-    );
-    assert!(
-        allow_b.contains("beta") && !allow_b.contains("alpha"),
-        "Member B allowlist must contain beta, not alpha: {allow_b:?}"
-    );
-
-    let spawned_a = executor_a
-        .spawn(&workspace, "member-a-test", &env_a)
+    let tracing = TracingCapture::start();
+    let error = runner
+        .run_agent_for_mention(session_id, "McpTarget", 0, &message)
         .await
-        .expect("spawn A");
-    drop(spawned_a);
-
-    let spawned_b = executor_b
-        .spawn(&workspace, "member-b-test", &env_b)
+        .expect_err("startup must stop at the expected boundary")
+        .to_string();
+    let tracing = tracing.finish();
+    let spawn_attempts = runner
+        .executor_spawn_attempts
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let state = ChatSessionAgent::find_by_id(&db.pool, session_agent.id)
         .await
-        .expect("spawn B");
-    drop(spawned_b);
+        .expect("read MCP target")
+        .expect("MCP target exists")
+        .state;
+    let events = std::iter::from_fn(|| events.try_recv().ok()).collect();
+    ChatStartupBoundaryResult {
+        _workspace: workspace,
+        db,
+        session_id,
+        session_agent_id: session_agent.id,
+        error,
+        spawn_attempts,
+        state,
+        tracing,
+        events,
+    }
+}
 
-    unsafe {
-        std::env::remove_var("OPENTEAMS_PI_QA_NPX_PATH");
+#[tokio::test]
+async fn chat_lifecycle_prepares_mcp_before_any_executor_spawn() {
+    let missing = run_chat_startup_until_spawn_boundary("CODEX", None, None).await;
+    assert!(missing.error.contains("not initialized"));
+    assert_eq!(missing.spawn_attempts, 0);
+    assert_eq!(missing.state, ChatSessionAgentState::Dead);
+
+    let codex = run_chat_startup_until_spawn_boundary(
+        "CODEX",
+        Some(Default::default()),
+        None,
+    )
+    .await;
+    assert!(codex.error.contains("test blocked executor spawn"));
+    assert_eq!(codex.spawn_attempts, 1);
+    assert_eq!(codex.state, ChatSessionAgentState::Dead);
+
+    let spawn =
+        run_chat_startup_until_spawn_boundary("PI", Some(Default::default()), None).await;
+    assert!(spawn.error.contains("test blocked executor spawn"));
+    assert_eq!(spawn.spawn_attempts, 1);
+    assert_eq!(spawn.state, ChatSessionAgentState::Dead);
+}
+
+#[tokio::test]
+async fn chat_mcp_preparation_failure_redacts_canonical_and_adapter_secrets_everywhere() {
+    let canonical = canonical_mcp_config_with_fake_secrets();
+    let expected_hash = canonical_mcp_server_map_hash(&canonical).expect("canonical MCP hash");
+    let result = run_chat_startup_until_spawn_boundary(
+        "PI",
+        Some(canonical),
+        Some(format!(
+            "adapter stderr echoed {ADAPTER_DIAGNOSTIC_SECRET} and {CANONICAL_MCP_SECRET}"
+        )),
+    )
+    .await;
+
+    assert_eq!(result.spawn_attempts, 0);
+    assert_eq!(result.state, ChatSessionAgentState::Dead);
+
+    let event_surface = serde_json::to_string(&result.events).expect("serialize chat events");
+    let messages = sqlx::query_as::<_, (String, String)>(
+        "SELECT content, CAST(meta AS TEXT) FROM chat_messages WHERE session_id = ?1",
+    )
+    .bind(result.session_id)
+    .fetch_all(&result.db.pool)
+    .await
+    .expect("read chat transcript surfaces");
+    let queue_failures = sqlx::query_scalar::<_, String>(
+        "SELECT COALESCE(failure_reason, '') FROM chat_message_queue WHERE session_agent_id = ?1",
+    )
+    .bind(result.session_agent_id)
+    .fetch_all(&result.db.pool)
+    .await
+    .expect("read queue failure surfaces");
+    let inbox_items = sqlx::query_as::<_, (String, String)>(
+        "SELECT title, COALESCE(body, '') FROM inbox_items WHERE session_id = ?1",
+    )
+    .bind(result.session_id)
+    .fetch_all(&result.db.pool)
+    .await
+    .expect("read inbox failure surfaces");
+    let run = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+        r#"
+        SELECT run_dir, meta_path, raw_log_path, retention_summary_json
+        FROM chat_runs
+        WHERE session_agent_id = ?1
+        ORDER BY run_index DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(result.session_agent_id)
+    .fetch_one(&result.db.pool)
+    .await
+    .expect("read failed chat run");
+    let mut artifacts = String::new();
+    for entry in std::fs::read_dir(&run.0).expect("read failed chat run directory") {
+        let path = entry.expect("run artifact entry").path();
+        if path.is_file()
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            artifacts.push_str(&content);
+        }
+    }
+    for path in [run.1.as_deref(), run.2.as_deref()].into_iter().flatten() {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            artifacts.push_str(&content);
+        }
+    }
+    let persisted_surface = serde_json::to_string(&serde_json::json!({
+        "messages": messages,
+        "queue_failures": queue_failures,
+        "inbox_items": inbox_items,
+        "retention_summary": run.3,
+        "artifacts": artifacts,
+    }))
+    .expect("serialize persisted chat surfaces");
+
+    for (label, surface) in [
+        ("returned error", result.error.as_str()),
+        ("tracing", result.tracing.as_str()),
+        ("stream events", event_surface.as_str()),
+        ("persisted chat records", persisted_surface.as_str()),
+    ] {
+        assert!(
+            !surface.contains(CANONICAL_MCP_SECRET),
+            "{label} leaked the canonical MCP secret: {surface}"
+        );
+        assert!(
+            !surface.contains(ADAPTER_DIAGNOSTIC_SECRET),
+            "{label} leaked the adapter diagnostic secret: {surface}"
+        );
+        assert!(surface.contains(&expected_hash), "{label} omitted the safe MCP hash");
+        assert!(surface.contains("mcp_server_count=2"), "{label} omitted the server count");
+        assert!(surface.contains("local-safe-name"), "{label} omitted a safe server name");
+        assert!(surface.contains("remote-safe-name"), "{label} omitted a safe server name");
     }
 }

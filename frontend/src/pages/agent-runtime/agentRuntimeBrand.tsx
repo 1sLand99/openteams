@@ -17,6 +17,7 @@ const brandIconPaths = {
 type AgentBrandMark = {
   title: string;
   path?: string;
+  text?: string;
   logoSrc?: string;
   logoMode?: "image" | "mask";
   logoClassName?: string;
@@ -39,6 +40,12 @@ export const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
   CURSOR_AGENT: {
     title: "Cursor",
     logoSrc: "/logos/cursor-logo.svg",
+    logoMode: "mask",
+    logoClassName: "h-[22px] w-[22px]",
+  },
+  DEEPSEEK_HARNESS: {
+    title: "DeepSeek Harness",
+    logoSrc: "/logos/deepseek-logo.svg",
     logoMode: "mask",
     logoClassName: "h-[22px] w-[22px]",
   },
@@ -144,7 +151,18 @@ export function AgentBrandAvatar({
           className={cx(resolvedIconClassName ?? "h-[18px] w-[18px]")}
           focusable="false"
         >
-          <path fill="currentColor" d={brand.path} />
+          {brand.path ? (
+            <path fill="currentColor" d={brand.path} />
+          ) : (
+            <text
+              x="12"
+              y="15"
+              textAnchor="middle"
+              className="fill-current font-mono text-[9px] font-semibold"
+            >
+              {brand.text}
+            </text>
+          )}
         </svg>
       )}
     </span>

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, anyhow, bail};
+use db::models::member_execution_config::MemberExecutionConfig;
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use utils::{path::home_directory, text::sanitize_member_handle};
@@ -101,7 +102,7 @@ const ROLE_PRESET_MARKDOWN: &[(&str, &str)] = &[
         "market_analyst.md",
         include_str!("presets/roles/market_analyst.md"),
     ),
-    // New agents (144 total) - alphabetically sorted
+    // New agents (147 total) - alphabetically sorted
     (
         "accessibility-auditor.md",
         include_str!("presets/roles/accessibility-auditor.md"),
@@ -358,6 +359,18 @@ const ROLE_PRESET_MARKDOWN: &[(&str, &str)] = &[
     (
         "linkedin-content-creator.md",
         include_str!("presets/roles/linkedin-content-creator.md"),
+    ),
+    (
+        "literature-research-assistant.md",
+        include_str!("presets/roles/literature_research_assistant.md"),
+    ),
+    (
+        "literature-research-reviewer.md",
+        include_str!("presets/roles/literature_research_reviewer.md"),
+    ),
+    (
+        "literature-review-researcher.md",
+        include_str!("presets/roles/literature_review_researcher.md"),
     ),
     (
         "livestream-commerce-coach.md",
@@ -688,6 +701,8 @@ struct RolePresetFrontmatter {
     #[serde(default)]
     recommended_model: Option<String>,
     #[serde(default)]
+    execution_config: Option<MemberExecutionConfig>,
+    #[serde(default)]
     tools_enabled: Option<serde_yaml::Value>,
 }
 
@@ -701,6 +716,7 @@ struct RolePresetMd {
     selected_skill_ids: Vec<String>,
     runner_type: Option<String>,
     recommended_model: Option<String>,
+    execution_config: Option<MemberExecutionConfig>,
     tools_enabled: serde_json::Value,
 }
 
@@ -970,6 +986,7 @@ impl PresetLoader {
             description: preset.description,
             runner_type: preset.runner_type,
             recommended_model: preset.recommended_model,
+            execution_config: preset.execution_config,
             system_prompt: preset.role_definition,
             default_workspace_path: Some(default_workspace_path.to_string()),
             selected_skill_ids: preset.selected_skill_ids,
@@ -1012,6 +1029,7 @@ impl PresetLoader {
             selected_skill_ids: normalize_selected_skill_ids(frontmatter.selected_skill_ids),
             runner_type: frontmatter.runner_type,
             recommended_model: frontmatter.recommended_model,
+            execution_config: frontmatter.execution_config,
             tools_enabled,
         })
     }
@@ -1199,15 +1217,77 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
+    use db::models::member_execution_config::MemberExecutionConfig;
     use utils::path::home_directory;
 
-    use super::{PresetLoader, TEAM_COLLABORATION_PROTOCOL_FILE, normalize_team_template_locale};
+    use super::{
+        ChatMemberPreset, PresetLoader, TEAM_COLLABORATION_PROTOCOL_FILE,
+        normalize_team_template_locale,
+    };
+
+    fn assert_member_mcp_secrets_are_obviously_fake(member: &ChatMemberPreset) {
+        let Some(mcp) = member
+            .execution_config
+            .as_ref()
+            .and_then(|config| config.mcp.as_ref())
+        else {
+            return;
+        };
+
+        for (server_name, definition) in &mcp.mcp_servers {
+            let Some(server) = definition.as_object() else {
+                continue;
+            };
+            for field in ["env", "headers"] {
+                let Some(values) = server.get(field).and_then(serde_json::Value::as_object) else {
+                    continue;
+                };
+                for (key, value) in values {
+                    let normalized_key = key.to_ascii_lowercase();
+                    let is_secret_key = [
+                        "authorization",
+                        "cookie",
+                        "password",
+                        "secret",
+                        "token",
+                        "api_key",
+                        "apikey",
+                    ]
+                    .iter()
+                    .any(|marker| normalized_key.contains(marker));
+                    if !is_secret_key {
+                        continue;
+                    }
+                    let value = value.as_str().unwrap_or_default();
+                    let normalized_value = value.to_ascii_lowercase();
+                    let obviously_fake = [
+                        "fake",
+                        "test",
+                        "example",
+                        "placeholder",
+                        "dummy",
+                        "changeme",
+                    ]
+                    .iter()
+                    .any(|marker| normalized_value.contains(marker))
+                        || value.starts_with('$')
+                        || value.starts_with('<')
+                        || value.contains("{{");
+                    assert!(
+                        obviously_fake,
+                        "built-in member `{}` server `{server_name}` contains a non-placeholder {field}.{key}",
+                        member.id
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn load_builtin_presets_reads_all_builtin_preset_markdown_files() {
         let presets = PresetLoader::load_builtin_presets();
 
-        assert_eq!(presets.members.len(), 166); // 22 original + 144 new
+        assert_eq!(presets.members.len(), 169); // 22 original + 147 new
         let embedded_team_files = PresetLoader::embedded_team_preset_markdown_files()
             .expect("embedded team markdown files should load");
         let english_team_file_count = embedded_team_files
@@ -1221,6 +1301,7 @@ mod tests {
             .iter()
             .find(|preset| preset.id == "fullstack_engineer")
             .expect("fullstack preset should exist");
+        assert!(fullstack.execution_config.is_none());
         assert_eq!(fullstack.name, "fullstack");
         let expected_workspace = home_directory().to_string_lossy().to_string();
         assert_eq!(
@@ -1320,6 +1401,20 @@ mod tests {
     }
 
     #[test]
+    fn builtin_repository_templates_do_not_embed_real_mcp_secrets() {
+        let presets = PresetLoader::load_builtin_presets();
+
+        for member in &presets.members {
+            assert_member_mcp_secrets_are_obviously_fake(member);
+        }
+        for team in &presets.teams {
+            for member in &team.members {
+                assert_member_mcp_secrets_are_obviously_fake(member);
+            }
+        }
+    }
+
+    #[test]
     fn parse_role_preset_markdown_extracts_frontmatter_and_role_definition() {
         let markdown = r#"---
 id: sample_role
@@ -1334,6 +1429,21 @@ runner_type: codex
 recommended_model: gpt-5.2-codex
 tools_enabled:
   shell: true
+execution_config:
+  runner_type: CODEX
+  model_name: fake-model
+  thinking_effort: high
+  model_variant: fake-variant
+  acp:
+    access_mode: workspace_only
+    approval_mode: auto_reject
+    additional_directories: []
+  mcp:
+    mcpServers:
+      fake-local:
+        command: fake-mcp-server
+        env:
+          API_TOKEN: fake-markdown-token
 ---
 
 # Role: Sample Role
@@ -1382,6 +1492,60 @@ Coordinate with design before shipping."#
         assert_eq!(parsed.runner_type.as_deref(), Some("codex"));
         assert_eq!(parsed.recommended_model.as_deref(), Some("gpt-5.2-codex"));
         assert_eq!(parsed.tools_enabled, serde_json::json!({ "shell": true }));
+
+        let member = PresetLoader::parse_chat_member_preset("sample.md", markdown, "/workspace")
+            .expect("role markdown should build a member preset");
+        assert_member_mcp_secrets_are_obviously_fake(&member);
+        let execution_config = member
+            .execution_config
+            .as_ref()
+            .expect("execution config should parse");
+        assert_eq!(
+            execution_config,
+            &serde_json::from_value::<MemberExecutionConfig>(serde_json::json!({
+                "runner_type": "CODEX",
+                "model_name": "fake-model",
+                "thinking_effort": "high",
+                "model_variant": "fake-variant",
+                "acp": {
+                    "access_mode": "workspace_only",
+                    "approval_mode": "auto_reject",
+                    "additional_directories": []
+                },
+                "mcp": {
+                    "mcpServers": {
+                        "fake-local": {
+                            "command": "fake-mcp-server",
+                            "env": { "API_TOKEN": "fake-markdown-token" }
+                        }
+                    }
+                }
+            }))
+            .expect("deserialize expected execution config")
+        );
+        let serialized = serde_json::to_value(member).expect("serialize member preset");
+        assert_eq!(
+            serialized["execution_config"],
+            serde_json::json!({
+                "runner_type": "CODEX",
+                "model_name": "fake-model",
+                "thinking_effort": "high",
+                "model_variant": "fake-variant",
+                "acp": {
+                    "access_mode": "workspace_only",
+                    "approval_mode": "auto_reject",
+                    "additional_directories": []
+                },
+                "mcp": {
+                    "mcpServers": {
+                        "fake-local": {
+                            "command": "fake-mcp-server",
+                            "env": { "API_TOKEN": "fake-markdown-token" }
+                        }
+                    }
+                }
+            })
+        );
     }
 
     #[test]
@@ -1495,6 +1659,29 @@ Follow the team protocol.
                 .iter()
                 .filter(|team| team.id != "blank_team")
                 .all(|team| !team.workflow_steps.is_empty())
+        );
+
+        let literature_research_team = presets
+            .teams
+            .iter()
+            .find(|team| team.id == "literature_research_team")
+            .expect("literature research team template exists");
+        let member_ids = literature_research_team
+            .members
+            .iter()
+            .map(|member| member.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            member_ids,
+            vec![
+                "literature-review-researcher",
+                "literature-research-assistant",
+                "literature-research-reviewer",
+            ]
+        );
+        assert_eq!(
+            literature_research_team.lead_member_id.as_deref(),
+            Some("literature-review-researcher")
         );
     }
 
@@ -1716,7 +1903,7 @@ Follow the team protocol.
             );
         }
 
-        assert_eq!(seen.len(), 166);
+        assert_eq!(seen.len(), 169);
     }
 
     #[test]

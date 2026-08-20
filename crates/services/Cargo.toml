@@ -73,3 +73,6 @@ junction = "1.0"
 
 [target.'cfg(not(windows))'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "linux-native-async-persistent", "crypto-rust", "vendored"] }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

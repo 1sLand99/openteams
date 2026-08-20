@@ -2,8 +2,8 @@ use std::{collections::HashMap, path::Path};
 
 use chrono::{DateTime, Utc};
 use git2::{
-    BranchType, Delta, DiffFindOptions, DiffOptions, Error as GitError, Reference, Remote,
-    Repository, Sort,
+    BranchType, ConfigLevel, Delta, DiffFindOptions, DiffOptions, Error as GitError, Reference,
+    Remote, Repository, Sort,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -182,16 +182,22 @@ impl GitService {
     }
 
     /// Ensure local (repo-scoped) identity exists for CLI commits.
-    /// Sets user.name/email only if missing in the repo config.
+    /// Snapshots the effective identity, falling back field-by-field when absent.
     fn ensure_cli_commit_identity(&self, repo_path: &Path) -> Result<(), GitServiceError> {
         let repo = self.open_repo(repo_path)?;
         let cfg = repo.config()?;
-        let has_name = cfg.get_string("user.name").is_ok();
-        let has_email = cfg.get_string("user.email").is_ok();
-        if !(has_name && has_email) {
-            let mut cfg = repo.config()?;
-            cfg.set_str("user.name", "openteams")?;
-            cfg.set_str("user.email", "noreply@openteams.com")?;
+        let effective_name = cfg
+            .get_string("user.name")
+            .unwrap_or_else(|_| "openteams".to_string());
+        let effective_email = cfg
+            .get_string("user.email")
+            .unwrap_or_else(|_| "noreply@openteams.com".to_string());
+        let mut local_cfg = cfg.open_level(ConfigLevel::Local)?;
+        if local_cfg.get_string("user.name").is_err() {
+            local_cfg.set_str("user.name", &effective_name)?;
+        }
+        if local_cfg.get_string("user.email").is_err() {
+            local_cfg.set_str("user.email", &effective_email)?;
         }
         Ok(())
     }

@@ -126,6 +126,7 @@ You can also connect any of these supported coding agents:
 | Kimi Code | `curl -LsSf https://code.kimi.com/install.sh \| bash` |
 | Qoder CLI | `curl -fsSL https://qoder.com/install \| bash` |
 | Pi | No install needed (runs via `npx`) |
+| DeepSeek Harness (ACP preview) | Build the [official source checkout](https://github.com/deepseek-ai/deepseek-harness) using the in-app pinned setup commands; OpenTeams launches its ACP server directly with Node (no `npx`) |
 | OpenTeams CLI | Bundled with openteams |
 
 

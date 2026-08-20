@@ -17,8 +17,10 @@ use executors::{
     env::ExecutionEnv,
     executors::{
         BaseCodingAgent, CodingAgent, StandardCodingAgentExecutor,
-        acp::{AcpAccessMode, AcpExecutionOptions, mcp::AcpMcpPolicy},
+        acp::{AcpExecutionOptions, mcp::AcpMcpPolicy},
     },
+    mcp_config::MemberMcpConfig,
+    mcp_run::{McpRunContext, McpRunPreparationError, PreparedMcpRun},
     model_sync::with_member_execution_overrides,
     profile::{ExecutorConfigs, ExecutorProfileId, canonical_variant_key},
 };
@@ -26,10 +28,16 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::services::{
-    agent_runtime::apply_agent_runtime_config, native_skills::list_native_skills_for_runner,
+    agent_runtime::apply_agent_runtime_config,
+    member_scoped_mcp_migration::ensure_member_scoped_mcp_initialized,
+    native_skills::list_native_skills_for_runner,
 };
 
 pub const EXECUTOR_PROFILE_VARIANT_KEY: &str = "executor_profile_variant";
+
+#[cfg(test)]
+pub(crate) const TEST_MCP_PREPARATION_DIAGNOSTIC_ENV: &str =
+    "OPENTEAMS_TEST_MCP_PREPARATION_DIAGNOSTIC";
 
 #[derive(Debug, Clone)]
 pub struct EffectiveMemberExecutionConfig {
@@ -176,33 +184,7 @@ pub fn build_effective_member_executor(
         resolved.model_variant.as_deref(),
     );
     if let Some(member_acp) = &resolved.acp {
-        match &mut executor {
-            CodingAgent::Gemini(config) => {
-                let inherited = config.acp.clone().unwrap_or_default();
-                config.acp = Some(inherited.overlay(member_acp));
-            }
-            CodingAgent::QwenCode(config) => {
-                let inherited = config.acp.clone().unwrap_or_default();
-                config.acp = Some(inherited.overlay(member_acp));
-            }
-            CodingAgent::KimiCode(config) => {
-                let inherited = config.acp.clone().unwrap_or_default();
-                config.acp = Some(inherited.overlay(member_acp));
-            }
-            CodingAgent::QoderCli(config) => {
-                let inherited = config.acp.clone().unwrap_or_default();
-                config.acp = Some(inherited.overlay(member_acp));
-            }
-            CodingAgent::Pi(config) => {
-                let inherited = config.acp.clone().unwrap_or_default();
-                config.acp = Some(inherited.overlay(member_acp));
-            }
-            CodingAgent::Hermes(config) => {
-                let inherited = config.acp.clone().unwrap_or_default();
-                config.acp = Some(inherited.overlay(member_acp));
-            }
-            _ => {}
-        }
+        executor.overlay_acp_execution_options(member_acp);
     }
     let mcp_policy = resolve_acp_mcp_policy(&agent.tools_enabled.0);
     executor.set_acp_mcp_policy(mcp_policy);
@@ -213,23 +195,68 @@ pub async fn build_effective_member_executor_for_run(
     pool: &SqlitePool,
     agent: &ChatAgent,
     session_agent: &ChatSessionAgent,
+    current_dir: &Path,
+    run_id: Uuid,
     env: &mut ExecutionEnv,
-) -> Result<(EffectiveMemberExecutionConfig, CodingAgent)> {
+) -> Result<(EffectiveMemberExecutionConfig, CodingAgent, PreparedMcpRun)> {
+    let canonical = freeze_member_mcp_snapshot(session_agent)?;
     let (resolved, mut executor) = build_effective_member_executor(agent, session_agent, env)?;
-    if let CodingAgent::Pi(config) = &mut executor {
-        let skill_paths = resolve_pi_member_skill_paths(pool, session_agent, config).await?;
-        config
-            .freeze_runtime_snapshot(skill_paths)
-            .await
-            .map_err(|error| anyhow!(error.to_string()))?;
+    let authorized_skill_paths =
+        resolve_member_native_skill_paths(pool, session_agent, resolved.runner_type, &executor)
+            .await?;
+    let context = McpRunContext::new(current_dir, session_agent.id, run_id)
+        .map_err(|error| {
+            anyhow!(McpRunPreparationError::from_executor_error(
+                &canonical, error
+            ))
+        })?
+        .with_authorized_skill_paths(authorized_skill_paths);
+    let prepared = executor
+        .prepare_mcp_for_run(&canonical, &context, env)
+        .await
+        .map_err(|error| {
+            anyhow!(McpRunPreparationError::from_executor_error(
+                &canonical, error
+            ))
+        })?;
+    #[cfg(test)]
+    if let Some(diagnostic) = env.get(TEST_MCP_PREPARATION_DIAGNOSTIC_ENV).cloned() {
+        return Err(anyhow!(McpRunPreparationError::from_executor_error(
+            &canonical,
+            executors::executors::ExecutorError::Io(std::io::Error::other(diagnostic)),
+        )));
     }
-    Ok((resolved, executor))
+    tracing::info!(
+        session_agent_id = %session_agent.id,
+        run_id = %run_id,
+        mcp_config_hash = prepared.config_hash(),
+        mcp_server_count = prepared.server_count(),
+        mcp_server_names = ?prepared.server_names(),
+        "Prepared member MCP configuration for executor run"
+    );
+    Ok((resolved, executor, prepared))
 }
 
-async fn resolve_pi_member_skill_paths(
+fn freeze_member_mcp_snapshot(session_agent: &ChatSessionAgent) -> Result<MemberMcpConfig> {
+    ensure_member_scoped_mcp_initialized(&session_agent.execution_config.0)
+        .map_err(|_| anyhow!(McpRunPreparationError::not_initialized()))?;
+    let canonical = session_agent
+        .execution_config
+        .0
+        .mcp
+        .clone()
+        .expect("member MCP initialization was checked");
+    canonical
+        .validate(&session_agent.member_name)
+        .map_err(|_| anyhow!(McpRunPreparationError::invalid_configuration(&canonical)))?;
+    Ok(canonical)
+}
+
+async fn resolve_member_native_skill_paths(
     pool: &SqlitePool,
     session_agent: &ChatSessionAgent,
-    config: &executors::executors::pi::Pi,
+    runner_type: BaseCodingAgent,
+    executor: &CodingAgent,
 ) -> Result<Vec<PathBuf>> {
     let mut requested = Vec::new();
     let mut seen = HashSet::new();
@@ -237,7 +264,7 @@ async fn resolve_pi_member_skill_paths(
         let id = raw_id.trim();
         if id.is_empty() || Uuid::parse_str(id).is_err() {
             return Err(anyhow!(
-                "invalid Pi member configuration: allowed skill ID is invalid"
+                "invalid member configuration: allowed skill ID is invalid"
             ));
         }
         if seen.insert(id.to_string()) {
@@ -248,21 +275,21 @@ async fn resolve_pi_member_skill_paths(
         return Ok(Vec::new());
     }
 
-    let installed = list_native_skills_for_runner(pool, BaseCodingAgent::Pi)
+    let installed = list_native_skills_for_runner(pool, runner_type)
         .await
         .map_err(|error| {
-            anyhow!("invalid Pi member configuration: failed to resolve Skill Registry: {error}")
+            anyhow!("invalid member configuration: failed to resolve Skill Registry: {error}")
         })?;
-    let roots = canonical_existing_roots(config.native_skill_discovery_roots()).await?;
+    let roots = canonical_existing_roots(executor.native_skill_discovery_roots()).await?;
     let installed = installed
         .into_iter()
         .filter(|item| item.enabled)
         .map(|item| (item.skill.id.to_string(), PathBuf::from(item.native_path)))
         .collect::<Vec<_>>();
-    resolve_requested_pi_skill_paths(&requested, &installed, &roots).await
+    resolve_requested_native_skill_paths(&requested, &installed, &roots).await
 }
 
-async fn resolve_requested_pi_skill_paths(
+async fn resolve_requested_native_skill_paths(
     requested: &[String],
     installed: &[(String, PathBuf)],
     roots: &[PathBuf],
@@ -273,9 +300,9 @@ async fn resolve_requested_pi_skill_paths(
             .iter()
             .find(|(installed_id, _)| installed_id == skill_id)
             .ok_or_else(|| anyhow!(
-                "invalid Pi member configuration: allowed skill `{skill_id}` is missing from the Skill Registry"
+                "invalid member configuration: allowed skill `{skill_id}` is missing from the Skill Registry"
             ))?;
-        paths.push(validate_pi_skill_path(&item.1, roots).await?);
+        paths.push(validate_native_skill_path(&item.1, roots).await?);
     }
     Ok(paths)
 }
@@ -289,7 +316,7 @@ async fn canonical_existing_roots(roots: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(anyhow!(
-                    "invalid Pi member configuration: failed to validate Skill Registry root: {error}"
+                    "invalid member configuration: failed to validate Skill Registry root: {error}"
                 ));
             }
         }
@@ -297,81 +324,31 @@ async fn canonical_existing_roots(roots: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
     Ok(canonical)
 }
 
-async fn validate_pi_skill_path(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
+async fn validate_native_skill_path(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
     let canonical = tokio::fs::canonicalize(path).await.map_err(|_| {
-        anyhow!("invalid Pi member configuration: authorized SKILL.md path is missing or invalid")
+        anyhow!("invalid member configuration: authorized SKILL.md path is missing or invalid")
     })?;
     let metadata = tokio::fs::metadata(&canonical).await.map_err(|_| {
-        anyhow!("invalid Pi member configuration: authorized SKILL.md path is missing or invalid")
+        anyhow!("invalid member configuration: authorized SKILL.md path is missing or invalid")
     })?;
     if !canonical.is_absolute()
         || !metadata.is_file()
         || canonical.file_name().and_then(|name| name.to_str()) != Some("SKILL.md")
     {
         return Err(anyhow!(
-            "invalid Pi member configuration: authorized Skill path is not an absolute SKILL.md file"
+            "invalid member configuration: authorized Skill path is not an absolute SKILL.md file"
         ));
     }
     if !roots.iter().any(|root| canonical.starts_with(root)) {
         return Err(anyhow!(
-            "invalid Pi member configuration: authorized SKILL.md path escapes the Skill Registry"
+            "invalid member configuration: authorized SKILL.md path escapes the Skill Registry"
         ));
     }
     Ok(canonical)
 }
 
 pub fn executor_acp_full_access_enabled(executor: &CodingAgent) -> bool {
-    match executor {
-        CodingAgent::Gemini(config) => {
-            config
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.access_mode)
-                .unwrap_or_default()
-                == AcpAccessMode::FullAccess
-        }
-        CodingAgent::QwenCode(config) => {
-            config
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.access_mode)
-                .unwrap_or_default()
-                == AcpAccessMode::FullAccess
-        }
-        CodingAgent::KimiCode(config) => {
-            config
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.access_mode)
-                .unwrap_or_default()
-                == AcpAccessMode::FullAccess
-        }
-        CodingAgent::QoderCli(config) => {
-            config
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.access_mode)
-                .unwrap_or_default()
-                == AcpAccessMode::FullAccess
-        }
-        CodingAgent::Pi(config) => {
-            config
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.access_mode)
-                .unwrap_or_default()
-                == AcpAccessMode::FullAccess
-        }
-        CodingAgent::Hermes(config) => {
-            config
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.access_mode)
-                .unwrap_or_default()
-                == AcpAccessMode::FullAccess
-        }
-        _ => false,
-    }
+    executor.acp_full_access_enabled()
 }
 
 fn resolve_acp_mcp_policy(tools_enabled: &serde_json::Value) -> AcpMcpPolicy {
@@ -449,7 +426,10 @@ mod tests {
         chat_agent::ChatAgent,
         chat_session_agent::{ChatSessionAgent, ChatSessionAgentState},
     };
-    use executors::executors::BaseCodingAgent;
+    use executors::{
+        env::RepoContext,
+        executors::{BaseCodingAgent as RunnerKind, acp::AcpAccessMode},
+    };
     use sqlx::types::Json;
     use uuid::Uuid;
 
@@ -497,7 +477,7 @@ mod tests {
                 .expect("resolve config");
 
         assert!(!resolved.has_member_config);
-        assert_eq!(resolved.runner_type, BaseCodingAgent::Codex);
+        assert_eq!(resolved.runner_type, RunnerKind::Codex);
         assert_eq!(resolved.model_name.as_deref(), Some("legacy-model"));
         assert!(resolved.profile_id.to_string().contains("HIGH_REASONING"));
     }
@@ -507,17 +487,18 @@ mod tests {
         let resolved = resolve_effective_member_execution_config(
             &agent(),
             &session_agent(MemberExecutionConfig {
-                runner_type: Some(BaseCodingAgent::Gemini),
+                runner_type: Some(RunnerKind::Gemini),
                 model_name: Some("gemini-3-pro-preview".to_string()),
                 thinking_effort: Some("high".to_string()),
                 model_variant: None,
                 acp: None,
+                mcp: None,
             }),
         )
         .expect("resolve config");
 
         assert!(resolved.has_member_config);
-        assert_eq!(resolved.runner_type, BaseCodingAgent::Gemini);
+        assert_eq!(resolved.runner_type, RunnerKind::Gemini);
         assert_eq!(resolved.model_name.as_deref(), Some("gemini-3-pro-preview"));
         assert_eq!(resolved.thinking_effort.as_deref(), Some("high"));
         assert_eq!(resolved.profile_id.to_string(), "GEMINI");
@@ -528,7 +509,7 @@ mod tests {
         for raw in ["OPEN_TEAMS_CLI", "OPENTEAMS_CLI", "openteams-cli"] {
             assert_eq!(
                 parse_runner_type(raw).expect("parse runner"),
-                BaseCodingAgent::OpenTeamsCli
+                RunnerKind::OpenTeamsCli
             );
         }
     }
@@ -570,28 +551,103 @@ mod tests {
     }
 
     #[test]
-    fn pi_member_without_mcp_selection_preserves_configured_servers() {
-        let mut pi_agent = agent();
-        pi_agent.runner_type = "PI".to_string();
-        pi_agent.tools_enabled = Json(serde_json::json!({}));
-        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+    fn mcp_snapshot_fails_closed_when_migration_is_pending() {
+        let error = freeze_member_mcp_snapshot(&session_agent(MemberExecutionConfig::default()))
+            .expect_err("mcp=None must not run");
 
-        let (_, executor) = build_effective_member_executor(
-            &pi_agent,
-            &session_agent(Default::default()),
-            &mut env,
-        )
-        .expect("Pi executor");
+        assert!(error.to_string().contains("not initialized"));
+    }
 
-        let CodingAgent::Pi(pi) = executor else {
-            panic!("expected Pi");
+    #[test]
+    fn mcp_snapshot_is_validated_without_exposing_secret_values() {
+        let fake_secret = "member-mcp-secret-never-log";
+        let canonical = MemberMcpConfig {
+            mcp_servers: [(
+                "remote".to_string(),
+                serde_json::json!({
+                    "url": "https://example.test/mcp",
+                    "headers": {"Authorization": {"secret": fake_secret}}
+                }),
+            )]
+            .into_iter()
+            .collect(),
         };
-        assert!(pi.acp_mcp_policy.allowed_server_names.is_none());
-        assert!(pi.acp_mcp_policy.disabled_server_names.is_empty());
+        let expected_hash =
+            executors::mcp_run::canonical_mcp_server_map_hash(&canonical).expect("canonical hash");
+        let member = session_agent(MemberExecutionConfig {
+            mcp: Some(canonical),
+            ..Default::default()
+        });
+
+        let error = freeze_member_mcp_snapshot(&member).expect_err("invalid header must fail");
+        let message = error.to_string();
+        assert!(message.contains("configuration is invalid"));
+        assert!(message.contains(&expected_hash));
+        assert!(message.contains("mcp_server_count=1"));
+        assert!(message.contains("remote"));
+        assert!(!message.contains(fake_secret));
+    }
+
+    #[test]
+    fn mcp_snapshot_is_immutable_for_the_current_run() {
+        fn config(name: &str) -> MemberMcpConfig {
+            MemberMcpConfig {
+                mcp_servers: [(
+                    name.to_string(),
+                    serde_json::json!({"command": "/bin/echo"}),
+                )]
+                .into_iter()
+                .collect(),
+            }
+        }
+
+        let mut member = session_agent(MemberExecutionConfig {
+            mcp: Some(config("alpha")),
+            ..Default::default()
+        });
+        let run_one = freeze_member_mcp_snapshot(&member).expect("run one snapshot");
+        member.execution_config.0.mcp = Some(config("beta"));
+        let run_two = freeze_member_mcp_snapshot(&member).expect("run two snapshot");
+
+        assert!(run_one.mcp_servers.contains_key("alpha"));
+        assert!(!run_one.mcp_servers.contains_key("beta"));
+        assert!(run_two.mcp_servers.contains_key("beta"));
+        assert!(!run_two.mcp_servers.contains_key("alpha"));
     }
 
     #[tokio::test]
-    async fn different_pi_members_receive_only_their_registry_skill_paths() {
+    async fn codex_prepares_an_empty_member_mcp_snapshot_before_spawn() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("test database");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let member = session_agent(MemberExecutionConfig {
+            mcp: Some(MemberMcpConfig::default()),
+            ..Default::default()
+        });
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+
+        let (effective, _executor, prepared) = build_effective_member_executor_for_run(
+            &pool,
+            &agent(),
+            &member,
+            workspace.path(),
+            Uuid::new_v4(),
+            &mut env,
+        )
+        .await
+        .expect("Codex must prepare its run-scoped MCP snapshot");
+
+        assert_eq!(effective.runner_type, RunnerKind::Codex);
+        assert_eq!(prepared.server_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn different_members_receive_only_their_registry_skill_paths() {
         let temp = tempfile::tempdir().expect("skill registry");
         let root = temp.path().join("skills");
         let alpha = root.join("alpha").join("SKILL.md");
@@ -612,14 +668,20 @@ mod tests {
             (beta_id.clone(), beta.clone()),
         ];
 
-        let member_alpha =
-            resolve_requested_pi_skill_paths(std::slice::from_ref(&alpha_id), &installed, &roots)
-                .await
-                .expect("alpha snapshot");
-        let member_beta =
-            resolve_requested_pi_skill_paths(std::slice::from_ref(&beta_id), &installed, &roots)
-                .await
-                .expect("beta snapshot");
+        let member_alpha = resolve_requested_native_skill_paths(
+            std::slice::from_ref(&alpha_id),
+            &installed,
+            &roots,
+        )
+        .await
+        .expect("alpha snapshot");
+        let member_beta = resolve_requested_native_skill_paths(
+            std::slice::from_ref(&beta_id),
+            &installed,
+            &roots,
+        )
+        .await
+        .expect("beta snapshot");
 
         assert_eq!(
             member_alpha,
@@ -628,10 +690,13 @@ mod tests {
         assert_eq!(member_beta, [tokio::fs::canonicalize(&beta).await.unwrap()]);
         assert!(!member_alpha.contains(&member_beta[0]));
         let missing_id = Uuid::new_v4().to_string();
-        let error =
-            resolve_requested_pi_skill_paths(std::slice::from_ref(&missing_id), &installed, &roots)
-                .await
-                .expect_err("unauthorized skill must be absent");
+        let error = resolve_requested_native_skill_paths(
+            std::slice::from_ref(&missing_id),
+            &installed,
+            &roots,
+        )
+        .await
+        .expect_err("unauthorized skill must be absent");
         assert!(
             error
                 .to_string()
@@ -641,7 +706,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn pi_skill_snapshot_rejects_symlink_escape() {
+    async fn native_skill_snapshot_rejects_symlink_escape() {
         let temp = tempfile::tempdir().expect("skill registry");
         let root = temp.path().join("skills");
         let outside = temp.path().join("outside");
@@ -656,7 +721,7 @@ mod tests {
             .await
             .expect("roots");
 
-        let error = validate_pi_skill_path(&root.join("SKILL.md"), &roots)
+        let error = validate_native_skill_path(&root.join("SKILL.md"), &roots)
             .await
             .expect_err("escape must fail");
         assert!(error.to_string().contains("escapes the Skill Registry"));
@@ -667,14 +732,43 @@ mod tests {
         let profiles = ExecutorConfigs::from_defaults();
 
         for runner in [
-            BaseCodingAgent::Gemini,
-            BaseCodingAgent::QwenCode,
-            BaseCodingAgent::KimiCode,
-            BaseCodingAgent::QoderCli,
-            BaseCodingAgent::Hermes,
+            RunnerKind::Gemini,
+            RunnerKind::QwenCode,
+            RunnerKind::KimiCode,
+            RunnerKind::QoderCli,
+            RunnerKind::Hermes,
+            RunnerKind::DeepseekHarness,
         ] {
             let executor = profiles.get_coding_agent_or_default(&ExecutorProfileId::new(runner));
             assert!(executor_acp_full_access_enabled(&executor), "{runner}");
         }
+    }
+
+    #[test]
+    fn deepseek_member_acp_override_uses_executor_capability() {
+        let mut deepseek_agent = agent();
+        deepseek_agent.runner_type = "DEEPSEEK_HARNESS".to_string();
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        let (_, executor) = build_effective_member_executor(
+            &deepseek_agent,
+            &session_agent(MemberExecutionConfig {
+                runner_type: Some(RunnerKind::DeepseekHarness),
+                acp: Some(AcpExecutionOptions {
+                    access_mode: Some(AcpAccessMode::WorkspaceOnly),
+                    ..AcpExecutionOptions::default()
+                }),
+                ..MemberExecutionConfig::default()
+            }),
+            &mut env,
+        )
+        .expect("DeepSeek Harness executor");
+
+        let CodingAgent::DeepseekHarness(harness) = executor else {
+            panic!("expected DeepSeek Harness");
+        };
+        assert_eq!(
+            harness.acp.and_then(|options| options.access_mode),
+            Some(AcpAccessMode::WorkspaceOnly)
+        );
     }
 }

@@ -1,4 +1,7 @@
-use executors::executors::{BaseCodingAgent, acp::AcpExecutionOptions};
+use executors::{
+    executors::{BaseCodingAgent, acp::AcpExecutionOptions},
+    mcp_config::MemberMcpConfig,
+};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -15,6 +18,8 @@ pub struct MemberExecutionConfig {
     pub model_variant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp: Option<AcpExecutionOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<MemberMcpConfig>,
 }
 
 impl MemberExecutionConfig {
@@ -42,4 +47,35 @@ fn normalize_optional_string(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use executors::mcp_config::MemberMcpConfig;
+
+    use super::MemberExecutionConfig;
+
+    #[test]
+    fn mcp_state_does_not_count_as_runner_or_profile_override() {
+        let config = MemberExecutionConfig {
+            mcp: Some(MemberMcpConfig::default()),
+            ..Default::default()
+        };
+
+        assert!(!config.has_overrides());
+    }
+
+    #[test]
+    fn legacy_none_and_explicit_empty_mcp_serialize_distinctly() {
+        let legacy = serde_json::to_value(MemberExecutionConfig::default())
+            .expect("serialize legacy member config");
+        let explicit_empty = serde_json::to_value(MemberExecutionConfig {
+            mcp: Some(MemberMcpConfig::default()),
+            ..Default::default()
+        })
+        .expect("serialize explicit empty MCP config");
+
+        assert!(legacy.get("mcp").is_none());
+        assert_eq!(explicit_empty["mcp"], serde_json::json!({"mcpServers": {}}));
+    }
 }

@@ -714,19 +714,21 @@ mod approval_flow_tests {
                 .await
         });
 
-        let request = loop {
+        let (request, waiting_agent) = loop {
             let pending = ExecutorApprovalBridge::list_pending(&db.pool, scope.session_id)
                 .await
                 .expect("list pending approvals");
-            if let Some(request) = pending.into_iter().next() {
-                break request;
+            let waiting_agent = ChatSessionAgent::find_by_id(&db.pool, scope.session_agent_id)
+                .await
+                .expect("load waiting agent")
+                .expect("waiting agent exists");
+            if let Some(request) = pending.into_iter().next()
+                && waiting_agent.state == ChatSessionAgentState::WaitingApproval
+            {
+                break (request, waiting_agent);
             }
             sleep(Duration::from_millis(10)).await;
         };
-        let waiting_agent = ChatSessionAgent::find_by_id(&db.pool, scope.session_agent_id)
-            .await
-            .expect("load waiting agent")
-            .expect("waiting agent exists");
         assert_eq!(waiting_agent.state, ChatSessionAgentState::WaitingApproval);
 
         let selected = ExecutorApprovalBridge::resolve(
