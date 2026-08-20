@@ -137,6 +137,11 @@ impl ExecutionEnv {
     pub fn get(&self, key: &str) -> Option<&String> {
         self.vars.get(key)
     }
+
+    /// Remove an environment variable. No-op if the key is absent.
+    pub fn remove(&mut self, key: &str) {
+        self.vars.remove(key);
+    }
 }
 
 #[cfg(test)]

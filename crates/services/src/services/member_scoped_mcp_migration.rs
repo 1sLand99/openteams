@@ -14,7 +14,7 @@ use executors::{
     profile::{ExecutorConfigs, ExecutorProfileId},
 };
 use serde_json::Value;
-use sqlx::{FromRow, SqlitePool, types::Json};
+use sqlx::{FromRow, SqlitePool};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -46,7 +46,7 @@ pub struct MemberScopedMcpMigrationPending;
 #[derive(Debug, FromRow)]
 struct LegacyMember {
     id: Uuid,
-    execution_config: Json<MemberExecutionConfig>,
+    member_runner_type: Option<String>,
     agent_runner_type: Option<String>,
 }
 
@@ -139,35 +139,40 @@ async fn migrate_pending_members(
     pool: &SqlitePool,
     source: &impl LegacyMcpConfigSource,
 ) -> Result<MemberScopedMcpMigrationReport, MemberScopedMcpMigrationError> {
-    let mut legacy_members = sqlx::query_as::<_, LegacyMember>(
+    let legacy_members = sqlx::query_as::<_, LegacyMember>(
         r#"SELECT pm.id,
-                  COALESCE(pm.execution_config, '{}') AS execution_config,
+                  CAST(json_extract(
+                      COALESCE(pm.execution_config, '{}'),
+                      '$.runner_type'
+                  ) AS TEXT) AS member_runner_type,
                   ca.runner_type AS agent_runner_type
            FROM project_members pm
            LEFT JOIN chat_agents ca ON ca.id = pm.agent_id
+           WHERE json_type(COALESCE(pm.execution_config, '{}'), '$.mcp') IS NULL
+              OR json_type(COALESCE(pm.execution_config, '{}'), '$.mcp') = 'null'
            ORDER BY pm.id"#,
     )
     .fetch_all(pool)
     .await?;
-    legacy_members.retain(|member| member.execution_config.0.mcp.is_none());
 
     let mut members_by_runner: HashMap<BaseCodingAgent, Vec<Uuid>> = HashMap::new();
     let mut configs_by_member = HashMap::new();
     for member in legacy_members {
-        let runner = match member.execution_config.0.runner_type {
-            Some(runner) => Some(runner),
-            None => match member.agent_runner_type.as_deref() {
-                Some(raw) => Some(parse_runner_type(raw).map_err(|_| {
-                    MemberScopedMcpMigrationError::LegacyConfig {
-                        summary: format!(
-                            "runner {}; config path <unresolved>; structure runner_type",
-                            sanitized_runner_label(raw)
-                        ),
-                    }
-                })?),
-                None => None,
-            },
-        };
+        let raw_runner = member
+            .member_runner_type
+            .as_deref()
+            .or(member.agent_runner_type.as_deref());
+        let runner = raw_runner.and_then(|raw| match parse_runner_type(raw) {
+            Ok(runner) => Some(runner),
+            Err(_) => {
+                tracing::warn!(
+                    member_id = %member.id,
+                    runner = %sanitized_runner_label(raw),
+                    "Legacy member runner is unavailable in this build; initializing an empty member MCP configuration"
+                );
+                None
+            }
+        });
         if let Some(runner) = runner {
             members_by_runner.entry(runner).or_default().push(member.id);
         } else {
@@ -346,7 +351,7 @@ mod tests {
     use db::models::application_data_migration::{
         ApplicationDataMigration, ApplicationDataMigrationStatus,
     };
-    use sqlx::sqlite::SqlitePoolOptions;
+    use sqlx::{sqlite::SqlitePoolOptions, types::Json};
 
     use super::*;
 
@@ -622,6 +627,67 @@ mod tests {
             member_config(&pool, member).await.mcp,
             Some(MemberMcpConfig::default())
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_runners_do_not_block_startup_migration() {
+        let pool = setup_pool().await;
+        let source = CountingPathSource {
+            configs: Mutex::new(HashMap::new()),
+            calls: Mutex::new(Vec::new()),
+        };
+        let unavailable_runner = if cfg!(feature = "qa-mode") {
+            "UNAVAILABLE_QA_RUNNER"
+        } else {
+            "ACP_QA"
+        };
+        let inherited = insert_legacy_member(
+            &pool,
+            Uuid::new_v4(),
+            unavailable_runner,
+            MemberExecutionConfig::default(),
+        )
+        .await;
+        let overridden = insert_legacy_member(
+            &pool,
+            Uuid::new_v4(),
+            "CODEX",
+            MemberExecutionConfig::default(),
+        )
+        .await;
+        sqlx::query(
+            "UPDATE project_members SET execution_config = json_set(execution_config, '$.runner_type', ?2) WHERE id = ?1",
+        )
+        .bind(overridden)
+        .bind(unavailable_runner)
+        .execute(&pool)
+        .await
+        .expect("set unavailable member runner override");
+
+        let report = run_member_scoped_mcp_migration_with_source(&pool, &source)
+            .await
+            .expect("unavailable runners must not block startup migration");
+
+        assert_eq!(report.migrated_members, 2);
+        assert_eq!(report.runner_reads, 0);
+        assert!(source.calls.lock().expect("calls").is_empty());
+        assert_eq!(
+            member_config(&pool, inherited).await.mcp,
+            Some(MemberMcpConfig::default())
+        );
+        let overridden_config = sqlx::query_scalar::<_, Json<Value>>(
+            "SELECT execution_config FROM project_members WHERE id = ?1",
+        )
+        .bind(overridden)
+        .fetch_one(&pool)
+        .await
+        .expect("read unavailable member config")
+        .0;
+        assert_eq!(
+            overridden_config["mcp"],
+            serde_json::json!({"mcpServers": {}})
+        );
+        assert_eq!(overridden_config["runner_type"], unavailable_runner);
     }
 
     #[tokio::test]

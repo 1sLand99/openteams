@@ -40,6 +40,10 @@ import {
   CommandSelectSearchRow,
 } from '@/components/CommandSelectMenu';
 import { ConfirmationDialog } from '@/components/ConfirmationDialog';
+import {
+  IssueCreateDialog,
+  type IssueCreateDialogSubmitValue,
+} from '@/components/IssueCreateDialog';
 import { IssueWorktreeSessionDialog } from '@/components/IssueWorktreeSessionDialog';
 import {
   NotificationToast,
@@ -109,6 +113,8 @@ export type IssueDetailPageProps = {
   onWorkItemChange?: (item: ProjectWorkItem) => void;
   onIssueDeleted?: (workItemId: string) => void;
   onIssueSync?: (snapshot: IssueDetailSyncSnapshot) => void;
+  subIssues?: IssueDetailItem[];
+  onSubIssueSelect?: (issue: IssueDetailItem) => void;
   linkedProviderId: RemoteProviderId | null;
   linkedRepoId?: string;
   linkedRepoName?: string;
@@ -351,6 +357,8 @@ export function IssueDetailPage({
   onWorkItemChange,
   onIssueDeleted,
   onIssueSync,
+  subIssues = [],
+  onSubIssueSelect,
   linkedProviderId,
   linkedRepoId,
   linkedRepoName,
@@ -393,6 +401,7 @@ export function IssueDetailPage({
   const [worktreeSessionGit, setWorktreeSessionGit] = useState<boolean | null>(
     null,
   );
+  const [subIssueDialogOpen, setSubIssueDialogOpen] = useState(false);
   const propertyMenuRef = useRef<HTMLDivElement | null>(null);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const labelMenuRef = useRef<HTMLDivElement | null>(null);
@@ -710,6 +719,45 @@ export function IssueDetailPage({
     } catch (error) {
       setActionError(errorMessage(error, tr));
       return false;
+    } finally {
+      setAction(null);
+    }
+  };
+
+  const canCreateSubIssue = !current.parent_id;
+  const subIssueDoneCount = subIssues.filter((subIssue) =>
+    ['done', 'cancelled', 'duplicate'].includes(subIssue.workItem.status),
+  ).length;
+
+  const handleCreateSubIssue = async ({
+    title,
+    description,
+    status,
+    priority,
+    labels,
+  }: IssueCreateDialogSubmitValue) => {
+    setAction('create-sub-issue');
+    setActionError('');
+    try {
+      const created = await projectWorkItemsApi.create(projectId, {
+        title,
+        description: description || null,
+        labels_json: labels.length > 0 ? JSON.stringify(labels) : null,
+        status,
+        priority,
+        type: 'task',
+        source: 'manual',
+        parent_id: current.id,
+      });
+      notifyBuildStatsUsageUpdated(projectId);
+      onWorkItemChange?.(created);
+      setSubIssueDialogOpen(false);
+      onAction(
+        tr('issue.subIssues.created', 'Sub-issue created: {title}', { title }),
+      );
+    } catch (error) {
+      setActionError(errorMessage(error, tr));
+      throw error;
     } finally {
       setAction(null);
     }
@@ -1657,22 +1705,50 @@ export function IssueDetailPage({
               </button>
             </div>
 
-            <button
-              type="button"
-              className="mt-[22px] flex items-center gap-2 text-[13px] font-medium leading-none text-[var(--ink-subtle)] transition hover:text-[var(--ink)]"
-              onClick={() =>
-                onAction(
-                  tr(
-                    'issue.detail.action.subIssuesOpened',
-                    'Sub-issues opened for {id}',
-                    { id: issue.id },
-                  ),
-                )
-              }
-            >
-              <Plus aria-hidden="true" className="h-[14px] w-[14px]" />
-              <span>{tr('issue.detail.addSubIssues', 'Add sub-issues')}</span>
-            </button>
+            <div className="mt-[22px]">
+              <div className="flex items-center justify-between">
+                <h3 className="flex items-baseline gap-2 text-[13px] font-semibold leading-none text-[var(--ink-subtle)]">
+                  {tr('issue.subIssues.title', 'Sub-issues')}
+                  {subIssues.length > 0 && (
+                    <span className="text-[12px] font-medium text-[var(--ink-tertiary)]">
+                      {subIssueDoneCount}/{subIssues.length}
+                    </span>
+                  )}
+                </h3>
+                {canCreateSubIssue && (
+                  <button
+                    type="button"
+                    disabled={action === 'create-sub-issue'}
+                    className="flex items-center gap-2 text-[13px] font-medium leading-none text-[var(--ink-subtle)] transition hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-45"
+                    onClick={() => setSubIssueDialogOpen(true)}
+                  >
+                    <Plus aria-hidden="true" className="h-[14px] w-[14px]" />
+                    <span>{tr('issue.subIssues.add', 'Add sub-issue')}</span>
+                  </button>
+                )}
+              </div>
+              {subIssues.length > 0 && (
+                <ul className="mt-3 space-y-1">
+                  {subIssues.map((subIssue) => (
+                    <li key={subIssue.workItemId}>
+                      <button
+                        type="button"
+                        className="flex w-full items-center gap-2 rounded-[6px] px-2 py-1.5 text-left transition hover:bg-[var(--surface-3)]"
+                        onClick={() => onSubIssueSelect?.(subIssue)}
+                      >
+                        <StatusMenuIcon status={subIssue.workItem.status} />
+                        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--ink)]">
+                          {subIssue.title}
+                        </span>
+                        <span className="shrink-0 font-mono text-[12px] text-[var(--ink-tertiary)]">
+                          {subIssue.id}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
 
             <div className="mt-3 border-t border-[var(--hairline)] pt-5">
               <div className="mb-6 flex items-center justify-between">
@@ -2061,6 +2137,17 @@ export function IssueDetailPage({
           </aside>
         </div>
       </main>
+      <IssueCreateDialog
+        open={subIssueDialogOpen}
+        projectName={projectName}
+        sessions={projectSessions}
+        sessionsLoading={sessionsLoading}
+        submitting={action === 'create-sub-issue'}
+        tr={tr}
+        availableLabels={availableLabels}
+        onClose={() => setSubIssueDialogOpen(false)}
+        onCreate={handleCreateSubIssue}
+      />
     </>
   );
 }

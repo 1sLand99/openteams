@@ -40,7 +40,7 @@ type UpdateMemberCall = {
   data: UpdateProjectMemberRequest;
 };
 
-const AUTO_SAVE_DELAY_MS = 25;
+const AUTO_SAVE_DELAY_MS = 50;
 const flush = async (ms = 60) => {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, ms));
@@ -174,9 +174,9 @@ const changeJson = (harness: Harness, value: string) => {
   const harness = mountEditor();
   await harness.render(memberA);
   changeJson(harness, canonicalJson({ a: { command: 'server-a' } }));
-  await flush(10); // debounce (25ms) still pending
+  await flush(20); // debounce (50ms) still pending
   await harness.render(memberB);
-  await flush(80);
+  await flush(100);
   assert.equal(harness.calls.length, 0, 'member A draft must never be saved');
   assert.equal(harness.snapshot().mcpServersJson, memberBJson);
   assert.equal(harness.snapshot().mcpDirty, false);
@@ -200,7 +200,7 @@ const changeJson = (harness: Harness, value: string) => {
   await harness.render(memberA);
   const draftA = canonicalJson({ a: { command: 'server-a' } });
   changeJson(harness, draftA);
-  await flush(60); // save for A is now in flight
+  await flush(80); // save for A is now in flight
   assert.equal(harness.calls.length, 1);
   assert.equal(harness.calls[0].memberId, 'member-a');
   await harness.render(memberB); // user moves on before the response arrives
@@ -264,7 +264,7 @@ const changeJson = (harness: Harness, value: string) => {
   await harness.render(memberA);
   const draft = canonicalJson({ kept: { command: 'keep-me' } });
   changeJson(harness, draft);
-  await flush(10); // debounce pending; draft not yet saved
+  await flush(20); // debounce pending; draft not yet saved
   const switchedRunner: Member = {
     id: memberA.id,
     execution_config: {
@@ -278,13 +278,13 @@ const changeJson = (harness: Harness, value: string) => {
     draft,
     'runner switch must preserve the canonical JSON draft',
   );
-  await flush(20);
+  await flush(40);
   assert.equal(
     harness.calls.length,
     0,
     'runner switch cancels the previous debounce before it fires',
   );
-  await flush(60);
+  await flush(80);
   assert.equal(
     harness.calls.length,
     1,
@@ -396,7 +396,7 @@ const changeJson = (harness: Harness, value: string) => {
   const draft1 = canonicalJson({ one: { command: 'first' } });
   const draft2 = canonicalJson({ two: { command: 'second' } });
   changeJson(harness, draft1);
-  await flush(60); // save 1 in flight
+  await flush(80); // save 1 in flight
   assert.equal(harness.calls.length, 1);
   changeJson(harness, draft2); // newer draft while save 1 is in flight
   await act(async () => {
@@ -409,7 +409,7 @@ const changeJson = (harness: Harness, value: string) => {
     'stale save must not mark the newer draft as saved',
   );
   assert.equal(harness.snapshot().mcpDirty, true);
-  await flush(60); // save 2 fires
+  await flush(80); // save 2 fires
   assert.equal(harness.calls.length, 2);
   await act(async () => {
     deferred[1](); // save 2 resolves with the freshest draft

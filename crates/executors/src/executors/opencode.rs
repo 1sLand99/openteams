@@ -48,6 +48,7 @@ use sdk::{LogWriter, RunConfig, generate_server_password, run_session, run_slash
 use slash_commands::{OpencodeSlashCommand, hardcoded_slash_commands};
 
 const CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
+const CROSS_FAMILY_CONFIG_CONTENT_ENV: &str = "OPENTEAMS_CONFIG_CONTENT";
 const CUSTOM_CONFIG_ENV: &str = "OPENCODE_CONFIG";
 const CUSTOM_CONFIG_DIR_ENV: &str = "OPENCODE_CONFIG_DIR";
 const DISABLE_PROJECT_CONFIG_ENV: &str = "OPENCODE_DISABLE_PROJECT_CONFIG";
@@ -281,6 +282,7 @@ impl Opencode {
         env.insert("XDG_CONFIG_HOME", &config_home);
         env.insert(ISOLATED_HOME_ENV, config_home);
         env.insert(DISABLE_PROJECT_CONFIG_ENV, "true");
+        env.remove(CROSS_FAMILY_CONFIG_CONTENT_ENV);
         Ok(env)
     }
 
@@ -311,7 +313,8 @@ impl Opencode {
             .env(ISOLATED_HOME_ENV, &snapshot.config_home)
             .env(DISABLE_PROJECT_CONFIG_ENV, "true")
             .env_remove(CUSTOM_CONFIG_ENV)
-            .env_remove(CUSTOM_CONFIG_DIR_ENV);
+            .env_remove(CUSTOM_CONFIG_DIR_ENV)
+            .env_remove(CROSS_FAMILY_CONFIG_CONTENT_ENV);
         Ok(())
     }
 

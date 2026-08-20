@@ -99,11 +99,12 @@ import {
 } from "@/lib/teamTemplateRuntime";
 import type { ShellOptionsMock } from "@/mockApiData";
 import {
-  type BaseCodingAgent as ProjectBaseCodingAgent,
+  type BaseCodingAgent,
   type ChatMemberPreset,
   type ChatSearchResult,
   type ChatTeamPreset,
   type InboxItem,
+  type MemberExecutionConfig,
   OnboardingAppearance,
   type OnboardingState,
   type OnboardingTeamMemberConfig,
@@ -724,6 +725,7 @@ function WorkspaceLayout() {
     allowedSkillIds,
     role,
     displayOrder,
+    executionConfig,
   }: {
     projectId: string;
     workspacePath: string | null;
@@ -735,6 +737,7 @@ function WorkspaceLayout() {
     allowedSkillIds: string[];
     role: string;
     displayOrder: number;
+    executionConfig: MemberExecutionConfig;
   }) => {
     const agent = await chatAgentsApi.create({
       name,
@@ -754,12 +757,7 @@ function WorkspaceLayout() {
       display_order: displayOrder as unknown as bigint,
       default_workspace_path: workspacePath,
       allowed_skill_ids: allowedSkillIds,
-      execution_config: {
-        runner_type: runnerType as unknown as ProjectBaseCodingAgent,
-        model_name: modelName,
-        thinking_effort: null,
-        model_variant: null,
-      },
+      execution_config: structuredClone(executionConfig),
       is_default: true,
     });
   };
@@ -789,16 +787,18 @@ function WorkspaceLayout() {
       const onboardingConfig = onboardingConfigByMember.get(
         spec.name.trim().toLowerCase(),
       );
+      const runnerType = onboardingConfig?.runner_type || spec.runnerType;
+      const modelName = onboardingConfig?.model_name || spec.modelName;
+      const executionConfig = structuredClone(spec.executionConfig);
+      executionConfig.runner_type = runnerType as BaseCodingAgent;
+      executionConfig.model_name = modelName;
       return {
         ...spec,
+        runnerType,
+        modelName,
+        executionConfig,
         ...(options?.forceWorkspacePath && workspacePath
           ? { workspacePath }
-          : {}),
-        ...(onboardingConfig?.runner_type
-          ? { runnerType: onboardingConfig.runner_type }
-          : {}),
-        ...(onboardingConfig?.model_name
-          ? { modelName: onboardingConfig.model_name }
           : {}),
       };
     });
