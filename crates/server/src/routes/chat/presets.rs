@@ -1494,7 +1494,7 @@ mod tests {
         let detail = api_get(&app, "/api/team-presets/literature_research_team?locale=zh").await;
         let members = detail["members"].as_array().expect("members array");
 
-        assert_eq!(members.len(), 3);
+        assert_eq!(members.len(), 7);
         for member in members {
             assert_eq!(
                 member["execution_config"]["mcp"]["mcpServers"]["playwright"],
