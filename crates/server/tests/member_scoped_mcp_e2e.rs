@@ -890,6 +890,7 @@ fn set_process_home(home: &Path) {
     unsafe {
         std::env::set_var("HOME", home);
         std::env::set_var("USERPROFILE", home);
+        std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
     }
 }
 
@@ -1987,6 +1988,21 @@ async fn e2e_009_one_time_migration(
         write_native_global_mcp(case, &scenario.home, &server_script, &ctx.fake_secret);
     let global_bytes = fs::read(&global_path).expect("read legacy global config");
 
+    if matches!(
+        case.runner,
+        BaseCodingAgent::Amp | BaseCodingAgent::Opencode
+    ) {
+        let profiles = ExecutorConfigs::get_cached();
+        let executor = profiles
+            .get_coding_agent(&ExecutorProfileId::new(case.runner))
+            .ok_or_else(|| format!("{label}: missing executor profile"))?;
+        if executor.default_mcp_config_path().as_deref() != Some(global_path.as_path()) {
+            return Err(format!(
+                "{label}: legacy vendor config was not written to the production MCP path"
+            ));
+        }
+    }
+
     let agent_id = Uuid::new_v4();
     sqlx::query("INSERT OR IGNORE INTO chat_agents (id, name, runner_type) VALUES (?1, ?2, ?3)")
         .bind(agent_id)
@@ -2113,9 +2129,12 @@ fn main() {
 
     let original_home = std::env::var_os("HOME");
     let original_userprofile = std::env::var_os("USERPROFILE");
+    let original_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
     let original_path = std::env::var_os("PATH");
     let fixture_home = fixture_root.path().join("process-home");
+    let fixture_xdg_config_home = fixture_home.join(".config");
     fs::create_dir_all(&fixture_home).expect("create fixture process home");
+    fs::create_dir_all(&fixture_xdg_config_home).expect("create fixture process XDG config home");
     let fixture_path = match &original_path {
         Some(path) => format!("{}:{}", bin.display(), path.to_string_lossy()),
         None => bin.to_string_lossy().into_owned(),
@@ -2127,6 +2146,7 @@ fn main() {
     unsafe {
         std::env::set_var("HOME", &fixture_home);
         std::env::set_var("USERPROFILE", &fixture_home);
+        std::env::set_var("XDG_CONFIG_HOME", &fixture_xdg_config_home);
         std::env::set_var("PATH", fixture_path);
     }
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -2251,6 +2271,10 @@ fn main() {
         match original_userprofile {
             Some(value) => std::env::set_var("USERPROFILE", value),
             None => std::env::remove_var("USERPROFILE"),
+        }
+        match original_xdg_config_home {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
         }
         match original_path {
             Some(value) => std::env::set_var("PATH", value),
