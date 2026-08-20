@@ -64,6 +64,7 @@ async fn seed_work_item(pool: &SqlitePool, project_id: Uuid, title: &str) -> Pro
         pool,
         project_id,
         CreateProjectWorkItem {
+            parent_id: None,
             r#type: ProjectWorkItemType::Feature,
             status: None,
             title: title.to_string(),

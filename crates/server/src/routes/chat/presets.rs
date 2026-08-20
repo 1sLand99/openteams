@@ -6,7 +6,10 @@ use axum::{
     response::Json as ResponseJson,
     routing::get,
 };
-use db::models::{chat_session::ChatSession, project_team_protocol::ProjectTeamProtocol};
+use db::models::{
+    chat_session::ChatSession, member_execution_config::MemberExecutionConfig,
+    project_team_protocol::ProjectTeamProtocol,
+};
 use deployment::Deployment;
 use executors::{
     executors::{BaseCodingAgent, CodingAgent},
@@ -107,6 +110,9 @@ pub struct TeamPresetMemberWrite {
     pub description: Option<String>,
     pub runner_type: Option<String>,
     pub recommended_model: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub execution_config: Option<MemberExecutionConfig>,
     pub system_prompt: Option<String>,
     pub default_workspace_path: Option<String>,
     #[serde(default)]
@@ -156,6 +162,7 @@ struct SessionPresetMemberRow {
     system_prompt: String,
     tools_enabled: SqlxJson<serde_json::Value>,
     model_name: Option<String>,
+    execution_config: SqlxJson<MemberExecutionConfig>,
     workspace_path: Option<String>,
     allowed_skill_ids: SqlxJson<Vec<String>>,
 }
@@ -323,6 +330,7 @@ async fn list_session_preset_member_rows(
                agents.system_prompt AS system_prompt,
                agents.tools_enabled AS tools_enabled,
                agents.model_name AS model_name,
+               COALESCE(session_agents.execution_config, '{}') AS execution_config,
                session_agents.workspace_path AS workspace_path,
                session_agents.allowed_skill_ids AS allowed_skill_ids
         FROM chat_session_agents session_agents
@@ -539,6 +547,7 @@ fn validate_member_presets(
             description: normalize_optional_string(member.description).unwrap_or_default(),
             runner_type: normalize_optional_string(member.runner_type),
             recommended_model: normalize_optional_string(member.recommended_model),
+            execution_config: member.execution_config,
             system_prompt: member.system_prompt.unwrap_or_default(),
             default_workspace_path: normalize_optional_string(member.default_workspace_path),
             selected_skill_ids: normalize_skill_ids(member.selected_skill_ids),
@@ -734,6 +743,12 @@ fn build_member_presets(
                 .map(|path| path.trim().to_string())
                 .filter(|path| !path.is_empty());
             let recommended_model = resolve_recommended_model(&row);
+            let runner_type = row
+                .execution_config
+                .runner_type
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or(row.runner_type);
             ChatMemberPreset {
                 id,
                 name,
@@ -741,8 +756,9 @@ fn build_member_presets(
                     "Snapshot of session member {} from chat session {}.",
                     row.session_agent_id, session.id
                 ),
-                runner_type: Some(row.runner_type),
+                runner_type: Some(runner_type),
                 recommended_model,
+                execution_config: Some(row.execution_config.0),
                 system_prompt: row.system_prompt,
                 default_workspace_path,
                 selected_skill_ids: normalize_skill_ids(row.allowed_skill_ids.0),
@@ -755,7 +771,8 @@ fn build_member_presets(
 }
 
 fn resolve_recommended_model(row: &SessionPresetMemberRow) -> Option<String> {
-    normalize_optional_string(row.model_name.clone())
+    normalize_optional_string(row.execution_config.model_name.clone())
+        .or_else(|| normalize_optional_string(row.model_name.clone()))
         .or_else(|| selected_profile_model(&row.runner_type, &row.tools_enabled.0))
 }
 
@@ -987,6 +1004,33 @@ mod tests {
         }
     }
 
+    fn complete_execution_config_with_fake_secrets() -> MemberExecutionConfig {
+        serde_json::from_value(json!({
+            "runner_type": "CODEX",
+            "model_name": "fake-model",
+            "thinking_effort": "high",
+            "model_variant": "fake-variant",
+            "acp": {
+                "access_mode": "workspace_only",
+                "approval_mode": "auto_reject",
+                "additional_directories": []
+            },
+            "mcp": {
+                "mcpServers": {
+                    "fake-local": {
+                        "command": "fake-mcp-server",
+                        "env": { "API_TOKEN": "fake-custom-token" }
+                    },
+                    "fake-remote": {
+                        "url": "https://example.invalid/mcp",
+                        "headers": { "Authorization": "Bearer fake-custom-token" }
+                    }
+                }
+            }
+        }))
+        .expect("deserialize complete fake execution config")
+    }
+
     fn custom_member_preset(id: &str) -> ChatMemberPreset {
         ChatMemberPreset {
             id: id.to_string(),
@@ -994,6 +1038,7 @@ mod tests {
             description: format!("{id} description"),
             runner_type: Some("codex".to_string()),
             recommended_model: Some("gpt-5.2".to_string()),
+            execution_config: None,
             system_prompt: format!("You are {id}."),
             default_workspace_path: None,
             selected_skill_ids: vec![],
@@ -1021,6 +1066,7 @@ mod tests {
             description: Some(format!("{id} description")),
             runner_type: Some("codex".to_string()),
             recommended_model: Some("gpt-5.2".to_string()),
+            execution_config: None,
             system_prompt: Some(format!("You are {id}.")),
             default_workspace_path: None,
             selected_skill_ids: vec!["skill-b".to_string(), "skill-a".to_string()],
@@ -1072,6 +1118,7 @@ mod tests {
             system_prompt: format!("You are {name}."),
             tools_enabled: SqlxJson(json!({ "executor_profile_variant": "DEFAULT" })),
             model_name: Some("gpt-5.2".to_string()),
+            execution_config: SqlxJson(MemberExecutionConfig::default()),
             workspace_path: None,
             allowed_skill_ids: SqlxJson(vec![
                 " skill-b ".to_string(),
@@ -1158,6 +1205,46 @@ mod tests {
     }
 
     #[test]
+    fn team_preset_crud_persists_complete_execution_config_with_fake_secrets() {
+        let mut presets = test_presets();
+        let expected = complete_execution_config_with_fake_secrets();
+        let mut member = member_write("delivery_backend");
+        member.execution_config = Some(expected.clone());
+        member.tools_enabled = None;
+
+        let mut team = create_team_preset_in_config(
+            &mut presets,
+            create_team_request("delivery_team", vec![member]),
+        )
+        .expect("create succeeds");
+        assert_eq!(team.members[0].execution_config.as_ref(), Some(&expected));
+        assert_eq!(team.members[0].tools_enabled, json!({}));
+        assert_eq!(presets.teams[0], team);
+
+        team.members[0]
+            .execution_config
+            .as_mut()
+            .expect("returned execution config")
+            .model_name = Some("changed-after-create".to_string());
+        assert_eq!(
+            presets.teams[0].members[0].execution_config.as_ref(),
+            Some(&expected),
+            "returned and persisted template members must not share mutable state"
+        );
+    }
+
+    #[test]
+    fn team_preset_member_write_accepts_legacy_payload_without_execution_config() {
+        let member = serde_json::from_value::<TeamPresetMemberWrite>(json!({
+            "id": "legacy_member",
+            "name": "legacy_member"
+        }))
+        .expect("legacy custom template member should deserialize");
+
+        assert!(member.execution_config.is_none());
+    }
+
+    #[test]
     fn team_preset_crud_rejects_invalid_team_and_member_required_fields() {
         let mut invalid_team_id_presets = test_presets();
         let invalid_team_id_error = create_team_preset_in_config(
@@ -1199,14 +1286,16 @@ mod tests {
     #[test]
     fn update_team_preset_in_config_replaces_embedded_members() {
         let mut presets = test_presets();
+        let expected = complete_execution_config_with_fake_secrets();
         create_team_preset_in_config(
             &mut presets,
             create_team_request("delivery_team", vec![member_write("delivery_backend")]),
         )
         .expect("create succeeds");
 
-        let mut update =
-            update_team_request("delivery_team", vec![member_write("delivery_frontend")]);
+        let mut updated_member = member_write("delivery_frontend");
+        updated_member.execution_config = Some(expected.clone());
+        let mut update = update_team_request("delivery_team", vec![updated_member]);
         update.name = "Updated Team".to_string();
 
         let team = update_team_preset_in_config(&mut presets, "delivery_team", update)
@@ -1216,6 +1305,11 @@ mod tests {
         assert_eq!(team_preset_member_ids(&team), vec!["delivery_frontend"]);
         assert_eq!(team.members.len(), 1);
         assert!(team.members.iter().all(|m| m.id == "delivery_frontend"));
+        assert_eq!(team.members[0].execution_config.as_ref(), Some(&expected));
+        assert_eq!(
+            presets.teams[0].members[0].execution_config.as_ref(),
+            Some(&expected)
+        );
     }
 
     #[test]
@@ -1258,11 +1352,14 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let config_path = temp.path().join("config.json");
         let mut config = Config::default();
+        let expected_execution_config = complete_execution_config_with_fake_secrets();
+        let mut route_member = custom_member_preset("route_member");
+        route_member.execution_config = Some(expected_execution_config.clone());
         let mut team = ChatTeamPreset {
             id: "route_custom_team".to_string(),
             name: "Route Custom Team".to_string(),
             description: "Created through route persistence.".to_string(),
-            members: vec![custom_member_preset("route_member")],
+            members: vec![route_member],
             lead_member_id: None,
             workflow_steps: Vec::new(),
             team_protocol: "Original protocol.".to_string(),
@@ -1280,6 +1377,22 @@ mod tests {
             .expect("find created")
             .expect("catalog row exists");
         assert_eq!(created.source, TeamTemplateCatalogSource::Custom);
+        let persisted = std::fs::read_to_string(&config_path).expect("read persisted config");
+        let persisted: serde_json::Value =
+            serde_json::from_str(&persisted).expect("parse persisted config");
+        let persisted_member = persisted["chat_presets"]["teams"]
+            .as_array()
+            .expect("persisted teams")
+            .iter()
+            .find(|team| team["id"] == "route_custom_team")
+            .and_then(|team| team["members"].as_array())
+            .and_then(|members| members.first())
+            .expect("persisted custom member");
+        assert_eq!(
+            persisted_member["execution_config"],
+            serde_json::to_value(&expected_execution_config)
+                .expect("serialize expected execution config")
+        );
 
         let original_checksum = created.content_checksum.clone();
         team.team_protocol = "Updated protocol.".to_string();
@@ -1519,6 +1632,94 @@ mod tests {
     }
 
     #[test]
+    fn team_preset_snapshot_copies_complete_session_execution_config_deeply() {
+        let session = test_session();
+        let mut presets = test_presets();
+        let expected = complete_execution_config_with_fake_secrets();
+        let mut row = test_row("backend");
+        row.runner_type = "GEMINI".to_string();
+        row.model_name = Some("legacy-model".to_string());
+        row.execution_config = SqlxJson(expected.clone());
+
+        let mut response = build_preset_snapshot(
+            &session,
+            Some("Follow the team protocol."),
+            vec![row],
+            snapshot_request("delivery", PresetSnapshotOverwriteStrategy::FailIfExists),
+            &mut presets,
+        )
+        .expect("snapshot succeeds");
+        let member = &response.team.members[0];
+
+        assert_eq!(member.runner_type.as_deref(), Some("CODEX"));
+        assert_eq!(member.recommended_model.as_deref(), Some("fake-model"));
+        assert_eq!(member.execution_config.as_ref(), Some(&expected));
+        assert_eq!(
+            member.tools_enabled,
+            json!({ "executor_profile_variant": "DEFAULT" }),
+            "legacy tools metadata must not be reinterpreted as MCP"
+        );
+
+        response.team.members[0]
+            .execution_config
+            .as_mut()
+            .expect("snapshot execution config")
+            .thinking_effort = Some("changed-after-snapshot".to_string());
+        assert_eq!(
+            presets.teams[0].members[0].execution_config.as_ref(),
+            Some(&expected),
+            "snapshot response and persisted template must be independent deep copies"
+        );
+    }
+
+    #[tokio::test]
+    async fn team_preset_snapshot_query_reads_chat_session_agent_execution_config() {
+        let pool = setup_pool().await;
+        let session_id = Uuid::new_v4();
+        let agent_id = Uuid::new_v4();
+        let session_agent_id = Uuid::new_v4();
+        let expected = complete_execution_config_with_fake_secrets();
+
+        sqlx::query("INSERT INTO chat_sessions (id, title) VALUES (?1, ?2)")
+            .bind(session_id)
+            .bind("Snapshot session")
+            .execute(&pool)
+            .await
+            .expect("insert session");
+        sqlx::query(
+            "INSERT INTO chat_agents (id, name, runner_type, system_prompt, tools_enabled, model_name) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(agent_id)
+        .bind("backend")
+        .bind("GEMINI")
+        .bind("Legacy prompt")
+        .bind(SqlxJson(json!({})))
+        .bind("legacy-model")
+        .execute(&pool)
+        .await
+        .expect("insert agent");
+        sqlx::query(
+            "INSERT INTO chat_session_agents (id, session_id, agent_id, member_name, execution_config, allowed_skill_ids) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(session_agent_id)
+        .bind(session_id)
+        .bind(agent_id)
+        .bind("backend")
+        .bind(SqlxJson(expected.clone()))
+        .bind(SqlxJson(Vec::<String>::new()))
+        .execute(&pool)
+        .await
+        .expect("insert session agent");
+
+        let rows = list_session_preset_member_rows(&pool, session_id)
+            .await
+            .expect("query snapshot members");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].execution_config.0, expected);
+    }
+
+    #[test]
     fn build_preset_snapshot_keeps_blank_team_description_empty() {
         let session = test_session();
         let mut presets = test_presets();
@@ -1713,6 +1914,7 @@ mod tests {
                 description: "Old member".to_string(),
                 runner_type: Some("codex".to_string()),
                 recommended_model: None,
+                execution_config: None,
                 system_prompt: "old".to_string(),
                 default_workspace_path: None,
                 selected_skill_ids: vec![],

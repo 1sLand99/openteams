@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result, anyhow, bail};
+use db::models::member_execution_config::MemberExecutionConfig;
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use utils::{path::home_directory, text::sanitize_member_handle};
@@ -688,6 +689,8 @@ struct RolePresetFrontmatter {
     #[serde(default)]
     recommended_model: Option<String>,
     #[serde(default)]
+    execution_config: Option<MemberExecutionConfig>,
+    #[serde(default)]
     tools_enabled: Option<serde_yaml::Value>,
 }
 
@@ -701,6 +704,7 @@ struct RolePresetMd {
     selected_skill_ids: Vec<String>,
     runner_type: Option<String>,
     recommended_model: Option<String>,
+    execution_config: Option<MemberExecutionConfig>,
     tools_enabled: serde_json::Value,
 }
 
@@ -970,6 +974,7 @@ impl PresetLoader {
             description: preset.description,
             runner_type: preset.runner_type,
             recommended_model: preset.recommended_model,
+            execution_config: preset.execution_config,
             system_prompt: preset.role_definition,
             default_workspace_path: Some(default_workspace_path.to_string()),
             selected_skill_ids: preset.selected_skill_ids,
@@ -1012,6 +1017,7 @@ impl PresetLoader {
             selected_skill_ids: normalize_selected_skill_ids(frontmatter.selected_skill_ids),
             runner_type: frontmatter.runner_type,
             recommended_model: frontmatter.recommended_model,
+            execution_config: frontmatter.execution_config,
             tools_enabled,
         })
     }

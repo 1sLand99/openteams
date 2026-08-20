@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_with::rust::double_option;
 use sqlx::{FromRow, SqlitePool, Type};
 use ts_rs::TS;
 use uuid::Uuid;
@@ -59,6 +60,7 @@ pub enum ProjectWorkItemSource {
 pub struct ProjectWorkItem {
     pub id: Uuid,
     pub project_id: Uuid,
+    pub parent_id: Option<Uuid>,
     pub r#type: ProjectWorkItemType,
     pub status: ProjectWorkItemStatus,
     pub title: String,
@@ -75,6 +77,9 @@ pub struct ProjectWorkItem {
 
 #[derive(Debug, Clone, Deserialize, TS)]
 pub struct CreateProjectWorkItem {
+    #[serde(default)]
+    #[ts(optional, type = "string | null")]
+    pub parent_id: Option<Uuid>,
     pub r#type: ProjectWorkItemType,
     #[serde(default)]
     #[ts(optional)]
@@ -91,6 +96,13 @@ pub struct CreateProjectWorkItem {
 
 #[derive(Debug, Clone, Deserialize, TS)]
 pub struct UpdateProjectWorkItem {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "double_option"
+    )]
+    #[ts(optional, type = "string | null")]
+    pub parent_id: Option<Option<Uuid>>,
     pub r#type: Option<ProjectWorkItemType>,
     pub status: Option<ProjectWorkItemStatus>,
     pub title: Option<String>,
@@ -109,14 +121,16 @@ impl ProjectWorkItem {
         sqlx::query_as::<_, Self>(
             r#"
             INSERT INTO project_work_items (
-                id, project_id, type, status, title, description, labels_json, priority, source, created_by
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            RETURNING id, project_id, type, status, title, description, labels_json, priority, source,
-                      created_by, created_at, updated_at
+                id, project_id, parent_id, type, status, title, description, labels_json, priority,
+                source, created_by
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            RETURNING id, project_id, parent_id, type, status, title, description, labels_json,
+                      priority, source, created_by, created_at, updated_at
             "#,
         )
         .bind(id)
         .bind(project_id)
+        .bind(input.parent_id)
         .bind(input.r#type)
         .bind(input.status.unwrap_or(ProjectWorkItemStatus::Open))
         .bind(input.title)
@@ -135,8 +149,8 @@ impl ProjectWorkItem {
     ) -> Result<Vec<Self>, sqlx::Error> {
         sqlx::query_as::<_, Self>(
             r#"
-            SELECT id, project_id, type, status, title, description, labels_json, priority, source,
-                   created_by, created_at, updated_at
+            SELECT id, project_id, parent_id, type, status, title, description, labels_json,
+                   priority, source, created_by, created_at, updated_at
             FROM project_work_items
             WHERE project_id = ?1
             ORDER BY updated_at DESC
@@ -150,8 +164,8 @@ impl ProjectWorkItem {
     pub async fn find_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as::<_, Self>(
             r#"
-            SELECT id, project_id, type, status, title, description, labels_json, priority, source,
-                   created_by, created_at, updated_at
+            SELECT id, project_id, parent_id, type, status, title, description, labels_json,
+                   priority, source, created_by, created_at, updated_at
             FROM project_work_items
             WHERE id = ?1
             "#,
@@ -172,19 +186,21 @@ impl ProjectWorkItem {
         sqlx::query_as::<_, Self>(
             r#"
             UPDATE project_work_items
-            SET type = ?2,
-                status = ?3,
-                title = ?4,
-                description = ?5,
-                labels_json = ?6,
-                priority = ?7,
+            SET parent_id = ?2,
+                type = ?3,
+                status = ?4,
+                title = ?5,
+                description = ?6,
+                labels_json = ?7,
+                priority = ?8,
                 updated_at = datetime('now', 'subsec')
             WHERE id = ?1
-            RETURNING id, project_id, type, status, title, description, labels_json, priority, source,
-                      created_by, created_at, updated_at
+            RETURNING id, project_id, parent_id, type, status, title, description, labels_json,
+                      priority, source, created_by, created_at, updated_at
             "#,
         )
         .bind(id)
+        .bind(input.parent_id.unwrap_or(existing.parent_id))
         .bind(input.r#type.unwrap_or(existing.r#type))
         .bind(input.status.unwrap_or(existing.status))
         .bind(input.title.unwrap_or(existing.title))
@@ -203,7 +219,7 @@ mod tests {
 
     use super::{
         CreateProjectWorkItem, ProjectWorkItem, ProjectWorkItemPriority, ProjectWorkItemSource,
-        ProjectWorkItemType,
+        ProjectWorkItemType, UpdateProjectWorkItem,
     };
     use crate::models::{
         github_operation_audit::{
@@ -234,6 +250,7 @@ mod tests {
             CREATE TABLE project_work_items (
                 id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL,
+                parent_id TEXT REFERENCES project_work_items(id) ON DELETE SET NULL,
                 type TEXT NOT NULL,
                 status TEXT NOT NULL,
                 title TEXT NOT NULL,
@@ -322,6 +339,7 @@ mod tests {
             pool,
             project_id,
             CreateProjectWorkItem {
+                parent_id: None,
                 r#type: ProjectWorkItemType::Bug,
                 status: None,
                 title: "Fix issue".to_string(),
@@ -344,6 +362,7 @@ mod tests {
             &pool,
             project_id,
             CreateProjectWorkItem {
+                parent_id: None,
                 r#type: ProjectWorkItemType::Task,
                 status: None,
                 title: "Open by default".to_string(),
@@ -362,6 +381,7 @@ mod tests {
             &pool,
             project_id,
             CreateProjectWorkItem {
+                parent_id: None,
                 r#type: ProjectWorkItemType::Task,
                 status: Some(super::ProjectWorkItemStatus::Done),
                 title: "Done import".to_string(),
@@ -375,6 +395,26 @@ mod tests {
         .await
         .expect("create done item");
         assert_eq!(done.status, super::ProjectWorkItemStatus::Done);
+    }
+
+    #[test]
+    fn update_parent_id_distinguishes_omitted_null_and_value() {
+        let omitted: UpdateProjectWorkItem =
+            serde_json::from_value(serde_json::json!({})).expect("deserialize omitted parent");
+        assert!(omitted.parent_id.is_none());
+
+        let cleared: UpdateProjectWorkItem = serde_json::from_value(serde_json::json!({
+            "parent_id": null
+        }))
+        .expect("deserialize null parent");
+        assert!(matches!(cleared.parent_id, Some(None)));
+
+        let parent_id = Uuid::new_v4();
+        let assigned: UpdateProjectWorkItem = serde_json::from_value(serde_json::json!({
+            "parent_id": parent_id
+        }))
+        .expect("deserialize parent id");
+        assert_eq!(assigned.parent_id, Some(Some(parent_id)));
     }
 
     #[tokio::test]

@@ -80,6 +80,5 @@
       }
     }
   },
-  "description": "Droid executor configuration",
   "type": "object"
 }

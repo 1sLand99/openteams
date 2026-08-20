@@ -739,6 +739,7 @@ async fn import_github_issue(
             &deployment.db().pool,
             project_id,
             CreateProjectWorkItem {
+                parent_id: None,
                 r#type: work_item_type_from_issue_labels(&issue_detail.summary.labels),
                 status: Some(work_item_status_from_github_state(
                     &issue_detail.summary.state,
