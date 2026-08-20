@@ -29,6 +29,8 @@ import type {
   AgentRuntimeReasoningCapability,
   BackendChatSkill,
   BaseCodingAgent,
+  JsonValue,
+  McpConfig,
 } from "@/types";
 import type {
   AcpConfigOptionSnapshot,
@@ -69,6 +71,7 @@ type TeamConfigTabsProps = {
   reasoningUnsupported: boolean;
   allowedSkillIds: string[];
   capability: AgentRuntimeReasoningCapability | null;
+  configuredMcpServerKeys: string[];
   isLeader: boolean;
   legacyModelName: string;
   legacyThinkingEffort: string;
@@ -77,6 +80,9 @@ type TeamConfigTabsProps = {
   memberDirty: boolean;
   memberSuccess: boolean;
   mcpApplying: boolean;
+  mcpCatalog: McpConfig | null;
+  mcpCatalogError: string | null;
+  mcpCatalogLoading: boolean;
   mcpDirty: boolean;
   mcpError: string | null;
   mcpServersJson: string;
@@ -104,6 +110,7 @@ type TeamConfigTabsProps = {
   t: TranslateFn;
   workspacePath: string;
   onMcpServersChange: (value: string) => void;
+  onToggleMcpServer: (serverKey: string) => void;
   onAcpConfigValueChange: (
     option: AcpConfigOptionSnapshot,
     value: AcpConfigValue,
@@ -188,12 +195,14 @@ function SettingRow({
 
 function MarkdownEditableField({
   disabled = false,
+  maxHeightClassName,
   minHeightClassName,
   onChange,
   placeholder,
   value,
 }: {
   disabled?: boolean;
+  maxHeightClassName?: string;
   minHeightClassName: string;
   onChange: (value: string) => void;
   placeholder: string;
@@ -213,6 +222,7 @@ function MarkdownEditableField({
         className={cx(
           "block w-full resize-y overflow-y-auto rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-4 py-4 font-mono text-[14px] leading-relaxed text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-muted)] focus:border-[var(--hairline-strong)] focus:ring-2 focus:ring-[var(--primary-focus)]/35",
           minHeightClassName,
+          maxHeightClassName,
         )}
       />
     );
@@ -234,6 +244,7 @@ function MarkdownEditableField({
       className={cx(
         "w-full overflow-y-auto rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-4 py-4 text-[14px] leading-relaxed transition-colors",
         minHeightClassName,
+        maxHeightClassName,
         disabled
           ? "cursor-not-allowed opacity-70"
           : "cursor-text hover:border-[var(--hairline-strong)] focus-visible:border-[var(--hairline-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary-focus)]/35",
@@ -804,6 +815,7 @@ function ConfigTab({
           onChange={setRoleDefinition}
           placeholder={t("teamPage.systemPrompt.placeholder")}
           minHeightClassName="min-h-[360px] flex-1"
+          maxHeightClassName="max-h-[480px]"
         />
       </ConfigSection>
     </div>
@@ -1057,14 +1069,46 @@ function SkillsTab({
 }
 
 function McpConfigTab({
+  configuredMcpServerKeys,
+  mcpApplying,
+  mcpCatalog,
+  mcpCatalogError,
+  mcpCatalogLoading,
   mcpError,
   mcpServersJson,
   onMcpServersChange,
+  onToggleMcpServer,
   t,
 }: Pick<
   TeamConfigTabsProps,
-  "mcpError" | "mcpServersJson" | "onMcpServersChange" | "t"
+  | "configuredMcpServerKeys"
+  | "mcpApplying"
+  | "mcpCatalog"
+  | "mcpCatalogError"
+  | "mcpCatalogLoading"
+  | "mcpError"
+  | "mcpServersJson"
+  | "onMcpServersChange"
+  | "onToggleMcpServer"
+  | "t"
 >) {
+  const preconfigured = (mcpCatalog?.preconfigured ?? {}) as Record<
+    string,
+    JsonValue | undefined
+  >;
+  const metadata =
+    typeof preconfigured.meta === "object" &&
+    preconfigured.meta !== null &&
+    !Array.isArray(preconfigured.meta)
+      ? (preconfigured.meta as Record<
+          string,
+          { description?: string; icon?: string; name?: string }
+        >)
+      : {};
+  const builtinServers = Object.entries(preconfigured).filter(
+    ([serverKey]) => serverKey !== "meta",
+  );
+
   return (
     <div className="space-y-6">
       {mcpError && (
@@ -1098,6 +1142,78 @@ function McpConfigTab({
             className="block w-full resize-y rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] px-4 py-3 font-mono text-[13px] leading-relaxed text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-tertiary)] focus:ring-2 focus:ring-[var(--primary-focus)]/50 disabled:opacity-70"
           />
         </SettingRow>
+
+        {(mcpCatalogLoading || mcpCatalogError || builtinServers.length > 0) && (
+          <SettingRow
+            title={t("teamPage.mcp.builtinTitle")}
+            wide
+            description={t("teamPage.mcp.builtinDesc")}
+          >
+            {mcpCatalogLoading ? (
+              <div className="flex items-center gap-2 rounded-[8px] border border-[var(--hairline)] bg-[var(--surface-1)] p-3 text-[13px] text-[var(--ink-subtle)]">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {t("teamPage.mcp.builtinLoading")}
+              </div>
+            ) : mcpCatalogError ? (
+              <div className="rounded-[8px] border border-red-500/20 bg-red-500/10 p-3 text-[13px] text-red-400">
+                {t("teamPage.error.mcpCatalogUnavailable", {
+                  error: mcpCatalogError,
+                })}
+              </div>
+            ) : (
+              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                {builtinServers.map(([serverKey]) => {
+                  const meta = metadata[serverKey] ?? {};
+                  const selected =
+                    configuredMcpServerKeys.includes(serverKey);
+                  const icon = meta.icon
+                    ? `/${meta.icon.replace(/^\/+/u, "")}`
+                    : null;
+                  return (
+                    <button
+                      key={serverKey}
+                      type="button"
+                      aria-pressed={selected}
+                      disabled={mcpApplying || !!mcpError}
+                      onClick={() => onToggleMcpServer(serverKey)}
+                      className={cx(
+                        "group flex min-w-0 items-start gap-3 rounded-[8px] border p-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-55",
+                        selected
+                          ? "border-[var(--primary)]/45 bg-[var(--primary-tint)]"
+                          : "border-[var(--hairline)] bg-[var(--surface-1)] hover:border-[var(--hairline-strong)] hover:bg-[var(--surface-3)]",
+                      )}
+                    >
+                      <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-[8px] bg-[var(--surface-1)]">
+                        {icon ? (
+                          <img
+                            src={icon}
+                            alt=""
+                            className="h-full w-full object-contain"
+                          />
+                        ) : (
+                          <Server className="h-4 w-4 text-[var(--ink-tertiary)]" />
+                        )}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[14px] font-medium text-[var(--ink)]">
+                          {meta.name || serverKey}
+                        </span>
+                        <span className="mt-1 line-clamp-2 block text-[12px] leading-[1.4] text-[var(--ink-subtle)]">
+                          {meta.description || t("teamPage.fallback.noDesc")}
+                        </span>
+                      </span>
+                      {selected ? (
+                        <Check className="mt-1 h-3.5 w-3.5 shrink-0 text-[var(--primary)]" />
+                      ) : (
+                        <PackagePlus className="mt-1 h-3.5 w-3.5 shrink-0 text-[var(--ink-tertiary)] transition-colors group-hover:text-[var(--primary)]" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </SettingRow>
+        )}
       </ConfigSection>
     </div>
   );
@@ -1297,9 +1413,15 @@ export function TeamConfigTabs(props: TeamConfigTabsProps) {
           />
         ) : effectiveActiveTab === "mcp" ? (
           <McpConfigTab
+            configuredMcpServerKeys={props.configuredMcpServerKeys}
+            mcpApplying={props.mcpApplying}
+            mcpCatalog={props.mcpCatalog}
+            mcpCatalogError={props.mcpCatalogError}
+            mcpCatalogLoading={props.mcpCatalogLoading}
             mcpError={props.mcpError}
             mcpServersJson={props.mcpServersJson}
             onMcpServersChange={props.onMcpServersChange}
+            onToggleMcpServer={props.onToggleMcpServer}
             t={t}
           />
         ) : (

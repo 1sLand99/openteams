@@ -63,6 +63,7 @@ import type {
   InstalledNativeSkill,
   InterruptStepResponse,
   JsonValue,
+  McpConfig,
   OpenInExplorerResponse,
   ProjectDeliveryRecord,
   ProjectDeliveryStatsSummary,
@@ -673,6 +674,15 @@ export const profilesApi = {
       body: content,
     });
     return handleApiResponse<string>(r);
+  },
+};
+
+export const memberMcpCatalogApi = {
+  load: async (): Promise<McpConfig> => {
+    const response = await makeRequest("/api/member-mcp-catalog", {
+      cache: "no-store",
+    });
+    return handleApiResponse<McpConfig>(response);
   },
 };
 
@@ -2970,6 +2980,7 @@ export const api = {
   version: versionApi,
   inbox: inboxApi,
   profiles: profilesApi,
+  memberMcpCatalog: memberMcpCatalogApi,
   teamPresets: teamPresetsApi,
   githubAuth: githubAuthApi,
   projectGithub: projectGithubApi,

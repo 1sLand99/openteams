@@ -21,6 +21,9 @@ export type MemberMcpSource = {
   execution_config?: MemberExecutionConfig | null;
 };
 
+const parseMemberMcpDocument = (json: string): JsonValue =>
+  json.trim() ? (JSON.parse(json) as JsonValue) : { mcpServers: {} };
+
 /**
  * Serialize the member's canonical MCP config for the editor. Both an absent
  * config (legacy member) and an explicit empty config render as
@@ -41,9 +44,7 @@ export const memberMcpServersJson = (member: MemberMcpSource): string => {
 export const parseMemberMcpServers = (
   json: string,
 ): Record<string, JsonValue> => {
-  const parsed = json.trim()
-    ? (JSON.parse(json) as JsonValue)
-    : { mcpServers: {} };
+  const parsed = parseMemberMcpDocument(json);
   McpConfigStrategyGeneral.validateFullConfig(
     MEMBER_MCP_STRATEGY_CONFIG,
     parsed,
@@ -52,6 +53,46 @@ export const parseMemberMcpServers = (
     MEMBER_MCP_STRATEGY_CONFIG,
     parsed,
   );
+};
+
+export const configuredMemberMcpCatalogServerKeys = (
+  catalog: McpConfig | null,
+  json: string,
+): string[] => {
+  if (!catalog) return [];
+  try {
+    return McpConfigStrategyGeneral.configuredServerKeys(
+      catalog,
+      parseMemberMcpDocument(json),
+    );
+  } catch {
+    return [];
+  }
+};
+
+export const toggleMemberMcpCatalogServer = (
+  catalog: McpConfig,
+  json: string,
+  serverKey: string,
+): string => {
+  const current = parseMemberMcpDocument(json);
+  const selected = McpConfigStrategyGeneral.hasPreconfiguredInConfig(
+    catalog,
+    current,
+    serverKey,
+  );
+  const updated = selected
+    ? McpConfigStrategyGeneral.removePreconfiguredFromConfig(
+        catalog,
+        current,
+        serverKey,
+      )
+    : McpConfigStrategyGeneral.addPreconfiguredToConfig(
+        catalog,
+        current,
+        serverKey,
+      );
+  return JSON.stringify(updated, null, 2);
 };
 
 /**

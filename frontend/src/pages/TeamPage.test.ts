@@ -363,16 +363,20 @@ check(
 );
 
 check(
-  "runtime MCP config file path copy and vendor gallery are removed from the team UI",
+  "built-in MCP choices write only to the selected member's canonical JSON",
   !configTabsSource.includes("mcpConfigPath") &&
     !configTabsSource.includes("savedToFile") &&
-    !configTabsSource.includes("builtinTitle") &&
-    !configTabsSource.includes("onToggleMcpServer") &&
-    !configTabsSource.includes("preconfigured") &&
+    configTabsSource.includes("builtinTitle") &&
+    configTabsSource.includes("onToggleMcpServer") &&
+    configTabsSource.includes("mcpCatalog?.preconfigured") &&
+    source.includes("memberMcpCatalogApi") &&
+    source.includes("toggleMemberMcpCatalogServer") &&
+    apiSource.includes("/api/member-mcp-catalog") &&
     configTabsSource.includes('t("teamPage.mcp.savedToMember")') &&
     !enTeamLocale.includes("savedToFile") &&
-    enTeamLocale.includes("teamPage.mcp.savedToMember"),
-  { configTabsSource, enTeamLocale },
+    enTeamLocale.includes("teamPage.mcp.savedToMember") &&
+    enTeamLocale.includes("teamPage.mcp.builtinTitle"),
+  { source, apiSource, configTabsSource, enTeamLocale },
 );
 
 // Workflow nodes reference team members (whose runtime may be PI), so no

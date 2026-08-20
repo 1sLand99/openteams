@@ -728,6 +728,8 @@ struct TeamPresetFrontmatter {
     #[serde(default)]
     member_ids: Vec<String>,
     #[serde(default)]
+    members: Vec<TeamMemberPresetInstance>,
+    #[serde(default)]
     lead_member_id: Option<String>,
     #[serde(default)]
     workflow_steps: Vec<ChatWorkflowStep>,
@@ -737,17 +739,72 @@ struct TeamPresetFrontmatter {
     tier: String,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct TeamMemberPresetInstance {
+    preset_id: String,
+    id: String,
+    name: String,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct TeamPresetMd {
     id: String,
     name: String,
     description: String,
     member_ids: Vec<String>,
+    members: Vec<TeamMemberPresetInstance>,
     lead_member_id: Option<String>,
     workflow_steps: Vec<ChatWorkflowStep>,
     team_protocol: String,
     enabled: bool,
     tier: ChatTeamTemplateTier,
+}
+
+impl TeamPresetMd {
+    fn instantiate_members(
+        &self,
+        member_by_id: &HashMap<&str, &ChatMemberPreset>,
+    ) -> Result<Vec<ChatMemberPreset>> {
+        if !self.members.is_empty() {
+            return self
+                .members
+                .iter()
+                .map(|instance| {
+                    let mut member = member_by_id
+                        .get(instance.preset_id.as_str())
+                        .copied()
+                        .cloned()
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "built-in team \"{}\" references unknown member preset: {}",
+                                self.id,
+                                instance.preset_id
+                            )
+                        })?;
+                    member.id = instance.id.clone();
+                    member.name = instance.name.clone();
+                    Ok(member)
+                })
+                .collect();
+        }
+
+        self.member_ids
+            .iter()
+            .map(|member_id| {
+                member_by_id
+                    .get(member_id.as_str())
+                    .copied()
+                    .cloned()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "built-in team \"{}\" references unknown member preset: {}",
+                            self.id,
+                            member_id
+                        )
+                    })
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -792,23 +849,7 @@ impl PresetLoader {
             })
             .map(|team_result| {
                 team_result.and_then(|team_md| {
-                    let team_members = team_md
-                        .member_ids
-                        .iter()
-                        .map(|member_id| {
-                            member_by_id
-                                .get(member_id.as_str())
-                                .copied()
-                                .cloned()
-                                .ok_or_else(|| {
-                                    anyhow!(
-                                        "built-in team \"{}\" references unknown member preset: {}",
-                                        team_md.id,
-                                        member_id
-                                    )
-                                })
-                        })
-                        .collect::<Result<Vec<_>>>()?;
+                    let team_members = team_md.instantiate_members(&member_by_id)?;
                     if let Some(ref lead_member_id) = team_md.lead_member_id
                         && !team_members
                             .iter()
@@ -1014,6 +1055,15 @@ impl PresetLoader {
             bail!("role preset body is empty in {path}");
         }
 
+        if let Some(mcp) = frontmatter
+            .execution_config
+            .as_ref()
+            .and_then(|config| config.mcp.as_ref())
+        {
+            mcp.validate(&frontmatter.id)
+                .with_context(|| format!("invalid member MCP configuration in {path}"))?;
+        }
+
         let tools_enabled = match frontmatter.tools_enabled {
             Some(value) => serde_json::to_value(value)
                 .with_context(|| format!("failed to convert tools_enabled in {path}"))?,
@@ -1049,8 +1099,15 @@ impl PresetLoader {
         }
 
         let member_ids = normalize_member_ids(frontmatter.member_ids);
-        if member_ids.is_empty() && (path.starts_with("en/") || !path.contains('/')) {
-            bail!("team preset contains no member_ids in {path}");
+        let members = normalize_team_member_instances(frontmatter.members, path)?;
+        if !member_ids.is_empty() && !members.is_empty() {
+            bail!("team preset must use either members or member_ids, not both, in {path}");
+        }
+        if member_ids.is_empty()
+            && members.is_empty()
+            && (path.starts_with("en/") || !path.contains('/'))
+        {
+            bail!("team preset contains no members in {path}");
         }
 
         Ok(TeamPresetMd {
@@ -1058,6 +1115,7 @@ impl PresetLoader {
             name: frontmatter.name,
             description: frontmatter.description,
             member_ids,
+            members,
             lead_member_id: frontmatter
                 .lead_member_id
                 .map(|lead_member_id| lead_member_id.trim().to_string())
@@ -1141,6 +1199,7 @@ fn validate_localized_team_template(
         }
     }
     localized.member_ids = english.member_ids.clone();
+    localized.members = english.members.clone();
     localized.lead_member_id = english.lead_member_id.clone();
     localized.enabled = english.enabled;
     localized.tier = english.tier;
@@ -1201,6 +1260,56 @@ fn normalize_member_ids(member_ids: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+fn normalize_team_member_instances(
+    members: Vec<TeamMemberPresetInstance>,
+    path: &str,
+) -> Result<Vec<TeamMemberPresetInstance>> {
+    let mut seen_ids = HashSet::new();
+    let mut seen_names = HashSet::new();
+
+    members
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut member)| {
+            member.preset_id = member.preset_id.trim().to_string();
+            member.id = member.id.trim().to_string();
+            member.name = sanitize_member_handle(member.name.trim());
+
+            if member.preset_id.is_empty() {
+                bail!("team preset member {index} has an empty preset_id in {path}");
+            }
+            if member.id.is_empty() {
+                bail!("team preset member {index} has an empty id in {path}");
+            }
+            if !member.id.chars().all(|ch| {
+                ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-'
+            }) {
+                bail!(
+                    "team preset member id must contain only lowercase letters, numbers, underscores, or hyphens: {} in {path}",
+                    member.id
+                );
+            }
+            if member.name.is_empty() {
+                bail!("team preset member {index} has an empty name in {path}");
+            }
+            if !seen_ids.insert(member.id.clone()) {
+                bail!(
+                    "team preset contains duplicate member instance id: {} in {path}",
+                    member.id
+                );
+            }
+            if !seen_names.insert(member.name.to_lowercase()) {
+                bail!(
+                    "team preset contains duplicate member instance name: {} in {path}",
+                    member.name
+                );
+            }
+
+            Ok(member)
+        })
+        .collect()
+}
+
 fn normalize_newlines(content: &str) -> String {
     content.replace("\r\n", "\n")
 }
@@ -1217,11 +1326,13 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use db::models::member_execution_config::MemberExecutionConfig;
     use utils::path::home_directory;
 
     use super::{
-        ChatMemberPreset, PresetLoader, TEAM_COLLABORATION_PROTOCOL_FILE,
+        ChatMemberPreset, PresetLoader, TEAM_COLLABORATION_PROTOCOL_FILE, TeamMemberPresetInstance,
         normalize_team_template_locale,
     };
 
@@ -1549,6 +1660,30 @@ Coordinate with design before shipping."#
     }
 
     #[test]
+    fn parse_role_preset_markdown_rejects_invalid_member_mcp_configuration() {
+        let markdown = r#"---
+id: invalid-mcp-role
+name: invalid-mcp-role
+description: Invalid MCP fixture
+execution_config:
+  mcp:
+    mcpServers:
+      playwright:
+        command: 7
+---
+
+This role must not load.
+"#;
+
+        let error = PresetLoader::parse_role_preset_markdown("invalid-mcp.md", markdown)
+            .expect_err("invalid member MCP configuration should fail");
+        let error_chain = format!("{error:#}");
+
+        assert!(error_chain.contains("invalid member MCP configuration in invalid-mcp.md"));
+        assert!(error_chain.contains("mcpServers.playwright.command"));
+    }
+
+    #[test]
     fn parse_team_preset_markdown_extracts_frontmatter_members_and_protocol() {
         let markdown = r#"---
 id: sample_team
@@ -1582,8 +1717,143 @@ Coordinate tightly and document every handoff.
             "Coordinate tightly and document every handoff.\n- Backend owns API behavior.\n- Frontend owns UX delivery."
         );
         assert_eq!(parsed.lead_member_id, None);
+        assert!(parsed.members.is_empty());
         assert!(parsed.workflow_steps.is_empty());
         assert!(parsed.enabled);
+    }
+
+    #[test]
+    fn parse_and_instantiate_repeated_team_member_preset_instances() {
+        let markdown = r#"---
+id: research_team
+name: Research Team
+description: Two independently addressable research assistants
+members:
+  - preset_id: literature-research-assistant
+    id: research_assistant_primary
+    name: Research Assistant Primary
+  - preset_id: literature-research-assistant
+    id: research_assistant_secondary
+    name: Research Assistant Secondary
+lead_member_id: research_assistant_primary
+---
+
+Search independently, then compare evidence.
+"#;
+
+        let parsed = PresetLoader::parse_team_preset_markdown("research_team.md", markdown)
+            .expect("member preset instances should parse");
+
+        assert!(parsed.member_ids.is_empty());
+        assert_eq!(
+            parsed.members,
+            vec![
+                TeamMemberPresetInstance {
+                    preset_id: "literature-research-assistant".to_string(),
+                    id: "research_assistant_primary".to_string(),
+                    name: "ResearchAssistantPrimary".to_string(),
+                },
+                TeamMemberPresetInstance {
+                    preset_id: "literature-research-assistant".to_string(),
+                    id: "research_assistant_secondary".to_string(),
+                    name: "ResearchAssistantSecondary".to_string(),
+                },
+            ]
+        );
+
+        let presets = PresetLoader::load_builtin_presets();
+        let member_by_id = presets
+            .members
+            .iter()
+            .map(|member| (member.id.as_str(), member))
+            .collect::<HashMap<_, _>>();
+        let source = member_by_id
+            .get("literature-research-assistant")
+            .expect("source member preset should exist");
+        let instances = parsed
+            .instantiate_members(&member_by_id)
+            .expect("member instances should materialize");
+
+        assert_eq!(
+            instances
+                .iter()
+                .map(|member| (member.id.as_str(), member.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("research_assistant_primary", "ResearchAssistantPrimary"),
+                ("research_assistant_secondary", "ResearchAssistantSecondary"),
+            ]
+        );
+        for instance in &instances {
+            assert_eq!(instance.system_prompt, source.system_prompt);
+            assert_eq!(instance.runner_type, source.runner_type);
+            assert_eq!(instance.execution_config, source.execution_config);
+            assert_eq!(instance.tools_enabled, source.tools_enabled);
+        }
+    }
+
+    #[test]
+    fn parse_team_preset_markdown_rejects_ambiguous_or_duplicate_instances() {
+        let mixed_syntax = r#"---
+id: invalid_team
+name: Invalid Team
+description: Invalid mixed syntax
+member_ids:
+  - backend_engineer
+members:
+  - preset_id: backend_engineer
+    id: backend_primary
+    name: BackendPrimary
+---
+
+Invalid.
+"#;
+        let duplicate_id = r#"---
+id: invalid_team
+name: Invalid Team
+description: Duplicate instance IDs
+members:
+  - preset_id: backend_engineer
+    id: backend
+    name: BackendPrimary
+  - preset_id: backend_engineer
+    id: backend
+    name: BackendSecondary
+---
+
+Invalid.
+"#;
+        let duplicate_name = r#"---
+id: invalid_team
+name: Invalid Team
+description: Duplicate instance names
+members:
+  - preset_id: backend_engineer
+    id: backend_primary
+    name: Backend Agent
+  - preset_id: backend_engineer
+    id: backend_secondary
+    name: backendagent
+---
+
+Invalid.
+"#;
+
+        for (markdown, expected) in [
+            (mixed_syntax, "must use either members or member_ids"),
+            (duplicate_id, "duplicate member instance id: backend"),
+            (
+                duplicate_name,
+                "duplicate member instance name: backendagent",
+            ),
+        ] {
+            let error = PresetLoader::parse_team_preset_markdown("invalid_team.md", markdown)
+                .expect_err("invalid member instances should fail");
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?}, got {error:#}"
+            );
+        }
     }
 
     #[test]
@@ -1676,6 +1946,10 @@ Follow the team protocol.
             vec![
                 "literature-review-researcher",
                 "literature-research-assistant",
+                "literature-research-assistant-2",
+                "literature-research-assistant-3",
+                "literature-research-assistant-4",
+                "literature-research-assistant-5",
                 "literature-research-reviewer",
             ]
         );
@@ -1683,6 +1957,44 @@ Follow the team protocol.
             literature_research_team.lead_member_id.as_deref(),
             Some("literature-review-researcher")
         );
+        assert_eq!(
+            literature_research_team
+                .members
+                .iter()
+                .map(|member| member.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "LiteratureReviewResearcher",
+                "LiteratureResearchAssistant",
+                "LiteratureResearchAssistant2",
+                "LiteratureResearchAssistant3",
+                "LiteratureResearchAssistant4",
+                "LiteratureResearchAssistant5",
+                "LiteratureResearchReviewer",
+            ]
+        );
+        let expected_playwright = serde_json::json!({
+            "command": "npx",
+            "args": ["@playwright/mcp@latest"]
+        });
+        for member in &literature_research_team.members {
+            let mcp = member
+                .execution_config
+                .as_ref()
+                .and_then(|config| config.mcp.as_ref())
+                .expect("literature research member should include MCP configuration");
+            mcp.validate(&member.id)
+                .expect("literature research member MCP configuration should be valid");
+            assert_eq!(mcp.mcp_servers.len(), 1);
+            assert_eq!(
+                mcp.mcp_servers.get("playwright"),
+                Some(&expected_playwright)
+            );
+            assert_eq!(
+                member.tools_enabled["mcpServers"]["playwright"],
+                serde_json::json!(true)
+            );
+        }
     }
 
     #[test]

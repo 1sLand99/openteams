@@ -1488,6 +1488,25 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn literature_template_detail_exposes_member_mcp_configuration() {
+        let (app, _pool) = setup_app().await;
+        let detail = api_get(&app, "/api/team-presets/literature_research_team?locale=zh").await;
+        let members = detail["members"].as_array().expect("members array");
+
+        assert_eq!(members.len(), 3);
+        for member in members {
+            assert_eq!(
+                member["execution_config"]["mcp"]["mcpServers"]["playwright"],
+                json!({
+                    "command": "npx",
+                    "args": ["@playwright/mcp@latest"]
+                })
+            );
+            assert_eq!(member["tools_enabled"]["mcpServers"]["playwright"], true);
+        }
+    }
+
     #[test]
     fn team_preset_crud_rejects_builtin_template_mutations() {
         let mut presets = test_presets();
