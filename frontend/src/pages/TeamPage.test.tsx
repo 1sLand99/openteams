@@ -57,7 +57,7 @@ const memberA: Member = {
         github: {
           command: 'npx',
           args: ['github-mcp'],
-          env: { GITHUB_TOKEN: 'ghp_secret_a' },
+          env: { GITHUB_TOKEN: 'placeholder-token-a' },
         },
       },
     },
@@ -315,7 +315,7 @@ const changeJson = (harness: Harness, value: string) => {
   changeJson(
     harness,
     canonicalJson({
-      github: { env: { GITHUB_TOKEN: 'ghp_secret_a' }, enabled: 'yes' },
+      github: { env: { GITHUB_TOKEN: 'placeholder-token-a' }, enabled: 'yes' },
     }),
   );
   await flush(80);
@@ -326,7 +326,7 @@ const changeJson = (harness: Harness, value: string) => {
     'error names the field',
   );
   assert.ok(
-    !shown.includes('ghp_secret_a'),
+    !shown.includes('placeholder-token-a'),
     'error must not contain the secret value',
   );
   await harness.unmount();
@@ -335,7 +335,7 @@ const changeJson = (harness: Harness, value: string) => {
   echoHarness.setUpdateMember(() =>
     Promise.reject(
       new Error(
-        'backend failed: {"mcpServers":{"github":{"env":{"GITHUB_TOKEN":"ghp_secret_a"}}}}',
+        'backend failed: {"mcpServers":{"github":{"env":{"GITHUB_TOKEN":"placeholder-token-a"}}}}',
       ),
     ),
   );
