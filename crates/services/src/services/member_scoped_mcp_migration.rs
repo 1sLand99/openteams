@@ -72,7 +72,7 @@ impl LegacyMcpConfigSource for ExecutorProfileLegacyMcpConfigSource {
         runner: BaseCodingAgent,
     ) -> Result<MemberMcpConfig, LegacyMcpReadError> {
         let profiles = ExecutorConfigs::get_cached();
-        let profile_id = ExecutorProfileId::new(runner.clone());
+        let profile_id = ExecutorProfileId::new(runner);
         let Some(executor) = profiles.get_coding_agent(&profile_id) else {
             return Err(legacy_read_error(
                 &runner,
@@ -361,7 +361,7 @@ mod tests {
             &self,
             runner: BaseCodingAgent,
         ) -> Result<MemberMcpConfig, LegacyMcpReadError> {
-            self.calls.lock().expect("calls lock").push(runner.clone());
+            self.calls.lock().expect("calls lock").push(runner);
             let (path, config) = self
                 .configs
                 .lock()
