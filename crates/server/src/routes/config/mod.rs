@@ -22,6 +22,7 @@ use executors::{
         AvailabilityInfo, BaseAgentCapability, BaseCodingAgent, CodingAgent,
         StandardCodingAgentExecutor,
     },
+    mcp_config::{McpConfig, PRECONFIGURED_MCP_SERVERS},
     model_sync::with_model,
     profile::{ExecutorConfigs, ExecutorProfileId, canonical_variant_key},
 };
@@ -101,6 +102,7 @@ pub fn router() -> Router<DeploymentImpl> {
         )
         .route("/config/cli/restart-service", post(restart_cli_service))
         .route("/sounds/{sound}", get(get_sound))
+        .route("/member-mcp-catalog", get(get_member_mcp_catalog))
         .route("/profiles", get(get_profiles).put(update_profiles))
         .route(
             "/editors/check-availability",
@@ -119,4 +121,5 @@ include!("providers.rs");
 include!("validation.rs");
 include!("tests.rs");
 include!("sounds.rs");
+include!("mcp.rs");
 include!("profiles.rs");

@@ -4,6 +4,13 @@ name: Literature Research Reviewer
 description: 使用浏览器独立核验文献检索与关键主张，关注权威数据库、顶刊顶会覆盖及证据边界
 runner_type: CODEX
 recommended_model: gpt-5.2-codex
+execution_config:
+  mcp:
+    mcpServers:
+      playwright:
+        command: npx
+        args:
+          - '@playwright/mcp@latest'
 tools_enabled:
   mcpServers:
     playwright: true

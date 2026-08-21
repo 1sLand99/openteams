@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import {
   collectProjectIssueLabels,
+  flattenIssueItems,
   githubOAuthPollDelay,
   issueDisplayIdFontSizePx,
   issueSourceProviderId,
@@ -10,6 +11,7 @@ import {
   projectWorkItemIssueStatus,
   projectWorkItemsToIssueGroups,
   shouldAutoFallbackToDevice,
+  sortIssueItems,
 } from './IssuePage';
 import {
   composeIssueCommentBody,
@@ -529,6 +531,289 @@ check(
       },
     },
   ).join(',') === 'bug,custom,help wanted',
+);
+
+const sortableWorkItem = (
+  id: string,
+  fields: Partial<ProjectWorkItem>,
+): ProjectWorkItem => ({
+  ...item(id, 'open'),
+  ...fields,
+});
+
+const sortFixtures = [
+  sortableWorkItem('aaaaaaaa-1111-4111-8111-111111111111', {
+    title: 'banana',
+    priority: 'low',
+    created_at: '2026-06-01T00:00:00Z',
+    updated_at: '2026-06-03T00:00:00Z',
+  }),
+  sortableWorkItem('aaaaaaaa-2222-4222-8222-222222222222', {
+    title: 'Apple',
+    priority: 'urgent',
+    created_at: '2026-06-03T00:00:00Z',
+    updated_at: '2026-06-01T00:00:00Z',
+  }),
+  sortableWorkItem('aaaaaaaa-3333-4333-8333-333333333333', {
+    title: 'cherry',
+    priority: 'medium',
+    created_at: '2026-06-02T00:00:00Z',
+    updated_at: '2026-06-02T00:00:00Z',
+  }),
+];
+
+const flatIssueTitles = (sortId: 'updated' | 'created' | 'priority' | 'title') =>
+  projectWorkItemsToIssueGroups(sortFixtures, 'all', 'OpenTeams', {}, {
+    groupBy: 'none',
+    sortId,
+  })[0]
+    ?.items.map((issue) => issue.title)
+    .join(',');
+
+check(
+  'issues sort by most recently updated by default',
+  flatIssueTitles('updated') === 'banana,cherry,Apple',
+  flatIssueTitles('updated'),
+);
+check(
+  'issues sort by creation time descending',
+  flatIssueTitles('created') === 'Apple,cherry,banana',
+  flatIssueTitles('created'),
+);
+check(
+  'issues sort by priority urgent first',
+  flatIssueTitles('priority') === 'Apple,cherry,banana',
+  flatIssueTitles('priority'),
+);
+check(
+  'issues sort by title with locale compare',
+  flatIssueTitles('title') === 'Apple,banana,cherry',
+  flatIssueTitles('title'),
+);
+check(
+  'sortIssueItems orders an existing list by title',
+  sortIssueItems(
+    projectWorkItemsToIssueGroups(sortFixtures, 'all', 'OpenTeams')[0]?.items ??
+      [],
+    'title',
+  )
+    .map((issue) => issue.title)
+    .join(',') === 'Apple,banana,cherry',
+);
+
+const priorityGroups = projectWorkItemsToIssueGroups(
+  sortFixtures,
+  'all',
+  'OpenTeams',
+  {},
+  { groupBy: 'priority' },
+);
+check(
+  'priority grouping orders groups from urgent to low',
+  priorityGroups.map((group) => group.id).join(',') ===
+    'priority:urgent,priority:medium,priority:low',
+  priorityGroups,
+);
+check(
+  'priority groups reuse priority i18n keys',
+  priorityGroups[0]?.titleKey === 'issue.priority.urgent' &&
+    priorityGroups[0]?.title === 'Urgent',
+  priorityGroups[0],
+);
+check(
+  'priority grouping keeps backlog filter semantics',
+  projectWorkItemsToIssueGroups(
+    [
+      item('bbbbbbbb-1111-4111-8111-111111111111', 'blocked'),
+      sortableWorkItem('bbbbbbbb-2222-4222-8222-222222222222', {
+        priority: 'urgent',
+      }),
+    ],
+    'backlog',
+    'OpenTeams',
+    {},
+    { groupBy: 'priority' },
+  ).flatMap((group) => group.items).length === 1,
+);
+
+const labelGroups = projectWorkItemsToIssueGroups(
+  [
+    sortableWorkItem('cccccccc-1111-4111-8111-111111111111', {
+      labels_json: JSON.stringify(['bug', 'feature']),
+    }),
+    sortableWorkItem('cccccccc-2222-4222-8222-222222222222', {
+      labels_json: JSON.stringify(['Bug']),
+    }),
+    sortableWorkItem('cccccccc-3333-4333-8333-333333333333', {}),
+  ],
+  'all',
+  'OpenTeams',
+  {},
+  { groupBy: 'label' },
+);
+check(
+  'label grouping buckets by first label with an unlabeled group',
+  labelGroups.map((group) => group.id).join(',') === 'label:bug,label:unlabeled',
+  labelGroups,
+);
+check(
+  'label groups use the label name and mark the unlabeled group',
+  labelGroups[0]?.title === 'bug' &&
+    labelGroups[0]?.titleKey === undefined &&
+    labelGroups[0]?.count === 2 &&
+    labelGroups[1]?.titleKey === 'issue.group.noLabel' &&
+    labelGroups[1]?.count === 1,
+  labelGroups,
+);
+
+check(
+  'no grouping returns a single flat section',
+  projectWorkItemsToIssueGroups(sortFixtures, 'all', 'OpenTeams', {}, {
+    groupBy: 'none',
+  }).map((group) => `${group.id}:${group.count}`)
+    .join(',') === 'all:3',
+);
+check(
+  'no grouping returns no sections for an empty list',
+  projectWorkItemsToIssueGroups([], 'all', 'OpenTeams', {}, { groupBy: 'none' })
+    .length === 0,
+);
+check(
+  'status grouping without options keeps the default behavior',
+  projectWorkItemsToIssueGroups(sortFixtures, 'all', 'OpenTeams').map(
+    (group) => group.id,
+  ).join(',') === 'todo',
+);
+
+const parentWorkItemId = 'dddddddd-0000-4000-8000-000000000000';
+const nestedGroups = projectWorkItemsToIssueGroups(
+  [
+    sortableWorkItem(parentWorkItemId, { title: 'parent', status: 'open' }),
+    sortableWorkItem('dddddddd-0000-4000-8000-000000000001', {
+      title: 'child beta',
+      status: 'blocked',
+      parent_id: parentWorkItemId,
+      updated_at: '2026-06-02T00:00:00Z',
+    }),
+    sortableWorkItem('dddddddd-0000-4000-8000-000000000002', {
+      title: 'child alpha',
+      status: 'in_progress',
+      parent_id: parentWorkItemId,
+      updated_at: '2026-06-03T00:00:00Z',
+    }),
+  ],
+  'all',
+  'OpenTeams',
+);
+const nestedParent = nestedGroups[0]?.items[0];
+check(
+  'sub-issues nest under their parent instead of their own status group',
+  nestedGroups.length === 1 &&
+    nestedGroups[0]?.id === 'todo' &&
+    nestedGroups[0]?.items.length === 1 &&
+    nestedParent?.children.length === 2,
+  nestedGroups,
+);
+check(
+  'sub-issues follow the current sort order',
+  nestedParent?.children.map((child) => child.title).join(',') ===
+    'child alpha,child beta',
+  nestedParent?.children,
+);
+check(
+  'sub-issues sort by title when requested',
+  projectWorkItemsToIssueGroups(
+    [
+      sortableWorkItem(parentWorkItemId, { title: 'parent', status: 'open' }),
+      sortableWorkItem('dddddddd-0000-4000-8000-000000000001', {
+        title: 'child beta',
+        parent_id: parentWorkItemId,
+      }),
+      sortableWorkItem('dddddddd-0000-4000-8000-000000000002', {
+        title: 'child alpha',
+        parent_id: parentWorkItemId,
+      }),
+    ],
+    'all',
+    'OpenTeams',
+    {},
+    { sortId: 'title' },
+  )[0]?.items[0]?.children
+    .map((child) => child.title)
+    .join(',') === 'child alpha,child beta',
+);
+check(
+  'sub-issues record their parent work item id',
+  nestedParent?.children.every(
+    (child) => child.parentWorkItemId === parentWorkItemId,
+  ) === true && nestedParent?.parentWorkItemId === null,
+);
+check(
+  'orphaned sub-issues stay top-level when the parent is filtered out',
+  (() => {
+    const orphanGroups = projectWorkItemsToIssueGroups(
+      [
+        sortableWorkItem(parentWorkItemId, {
+          title: 'done parent',
+          status: 'done',
+        }),
+        sortableWorkItem('dddddddd-0000-4000-8000-000000000001', {
+          title: 'orphan child',
+          status: 'open',
+          parent_id: parentWorkItemId,
+        }),
+      ],
+      'active',
+      'OpenTeams',
+    );
+    return (
+      orphanGroups.length === 1 &&
+      orphanGroups[0]?.id === 'todo' &&
+      orphanGroups[0]?.items.length === 1 &&
+      orphanGroups[0]?.items[0]?.title === 'orphan child' &&
+      orphanGroups[0]?.items[0]?.children.length === 0
+    );
+  })(),
+);
+check(
+  'sub-issues follow the parent group under priority grouping',
+  (() => {
+    const groups = projectWorkItemsToIssueGroups(
+      [
+        sortableWorkItem(parentWorkItemId, {
+          title: 'parent',
+          priority: 'low',
+        }),
+        sortableWorkItem('dddddddd-0000-4000-8000-000000000001', {
+          title: 'child',
+          priority: 'urgent',
+          parent_id: parentWorkItemId,
+        }),
+      ],
+      'all',
+      'OpenTeams',
+      {},
+      { groupBy: 'priority' },
+    );
+    return (
+      groups.length === 1 &&
+      groups[0]?.id === 'priority:low' &&
+      groups[0]?.items[0]?.children[0]?.title === 'child'
+    );
+  })(),
+);
+check(
+  'flattenIssueItems omits children of collapsed parents',
+  (() => {
+    const items = nestedGroups[0]?.items ?? [];
+    return (
+      flattenIssueItems(items, new Set()).map((issue) => issue.title).join(',') ===
+        'parent,child alpha,child beta' &&
+      flattenIssueItems(items, new Set([parentWorkItemId]))
+        .map((issue) => issue.title)
+        .join(',') === 'parent'
+    );
+  })(),
 );
 check(
   'known issue labels translate through the shared label helper',

@@ -75,7 +75,11 @@ const searchIssueResult: ChatSearchResult = {
   updated_at: "2026-07-04T00:00:00Z",
 };
 
-check("imports ProjectSidebar", source.includes("import { ProjectSidebar }"));
+check(
+  "imports ProjectSidebar",
+  source.includes("ProjectSidebar,") &&
+    source.includes('from "@/components/ProjectSidebar"'),
+);
 check(
   "imports GlobalSearchDialog",
   source.includes("GlobalSearchDialog") &&
@@ -198,7 +202,15 @@ check(
     source.includes("teamPresets.find") &&
     source.includes("for (const spec of memberSpecs)") &&
     source.includes("toast.projectCreatedWithTeam") &&
-    source.includes("setPendingProjectSessionProtocol"),
+    source.includes("projectApi.updateTeamProtocol(project.id"),
+  source,
+);
+check(
+  "copies complete template execution config into created project members",
+  source.includes("execution_config: structuredClone(executionConfig)") &&
+    source.includes("const executionConfig = structuredClone(spec.executionConfig)") &&
+    source.includes("executionConfig.runner_type = runnerType") &&
+    source.includes("executionConfig.model_name = modelName"),
   source,
 );
 check(

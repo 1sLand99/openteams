@@ -50,6 +50,7 @@ use super::opencode::{
 
 const FREE_MODEL_PROVIDER_ID: &str = "opencode";
 const CONFIG_CONTENT_ENV: &str = "OPENTEAMS_CONFIG_CONTENT";
+const CROSS_FAMILY_CONFIG_CONTENT_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 const CUSTOM_CONFIG_ENV: &str = "OPENTEAMS_CONFIG";
 const CUSTOM_CONFIG_DIR_ENV: &str = "OPENTEAMS_CONFIG_DIR";
 const DISABLE_PROJECT_CONFIG_ENV: &str = "OPENTEAMS_DISABLE_PROJECT_CONFIG";
@@ -262,6 +263,7 @@ impl OpenTeamsCli {
             snapshot.config_home.to_string_lossy().to_string(),
         );
         env.insert(DISABLE_PROJECT_CONFIG_ENV, "true");
+        env.remove(CROSS_FAMILY_CONFIG_CONTENT_ENV);
         Ok(env)
     }
 
@@ -292,7 +294,8 @@ impl OpenTeamsCli {
             .env(ISOLATED_HOME_ENV, &snapshot.config_home)
             .env(DISABLE_PROJECT_CONFIG_ENV, "true")
             .env_remove(CUSTOM_CONFIG_ENV)
-            .env_remove(CUSTOM_CONFIG_DIR_ENV);
+            .env_remove(CUSTOM_CONFIG_DIR_ENV)
+            .env_remove(CROSS_FAMILY_CONFIG_CONTENT_ENV);
         Ok(())
     }
 

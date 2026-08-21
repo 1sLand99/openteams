@@ -15,6 +15,7 @@ import {
   agentRuntimeApi,
   chatAgentsApi,
   chatSessionsApi,
+  memberMcpCatalogApi,
   projectApi,
   sessionAgentsApi,
   skillsApi,
@@ -33,12 +34,17 @@ import type {
   BackendChatSkill,
   BaseCodingAgent,
   JsonValue,
+  McpConfig,
 } from "@/types";
 import {
   getRunnerLabel,
   getRuntimeDisplayState,
 } from "./agent-runtime/agentRuntimeViewModel";
 import { TeamConfigTabs } from "./team/TeamConfigTabs";
+import {
+  configuredMemberMcpCatalogServerKeys,
+  toggleMemberMcpCatalogServer,
+} from "./team/memberMcpConfig";
 import { useMemberMcpEditor } from "./team/useMemberMcpEditor";
 import {
   TeamAddMemberButton,
@@ -447,6 +453,9 @@ export function TeamPage() {
   const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [mcpCatalog, setMcpCatalog] = useState<McpConfig | null>(null);
+  const [mcpCatalogLoading, setMcpCatalogLoading] = useState(true);
+  const [mcpCatalogError, setMcpCatalogError] = useState<string | null>(null);
   const [teamProtocolContent, setTeamProtocolContent] = useState("");
   const [originalTeamProtocolContent, setOriginalTeamProtocolContent] =
     useState("");
@@ -672,6 +681,23 @@ export function TeamPage() {
     pauseAutoSave: saving,
     t,
   });
+  const configuredMcpServerKeys = useMemo(
+    () => configuredMemberMcpCatalogServerKeys(mcpCatalog, mcpServersJson),
+    [mcpCatalog, mcpServersJson],
+  );
+  const handleToggleMcpServer = useCallback(
+    (serverKey: string) => {
+      if (!mcpCatalog) return;
+      handleMcpServersChange(
+        toggleMemberMcpCatalogServer(
+          mcpCatalog,
+          mcpServersJson,
+          serverKey,
+        ),
+      );
+    },
+    [handleMcpServersChange, mcpCatalog, mcpServersJson],
+  );
 
   const consumeTeamMemberInviteTarget = useCallback(() => {
     if (!selectedProjectId || !teamDataReady) return;
@@ -762,6 +788,31 @@ export function TeamPage() {
   useEffect(() => {
     void load();
   }, [activeSessionId, selectedProjectId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setMcpCatalogLoading(true);
+    setMcpCatalogError(null);
+    void memberMcpCatalogApi
+      .load()
+      .then((catalog) => {
+        if (!cancelled) setMcpCatalog(catalog);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setMcpCatalog(null);
+        setMcpCatalogError(
+          err instanceof Error ? err.message : String(err),
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setMcpCatalogLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     setMemberSuccess(false);
@@ -1572,6 +1623,7 @@ export function TeamPage() {
               acpProbeLoading={acpProbeLoading}
               reasoningUnsupported={reasoningUnsupported}
               capability={capability}
+              configuredMcpServerKeys={configuredMcpServerKeys}
               isLeader={isLeader}
               legacyModelName={modelName}
               legacyThinkingEffort={thinkingEffort}
@@ -1582,6 +1634,9 @@ export function TeamPage() {
               memberDirty={memberDirty}
               memberSuccess={memberSuccess}
               mcpApplying={mcpApplying}
+              mcpCatalog={mcpCatalog}
+              mcpCatalogError={mcpCatalogError}
+              mcpCatalogLoading={mcpCatalogLoading}
               mcpDirty={mcpDirty}
               mcpError={mcpError}
               mcpServersJson={mcpServersJson}
@@ -1608,6 +1663,7 @@ export function TeamPage() {
               teamProtocolSuccess={teamProtocolSuccess}
               workspacePath={workspacePath}
               onMcpServersChange={handleMcpServersChange}
+              onToggleMcpServer={handleToggleMcpServer}
               onAcpConfigValueChange={handleAcpConfigValueChange}
               onTeamProtocolChange={handleTeamProtocolChange}
               setAllowedSkillIds={setAllowedSkillIds}

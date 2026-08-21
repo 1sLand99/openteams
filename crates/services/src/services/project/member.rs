@@ -87,6 +87,10 @@ impl ProjectMemberService {
             member_name
         };
 
+        if let Some(mcp) = execution_config.mcp.as_ref() {
+            mcp.validate(member_name.as_deref().unwrap_or("project member"))?;
+        }
+
         let member = ProjectMember::create(
             pool,
             project_id,
@@ -677,6 +681,51 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn add_member_rejects_invalid_member_mcp_config_before_persisting() {
+        let pool = setup_pool().await;
+        let service = ProjectMemberService::new();
+        let project_id = Uuid::new_v4();
+        let agent = create_agent(&pool).await;
+        let execution_config = MemberExecutionConfig {
+            mcp: Some(
+                serde_json::from_value(serde_json::json!({
+                    "mcpServers": {
+                        "playwright": {"command": 7}
+                    }
+                }))
+                .expect("deserialize structurally invalid MCP config"),
+            ),
+            ..Default::default()
+        };
+
+        let error = service
+            .add_member(
+                &pool,
+                project_id,
+                ProjectMemberType::Agent,
+                None,
+                Some(agent.id),
+                Some("Researcher".to_string()),
+                Some("member".to_string()),
+                1,
+                None,
+                Vec::new(),
+                true,
+                execution_config,
+            )
+            .await
+            .expect_err("invalid member MCP configuration should fail");
+
+        assert!(error.to_string().contains("mcpServers.playwright.command"));
+        assert!(
+            ProjectMember::find_by_project(&pool, project_id)
+                .await
+                .expect("list project members")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

@@ -29,6 +29,7 @@ import {
   type SetStateAction,
   type SVGProps,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   DropdownSelect,
   type DropdownSelectOption,
@@ -43,6 +44,7 @@ import {
   type NotificationToastTone,
 } from '@/components/NotificationToast';
 import { ProjectBreadcrumbAvatar } from '@/components/ProjectBreadcrumbAvatar';
+import { useAppScale } from '@/context/AppScaleContext';
 import { useWorkspace } from '@/context/WorkspaceContext';
 import {
   useCommandHandler,
@@ -67,6 +69,7 @@ import {
   PriorityMenuIcon,
   labelDisplayName,
   projectWorkItemLabelList,
+  type IssueDetailItem,
   type IssueDetailSyncSnapshot,
 } from '@/pages/IssueDetailPage';
 import type {
@@ -98,6 +101,8 @@ type IssueItem = {
   labels?: IssueLabel[];
   date: string;
   workItem: ProjectWorkItem;
+  parentWorkItemId: string | null;
+  children: IssueItem[];
 };
 
 type IssueRowOverride = {
@@ -119,13 +124,24 @@ type IssueStatusGroupId =
   | 'duplicate';
 
 type IssueGroup = {
-  id: IssueStatusGroupId;
+  id: string;
+  status?: IssueStatusGroupId;
   title: string;
+  titleKey?: string;
   count: number;
   items: IssueItem[];
 };
 
 type IssueFilter = 'all' | 'active' | 'backlog';
+
+type IssueSortId = 'updated' | 'created' | 'priority' | 'title';
+
+type IssueGroupBy = 'status' | 'priority' | 'label' | 'none';
+
+type IssueGroupingOptions = {
+  groupBy?: IssueGroupBy;
+  sortId?: IssueSortId;
+};
 
 type IssueRowPropertyMenu = 'status' | 'priority' | null;
 
@@ -161,7 +177,7 @@ type IssueTranslator = (
   replacements?: Record<string, string | number>,
 ) => string;
 
-const issueGroupStatusKey: Record<IssueGroup['id'], string> = {
+const issueGroupStatusKey: Record<IssueStatusGroupId, string> = {
   todo: 'issue.status.todo',
   in_progress: 'issue.status.in_progress',
   backlog: 'issue.status.backlog',
@@ -172,7 +188,7 @@ const issueGroupStatusKey: Record<IssueGroup['id'], string> = {
   duplicate: 'issue.status.duplicate',
 };
 
-const issueGroupTitleFallback: Record<IssueGroup['id'], string> = {
+const issueGroupTitleFallback: Record<IssueStatusGroupId, string> = {
   todo: 'Todo',
   in_progress: 'In Progress',
   backlog: 'Backlog',
@@ -190,7 +206,7 @@ const labelColorClass: Record<IssueLabel['color'], string> = {
   cyan: 'bg-[#92ecec]',
 };
 
-const issueGroupOrder: Array<IssueGroup['id']> = [
+const issueGroupOrder: IssueStatusGroupId[] = [
   'todo',
   'in_progress',
   'backlog',
@@ -201,7 +217,7 @@ const issueGroupOrder: Array<IssueGroup['id']> = [
   'duplicate',
 ];
 
-const issueGroupHeaderBgClass: Record<IssueGroup['id'], string> = {
+const issueGroupHeaderBgClass: Record<IssueStatusGroupId, string> = {
   backlog: 'bg-[var(--issue-section-backlog-bg)]',
   todo: 'bg-[var(--issue-section-todo-bg)]',
   in_progress: 'bg-[var(--issue-section-in-progress-bg)]',
@@ -316,48 +332,202 @@ export const projectWorkItemToIssueItem = (
   ),
   date: formatSimpleDate(item.updated_at),
   workItem: effectiveWorkItem(item, override),
+  parentWorkItemId: item.parent_id ?? null,
+  children: [],
 });
+
+const issuePriorityGroupOrder = issueRowPriorityMenuValues.map(
+  (entry) => entry.value,
+);
+
+const issuePriorityRank = (priority: ProjectWorkItemPriority) => {
+  const index = issuePriorityGroupOrder.indexOf(priority);
+  return index === -1 ? 0 : issuePriorityGroupOrder.length - index;
+};
+
+const issueItemTimestamp = (value: string | null | undefined) => {
+  const parsed = value ? Date.parse(value) : Number.NaN;
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+export const sortIssueItems = (
+  items: IssueItem[],
+  sortId: IssueSortId = 'updated',
+): IssueItem[] => {
+  const sorted = [...items];
+  if (sortId === 'title') {
+    sorted.sort((left, right) => left.title.localeCompare(right.title));
+    return sorted;
+  }
+  if (sortId === 'priority') {
+    sorted.sort(
+      (left, right) =>
+        issuePriorityRank(right.workItem.priority) -
+        issuePriorityRank(left.workItem.priority),
+    );
+    return sorted;
+  }
+  const field = sortId === 'created' ? 'created_at' : 'updated_at';
+  sorted.sort(
+    (left, right) =>
+      issueItemTimestamp(right.workItem[field]) -
+      issueItemTimestamp(left.workItem[field]),
+  );
+  return sorted;
+};
+
+export const flattenIssueItems = (
+  items: IssueItem[],
+  collapsedRowIds: Set<string>,
+): IssueItem[] =>
+  items.flatMap((issue) =>
+    collapsedRowIds.has(issue.workItemId)
+      ? [issue]
+      : [issue, ...issue.children],
+  );
 
 export const projectWorkItemsToIssueGroups = (
   items: ProjectWorkItem[],
   filter: IssueFilter,
   projectName?: string | null,
   overrides: IssueRowOverrides = {},
+  options: IssueGroupingOptions = {},
 ): IssueGroup[] => {
-  const allowedGroups = new Set<IssueGroup['id']>(
+  const groupBy = options.groupBy ?? 'status';
+  const sortId = options.sortId ?? 'updated';
+  const allowedStatuses = new Set<IssueStatusGroupId>(
     filter === 'backlog'
       ? ['backlog']
       : filter === 'active'
         ? ['todo', 'in_progress', 'backlog', 'ready_to_merge', 'merging']
         : issueGroupOrder,
   );
+  const visibleItems = items.filter((item) =>
+    allowedStatuses.has(
+      projectWorkItemIssueStatus(
+        effectiveWorkItem(item, overrides[item.id]).status,
+      ),
+    ),
+  );
+  const visibleIds = new Set(visibleItems.map((item) => item.id));
+  const childItemsByParent = new Map<string, ProjectWorkItem[]>();
+  // Orphaned sub-issues (parent missing or filtered out) stay top-level.
+  const topLevelItems = visibleItems.filter((item) => {
+    const parentId = item.parent_id;
+    if (!parentId || !visibleIds.has(parentId)) return true;
+    const siblings = childItemsByParent.get(parentId) ?? [];
+    siblings.push(item);
+    childItemsByParent.set(parentId, siblings);
+    return false;
+  });
   let sequence = 0;
+  const toIssueItem = (item: ProjectWorkItem): IssueItem => {
+    const issueItem = projectWorkItemToIssueItem(
+      item,
+      projectName,
+      ++sequence,
+      overrides[item.id],
+    );
+    issueItem.children = sortIssueItems(
+      (childItemsByParent.get(item.id) ?? []).map(toIssueItem),
+      sortId,
+    );
+    return issueItem;
+  };
+
+  if (groupBy === 'priority') {
+    return issueRowPriorityMenuValues
+      .map((entry) => {
+        const groupItems = sortIssueItems(
+          topLevelItems
+            .filter(
+              (item) =>
+                effectiveWorkItem(item, overrides[item.id]).priority ===
+                entry.value,
+            )
+            .map(toIssueItem),
+          sortId,
+        );
+        return {
+          id: `priority:${entry.value}`,
+          title: entry.fallback,
+          titleKey: entry.key,
+          count: groupItems.length,
+          items: groupItems,
+        };
+      })
+      .filter((group) => group.items.length > 0);
+  }
+
+  if (groupBy === 'label') {
+    const groups: IssueGroup[] = [];
+    const groupIndex = new Map<string, IssueGroup>();
+    topLevelItems.forEach((item) => {
+      const labels = projectWorkItemLabels(
+        effectiveWorkItem(item, overrides[item.id]),
+        overrides[item.id]?.externalLabels,
+      );
+      const labelName = labels[0]?.name.trim() ?? '';
+      const key = labelName.toLowerCase();
+      let group = groupIndex.get(key);
+      if (!group) {
+        group = {
+          id: `label:${key || 'unlabeled'}`,
+          title: labelName || 'No label',
+          titleKey: labelName ? undefined : 'issue.group.noLabel',
+          count: 0,
+          items: [],
+        };
+        groupIndex.set(key, group);
+        groups.push(group);
+      }
+      group.items.push(toIssueItem(item));
+    });
+    groups.forEach((group) => {
+      group.items = sortIssueItems(group.items, sortId);
+      group.count = group.items.length;
+    });
+    return groups;
+  }
+
+  if (groupBy === 'none') {
+    const groupItems = sortIssueItems(topLevelItems.map(toIssueItem), sortId);
+    return groupItems.length > 0
+      ? [
+          {
+            id: 'all',
+            title: 'All issues',
+            titleKey: 'issue.group.all',
+            count: groupItems.length,
+            items: groupItems,
+          },
+        ]
+      : [];
+  }
 
   return issueGroupOrder
     .map((groupId) => {
-      const groupItems = items
-        .filter(
-          (item) =>
-            projectWorkItemIssueStatus(
-              effectiveWorkItem(item, overrides[item.id]).status,
-            ) === groupId,
-        )
-        .map((item) =>
-          projectWorkItemToIssueItem(
-            item,
-            projectName,
-            ++sequence,
-            overrides[item.id],
-          ),
-        );
+      const groupItems = sortIssueItems(
+        topLevelItems
+          .filter(
+            (item) =>
+              projectWorkItemIssueStatus(
+                effectiveWorkItem(item, overrides[item.id]).status,
+              ) === groupId,
+          )
+          .map(toIssueItem),
+        sortId,
+      );
       return {
         id: groupId,
+        status: groupId,
         title: issueGroupTitleFallback[groupId],
+        titleKey: issueGroupStatusKey[groupId],
         count: groupItems.length,
         items: groupItems,
       };
     })
-    .filter((group) => allowedGroups.has(group.id) && group.items.length > 0);
+    .filter((group) => group.items.length > 0);
 };
 
 export const projectWorkItemIssueStatus = (
@@ -371,9 +541,9 @@ export const projectWorkItemIssueStatus = (
 };
 
 const issueGroupInitialWorkItemStatus = (
-  groupId: IssueStatusGroupId,
+  groupId?: IssueStatusGroupId,
 ): ProjectWorkItemStatus => {
-  if (groupId === 'todo') return 'open';
+  if (!groupId || groupId === 'todo') return 'open';
   if (groupId === 'backlog') return 'blocked';
   return groupId;
 };
@@ -714,7 +884,12 @@ export function IssuePage() {
     [t],
   );
   const [activeFilter, setActiveFilter] = useState<IssueFilter>('active');
+  const [groupBy, setGroupBy] = useState<IssueGroupBy>('status');
+  const [sortId, setSortId] = useState<IssueSortId>('updated');
   const [collapsedGroups, setCollapsedGroups] = useState<Set<IssueGroup['id']>>(
+    () => new Set(),
+  );
+  const [collapsedIssueRows, setCollapsedIssueRows] = useState<Set<string>>(
     () => new Set(),
   );
   const [workItems, setWorkItems] = useState<ProjectWorkItem[]>([]);
@@ -779,8 +954,9 @@ export function IssuePage() {
         activeFilter,
         selectedProjectName,
         issueRowOverrides,
+        { groupBy, sortId },
       ),
-    [activeFilter, issueRowOverrides, selectedProjectName, workItems],
+    [activeFilter, groupBy, issueRowOverrides, selectedProjectName, sortId, workItems],
   );
   const projectIssueLabels = useMemo(
     () => collectProjectIssueLabels(workItems, issueRowOverrides),
@@ -801,9 +977,32 @@ export function IssuePage() {
   const visibleIssues = useMemo(
     () =>
       visibleGroups.flatMap((group) =>
-        collapsedGroups.has(group.id) ? [] : group.items,
+        collapsedGroups.has(group.id)
+          ? []
+          : flattenIssueItems(group.items, collapsedIssueRows),
       ),
-    [collapsedGroups, visibleGroups],
+    [collapsedGroups, collapsedIssueRows, visibleGroups],
+  );
+  const allIssues = useMemo(
+    () =>
+      projectWorkItemsToIssueGroups(
+        workItems,
+        'all',
+        selectedProjectName,
+        issueRowOverrides,
+      ).flatMap((group) =>
+        group.items.flatMap((issue) => [issue, ...issue.children]),
+      ),
+    [issueRowOverrides, selectedProjectName, workItems],
+  );
+  const activeSubIssues = useMemo(
+    () =>
+      activeIssue
+        ? allIssues.filter(
+            (issue) => issue.parentWorkItemId === activeIssue.workItemId,
+          )
+        : [],
+    [activeIssue, allIssues],
   );
   const linkedRepo = integrationState?.primary_repository ?? null;
   const linkedRepoId = linkedRepo?.id ?? '';
@@ -885,12 +1084,6 @@ export function IssuePage() {
       setActiveIssue(null);
       return;
     }
-    const allIssues = projectWorkItemsToIssueGroups(
-      workItems,
-      'all',
-      selectedProjectName,
-      issueRowOverrides,
-    ).flatMap((group) => group.items);
     const pendingTargetWorkItemId =
       pendingIssueTarget && 'workItemId' in pendingIssueTarget
         ? pendingIssueTarget.workItemId
@@ -931,11 +1124,9 @@ export function IssuePage() {
         : current,
     );
   }, [
-    issueRowOverrides,
+    allIssues,
     pendingIssueTarget,
     selectedProjectId,
-    selectedProjectName,
-    workItems,
     workItemsLoading,
     workItemsProjectId,
   ]);
@@ -1195,15 +1386,31 @@ export function IssuePage() {
     );
   };
 
-  const handleGroupToggle = (groupId: IssueGroup['id']) => {
+  const handleSortChange = (nextSortId: IssueSortId, label: string) => {
+    setSortId(nextSortId);
+    setInteractionMessage(
+      tr('issue.action.sortChanged', 'Sorted by {sort}', { sort: label }),
+    );
+  };
+
+  const handleGroupByChange = (nextGroupBy: IssueGroupBy, label: string) => {
+    setGroupBy(nextGroupBy);
+    setInteractionMessage(
+      tr('issue.action.groupingChanged', 'Grouped by {grouping}', {
+        grouping: label,
+      }),
+    );
+  };
+
+  const handleGroupToggle = (group: IssueGroup) => {
     setCollapsedGroups((current) => {
       const next = new Set(current);
-      const label = tr(issueGroupStatusKey[groupId], issueGroupTitleFallback[groupId]);
-      if (next.has(groupId)) {
-        next.delete(groupId);
+      const label = group.titleKey ? tr(group.titleKey, group.title) : group.title;
+      if (next.has(group.id)) {
+        next.delete(group.id);
         setInteractionMessage(tr('issue.action.expanded', 'Expanded {group}', { group: label }));
       } else {
-        next.add(groupId);
+        next.add(group.id);
         setInteractionMessage(tr('issue.action.collapsed', 'Collapsed {group}', { group: label }));
       }
       return next;
@@ -1215,6 +1422,31 @@ export function IssuePage() {
     setSelectedIssueId(issue.id);
     setActiveIssue(issue);
     setInteractionMessage(tr('issue.action.opened', 'Opened {id}', { id: issue.id }));
+  };
+
+  const handleIssueRowToggle = (issue: IssueItem) => {
+    setCollapsedIssueRows((current) => {
+      const next = new Set(current);
+      if (next.has(issue.workItemId)) {
+        next.delete(issue.workItemId);
+        setInteractionMessage(
+          tr('issue.action.expanded', 'Expanded {group}', { group: issue.id }),
+        );
+      } else {
+        next.add(issue.workItemId);
+        setInteractionMessage(
+          tr('issue.action.collapsed', 'Collapsed {group}', { group: issue.id }),
+        );
+      }
+      return next;
+    });
+  };
+
+  const handleSubIssueSelect = (subIssue: IssueDetailItem) => {
+    const match = allIssues.find(
+      (issue) => issue.workItemId === subIssue.workItemId,
+    );
+    if (match) handleIssueSelect(match);
   };
 
   const focusIssueRow = (issueId: string) => {
@@ -1848,6 +2080,8 @@ export function IssuePage() {
           onWorkItemChange={(item) => mergeWorkItem(item, setWorkItems)}
           onIssueDeleted={handleIssueDeleted}
           onIssueSync={handleIssueDetailSync}
+          subIssues={activeSubIssues}
+          onSubIssueSelect={handleSubIssueSelect}
           linkedProviderId={linkedProviderId}
           linkedRepoId={linkedRepoId}
           linkedRepoName={linkedRepoName}
@@ -1868,8 +2102,12 @@ export function IssuePage() {
           />
           <IssueToolbar
             activeFilter={activeFilter}
+            groupBy={groupBy}
             importEnabled={Boolean(linkedRepoId)}
+            sortId={sortId}
             onFilterChange={handleFilterChange}
+            onGroupByChange={handleGroupByChange}
+            onSortChange={handleSortChange}
             onCreateIssue={openCreateIssueDialog}
             onImport={handleOpenImportDialog}
             onAction={handleAction}
@@ -1914,15 +2152,18 @@ export function IssuePage() {
                     key={group.id}
                     group={group}
                     collapsed={collapsedGroups.has(group.id)}
+                    hideHeader={groupBy === 'none'}
                     selectedIssueId={selectedIssueId}
                     issueRowRefs={issueRowRefs}
-                    onToggle={() => handleGroupToggle(group.id)}
+                    onToggle={() => handleGroupToggle(group)}
                     onIssueSelect={handleIssueSelect}
                     onCreateIssue={() =>
                       openCreateIssueDialog(
-                        issueGroupInitialWorkItemStatus(group.id),
+                        issueGroupInitialWorkItemStatus(group.status),
                       )
                     }
+                    collapsedIssueRows={collapsedIssueRows}
+                    onIssueRowToggle={handleIssueRowToggle}
                     statusOptions={issueRowStatusOptions}
                     priorityOptions={issueRowPriorityOptions}
                     onStatusChange={handleIssueRowStatusChange}
@@ -2997,21 +3238,41 @@ function ProviderIcon({
 
 function IssueToolbar({
   activeFilter,
+  groupBy,
   importEnabled,
+  sortId,
   onFilterChange,
+  onGroupByChange,
+  onSortChange,
   onCreateIssue,
   onImport,
   onAction,
   tr,
 }: {
   activeFilter: IssueFilter;
+  groupBy: IssueGroupBy;
   importEnabled: boolean;
+  sortId: IssueSortId;
   onFilterChange: (filter: IssueFilter) => void;
+  onGroupByChange: (groupBy: IssueGroupBy, label: string) => void;
+  onSortChange: (sortId: IssueSortId, label: string) => void;
   onCreateIssue: () => void;
   onImport: () => void;
   onAction: (message: string) => void;
   tr: IssueTranslator;
 }) {
+  const groupOptions: DropdownSelectOption[] = [
+    { id: 'status', label: tr('issue.toolbar.group.status', 'Status') },
+    { id: 'priority', label: tr('issue.toolbar.group.priority', 'Priority') },
+    { id: 'label', label: tr('issue.toolbar.group.label', 'Label') },
+    { id: 'none', label: tr('issue.toolbar.group.none', 'No grouping') },
+  ];
+  const sortOptions: DropdownSelectOption[] = [
+    { id: 'updated', label: tr('issue.toolbar.sort.updated', 'Recently updated') },
+    { id: 'created', label: tr('issue.toolbar.sort.created', 'Recently created') },
+    { id: 'priority', label: tr('issue.toolbar.sort.priority', 'Priority') },
+    { id: 'title', label: tr('issue.toolbar.sort.byTitle', 'Title') },
+  ];
   return (
     <section className="flex h-[46px] shrink-0 items-center justify-between bg-[var(--surface-2)] px-[17px]">
       <div className="flex items-center gap-1.5">
@@ -3043,21 +3304,26 @@ function IssueToolbar({
       </div>
 
       <div className="flex items-center gap-2">
-        <ToolbarButton
+        <ToolbarIconMenu
+          highlighted={sortId !== 'updated'}
           icon={ListFilter}
-          label={tr('issue.toolbar.filterIssues', 'Filter issues')}
-          onClick={() =>
-            onAction(tr('issue.action.filterMenuOpened', 'Filter menu opened'))
+          label={tr('issue.toolbar.sort.title', 'Sort by')}
+          options={sortOptions}
+          panelTitle={tr('issue.toolbar.sort.title', 'Sort by')}
+          value={sortId}
+          onChange={(value, option) =>
+            onSortChange(value as IssueSortId, option.label)
           }
         />
-        <ToolbarButton
-          disabled
+        <ToolbarIconMenu
+          highlighted={groupBy !== 'status'}
           icon={SlidersHorizontal}
-          label={tr('issue.toolbar.displaySettings', 'Display settings')}
-          onClick={() =>
-            onAction(
-              tr('issue.action.displaySettingsOpened', 'Display settings opened'),
-            )
+          label={tr('issue.toolbar.group.title', 'Group by')}
+          options={groupOptions}
+          panelTitle={tr('issue.toolbar.group.title', 'Group by')}
+          value={groupBy}
+          onChange={(value, option) =>
+            onGroupByChange(value as IssueGroupBy, option.label)
           }
         />
         <ToolbarButton
@@ -3110,12 +3376,14 @@ function FilterTab({
 }
 
 function ToolbarButton({
+  active = false,
   disabled = false,
   disabledTitle,
   icon: Icon,
   label,
   onClick,
 }: {
+  active?: boolean;
   disabled?: boolean;
   disabledTitle?: string;
   icon: LucideIcon;
@@ -3131,7 +3399,9 @@ function ToolbarButton({
         'flex h-[33px] w-[33px] items-center justify-center rounded-full border border-[var(--hairline)] bg-[var(--surface-2)] text-[var(--ink-subtle)] transition',
         disabled
           ? 'cursor-not-allowed opacity-45'
-          : 'hover:bg-[var(--surface-3)] hover:text-[var(--ink)]',
+          : active
+            ? 'bg-[var(--surface-3)] text-[var(--ink)]'
+            : 'hover:bg-[var(--surface-3)] hover:text-[var(--ink)]',
       )}
       aria-label={buttonLabel}
       disabled={disabled}
@@ -3143,14 +3413,164 @@ function ToolbarButton({
   );
 }
 
+const TOOLBAR_MENU_PANEL_WIDTH = 200;
+
+function ToolbarIconMenu({
+  highlighted = false,
+  icon,
+  label,
+  options,
+  panelTitle,
+  value,
+  onChange,
+}: {
+  highlighted?: boolean;
+  icon: LucideIcon;
+  label: string;
+  options: DropdownSelectOption[];
+  panelTitle: string;
+  value: string;
+  onChange: (value: string, option: DropdownSelectOption) => void;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const appScale = useAppScale();
+  const [open, setOpen] = useState(false);
+  const [panelStyle, setPanelStyle] = useState<{
+    left: number;
+    top: number;
+    width: number;
+  }>({ left: 0, top: 0, width: TOOLBAR_MENU_PANEL_WIDTH });
+  const portalTarget =
+    appScale.portalRoot ??
+    (typeof document === 'undefined' ? null : document.body);
+  const overlayScale =
+    appScale.enabled && portalTarget === appScale.portalRoot
+      ? appScale.scale
+      : 1;
+  const toOverlayValue = (value: number) => value / overlayScale;
+
+  const updatePanelPosition = () => {
+    const rect = rootRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const viewportWidth = toOverlayValue(window.innerWidth);
+    const left = Math.max(
+      8,
+      Math.min(
+        toOverlayValue(rect.right) - TOOLBAR_MENU_PANEL_WIDTH,
+        viewportWidth - TOOLBAR_MENU_PANEL_WIDTH - 8,
+      ),
+    );
+    setPanelStyle({
+      left,
+      top: toOverlayValue(rect.bottom) + 4,
+      width: TOOLBAR_MENU_PANEL_WIDTH,
+    });
+  };
+
+  useEffect(() => {
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (
+        !rootRef.current?.contains(target) &&
+        !panelRef.current?.contains(target)
+      ) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    return () => document.removeEventListener('pointerdown', handlePointerDown);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+
+    updatePanelPosition();
+    window.addEventListener('resize', updatePanelPosition);
+    window.addEventListener('scroll', updatePanelPosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePanelPosition);
+      window.removeEventListener('scroll', updatePanelPosition, true);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appScale.enabled, appScale.portalRoot, appScale.scale, open]);
+
+  const panel = (
+    <div
+      ref={panelRef}
+      className="fixed z-[1000] overflow-hidden rounded-lg border border-[var(--hairline-strong)] bg-[var(--surface-3)] shadow-[0_14px_40px_rgba(0,0,0,0.18)]"
+      style={panelStyle}
+    >
+      <div className="px-3 pb-1 pt-2 text-[12px] font-semibold uppercase tracking-[0.4px] text-[var(--ink-tertiary)]">
+        {panelTitle}
+      </div>
+      <div role="listbox" className="max-h-[240px] overflow-y-auto py-1">
+        {options.map((option) => {
+          const active = option.id === value;
+          return (
+            <button
+              key={option.id}
+              type="button"
+              role="option"
+              aria-selected={active}
+              className={cn(
+                'flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left text-[14px] transition hover:bg-[var(--surface-1)]',
+                active
+                  ? 'bg-[var(--primary)]/8 font-medium text-[var(--ink)]'
+                  : 'text-[var(--ink)]',
+              )}
+              onClick={() => {
+                onChange(option.id, option);
+                setOpen(false);
+              }}
+            >
+              <span className="min-w-0 flex-1 truncate">{option.label}</span>
+              {active && (
+                <Check
+                  aria-hidden="true"
+                  className="h-3.5 w-3.5 shrink-0 text-[var(--primary)]"
+                />
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  return (
+    <div
+      ref={rootRef}
+      className="relative"
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') setOpen(false);
+      }}
+    >
+      <ToolbarButton
+        active={open || highlighted}
+        icon={icon}
+        label={label}
+        onClick={() => {
+          if (!open) updatePanelPosition();
+          setOpen((current) => !current);
+        }}
+      />
+      {open && (portalTarget ? createPortal(panel, portalTarget) : panel)}
+    </div>
+  );
+}
+
 function IssueSection({
   group,
   collapsed,
+  hideHeader = false,
   selectedIssueId,
   issueRowRefs,
   onToggle,
   onIssueSelect,
   onCreateIssue,
+  collapsedIssueRows,
+  onIssueRowToggle,
   statusOptions,
   priorityOptions,
   onStatusChange,
@@ -3159,11 +3579,14 @@ function IssueSection({
 }: {
   group: IssueGroup;
   collapsed: boolean;
+  hideHeader?: boolean;
   selectedIssueId: string;
   issueRowRefs: MutableRefObject<Map<string, HTMLElement>>;
   onToggle: () => void;
   onIssueSelect: (issue: IssueItem) => void;
   onCreateIssue: () => void;
+  collapsedIssueRows: Set<string>;
+  onIssueRowToggle: (issue: IssueItem) => void;
   statusOptions: Array<IssueRowMenuOption<ProjectWorkItemStatus>>;
   priorityOptions: Array<IssueRowMenuOption<ProjectWorkItemPriority>>;
   onStatusChange: (
@@ -3176,12 +3599,12 @@ function IssueSection({
   ) => Promise<void>;
   tr: IssueTranslator;
 }) {
-  const groupTitle = tr(
-    issueGroupStatusKey[group.id],
-    issueGroupTitleFallback[group.id],
-  );
+  const groupTitle = group.titleKey
+    ? tr(group.titleKey, group.title)
+    : group.title;
   return (
     <section className="group/section">
+      {!hideHeader && (
       <div
         role="button"
         tabIndex={0}
@@ -3194,8 +3617,10 @@ function IssueSection({
           }
         }}
         className={cn(
-          'flex h-[39px] items-center justify-between rounded-[9px] px-4',
-          issueGroupHeaderBgClass[group.id],
+          'flex h-[39px] cursor-pointer items-center justify-between rounded-[9px] px-4 transition hover:brightness-[1.12]',
+          group.status
+            ? issueGroupHeaderBgClass[group.status]
+            : 'bg-[var(--surface-3)]',
         )}
       >
         <div className="flex items-center gap-[10px]">
@@ -3205,12 +3630,12 @@ function IssueSection({
             fill="#333744"
             strokeWidth={0}
           />
-          <StatusIcon status={group.id} size="header" />
+          {group.status && <StatusIcon status={group.status} size="header" />}
           <div className="flex items-baseline gap-3">
             <h2 className="text-[16px] font-semibold leading-none text-[var(--ink)]">
               {groupTitle}
             </h2>
-            <span className="text-[16px] font-medium leading-none text-[var(--ink-subtle)]">
+            <span className="rounded-full bg-[var(--surface-3)] px-2 py-[3px] text-[12px] font-semibold leading-none text-[var(--ink-subtle)]">
               {group.count}
             </span>
           </div>
@@ -3229,19 +3654,20 @@ function IssueSection({
           <Plus aria-hidden="true" className="h-[14px] w-[14px]" />
         </button>
       </div>
+      )}
 
       <div>
         {!collapsed &&
           group.items.map((issue) => (
-            <IssueRow
+            <IssueTreeRow
               key={issue.id}
               issue={issue}
-              selected={selectedIssueId === issue.id}
-              rowRef={(node) => {
-                if (node) issueRowRefs.current.set(issue.id, node);
-                else issueRowRefs.current.delete(issue.id);
-              }}
-              onSelect={() => onIssueSelect(issue)}
+              depth={0}
+              collapsedIssueRows={collapsedIssueRows}
+              selectedIssueId={selectedIssueId}
+              issueRowRefs={issueRowRefs}
+              onIssueRowToggle={onIssueRowToggle}
+              onIssueSelect={onIssueSelect}
               statusOptions={statusOptions}
               priorityOptions={priorityOptions}
               onStatusChange={onStatusChange}
@@ -3251,6 +3677,110 @@ function IssueSection({
           ))}
       </div>
     </section>
+  );
+}
+
+function IssueTreeRow({
+  issue,
+  depth,
+  collapsedIssueRows,
+  selectedIssueId,
+  issueRowRefs,
+  onIssueRowToggle,
+  onIssueSelect,
+  statusOptions,
+  priorityOptions,
+  onStatusChange,
+  onPriorityChange,
+  tr,
+}: {
+  issue: IssueItem;
+  depth: number;
+  collapsedIssueRows: Set<string>;
+  selectedIssueId: string;
+  issueRowRefs: MutableRefObject<Map<string, HTMLElement>>;
+  onIssueRowToggle: (issue: IssueItem) => void;
+  onIssueSelect: (issue: IssueItem) => void;
+  statusOptions: Array<IssueRowMenuOption<ProjectWorkItemStatus>>;
+  priorityOptions: Array<IssueRowMenuOption<ProjectWorkItemPriority>>;
+  onStatusChange: (
+    issue: IssueItem,
+    status: ProjectWorkItemStatus,
+  ) => Promise<void>;
+  onPriorityChange: (
+    issue: IssueItem,
+    priority: ProjectWorkItemPriority,
+  ) => Promise<void>;
+  tr: IssueTranslator;
+}) {
+  const hasChildren = issue.children.length > 0;
+  const collapsed = collapsedIssueRows.has(issue.workItemId);
+  return (
+    <>
+      <div className={cn('relative', depth > 0 && 'pl-6')}>
+        {hasChildren && (
+          <button
+            type="button"
+            aria-expanded={!collapsed}
+            aria-label={tr(
+              collapsed
+                ? 'issue.subIssues.expand'
+                : 'issue.subIssues.collapse',
+              collapsed ? 'Expand sub-issues' : 'Collapse sub-issues',
+            )}
+            title={tr('issue.subIssues.count', '{count} sub-issues', {
+              count: issue.children.length,
+            })}
+            className="absolute left-2 top-1/2 z-10 flex h-5 min-w-5 -translate-y-1/2 items-center justify-center gap-0.5 rounded-full px-0.5 text-[var(--ink-tertiary)] transition hover:bg-[var(--surface-3)] hover:text-[var(--ink)]"
+            onClick={(event) => {
+              event.stopPropagation();
+              onIssueRowToggle(issue);
+            }}
+          >
+            {collapsed ? (
+              <ChevronRight aria-hidden="true" className="h-3 w-3" />
+            ) : (
+              <ChevronDown aria-hidden="true" className="h-3 w-3" />
+            )}
+            <span className="text-[10px] font-semibold leading-none">
+              {issue.children.length}
+            </span>
+          </button>
+        )}
+        <IssueRow
+          issue={issue}
+          selected={selectedIssueId === issue.id}
+          rowRef={(node) => {
+            if (node) issueRowRefs.current.set(issue.id, node);
+            else issueRowRefs.current.delete(issue.id);
+          }}
+          onSelect={() => onIssueSelect(issue)}
+          statusOptions={statusOptions}
+          priorityOptions={priorityOptions}
+          onStatusChange={onStatusChange}
+          onPriorityChange={onPriorityChange}
+          tr={tr}
+        />
+      </div>
+      {!collapsed &&
+        issue.children.map((child) => (
+          <IssueTreeRow
+            key={child.id}
+            issue={child}
+            depth={depth + 1}
+            collapsedIssueRows={collapsedIssueRows}
+            selectedIssueId={selectedIssueId}
+            issueRowRefs={issueRowRefs}
+            onIssueRowToggle={onIssueRowToggle}
+            onIssueSelect={onIssueSelect}
+            statusOptions={statusOptions}
+            priorityOptions={priorityOptions}
+            onStatusChange={onStatusChange}
+            onPriorityChange={onPriorityChange}
+            tr={tr}
+          />
+        ))}
+    </>
   );
 }
 
@@ -3725,7 +4255,7 @@ function StatusIcon({
   status,
   size,
 }: {
-  status: IssueItem['status'] | IssueGroup['id'];
+  status: IssueItem['status'] | IssueStatusGroupId;
   size: 'header' | 'row' | 'menu';
 }) {
   const dimension = size === 'header' ? 17 : size === 'row' ? 18 : 14;

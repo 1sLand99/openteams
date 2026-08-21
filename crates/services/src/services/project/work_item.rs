@@ -70,6 +70,9 @@ impl ProjectWorkItemService {
         project_id: Uuid,
         input: CreateProjectWorkItem,
     ) -> Result<ProjectWorkItem> {
+        if let Some(parent_id) = input.parent_id {
+            Self::validate_parent_assignment(pool, project_id, None, parent_id).await?;
+        }
         Ok(ProjectWorkItem::create(pool, project_id, input).await?)
     }
 
@@ -85,6 +88,10 @@ impl ProjectWorkItemService {
             .ok_or_else(|| anyhow!("Project work item not found"))?;
         if existing.project_id != project_id {
             return Err(anyhow!("Project work item not found"));
+        }
+        if let Some(Some(parent_id)) = input.parent_id {
+            Self::validate_parent_assignment(pool, project_id, Some(work_item_id), parent_id)
+                .await?;
         }
         Ok(ProjectWorkItem::update(pool, work_item_id, input).await?)
     }
@@ -103,6 +110,10 @@ impl ProjectWorkItemService {
         }
 
         let mut tx = pool.begin().await?;
+        sqlx::query("UPDATE project_work_items SET parent_id = NULL WHERE parent_id = ?1")
+            .bind(work_item_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
             r#"
             UPDATE project_delivery_records
@@ -314,6 +325,68 @@ impl ProjectWorkItemService {
         }
         Ok(ProjectWorkItemExecutionLink::delete(pool, link_id).await?)
     }
+
+    async fn validate_parent_assignment(
+        pool: &SqlitePool,
+        project_id: Uuid,
+        work_item_id: Option<Uuid>,
+        parent_id: Uuid,
+    ) -> Result<()> {
+        if work_item_id == Some(parent_id) {
+            return Err(anyhow!("A work item cannot be its own parent"));
+        }
+
+        let parent = ProjectWorkItem::find_by_id(pool, parent_id)
+            .await?
+            .filter(|item| item.project_id == project_id)
+            .ok_or_else(|| anyhow!("Parent work item must belong to the same project"))?;
+
+        if let Some(work_item_id) = work_item_id {
+            let creates_cycle = sqlx::query_scalar::<_, i64>(
+                r#"
+                WITH RECURSIVE descendants(id) AS (
+                    SELECT id
+                    FROM project_work_items
+                    WHERE parent_id = ?1
+                    UNION
+                    SELECT child.id
+                    FROM project_work_items child
+                    JOIN descendants ON child.parent_id = descendants.id
+                )
+                SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)
+                "#,
+            )
+            .bind(work_item_id)
+            .bind(parent_id)
+            .fetch_one(pool)
+            .await?
+                != 0;
+            if creates_cycle {
+                return Err(anyhow!(
+                    "Parent work item cannot be the work item's descendant"
+                ));
+            }
+
+            let has_children = sqlx::query_scalar::<_, i64>(
+                "SELECT EXISTS(SELECT 1 FROM project_work_items WHERE parent_id = ?1)",
+            )
+            .bind(work_item_id)
+            .fetch_one(pool)
+            .await?
+                != 0;
+            if has_children {
+                return Err(anyhow!(
+                    "A work item with sub-issues cannot become a sub-issue"
+                ));
+            }
+        }
+
+        if parent.parent_id.is_some() {
+            return Err(anyhow!("A sub-issue cannot be used as a parent"));
+        }
+
+        Ok(())
+    }
 }
 
 fn cached_github_issue_detail(link: &ProjectWorkItemExternalLink) -> Option<GitHubIssueDetail> {
@@ -321,4 +394,214 @@ fn cached_github_issue_detail(link: &ProjectWorkItemExternalLink) -> Option<GitH
         return None;
     }
     serde_json::from_str(link.metadata_json.as_deref()?).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use db::models::{
+        project::{CreateProject, Project},
+        project_work_item::{
+            CreateProjectWorkItem, ProjectWorkItem, ProjectWorkItemPriority, ProjectWorkItemSource,
+            ProjectWorkItemType, UpdateProjectWorkItem,
+        },
+    };
+    use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+    use uuid::Uuid;
+
+    use super::ProjectWorkItemService;
+
+    async fn setup_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("create sqlite memory pool");
+        sqlx::migrate!("../db/migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
+
+    async fn create_project(pool: &SqlitePool, name: &str) -> Project {
+        Project::create(
+            pool,
+            &CreateProject {
+                name: name.to_string(),
+                repositories: Vec::new(),
+                description: None,
+                status: Some("active".to_string()),
+                default_workspace_path: None,
+                active_repo_id: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create project")
+    }
+
+    fn create_input(title: &str, parent_id: Option<Uuid>) -> CreateProjectWorkItem {
+        CreateProjectWorkItem {
+            parent_id,
+            r#type: ProjectWorkItemType::Task,
+            status: None,
+            title: title.to_string(),
+            description: None,
+            labels_json: None,
+            priority: ProjectWorkItemPriority::Medium,
+            source: ProjectWorkItemSource::Manual,
+            created_by: None,
+        }
+    }
+
+    fn parent_update(parent_id: Option<Uuid>) -> UpdateProjectWorkItem {
+        UpdateProjectWorkItem {
+            parent_id: Some(parent_id),
+            r#type: None,
+            status: None,
+            title: None,
+            description: None,
+            labels_json: None,
+            priority: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_cross_project_and_nested_parents() {
+        let pool = setup_pool().await;
+        let first_project = create_project(&pool, "First").await;
+        let second_project = create_project(&pool, "Second").await;
+        let service = ProjectWorkItemService::new();
+        let parent = service
+            .create(&pool, first_project.id, create_input("Parent", None))
+            .await
+            .expect("create parent");
+        let child = service
+            .create(
+                &pool,
+                first_project.id,
+                create_input("Child", Some(parent.id)),
+            )
+            .await
+            .expect("create child");
+        assert_eq!(child.parent_id, Some(parent.id));
+
+        let cross_project_error = service
+            .create(
+                &pool,
+                second_project.id,
+                create_input("Cross-project child", Some(parent.id)),
+            )
+            .await
+            .expect_err("reject parent from another project");
+        assert!(
+            cross_project_error
+                .to_string()
+                .contains("must belong to the same project")
+        );
+
+        let nested_error = service
+            .create(
+                &pool,
+                first_project.id,
+                create_input("Grandchild", Some(child.id)),
+            )
+            .await
+            .expect_err("reject a sub-issue as parent");
+        assert!(
+            nested_error
+                .to_string()
+                .contains("sub-issue cannot be used as a parent")
+        );
+    }
+
+    #[tokio::test]
+    async fn update_rejects_cycles_and_moving_a_parent_below_another_item() {
+        let pool = setup_pool().await;
+        let project = create_project(&pool, "Project").await;
+        let service = ProjectWorkItemService::new();
+        let parent = service
+            .create(&pool, project.id, create_input("Parent", None))
+            .await
+            .expect("create parent");
+        let child = service
+            .create(&pool, project.id, create_input("Child", Some(parent.id)))
+            .await
+            .expect("create child");
+        let other_parent = service
+            .create(&pool, project.id, create_input("Other parent", None))
+            .await
+            .expect("create other parent");
+
+        let self_parent_error = service
+            .update(&pool, project.id, child.id, parent_update(Some(child.id)))
+            .await
+            .expect_err("reject item as its own parent");
+        assert!(
+            self_parent_error
+                .to_string()
+                .contains("cannot be its own parent")
+        );
+
+        let cycle_error = service
+            .update(&pool, project.id, parent.id, parent_update(Some(child.id)))
+            .await
+            .expect_err("reject descendant as parent");
+        assert!(
+            cycle_error
+                .to_string()
+                .contains("cannot be the work item's descendant")
+        );
+
+        let nesting_error = service
+            .update(
+                &pool,
+                project.id,
+                parent.id,
+                parent_update(Some(other_parent.id)),
+            )
+            .await
+            .expect_err("reject moving a parent below another item");
+        assert!(
+            nesting_error
+                .to_string()
+                .contains("with sub-issues cannot become a sub-issue")
+        );
+    }
+
+    #[tokio::test]
+    async fn update_can_clear_parent_and_delete_unparents_children() {
+        let pool = setup_pool().await;
+        let project = create_project(&pool, "Project").await;
+        let service = ProjectWorkItemService::new();
+        let parent = service
+            .create(&pool, project.id, create_input("Parent", None))
+            .await
+            .expect("create parent");
+        let child = service
+            .create(&pool, project.id, create_input("Child", Some(parent.id)))
+            .await
+            .expect("create child");
+
+        let cleared = service
+            .update(&pool, project.id, child.id, parent_update(None))
+            .await
+            .expect("clear parent");
+        assert_eq!(cleared.parent_id, None);
+
+        service
+            .update(&pool, project.id, child.id, parent_update(Some(parent.id)))
+            .await
+            .expect("restore parent");
+        service
+            .delete(&pool, project.id, parent.id)
+            .await
+            .expect("delete parent");
+
+        let surviving_child = ProjectWorkItem::find_by_id(&pool, child.id)
+            .await
+            .expect("find child")
+            .expect("child survives parent deletion");
+        assert_eq!(surviving_child.parent_id, None);
+    }
 }
