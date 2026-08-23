@@ -1753,18 +1753,8 @@ pub(super) fn build_opencode_compatible_mcp_servers(
                 server.get("type").and_then(Value::as_str),
                 Some("http" | "sse")
             );
-        let allowed = if is_remote {
-            ["type", "url", "httpUrl", "headers", "enabled", "disabled"].as_slice()
-        } else {
-            ["type", "command", "args", "env", "enabled", "disabled"].as_slice()
-        };
-        if server.keys().any(|key| !allowed.contains(&key.as_str())) {
-            return Err(ExecutorError::Configuration(format!(
-                "{adapter_name} cannot safely translate a member MCP server field"
-            )));
-        }
-
-        let mut converted = Map::new();
+        let mut converted = server.clone();
+        converted.remove("disabled");
         if is_remote {
             if !matches!(
                 server.get("type").and_then(Value::as_str),
@@ -1786,11 +1776,9 @@ pub(super) fn build_opencode_compatible_mcp_servers(
                     "{adapter_name} rejected an empty member MCP remote URL"
                 )));
             }
+            converted.remove("httpUrl");
             converted.insert("type".to_string(), Value::String("remote".to_string()));
             converted.insert("url".to_string(), url);
-            if let Some(headers) = server.get("headers") {
-                converted.insert("headers".to_string(), headers.clone());
-            }
         } else {
             if !matches!(
                 server.get("type").and_then(Value::as_str),
@@ -1811,11 +1799,13 @@ pub(super) fn build_opencode_compatible_mcp_servers(
             if let Some(args) = server.get("args").and_then(Value::as_array) {
                 command_and_args.extend(args.iter().cloned());
             }
+            converted.remove("args");
             converted.insert("type".to_string(), Value::String("local".to_string()));
             converted.insert("command".to_string(), Value::Array(command_and_args));
             if let Some(environment) = server.get("env") {
                 converted.insert("environment".to_string(), environment.clone());
             }
+            converted.remove("env");
         }
         if let Some(enabled) = effective_mcp_enabled(server) {
             converted.insert("enabled".to_string(), Value::Bool(enabled));
@@ -1988,12 +1978,16 @@ mod tests {
                 "local": {
                     "command": "/bin/echo",
                     "args": ["serve"],
-                    "env": {"TOKEN": "member-secret"}
+                    "env": {"TOKEN": "member-secret"},
+                    "cwd": ".",
+                    "startup_timeout_sec": 120,
+                    "future_option": {"nested": true}
                 },
                 "remote": {
                     "type": "sse",
                     "httpUrl": "https://example.test/events",
-                    "headers": {"Authorization": "Bearer member-secret"}
+                    "headers": {"Authorization": "Bearer member-secret"},
+                    "future_remote_option": "preserved"
                 }
             }
         }))
@@ -2017,7 +2011,20 @@ mod tests {
             config["mcp"]["local"]["environment"]["TOKEN"],
             json!("member-secret")
         );
+        assert_eq!(config["mcp"]["local"]["cwd"], json!("."));
+        assert_eq!(config["mcp"]["local"]["startup_timeout_sec"], json!(120));
+        assert_eq!(
+            config["mcp"]["local"]["future_option"],
+            json!({"nested": true})
+        );
+        assert!(config["mcp"]["local"].get("args").is_none());
+        assert!(config["mcp"]["local"].get("env").is_none());
         assert_eq!(config["mcp"]["remote"]["type"], json!("remote"));
+        assert_eq!(
+            config["mcp"]["remote"]["future_remote_option"],
+            json!("preserved")
+        );
+        assert!(config["mcp"]["remote"].get("httpUrl").is_none());
         assert_eq!(
             config["provider"]["custom"]["options"]["apiKey"],
             json!("provider-key")

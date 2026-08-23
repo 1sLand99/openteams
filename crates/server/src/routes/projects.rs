@@ -991,7 +991,10 @@ mod tests {
                     "command": "mcp-tool",
                     "args": ["serve"],
                     "env": {"MODE": "test"},
-                    "disabled": false
+                    "disabled": false,
+                    "cwd": ".",
+                    "startup_timeout_sec": 120,
+                    "future_option": {"nested": true}
                 },
                 "stream": {
                     "type": "sse",

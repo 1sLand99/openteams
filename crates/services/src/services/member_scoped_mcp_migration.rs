@@ -481,7 +481,7 @@ mod tests {
                     true,
                 ),
                 format!(
-                    "[mcp_servers.server]\ncommand = \"tool\"\nargs = [\"serve\"]\n[mcp_servers.server.env]\nTOKEN = \"{fake_secret}\"\n"
+                    "[mcp_servers.server]\ncommand = \"tool\"\nargs = [\"serve\"]\ncwd = \".\"\nstartup_timeout_sec = 120\nfuture_option = \"preserved\"\n[mcp_servers.server.env]\nTOKEN = \"{fake_secret}\"\n"
                 ),
             ),
             (
@@ -503,6 +503,14 @@ mod tests {
                 .expect("canonicalize vendor config");
             assert_eq!(canonical.mcp_servers["server"]["env"]["TOKEN"], fake_secret);
             assert_eq!(canonical.mcp_servers["server"]["command"], "tool");
+            if runner == BaseCodingAgent::Codex {
+                assert_eq!(canonical.mcp_servers["server"]["cwd"], ".");
+                assert_eq!(canonical.mcp_servers["server"]["startup_timeout_sec"], 120);
+                assert_eq!(
+                    canonical.mcp_servers["server"]["future_option"],
+                    "preserved"
+                );
+            }
         }
     }
 

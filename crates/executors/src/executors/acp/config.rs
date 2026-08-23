@@ -335,7 +335,7 @@ impl Default for AcpClientServicePolicy {
     }
 }
 
-/// How the generic ACP runtime classifies a refusal after session recovery.
+/// How the generic ACP runtime handles adapter-specific session recovery behavior.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AcpResumePolicy {
     /// Preserve the Agent's refusal as a normal turn result.
@@ -344,6 +344,9 @@ pub enum AcpResumePolicy {
     /// If recovery had to reuse the requested ID because the response omitted
     /// `sessionId`, classify a refusal as an invalid session.
     RefusalMeansInvalidSession,
+    /// If resume/load explicitly reports that the requested session is unknown,
+    /// create a replacement session so the caller can persist its new ID.
+    UnknownSessionStartsNew,
 }
 
 /// Per-run inputs for the generic ACP runtime.

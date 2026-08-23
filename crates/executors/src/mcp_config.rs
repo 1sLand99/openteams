@@ -712,7 +712,10 @@ mod tests {
                     "command": "mcp-tool",
                     "args": ["serve"],
                     "env": {"MODE": "test"},
-                    "disabled": false
+                    "disabled": false,
+                    "cwd": ".",
+                    "startup_timeout_sec": 120,
+                    "future_option": {"nested": true}
                 },
                 "stream": {
                     "type": "sse",
@@ -731,6 +734,15 @@ mod tests {
             .map(String::as_str)
             .collect::<Vec<_>>();
         assert_eq!(server_names, vec!["alpha", "stream", "zeta"]);
+        assert_eq!(serialized["mcpServers"]["alpha"]["cwd"], ".");
+        assert_eq!(
+            serialized["mcpServers"]["alpha"]["startup_timeout_sec"],
+            120
+        );
+        assert_eq!(
+            serialized["mcpServers"]["alpha"]["future_option"],
+            serde_json::json!({"nested": true})
+        );
         assert_eq!(
             serde_json::from_value::<MemberMcpConfig>(serialized).expect("round trip config"),
             config
