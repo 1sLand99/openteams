@@ -122,11 +122,16 @@ jobs:
             new_version="$current_repo_version"
             new_tag="v${new_version}-${timestamp}"
           elif [[ "${{ github.event.inputs.version_type }}" == "prerelease" ]]; then
-            # For prerelease, align to stable release_base_version and keep
-            # the same major.minor.patch without bumping.
+            # A prerelease must target the next patch release. Reusing the
+            # current stable version would create an invalid publish sequence
+            # when that version is already present in the registry.
             # Then append a numeric prerelease identifier.
             # MSI requires a numeric prerelease identifier (<= 65535).
             npm version $release_base_version --no-git-tag-version --allow-same-version
+            npm version patch --no-git-tag-version
+
+            prerelease_base_version=$(node -p "require('./package.json').version")
+            echo "Prerelease base version: $prerelease_base_version"
 
             msi_prerelease_id="${GITHUB_RUN_NUMBER:-1}"
             if ! [[ "$msi_prerelease_id" =~ ^[0-9]+$ ]]; then
@@ -135,7 +140,7 @@ jobs:
             msi_prerelease_id=$(( (msi_prerelease_id - 1) % 65535 + 1 ))
             echo "MSI-compatible prerelease id: $msi_prerelease_id"
 
-            new_version="${release_base_version}-${msi_prerelease_id}"
+            new_version="${prerelease_base_version}-${msi_prerelease_id}"
             npm version "$new_version" --no-git-tag-version --allow-same-version
             new_tag="v${new_version}.${timestamp}"
           else
