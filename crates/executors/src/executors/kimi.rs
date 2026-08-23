@@ -1,5 +1,7 @@
 use std::{
     collections::BTreeSet,
+    fs::{self, DirBuilder, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -14,7 +16,7 @@ use workspace_utils::msg_store::MsgStore;
 use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
     AcpCapabilityProbe, AcpClientServicePolicy, AcpConfigChoice, AcpConfigOptionKind,
-    AcpConfigOptionSnapshot, AcpConfigSource, AcpExecutionOptions,
+    AcpConfigOptionSnapshot, AcpConfigSource, AcpExecutionOptions, AcpResumePolicy,
     mcp::{
         AcpMcpPolicy, load_prepared_acp_mcp_config, pin_mcp_run_environment,
         prepare_acp_mcp_for_run,
@@ -32,7 +34,7 @@ use crate::{
         utils::{json_has_nonempty_string, read_json_file},
     },
     mcp_config::MemberMcpConfig,
-    mcp_run::{McpRunContext, PreparedMcpRun, PrivateMcpRunDirectory},
+    mcp_run::{McpRunContext, PreparedMcpRun},
     model_discovery::{
         discover_model_map_from_cli_command, model_ids_from_model_map_json, read_config_value,
     },
@@ -110,6 +112,7 @@ impl KimiCode {
         let full_access = options.access_mode.unwrap_or_default() == AcpAccessMode::FullAccess;
         let mut harness = AcpAgentHarness::new()
             .with_approval_policy(approval_policy)
+            .with_resume_policy(AcpResumePolicy::UnknownSessionStartsNew)
             .with_required_session_mode("mode", "default")
             .with_additional_directories(additional_directories)
             .with_client_services(AcpClientServicePolicy {
@@ -247,16 +250,176 @@ impl KimiCode {
 async fn copy_optional_kimi_run_file(
     source_home: Option<&Path>,
     relative_path: &Path,
-    directory: &PrivateMcpRunDirectory,
+    run_home: &Path,
 ) -> Result<(), ExecutorError> {
-    let Some(source_home) = source_home else {
-        return Ok(());
+    let contents = match source_home {
+        Some(source_home) => tokio::fs::read(source_home.join(relative_path)).await,
+        None => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
     };
-    match tokio::fs::read(source_home.join(relative_path)).await {
+    match contents {
         Ok(contents) => {
-            directory.write_file(relative_path, &contents)?;
+            let target = run_home.join(relative_path);
+            replace_private_kimi_run_file(&target, &contents)?;
             Ok(())
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            remove_optional_kimi_run_file(&run_home.join(relative_path))?;
+            Ok(())
+        }
+        Err(error) => Err(ExecutorError::Io(error)),
+    }
+}
+
+fn kimi_credential_expiry(contents: &[u8]) -> Option<f64> {
+    serde_json::from_slice::<serde_json::Value>(contents)
+        .ok()?
+        .get("expires_at")?
+        .as_f64()
+}
+
+/// Keep OAuth refreshes written by Kimi in the stable session home. The
+/// canonical login wins again when it has a later expiry (for example after an
+/// explicit `kimi login`), while an older canonical token must not overwrite a
+/// token that Kimi refreshed during the previous run.
+async fn sync_kimi_run_credentials(
+    source_home: Option<&Path>,
+    run_home: &Path,
+) -> Result<(), ExecutorError> {
+    let relative_path = Path::new("credentials/kimi-code.json");
+    let target = run_home.join(relative_path);
+    let Some(source) = source_home.map(|home| home.join(relative_path)) else {
+        remove_optional_kimi_run_file(&target)?;
+        return Ok(());
+    };
+    if source == target {
+        return match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(()),
+            Ok(_) => Err(ExecutorError::Configuration(
+                "Kimi credentials path is not a regular file".to_string(),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(ExecutorError::Io(error)),
+        };
+    }
+
+    let source_contents = match tokio::fs::read(&source).await {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            remove_optional_kimi_run_file(&target)?;
+            return Ok(());
+        }
+        Err(error) => return Err(ExecutorError::Io(error)),
+    };
+    let keep_refreshed_target = match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            let target_contents = tokio::fs::read(&target).await.map_err(ExecutorError::Io)?;
+            match (
+                kimi_credential_expiry(&target_contents),
+                kimi_credential_expiry(&source_contents),
+            ) {
+                (Some(target_expiry), Some(source_expiry)) => target_expiry >= source_expiry,
+                _ => false,
+            }
+        }
+        Ok(_) => {
+            return Err(ExecutorError::Configuration(
+                "Kimi credentials path is not a regular file".to_string(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(ExecutorError::Io(error)),
+    };
+    if !keep_refreshed_target {
+        replace_private_kimi_run_file(&target, &source_contents)?;
+    }
+    Ok(())
+}
+
+/// Kimi persists each session index entry with an absolute path below
+/// `KIMI_CODE_HOME`, so this home must stay stable across follow-up runs.
+fn kimi_session_home(context: &McpRunContext) -> Result<PathBuf, ExecutorError> {
+    let workspace = fs::canonicalize(context.current_dir()).map_err(ExecutorError::Io)?;
+    let runtime_root = context.current_dir().join(".openteams");
+    create_private_kimi_directory(&runtime_root)?;
+    let runtime_root = fs::canonicalize(&runtime_root).map_err(ExecutorError::Io)?;
+    if !runtime_root.starts_with(&workspace) {
+        return Err(ExecutorError::Configuration(
+            "Kimi session state directory escapes the workspace".to_string(),
+        ));
+    }
+
+    let executor_state_root = runtime_root.join("executor-state");
+    create_private_kimi_directory(&executor_state_root)?;
+    let state_root = executor_state_root.join("kimi-code");
+    create_private_kimi_directory(&state_root)?;
+
+    let session_home = state_root.join(context.session_agent_id().to_string());
+    create_private_kimi_directory(&session_home)?;
+    Ok(session_home)
+}
+
+fn create_private_kimi_directory(path: &Path) -> Result<(), ExecutorError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => return Ok(()),
+        Ok(_) => {
+            return Err(ExecutorError::Configuration(
+                "Kimi session state path is not a directory".to_string(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ExecutorError::Io(error)),
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(ExecutorError::Io)?;
+    }
+    let mut builder = DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path).map_err(ExecutorError::Io)?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                Ok(())
+            } else {
+                Err(ExecutorError::Configuration(
+                    "Kimi session state path is not a directory".to_string(),
+                ))
+            }
+        }
+        Err(error) => Err(ExecutorError::Io(error)),
+    }
+}
+
+fn replace_private_kimi_run_file(path: &Path, contents: &[u8]) -> Result<(), ExecutorError> {
+    remove_optional_kimi_run_file(path)?;
+    if let Some(parent) = path.parent() {
+        create_private_kimi_directory(parent)?;
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(ExecutorError::Io)?;
+    file.write_all(contents).map_err(ExecutorError::Io)?;
+    file.sync_all().map_err(ExecutorError::Io)
+}
+
+fn remove_optional_kimi_run_file(path: &Path) -> Result<(), ExecutorError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {
+            fs::remove_file(path).map_err(ExecutorError::Io)
+        }
+        Ok(_) => Err(ExecutorError::Configuration(
+            "Kimi transient run path is not a file".to_string(),
+        )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(ExecutorError::Io(error)),
     }
@@ -274,23 +437,23 @@ impl StandardCodingAgentExecutor for KimiCode {
         let source_home = kimi_code_home(Some(&source_env));
         let prepared =
             prepare_acp_mcp_for_run(canonical, context, env, &mut self.cmd, "kimi-acp-mcp")?;
-        let directory = PrivateMcpRunDirectory::create(context, "kimi-code-home")?;
-        copy_optional_kimi_run_file(source_home.as_deref(), Path::new("config.toml"), &directory)
+        let run_home = kimi_session_home(context)?;
+        let vendor_mcp_path = run_home.join("mcp.json");
+        let transient_cleanup = crate::executors::ExecutorRunCleanup::new(vec![
+            run_home.join("config.toml"),
+            vendor_mcp_path.clone(),
+        ]);
+        copy_optional_kimi_run_file(source_home.as_deref(), Path::new("config.toml"), &run_home)
             .await?;
-        copy_optional_kimi_run_file(
-            source_home.as_deref(),
-            Path::new("credentials/kimi-code.json"),
-            &directory,
-        )
-        .await?;
-        directory.write_file(
-            "mcp.json",
+        replace_private_kimi_run_file(
+            &vendor_mcp_path,
             &serde_json::to_vec_pretty(&serde_json::json!({"mcpServers": {}}))?,
         )?;
-        let run_home = directory.path().to_string_lossy().into_owned();
+        sync_kimi_run_credentials(source_home.as_deref(), &run_home).await?;
+        let run_home = run_home.to_string_lossy().into_owned();
         pin_mcp_run_environment(env, &mut self.cmd, Self::CODE_HOME_ENV, run_home.clone());
         pin_mcp_run_environment(env, &mut self.cmd, Self::SHARE_DIR_ENV, run_home);
-        Ok(prepared.with_cleanup(directory.into_cleanup()))
+        Ok(prepared.with_cleanup(transient_cleanup))
     }
 
     fn overlay_acp_execution_options(&mut self, higher_priority: &AcpExecutionOptions) {
@@ -616,8 +779,11 @@ mod tests {
     use crate::env::RepoContext;
 
     fn run_context(workspace: &Path) -> McpRunContext {
-        McpRunContext::new(workspace, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
-            .expect("run context")
+        run_context_for(workspace, uuid::Uuid::new_v4())
+    }
+
+    fn run_context_for(workspace: &Path, session_agent_id: uuid::Uuid) -> McpRunContext {
+        McpRunContext::new(workspace, session_agent_id, uuid::Uuid::new_v4()).expect("run context")
     }
 
     fn kimi() -> KimiCode {
@@ -771,7 +937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_preparation_builds_private_home_preserves_auth_and_clears_vendor_mcp() {
+    async fn public_preparation_keeps_refreshed_credentials_with_session_state() {
         let workspace = tempfile::tempdir().expect("workspace");
         let source_home = workspace.path().join("source-kimi-home");
         tokio::fs::create_dir_all(source_home.join("credentials"))
@@ -788,7 +954,7 @@ mod tests {
         .expect("Kimi config");
         tokio::fs::write(
             &source_credentials_path,
-            r#"{"access_token":"fixture-login-token"}"#,
+            r#"{"access_token":"fixture-login-token","refresh_token":"fixture-refresh-token","expires_at":10}"#,
         )
         .await
         .expect("Kimi credentials");
@@ -830,8 +996,13 @@ mod tests {
             source_home.to_string_lossy().into_owned(),
         );
 
+        let session_agent_id = uuid::Uuid::new_v4();
         let prepared = executor
-            .prepare_mcp_for_run(&canonical, &run_context(workspace.path()), &mut env)
+            .prepare_mcp_for_run(
+                &canonical,
+                &run_context_for(workspace.path(), session_agent_id),
+                &mut env,
+            )
             .await
             .expect("Kimi MCP preparation");
         let run_home = PathBuf::from(env.get(KimiCode::CODE_HOME_ENV).expect("run Kimi home"));
@@ -897,8 +1068,37 @@ mod tests {
         assert!(executor.is_authenticated(&env));
         assert_eq!(effective.server_names(), ["member-only".to_string()].into());
 
+        let persisted_session = run_home
+            .join("sessions")
+            .join("wd_fixture")
+            .join("session_fixture")
+            .join("state.json");
+        tokio::fs::create_dir_all(persisted_session.parent().expect("session directory"))
+            .await
+            .expect("create persisted Kimi session directory");
+        tokio::fs::write(&persisted_session, b"{}")
+            .await
+            .expect("write persisted Kimi session state");
+        let refreshed_credentials =
+            br#"{"access_token":"refreshed-token","refresh_token":"rotated-token","expires_at":20}"#;
+        tokio::fs::write(
+            run_home.join("credentials/kimi-code.json"),
+            refreshed_credentials,
+        )
+        .await
+        .expect("simulate Kimi OAuth refresh");
+
         drop(prepared.into_cleanup());
-        assert!(!run_home.exists());
+        assert!(run_home.exists());
+        assert!(persisted_session.is_file());
+        assert!(!run_home.join("config.toml").exists());
+        assert_eq!(
+            tokio::fs::read(run_home.join("credentials/kimi-code.json"))
+                .await
+                .expect("refreshed credentials survive cleanup"),
+            refreshed_credentials
+        );
+        assert!(!run_home.join("mcp.json").exists());
         assert!(!snapshot_path.exists());
         assert_eq!(
             tokio::fs::read(&source_config_path)
@@ -918,6 +1118,45 @@ mod tests {
                 .expect("read source Kimi MCP after cleanup"),
             original_mcp
         );
+
+        let mut next_env = ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+        next_env.insert(
+            KimiCode::CODE_HOME_ENV,
+            source_home.to_string_lossy().into_owned(),
+        );
+        let mut next_executor = kimi();
+        next_executor.acp_mcp_policy = AcpMcpPolicy {
+            allowed_server_names: Some(Default::default()),
+            disabled_server_names: Default::default(),
+        };
+        let next_prepared = next_executor
+            .prepare_mcp_for_run(
+                &canonical,
+                &run_context_for(workspace.path(), session_agent_id),
+                &mut next_env,
+            )
+            .await
+            .expect("second Kimi MCP preparation");
+        let next_home = PathBuf::from(
+            next_env
+                .get(KimiCode::CODE_HOME_ENV)
+                .expect("second run Kimi home"),
+        );
+        assert_eq!(next_home, run_home);
+        assert!(persisted_session.is_file());
+        assert_eq!(
+            tokio::fs::read(next_home.join("credentials/kimi-code.json"))
+                .await
+                .expect("second run credentials"),
+            refreshed_credentials,
+            "an older source token must not replace Kimi's refreshed token"
+        );
+        drop(next_prepared.into_cleanup());
+        assert!(next_home.join("credentials/kimi-code.json").is_file());
     }
 
     #[tokio::test]
@@ -1028,7 +1267,15 @@ mod tests {
         );
 
         drop(prepared.into_cleanup());
-        assert!(!run_home.exists());
+        assert!(run_home.exists());
+        assert!(!run_home.join("config.toml").exists());
+        assert_eq!(
+            tokio::fs::read(run_home.join("credentials/kimi-code.json"))
+                .await
+                .expect("persistent Kimi credentials"),
+            original_credentials
+        );
+        assert!(!run_home.join("mcp.json").exists());
         assert_eq!(
             tokio::fs::read(&source_config_path)
                 .await
@@ -1047,6 +1294,51 @@ mod tests {
                 .expect("read source Kimi MCP after cleanup"),
             original_mcp
         );
+    }
+
+    #[tokio::test]
+    async fn failed_stable_home_preparation_does_not_seed_credentials() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source_home = workspace.path().join("source-kimi-home");
+        tokio::fs::create_dir_all(source_home.join("credentials"))
+            .await
+            .expect("source credentials directory");
+        tokio::fs::write(
+            source_home.join("config.toml"),
+            "default_model = \"fixture\"",
+        )
+        .await
+        .expect("source config");
+        tokio::fs::write(
+            source_home.join("credentials/kimi-code.json"),
+            r#"{"access_token":"fixture-login-token"}"#,
+        )
+        .await
+        .expect("source credentials");
+
+        let context = run_context(workspace.path());
+        let run_home = kimi_session_home(&context).expect("stable Kimi home");
+        tokio::fs::create_dir(run_home.join("mcp.json"))
+            .await
+            .expect("blocking vendor MCP directory");
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+        env.insert(
+            KimiCode::CODE_HOME_ENV,
+            source_home.to_string_lossy().into_owned(),
+        );
+
+        let error = kimi()
+            .prepare_mcp_for_run(&MemberMcpConfig::default(), &context, &mut env)
+            .await
+            .expect_err("non-file MCP target must fail closed");
+
+        assert!(error.to_string().contains("not a file"));
+        assert!(!run_home.join("config.toml").exists());
+        assert!(!run_home.join("credentials/kimi-code.json").exists());
     }
 
     #[tokio::test]

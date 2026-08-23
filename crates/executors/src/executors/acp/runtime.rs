@@ -6,7 +6,7 @@ use std::{
 };
 
 use agent_client_protocol::{
-    Agent, ConnectionTo, Lines, UntypedMessage,
+    Agent, ConnectionTo, ErrorCode, Lines, UntypedMessage,
     schema::{
         ProtocolVersion,
         v1::{
@@ -933,6 +933,14 @@ fn parse_session_start_response(
     })
 }
 
+fn is_unknown_session_error(error: &agent_client_protocol::Error) -> bool {
+    matches!(error.code, ErrorCode::ResourceNotFound)
+        || matches!(error.code, ErrorCode::InvalidParams) && {
+            let message = error.message.to_ascii_lowercase();
+            message.contains("unknown session") || message.contains("session not found")
+        }
+}
+
 fn snapshot_config_options(options: &[SessionConfigOption]) -> Vec<AcpConfigOptionSnapshot> {
     options.iter().filter_map(snapshot_config_option).collect()
 }
@@ -1093,7 +1101,7 @@ async fn run_connection(
             .data("ACP Agent does not support additionalDirectories"));
     }
 
-    let is_follow_up = existing_session.is_some();
+    let mut resumed_existing_session = false;
     let mut session_state = match existing_session {
         None => {
             send_session_start_request(
@@ -1108,7 +1116,7 @@ async fn run_connection(
         }
         Some(existing) => {
             let session_id = SessionId::new(existing);
-            if negotiated
+            let resume_result = if negotiated
                 .agent_capabilities
                 .session_capabilities
                 .resume
@@ -1120,9 +1128,9 @@ async fn run_connection(
                     ResumeSessionRequest::new(session_id.clone(), cwd)
                         .additional_directories(config.additional_directories.clone())
                         .mcp_servers(config.mcp_servers.clone()),
-                    Some(session_id),
+                    Some(session_id.clone()),
                 )
-                .await?
+                .await
             } else if negotiated.agent_capabilities.load_session {
                 send_session_start_request(
                     connection,
@@ -1130,9 +1138,9 @@ async fn run_connection(
                     LoadSessionRequest::new(session_id.clone(), cwd)
                         .additional_directories(config.additional_directories.clone())
                         .mcp_servers(config.mcp_servers.clone()),
-                    Some(session_id),
+                    Some(session_id.clone()),
                 )
-                .await?
+                .await
             } else {
                 let message =
                     "Agent advertises neither session/resume nor session/load".to_string();
@@ -1141,6 +1149,31 @@ async fn run_connection(
                     Err(BootstrapError::FollowUpNotSupported(message.clone())),
                 );
                 return Err(agent_client_protocol::Error::method_not_found().data(message));
+            };
+            match resume_result {
+                Ok(state) => {
+                    resumed_existing_session = true;
+                    state
+                }
+                Err(error)
+                    if config.resume_policy == AcpResumePolicy::UnknownSessionStartsNew
+                        && is_unknown_session_error(&error) =>
+                {
+                    tracing::warn!(
+                        requested_session_id = %session_id.0,
+                        "ACP Agent no longer knows the persisted session; starting a replacement session"
+                    );
+                    send_session_start_request(
+                        connection,
+                        "session/new",
+                        NewSessionRequest::new(cwd)
+                            .additional_directories(config.additional_directories.clone())
+                            .mcp_servers(config.mcp_servers.clone()),
+                        None,
+                    )
+                    .await?
+                }
+                Err(error) => return Err(error),
             }
         }
     };
@@ -1195,7 +1228,7 @@ async fn run_connection(
         }
     };
     if config.resume_policy == AcpResumePolicy::RefusalMeansInvalidSession
-        && is_follow_up
+        && resumed_existing_session
         && session_id_was_fallback
         && response.stop_reason == StopReason::Refusal
     {
@@ -1778,6 +1811,25 @@ mod tests {
             AcpAgentHarness::new().config.resume_policy,
             AcpResumePolicy::PreserveRefusal
         );
+
+        let harness =
+            AcpAgentHarness::new().with_resume_policy(AcpResumePolicy::UnknownSessionStartsNew);
+        assert_eq!(
+            harness.config.resume_policy,
+            AcpResumePolicy::UnknownSessionStartsNew
+        );
+    }
+
+    #[test]
+    fn unknown_session_detection_is_narrow_to_resume_lookup_errors() {
+        let unknown =
+            agent_client_protocol::Error::new(-32602, "Unknown sessionId: session_fixture");
+        let missing = agent_client_protocol::Error::resource_not_found(None);
+        let unrelated = agent_client_protocol::Error::invalid_params().data("invalid cwd");
+
+        assert!(is_unknown_session_error(&unknown));
+        assert!(is_unknown_session_error(&missing));
+        assert!(!is_unknown_session_error(&unrelated));
     }
 
     #[test]
