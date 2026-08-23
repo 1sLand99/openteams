@@ -3,7 +3,7 @@ id: literature-research-reviewer
 name: Literature Research Reviewer
 description: 使用浏览器独立核验文献检索与关键主张，关注权威数据库、顶刊顶会覆盖及证据边界
 runner_type: CODEX
-recommended_model: gpt-5.2-codex
+recommended_model: gpt-5.6-terra
 execution_config:
   mcp:
     mcpServers:

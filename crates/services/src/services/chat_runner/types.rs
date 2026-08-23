@@ -148,6 +148,8 @@ pub enum ChatStreamEvent {
         agent_id: Uuid,
         agent_name: String,
         model: Option<String>,
+        /// Stable durable delivery identity (`chat_message_queue.id`) for this run.
+        delivery_id: Uuid,
         run_id: Uuid,
         /// User (or upstream) message whose processing triggered this run.
         source_message_id: Uuid,

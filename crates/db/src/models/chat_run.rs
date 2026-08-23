@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use executors::logs::TokenUsageInfo;
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool, Type};
+use sqlx::{FromRow, QueryBuilder, Sqlite, SqlitePool, Transaction, Type};
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -329,6 +329,48 @@ impl ChatRun {
             data.meta_path
         )
         .fetch_one(pool)
+        .await
+    }
+
+    pub async fn create_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        data: &CreateChatRun,
+        id: Uuid,
+    ) -> Result<Self, sqlx::Error> {
+        sqlx::query_as::<_, ChatRun>(
+            r#"INSERT INTO chat_runs
+               (id, session_id, session_agent_id, workspace_path, run_index, run_dir, input_path, output_path, raw_log_path, meta_path)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+               RETURNING id,
+                         session_id,
+                         session_agent_id,
+                         workspace_path,
+                         run_index,
+                         run_dir,
+                         input_path,
+                         output_path,
+                         raw_log_path,
+                         meta_path,
+                         log_state,
+                         artifact_state,
+                         log_truncated,
+                         log_capture_degraded,
+                         pruned_at,
+                         prune_reason,
+                         retention_summary_json,
+                         created_at"#,
+        )
+        .bind(id)
+        .bind(data.session_id)
+        .bind(data.session_agent_id)
+        .bind(&data.workspace_path)
+        .bind(data.run_index)
+        .bind(&data.run_dir)
+        .bind(&data.input_path)
+        .bind(&data.output_path)
+        .bind(&data.raw_log_path)
+        .bind(&data.meta_path)
+        .fetch_one(&mut **transaction)
         .await
     }
 

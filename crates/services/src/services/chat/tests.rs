@@ -16,6 +16,7 @@ mod tests {
     use super::{
         CompressionType, SimplifiedMessage, all_agents_running, build_message_analytics_metrics,
         build_summarization_prompt, compress_messages_if_needed, create_message,
+        create_message_idempotent, create_message_idempotent_with_id, create_message_with_id,
         create_session_with_project_members, effective_agent_name,
         is_protocol_notice_history_message, is_workflow_chat_input_mode,
         limit_summary_input_messages, member_name_overrides_for_session, normalized_member_name,
@@ -245,6 +246,18 @@ mod tests {
                 FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
             )
             "#,
+            r#"
+            CREATE TABLE chat_message_idempotency (
+                session_id BLOB NOT NULL,
+                client_message_id TEXT NOT NULL,
+                message_id BLOB NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                PRIMARY KEY (session_id, client_message_id),
+                FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY (message_id) REFERENCES chat_messages(id) ON DELETE CASCADE
+                    DEFERRABLE INITIALLY DEFERRED
+            )
+            "#,
         ] {
             sqlx::query(statement)
                 .execute(&pool)
@@ -427,6 +440,108 @@ mod tests {
         .expect("create user message");
 
         assert_eq!(message.mentions.0, vec!["lead"]);
+    }
+
+    #[tokio::test]
+    async fn client_message_id_retry_returns_original_message_without_duplicate_insert() {
+        let pool = setup_chat_message_pool().await;
+        let session = create_active_session(&pool).await;
+        let meta = Some(serde_json::json!({
+            "client_message_id": "client-retry-1",
+            "mentions": ["lead"]
+        }));
+
+        let first = create_message_idempotent(
+            &pool,
+            session.id,
+            ChatSenderType::User,
+            None,
+            "first body".to_string(),
+            meta.clone(),
+        )
+        .await
+        .expect("first request");
+        let replay = create_message_idempotent(
+            &pool,
+            session.id,
+            ChatSenderType::User,
+            None,
+            "retry body must not replace original".to_string(),
+            meta,
+        )
+        .await
+        .expect("retry request");
+
+        assert!(first.created);
+        assert!(!replay.created);
+        assert_eq!(replay.message.id, first.message.id);
+        assert_eq!(replay.message.content, "first body");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM chat_messages WHERE session_id = ?1",
+        )
+        .bind(session.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn failed_message_insert_rolls_back_idempotency_claim() {
+        let pool = setup_chat_message_pool().await;
+        let session = create_active_session(&pool).await;
+        let colliding_id = Uuid::new_v4();
+        create_message_with_id(
+            &pool,
+            session.id,
+            ChatSenderType::User,
+            None,
+            "existing message".to_string(),
+            Some(serde_json::json!({})),
+            colliding_id,
+        )
+        .await
+        .expect("seed colliding message id");
+        let meta = Some(serde_json::json!({
+            "client_message_id": "client-rollback-1"
+        }));
+
+        assert!(
+            create_message_idempotent_with_id(
+                &pool,
+                session.id,
+                ChatSenderType::User,
+                None,
+                "first attempt".to_string(),
+                meta.clone(),
+                colliding_id,
+            )
+            .await
+            .is_err()
+        );
+
+        let retry = create_message_idempotent_with_id(
+            &pool,
+            session.id,
+            ChatSenderType::User,
+            None,
+            "retry succeeds".to_string(),
+            meta,
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("retry after rolled-back claim");
+        assert!(retry.created);
+        assert_eq!(retry.message.content, "retry succeeds");
+        let mapping_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM chat_message_idempotency
+             WHERE session_id = ?1 AND client_message_id = 'client-rollback-1'",
+        )
+        .bind(session.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mapping_count, 1);
     }
 
     #[tokio::test]

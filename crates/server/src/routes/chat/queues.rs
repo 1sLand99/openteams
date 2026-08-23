@@ -154,7 +154,9 @@ pub async fn delete_queue_item(
 
     ensure_delete_allowed(queue_item.status)?;
 
-    let deleted = service.delete_queued(pool, queue_id).await?;
+    let deleted = service
+        .delete_queued_cas(pool, queue_id, queue_item.revision)
+        .await?;
     if deleted == 0 {
         return Err(ApiError::Conflict(
             "Queue item is no longer queued.".to_string(),
@@ -166,8 +168,7 @@ pub async fn delete_queue_item(
     // already executed for another member or is still pending elsewhere, and must stay visible.
     let other_references = service
         .other_reference_count_for_chat_message(pool, queue_item.chat_message_id, queue_id)
-        .await
-        .unwrap_or(0);
+        .await?;
     let mut deleted_chat_message_id = None;
     if other_references == 0 {
         let rows = ChatMessage::delete(pool, queue_item.chat_message_id).await?;
@@ -238,6 +239,7 @@ mod tests {
     fn snapshot(status: MemberQueueStatus, can_continue: bool) -> MemberQueueSnapshot {
         MemberQueueSnapshot {
             session_id: Uuid::new_v4(),
+            revision: 0,
             session_agent_id: Uuid::new_v4(),
             agent_id: Uuid::new_v4(),
             status,
@@ -252,6 +254,10 @@ mod tests {
     #[test]
     fn delete_guard_allows_only_queued_items() {
         assert!(ensure_delete_allowed(QueuedMessageStatus::Queued).is_ok());
+        assert!(matches!(
+            ensure_delete_allowed(QueuedMessageStatus::Starting),
+            Err(ApiError::Conflict(_))
+        ));
         assert!(matches!(
             ensure_delete_allowed(QueuedMessageStatus::Processing),
             Err(ApiError::Conflict(_))

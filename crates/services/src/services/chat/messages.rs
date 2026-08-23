@@ -18,6 +18,145 @@ pub async fn create_message(
     .await
 }
 
+#[derive(Debug, Clone)]
+pub struct IdempotentChatMessage {
+    pub message: ChatMessage,
+    pub created: bool,
+}
+
+fn normalized_client_message_id(
+    meta: Option<&Value>,
+) -> Result<Option<String>, ChatServiceError> {
+    let Some(client_message_id) = meta
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("client_message_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if client_message_id.len() > 256 {
+        return Err(ChatServiceError::Validation(
+            "client_message_id cannot exceed 256 bytes".to_string(),
+        ));
+    }
+    Ok(Some(client_message_id.to_string()))
+}
+
+/// Create a user message exactly once for a session/client key. A retry returns the original
+/// row, allowing the route to skip analytics and runner dispatch on replay.
+pub async fn create_message_idempotent(
+    pool: &SqlitePool,
+    session_id: Uuid,
+    sender_type: ChatSenderType,
+    sender_id: Option<Uuid>,
+    content: String,
+    meta: Option<Value>,
+) -> Result<IdempotentChatMessage, ChatServiceError> {
+    create_message_idempotent_with_id(
+        pool,
+        session_id,
+        sender_type,
+        sender_id,
+        content,
+        meta,
+        Uuid::new_v4(),
+    )
+    .await
+}
+
+/// Attachment uploads reserve their storage path before persistence, so they provide the
+/// candidate message id while retaining the same idempotency semantics.
+pub async fn create_message_idempotent_with_id(
+    pool: &SqlitePool,
+    session_id: Uuid,
+    sender_type: ChatSenderType,
+    sender_id: Option<Uuid>,
+    content: String,
+    mut meta: Option<Value>,
+    message_id: Uuid,
+) -> Result<IdempotentChatMessage, ChatServiceError> {
+    let client_message_id = if matches!(sender_type, ChatSenderType::User) {
+        normalized_client_message_id(meta.as_ref())?
+    } else {
+        None
+    };
+    let Some(client_message_id) = client_message_id else {
+        return Ok(IdempotentChatMessage {
+            message: create_message_with_id(
+                pool,
+                session_id,
+                sender_type,
+                sender_id,
+                content,
+                meta,
+                message_id,
+            )
+            .await?,
+            created: true,
+        });
+    };
+
+    if let Some(existing) =
+        ChatMessage::find_idempotent_user_message(pool, session_id, &client_message_id).await?
+    {
+        return Ok(IdempotentChatMessage {
+            message: existing,
+            created: false,
+        });
+    }
+
+    if let Some(meta_object) = meta.as_mut().and_then(Value::as_object_mut) {
+        meta_object.insert(
+            "client_message_id".to_string(),
+            Value::String(client_message_id.clone()),
+        );
+    }
+    let data = prepare_chat_message(
+        pool,
+        session_id,
+        sender_type,
+        sender_id,
+        content,
+        meta,
+    )
+    .await?;
+    let mut transaction = pool.begin().await?;
+    let claimed = ChatMessage::claim_idempotency_key_in_transaction(
+        &mut transaction,
+        session_id,
+        &client_message_id,
+        message_id,
+    )
+    .await?;
+    if !claimed {
+        transaction.rollback().await?;
+        let existing = ChatMessage::find_idempotent_user_message(
+            pool,
+            session_id,
+            &client_message_id,
+        )
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
+        return Ok(IdempotentChatMessage {
+            message: existing,
+            created: false,
+        });
+    }
+
+    let message = ChatMessage::create_in_transaction(&mut transaction, &data, message_id).await?;
+    sqlx::query("UPDATE chat_sessions SET updated_at = datetime('now', 'subsec') WHERE id = ?1")
+        .bind(session_id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(IdempotentChatMessage {
+        message,
+        created: true,
+    })
+}
+
 pub async fn create_message_with_id(
     pool: &SqlitePool,
     session_id: Uuid,
@@ -27,6 +166,23 @@ pub async fn create_message_with_id(
     meta: Option<Value>,
     message_id: Uuid,
 ) -> Result<ChatMessage, ChatServiceError> {
+    let data = prepare_chat_message(pool, session_id, sender_type, sender_id, content, meta).await?;
+
+    let message = ChatMessage::create(pool, &data, message_id).await?;
+
+    ChatSession::touch(pool, session_id).await?;
+
+    Ok(message)
+}
+
+async fn prepare_chat_message(
+    pool: &SqlitePool,
+    session_id: Uuid,
+    sender_type: ChatSenderType,
+    sender_id: Option<Uuid>,
+    content: String,
+    meta: Option<Value>,
+) -> Result<CreateChatMessage, ChatServiceError> {
     if matches!(sender_type, ChatSenderType::Agent) && sender_id.is_none() {
         return Err(ChatServiceError::Validation(
             "sender_id is required for agent messages".to_string(),
@@ -99,23 +255,14 @@ pub async fn create_message_with_id(
         "created_at": Utc::now().to_rfc3339(),
     });
 
-    let message = ChatMessage::create(
-        pool,
-        &CreateChatMessage {
-            session_id,
-            sender_type,
-            sender_id,
-            content,
-            mentions,
-            meta,
-        },
-        message_id,
-    )
-    .await?;
-
-    ChatSession::touch(pool, session_id).await?;
-
-    Ok(message)
+    Ok(CreateChatMessage {
+        session_id,
+        sender_type,
+        sender_id,
+        content,
+        mentions,
+        meta,
+    })
 }
 
 pub fn is_protocol_notice_history_message(message: &ChatMessage) -> bool {

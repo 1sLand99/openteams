@@ -10,6 +10,7 @@ use std::{
     },
 };
 
+use async_trait::async_trait;
 use base64::Engine as _;
 use chrono::Utc;
 use dashmap::DashMap;
@@ -18,6 +19,7 @@ use db::{
     models::{
         chat_agent::ChatAgent,
         chat_message::{ChatMessage, ChatSenderType},
+        chat_message_queue::QueuedMessageStatus,
         chat_run::{
             ChatRun, ChatRunArtifactState, ChatRunLogState, ChatRunRetentionSummary, CreateChatRun,
         },
@@ -30,6 +32,7 @@ use db::{
     },
 };
 use executors::{
+    approvals::{ExecutorApprovalError, ExecutorApprovalRequest, ExecutorApprovalService},
     env::{ExecutionEnv, RepoContext},
     executors::{
         BaseCodingAgent, CancellationToken, ExecutorError, ExecutorExitSignal, ExecutorPrompt,
@@ -53,6 +56,7 @@ use tokio::{
 use tokio_util::io::ReaderStream;
 use ts_rs::TS;
 use utils::{
+    approvals::ApprovalStatus,
     assets::{asset_dir, config_path},
     log_msg::LogMsg,
     msg_store::{MsgStore, SESSION_INACTIVITY_TIMEOUT},

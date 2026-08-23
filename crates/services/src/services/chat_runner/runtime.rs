@@ -3,9 +3,8 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::services::project::source_control::{SourceControlObservedPath, SourceControlService};
-
 use super::{startup_timing, *};
+use crate::services::project::source_control::{SourceControlObservedPath, SourceControlService};
 
 pub(super) struct ExitWatcherArgs {
     pub(super) child: command_group::AsyncGroupChild,
@@ -520,14 +519,18 @@ impl ChatRunner {
         spawned: &mut SpawnedChild,
         msg_store: Arc<MsgStore>,
         raw_log_spool: Arc<Mutex<RunLogSpool>>,
-    ) -> RunLogForwarders {
-        let stdout = spawned.take_stdout().expect("chat runner missing stdout");
-        let stderr = spawned
-            .child
-            .inner()
-            .stderr
-            .take()
-            .expect("chat runner missing stderr");
+    ) -> Result<RunLogForwarders, ChatRunnerError> {
+        let stdout = spawned.take_stdout().ok_or_else(|| {
+            ChatRunnerError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "chat runner missing stdout",
+            ))
+        })?;
+        // Protocol-backed executors may deliberately consume or disable the child stderr pipe
+        // and expose their normalized output through `SpawnedChild::stdout` instead. Treat that
+        // as a supported capability shape rather than panicking the HTTP request that started
+        // the run.
+        let stderr = spawned.child.inner().stderr.take();
 
         let stdout_store = msg_store.clone();
         let stdout_log = raw_log_spool.clone();
@@ -564,6 +567,10 @@ impl ChatRunner {
         let stderr_store = msg_store.clone();
         let stderr_log = raw_log_spool.clone();
         let stderr = tokio::spawn(async move {
+            let Some(stderr) = stderr else {
+                tracing::debug!("[chat_runner] Executor exposes no stderr pipe");
+                return;
+            };
             tracing::debug!("[chat_runner] Starting stderr forwarder");
             let mut stream = ReaderStream::new(stderr);
             let mut decoder = Utf8LossyDecoder::new();
@@ -611,7 +618,7 @@ impl ChatRunner {
             tracing::debug!("[chat_runner] stderr forwarder ended");
         });
 
-        RunLogForwarders { stdout, stderr }
+        Ok(RunLogForwarders { stdout, stderr })
     }
 
     fn u32_field(value: &serde_json::Value, name: &str) -> Option<u32> {
@@ -622,10 +629,7 @@ impl ChatRunner {
     }
 
     fn string_field(value: &serde_json::Value, name: &str) -> Option<String> {
-        value
-            .get(name)
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
+        value.get(name).and_then(|v| v.as_str()).map(str::to_string)
     }
 
     pub(crate) fn parse_token_usage_from_stdout_line(line: &str) -> Option<TokenUsageInfo> {
@@ -669,10 +673,7 @@ impl ChatRunner {
                     &value,
                     "snapshot_reasoning_output_tokens",
                 ),
-                snapshot_cache_read_tokens: Self::u32_field(
-                    &value,
-                    "snapshot_cache_read_tokens",
-                ),
+                snapshot_cache_read_tokens: Self::u32_field(&value, "snapshot_cache_read_tokens"),
                 is_estimated: false,
             });
         }
@@ -864,9 +865,7 @@ impl ChatRunner {
         entry
             .metadata
             .as_ref()
-            .and_then(|metadata| {
-                metadata.get(executors::executors::acp::ACP_TURN_SIGNAL_KEY)
-            })
+            .and_then(|metadata| metadata.get(executors::executors::acp::ACP_TURN_SIGNAL_KEY))
             .and_then(serde_json::Value::as_str)
             == Some(executors::executors::acp::ACP_PERMISSION_REJECTED_SIGNAL)
     }
@@ -983,9 +982,7 @@ impl ChatRunner {
 
         for line in content.lines() {
             let normalized = line.trim();
-            if !normalized.is_empty()
-                && previous_non_empty.as_deref() == Some(normalized)
-            {
+            if !normalized.is_empty() && previous_non_empty.as_deref() == Some(normalized) {
                 continue;
             }
 
@@ -1243,9 +1240,9 @@ impl ChatRunner {
     }
 
     fn is_openteams_observed_path(path: &str) -> bool {
-        PathBuf::from(path).components().next().is_some_and(|component| {
-            matches!(component, Component::Normal(part) if part == ".openteams")
-        })
+        PathBuf::from(path).components().next().is_some_and(
+            |component| matches!(component, Component::Normal(part) if part == ".openteams"),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1449,11 +1446,9 @@ impl ChatRunner {
                         );
                     }
                     Ok(LogMsg::JsonPatch(patch)) => {
-                        acp_permission_rejected |=
-                            Self::patch_has_acp_permission_rejection(&patch);
+                        acp_permission_rejected |= Self::patch_has_acp_permission_rejection(&patch);
                         let activity_lines = activity_state.drain_patch_lines(&patch, true);
-                        let first_activity_line =
-                            !saw_activity_line && !activity_lines.is_empty();
+                        let first_activity_line = !saw_activity_line && !activity_lines.is_empty();
                         let assistant_updates_before = assistant_update_count;
                         // The frontend creates a synthetic row for this delta and replaces it
                         // when the authoritative activity line arrives. Keep that delivery
@@ -1491,7 +1486,10 @@ impl ChatRunner {
                             startup_timing
                                 .mark_and_persist(
                                     startup_timing::StartupMilestoneName::FirstActivityLine,
-                                    Some(format!("sequence={}", activity_sequence.saturating_sub(1))),
+                                    Some(format!(
+                                        "sequence={}",
+                                        activity_sequence.saturating_sub(1)
+                                    )),
                                 )
                                 .await;
                         }
@@ -1711,11 +1709,9 @@ impl ChatRunner {
                             &workspace_change_baseline,
                         )
                         .await;
-                        let diff_info = workspace_delta.diff_patch.as_ref().map(|patch| {
-                            DiffInfo {
-                                _truncated: patch.len() > 4000,
-                                observed_paths: workspace_delta.diff_paths.clone(),
-                            }
+                        let diff_info = workspace_delta.diff_patch.as_ref().map(|patch| DiffInfo {
+                            _truncated: patch.len() > 4000,
+                            observed_paths: workspace_delta.diff_paths.clone(),
                         });
                         let untracked_files = workspace_delta.untracked_files;
                         let workspace_observed_paths =
@@ -2055,14 +2051,12 @@ impl ChatRunner {
                             )
                             .await;
 
-                        let protocol_output = if matches!(
-                            completion_status,
-                            RunCompletionStatus::Stopped
-                        ) {
-                            ""
-                        } else {
-                            &latest_assistant
-                        };
+                        let protocol_output =
+                            if matches!(completion_status, RunCompletionStatus::Stopped) {
+                                ""
+                            } else {
+                                &latest_assistant
+                            };
                         let process_result = runner
                             .process_agent_protocol_output(
                                 session_id,
@@ -2405,8 +2399,8 @@ impl ChatRunner {
                                     .to_string(),
                                     duration_bucket: duration_bucket(duration_ms).to_string(),
                                 })
-                                    .with_session(session_id)
-                                    .with_run(run_id),
+                                .with_session(session_id)
+                                .with_run(run_id),
                             )
                             .await;
 
@@ -2417,16 +2411,20 @@ impl ChatRunner {
                                     AnalyticsEvent::new(AnalyticsEventPayload::AgentError {
                                         run_kind: Some("chat".to_string()),
                                         phase: Some("exit".to_string()),
-                                        error_code: Self::normalized_entry_error_name(error_type.as_ref()),
+                                        error_code: Self::normalized_entry_error_name(
+                                            error_type.as_ref(),
+                                        ),
                                         agent_id: Some(agent_id),
                                         agent_role: None,
                                     })
-                                        .with_session(session_id)
-                                        .with_run(run_id),
+                                    .with_session(session_id)
+                                    .with_run(run_id),
                                 )
                                 .await;
                             let failure_detail = visible_error_content
-                                .or_else(|| (!error_content.is_empty()).then_some(error_content.as_str()))
+                                .or_else(|| {
+                                    (!error_content.is_empty()).then_some(error_content.as_str())
+                                })
                                 .unwrap_or("Agent run failed.");
                             InboxService::new()
                                 .notify_chat_agent_failed(
@@ -2459,56 +2457,82 @@ impl ChatRunner {
                             }
                         };
 
-                        let (finalization_applied, next_queued_entry) =
-                            if final_state == ChatSessionAgentState::Idle {
-                                match QueuedMessageService::new()
-                                    .finalize_completed_run(
+                        let delivery_service = QueuedMessageService::new();
+                        let current_delivery =
+                            delivery_service.find_by_run_id(&db.pool, run_id).await;
+                        let (finalization_applied, next_queued_entry) = match current_delivery {
+                            Ok(Some(delivery)) if final_state == ChatSessionAgentState::Idle => {
+                                match delivery_service
+                                    .finalize_completed_run_cas(
                                         &db.pool,
                                         run_id,
                                         session_agent_id,
+                                        delivery.revision,
                                         protocol_retry_request.is_none(),
                                     )
                                     .await
                                 {
-                                    Ok(finalization) => {
-                                        (finalization.applied, finalization.next)
-                                    }
+                                    Ok(finalization) => (finalization.applied, finalization.next),
                                     Err(err) => {
                                         tracing::warn!(
                                             session_id = %session_id,
                                             session_agent_id = %session_agent_id,
                                             run_id = %run_id,
+                                            delivery_id = %delivery.id,
+                                            delivery_revision = delivery.revision,
                                             error = %err,
-                                            "failed to atomically finalize completed agent run"
+                                            "failed to CAS-finalize completed agent run"
                                         );
                                         (false, None)
                                     }
                                 }
-                            } else {
-                                match QueuedMessageService::new()
-                                    .finalize_failed_run(
+                            }
+                            Ok(Some(delivery)) => {
+                                match delivery_service
+                                    .finalize_failed_run_cas(
                                         &db.pool,
                                         run_id,
                                         session_agent_id,
-                                        Some(format!(
-                                            "agent run ended in state {final_state:?}"
-                                        )),
+                                        delivery.revision,
+                                        Some(format!("agent run ended in state {final_state:?}")),
                                     )
                                     .await
                                 {
-                                    Ok(applied) => (applied, None),
+                                    Ok(finalization) => (finalization.applied, None),
                                     Err(err) => {
                                         tracing::warn!(
                                             session_id = %session_id,
                                             session_agent_id = %session_agent_id,
                                             run_id = %run_id,
+                                            delivery_id = %delivery.id,
+                                            delivery_revision = delivery.revision,
                                             error = %err,
-                                            "failed to atomically finalize failed agent run"
+                                            "failed to CAS-finalize failed agent run"
                                         );
                                         (false, None)
                                     }
                                 }
-                            };
+                            }
+                            Ok(None) => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    session_agent_id = %session_agent_id,
+                                    run_id = %run_id,
+                                    "agent run has no bound delivery at finalization"
+                                );
+                                (false, None)
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    session_agent_id = %session_agent_id,
+                                    run_id = %run_id,
+                                    error = %err,
+                                    "failed to load current delivery revision for finalization"
+                                );
+                                (false, None)
+                            }
+                        };
                         if !finalization_applied {
                             tracing::warn!(
                                 session_id = %session_id,
@@ -2553,14 +2577,12 @@ impl ChatRunner {
                                 mention_status = ?mention_status,
                                 "mention status: "
                             );
-                            let project_member_id = ChatSessionAgent::find_by_id(
-                                &db.pool,
-                                session_agent_id,
-                            )
-                            .await
-                            .ok()
-                            .flatten()
-                            .and_then(|member| member.project_member_id);
+                            let project_member_id =
+                                ChatSessionAgent::find_by_id(&db.pool, session_agent_id)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|member| member.project_member_id);
                             let _ = sender.send(ChatStreamEvent::MentionAcknowledged {
                                 session_id,
                                 message_id: source_message_id,
@@ -2698,15 +2720,18 @@ impl ChatRunner {
                                         )
                                         .await;
                                         match target_result {
-                                            Ok(_) => runner.run_agent_internal(
-                                            AgentRunTarget {
-                                                member,
-                                                claimed_queue_id: None,
-                                            },
-                                            &retry_message,
-                                            retry_track_source,
-                                        )
-                                        .await,
+                                            Ok(_) => {
+                                                runner
+                                                    .run_agent_internal(
+                                                        AgentRunTarget {
+                                                            member,
+                                                            claimed_queue_id: None,
+                                                        },
+                                                        &retry_message,
+                                                        retry_track_source,
+                                                    )
+                                                    .await
+                                            }
                                             Err(err) => Err(ChatRunnerError::Database(err)),
                                         }
                                     }
@@ -3579,22 +3604,33 @@ impl ChatRunner {
             return Ok(());
         };
 
-        if !matches!(
-            session_agent.state,
-            ChatSessionAgentState::Running
-                | ChatSessionAgentState::WaitingApproval
-                | ChatSessionAgentState::Stopping
-        ) {
+        let delivery_service = QueuedMessageService::new();
+        let active_delivery = delivery_service
+            .find_active_for_member(&self.db.pool, session_agent_id)
+            .await?;
+
+        if active_delivery.is_none()
+            && !matches!(
+                session_agent.state,
+                ChatSessionAgentState::Running
+                    | ChatSessionAgentState::WaitingApproval
+                    | ChatSessionAgentState::Stopping
+            )
+        {
             tracing::info!(
                 session_id = %session_id,
                 session_agent_id = %session_agent_id,
                 state = ?session_agent.state,
-                "stop_agent ignored because agent is not active"
+                "stop_agent ignored because neither member nor delivery is active"
             );
             return Ok(());
         }
 
         let control_found = self.run_controls.contains_key(&session_agent_id);
+        let active_run_id = self
+            .run_controls
+            .get(&session_agent_id)
+            .map(|control| control.run_id);
         tracing::info!("Run control found: {}", control_found);
 
         if !control_found {
@@ -3602,32 +3638,133 @@ impl ChatRunner {
             return Ok(());
         }
 
-        if control_found && session_agent.state != ChatSessionAgentState::Stopping {
+        if control_found {
             let running_started_at = session_agent.updated_at;
-            let active_run_id = self
-                .run_controls
-                .get(&session_agent_id)
-                .map(|control| control.run_id);
-            let updated = ChatSessionAgent::update_state(
-                &self.db.pool,
-                session_agent_id,
-                ChatSessionAgentState::Stopping,
-            )
-            .await?;
+            let mut projected_state = None;
 
-            self.emit(
-                session_id,
-                ChatStreamEvent::AgentState {
-                    session_agent_id,
-                    agent_id: updated.agent_id,
-                    state: ChatSessionAgentState::Stopping,
-                    run_id: active_run_id,
-                    started_at: Some(running_started_at),
-                },
-            );
+            if let Some(delivery) = active_delivery {
+                #[cfg(any(test, feature = "qa-mode"))]
+                self.stop_transition_gate.checkpoint().await;
+                match delivery.status {
+                    QueuedMessageStatus::Starting | QueuedMessageStatus::Processing => {
+                        match delivery_service
+                            .transition_status_cas(
+                                &self.db.pool,
+                                delivery.id,
+                                delivery.revision,
+                                delivery.status,
+                                QueuedMessageStatus::Cancelled,
+                            )
+                            .await?
+                        {
+                            Some(_) => {
+                                self.emit_member_queue_update(session_id, session_agent_id)
+                                    .await;
+                                projected_state = Some((
+                                    session_agent.agent_id,
+                                    ChatSessionAgentState::Idle,
+                                    None,
+                                    None,
+                                ));
+                            }
+                            None => tracing::debug!(
+                                session_id = %session_id,
+                                session_agent_id = %session_agent_id,
+                                delivery_id = %delivery.id,
+                                expected_revision = delivery.revision,
+                                "stop delivery transition lost its CAS race"
+                            ),
+                        }
+                    }
+                    QueuedMessageStatus::Running | QueuedMessageStatus::WaitingApproval => {
+                        if let Some(run_id) = delivery.run_id
+                            && active_run_id == Some(run_id)
+                        {
+                            match delivery_service
+                                .transition_run_to_stopping_cas(
+                                    &self.db.pool,
+                                    delivery.id,
+                                    delivery.revision,
+                                    delivery.status,
+                                    run_id,
+                                    session_agent_id,
+                                )
+                                .await?
+                            {
+                                Some(transition) => {
+                                    self.emit_member_queue_update(session_id, session_agent_id)
+                                        .await;
+                                    tracing::debug!(
+                                        session_id = %session_id,
+                                        session_agent_id = %session_agent_id,
+                                        delivery_id = %transition.delivery.id,
+                                        delivery_revision = transition.delivery.revision,
+                                        runtime_revision = transition.runtime_revision,
+                                        "stop projected the committed atomic delivery/member transition"
+                                    );
+                                    projected_state = Some((
+                                        transition.member.agent_id,
+                                        ChatSessionAgentState::Stopping,
+                                        transition.delivery.run_id,
+                                        Some(running_started_at),
+                                    ));
+                                }
+                                None => tracing::debug!(
+                                    session_id = %session_id,
+                                    session_agent_id = %session_agent_id,
+                                    delivery_id = %delivery.id,
+                                    run_id = %run_id,
+                                    expected_revision = delivery.revision,
+                                    "stop run transition lost its atomic delivery/member CAS race"
+                                ),
+                            }
+                        } else {
+                            tracing::debug!(
+                                session_id = %session_id,
+                                session_agent_id = %session_agent_id,
+                                delivery_id = %delivery.id,
+                                delivery_run_id = ?delivery.run_id,
+                                control_run_id = ?active_run_id,
+                                "stop ignored a delivery whose run does not match the active control"
+                            );
+                        }
+                    }
+                    QueuedMessageStatus::Stopping => {}
+                    _ => {}
+                }
+            } else {
+                tracing::warn!(
+                    session_id = %session_id,
+                    session_agent_id = %session_agent_id,
+                    control_run_id = ?active_run_id,
+                    "stop found no active delivery; recovering the anomalous member instead of projecting legacy stopping"
+                );
+                if let Some(control) = self.run_controls.get(&session_agent_id)
+                    && Some(control.run_id) == active_run_id
+                {
+                    control.stop.cancel();
+                }
+                self.recover_missing_run_control(&session_agent).await?;
+                return Ok(());
+            }
+
+            if let Some((agent_id, state, run_id, started_at)) = projected_state {
+                self.emit(
+                    session_id,
+                    ChatStreamEvent::AgentState {
+                        session_agent_id,
+                        agent_id,
+                        state,
+                        run_id,
+                        started_at,
+                    },
+                );
+            }
         }
 
-        if let Some(control) = self.run_controls.get(&session_agent_id) {
+        if let Some(control) = self.run_controls.get(&session_agent_id)
+            && Some(control.run_id) == active_run_id
+        {
             tracing::info!("Requesting stop for session_agent_id: {}", session_agent_id);
             control.stop.cancel();
         } else {
@@ -3643,6 +3780,9 @@ impl ChatRunner {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Stdio;
+
+    use command_group::AsyncCommandGroup;
     use dashmap::DashMap;
     use executors::logs::{
         NormalizedEntry, NormalizedEntryError, NormalizedEntryType, utils::patch::ConversationPatch,
@@ -3666,6 +3806,44 @@ mod tests {
         let text = "ERROR codex_core::session: some other failure\n";
 
         assert_eq!(filter_benign_executor_stderr(text), Some(text.to_string()));
+    }
+
+    #[tokio::test]
+    async fn log_forwarders_accept_executor_without_stderr_pipe() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        let runner = ChatRunner::new(db::DBService { pool: pool.clone() });
+        let temp = tempdir().expect("tempdir");
+        let spool = RunLogSpool::new(
+            temp.path().join("live.log"),
+            Uuid::new_v4(),
+            pool,
+            "test-workspace".to_string(),
+            Arc::new(DashMap::new()),
+        )
+        .await
+        .expect("log spool");
+        let msg_store = Arc::new(MsgStore::new());
+
+        let mut command = Command::new(std::env::current_exe().expect("current test binary"));
+        command
+            .arg("--help")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let child = command.group_spawn().expect("spawn test child");
+        let mut spawned = SpawnedChild::from(child);
+        assert!(spawned.child.inner().stderr.is_none());
+
+        let forwarders = runner
+            .spawn_log_forwarders(&mut spawned, msg_store.clone(), Arc::new(Mutex::new(spool)))
+            .expect("stderr-less executor is supported");
+        forwarders.stdout.await.expect("stdout forwarder");
+        forwarders.stderr.await.expect("stderr forwarder");
+
+        assert!(msg_store.get_history().iter().any(
+            |message| matches!(message, LogMsg::Stdout(content) if !content.trim().is_empty())
+        ));
     }
 
     #[test]
@@ -4047,7 +4225,9 @@ mod tests {
         fs::create_dir_all(&fresh_run_dir).await.expect("fresh dir");
         let old_activity = old_run_dir.join(RUN_ACTIVITY_FILE_NAME);
         let fresh_activity = fresh_run_dir.join(RUN_ACTIVITY_FILE_NAME);
-        fs::write(&old_activity, "{}\n").await.expect("old activity");
+        fs::write(&old_activity, "{}\n")
+            .await
+            .expect("old activity");
         fs::write(&fresh_activity, "{}\n")
             .await
             .expect("fresh activity");

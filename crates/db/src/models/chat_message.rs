@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool, Type};
+use sqlx::{FromRow, Sqlite, SqlitePool, Transaction, Type};
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -57,6 +57,57 @@ impl ChatMessage {
         .bind(id)
         .fetch_optional(pool)
         .await
+    }
+
+    pub async fn find_idempotent_user_message(
+        pool: &SqlitePool,
+        session_id: Uuid,
+        client_message_id: &str,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, ChatMessage>(
+            r#"SELECT messages.id,
+                      messages.session_id,
+                      messages.sender_type,
+                      messages.sender_id,
+                      messages.sender_session_agent_id,
+                      messages.content,
+                      messages.mentions,
+                      messages.meta,
+                      messages.created_at
+               FROM chat_message_idempotency idempotency
+               JOIN chat_messages messages ON messages.id = idempotency.message_id
+               WHERE idempotency.session_id = ?1
+                 AND idempotency.client_message_id = ?2"#,
+        )
+        .bind(session_id)
+        .bind(client_message_id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Reserve a session/client message key before inserting the message in the same transaction.
+    /// The mapping FK is deferred until commit, which makes concurrent retries serialize on the
+    /// unique key without ever committing a duplicate message.
+    pub async fn claim_idempotency_key_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        session_id: Uuid,
+        client_message_id: &str,
+        message_id: Uuid,
+    ) -> Result<bool, sqlx::Error> {
+        let claimed: Option<Uuid> = sqlx::query_scalar(
+            "INSERT INTO chat_message_idempotency (
+                 session_id, client_message_id, message_id
+             )
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id, client_message_id) DO NOTHING
+             RETURNING message_id",
+        )
+        .bind(session_id)
+        .bind(client_message_id)
+        .bind(message_id)
+        .fetch_optional(&mut **transaction)
+        .await?;
+        Ok(claimed.is_some())
     }
 
     pub async fn find_by_session_id(
@@ -187,6 +238,47 @@ impl ChatMessage {
         .bind(mentions_json)
         .bind(meta_json)
         .fetch_one(pool)
+        .await
+    }
+
+    pub async fn create_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        data: &CreateChatMessage,
+        id: Uuid,
+    ) -> Result<Self, sqlx::Error> {
+        let mentions_json = sqlx::types::Json(data.mentions.clone());
+        let meta_json = sqlx::types::Json(data.meta.clone());
+        let sender_session_agent_id = data
+            .meta
+            .get("session_agent_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok());
+
+        sqlx::query_as::<_, ChatMessage>(
+            r#"INSERT INTO chat_messages (
+                   id, session_id, sender_type, sender_id, sender_session_agent_id,
+                   content, mentions, meta
+               )
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               RETURNING id,
+                         session_id,
+                         sender_type,
+                         sender_id,
+                         sender_session_agent_id,
+                         content,
+                         mentions,
+                         meta,
+                         created_at"#,
+        )
+        .bind(id)
+        .bind(data.session_id)
+        .bind(data.sender_type.clone())
+        .bind(data.sender_id)
+        .bind(sender_session_agent_id)
+        .bind(&data.content)
+        .bind(mentions_json)
+        .bind(meta_json)
+        .fetch_one(&mut **transaction)
         .await
     }
 

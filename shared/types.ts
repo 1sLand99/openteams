@@ -621,7 +621,11 @@ export enum AcpConfigSource { none = "none", stable = "stable", legacy_model = "
 
 export type AcpCapabilityProbe = { protocol_version: string, agent_name: string | null, agent_version: string | null, auth_methods: Array<AcpAuthMethodInfo>, supports_session_list: boolean, supports_session_resume: boolean, supports_session_load: boolean, supports_session_close: boolean, supports_session_delete: boolean, supports_additional_directories: boolean, agent_capabilities: JsonValue, config_source: AcpConfigSource, config_options: Array<AcpConfigOptionSnapshot>, };
 
-export type ChatStreamEvent = { "type": "message_new", message: ChatMessage, } | { "type": "message_updated", message: ChatMessage, } | { "type": "work_item_new", work_item: ChatWorkItem, } | { "type": "agent_delta", session_id: string, session_agent_id: string, agent_id: string, run_id: string, stream_type: ChatStreamDeltaType, content: string, delta: boolean, is_final: boolean, } | { "type": "agent_run_started", session_id: string, session_agent_id: string, agent_id: string, agent_name: string, model: string | null, run_id: string,
+export type ChatStreamEvent = { "type": "message_new", message: ChatMessage, } | { "type": "message_updated", message: ChatMessage, } | { "type": "work_item_new", work_item: ChatWorkItem, } | { "type": "agent_delta", session_id: string, session_agent_id: string, agent_id: string, run_id: string, stream_type: ChatStreamDeltaType, content: string, delta: boolean, is_final: boolean, } | { "type": "agent_run_started", session_id: string, session_agent_id: string, agent_id: string, agent_name: string, model: string | null,
+/**
+ * Stable durable delivery identity (`chat_message_queue.id`) for this run.
+ */
+delivery_id: string, run_id: string,
 /**
  * User (or upstream) message whose processing triggered this run.
  */
@@ -810,9 +814,9 @@ export type ChatRunFilesResponse = { run_id: string, workspace_path: string | nu
 
 export type ChatActiveRunStatus = "starting" | "running" | "stopping" | "waiting_approval";
 
-export type ChatActiveRun = { run_id: string, session_id: string, session_agent_id: string, agent_id: string, agent_name: string, display_name: string, avatar: string, model: string | null, status: ChatActiveRunStatus, source_message_id: string | null, client_message_id: string | null, created_at: string, };
+export type ChatActiveRun = { delivery_id: string, run_id: string, session_id: string, session_agent_id: string, agent_id: string, agent_name: string, display_name: string, avatar: string, model: string | null, status: ChatActiveRunStatus, source_message_id: string | null, client_message_id: string | null, created_at: string, };
 
-export type ChatSessionRuntimeSnapshot = { session_id: string, messages: Array<ChatMessage> | null, active_runs: Array<ChatActiveRun>, queues: Array<MemberQueueSnapshot>, };
+export type ChatSessionRuntimeSnapshot = { session_id: string, revision: bigint, messages: Array<ChatMessage> | null, active_runs: Array<ChatActiveRun>, queues: Array<MemberQueueSnapshot>, };
 
 export type ChatSessionRuntimeQuery = { include_messages: boolean | null, };
 
@@ -1351,17 +1355,21 @@ export type CreatePresetSnapshotResponse = { team: ChatTeamPreset, overwritten: 
 
 export type GitBranch = { name: string, is_current: boolean, is_remote: boolean, last_commit_date: Date, };
 
-export enum QueuedMessageStatus { queued = "queued", processing = "processing", running = "running", failed = "failed", skipped = "skipped", completed = "completed" }
+export enum QueuedMessageStatus { queued = "queued", starting = "starting", processing = "processing", running = "running", waiting_approval = "waiting_approval", stopping = "stopping", failed = "failed", cancelled = "cancelled", skipped = "skipped", completed = "completed" }
 
-export type QueuedMessage = { id: string, session_id: string, session_agent_id: string, agent_id: string, chat_message_id: string, status: QueuedMessageStatus, created_at: string, updated_at: string, processing_started_at: string | null, run_id: string | null, failure_reason: string | null, };
+export type QueuedMessage = { id: string, session_id: string, session_agent_id: string, agent_id: string, chat_message_id: string, status: QueuedMessageStatus, revision: bigint, attempt_no: bigint, created_at: string, updated_at: string, processing_started_at: string | null, run_id: string | null, failure_reason: string | null, };
 
 export type QueuedMessageListItem = { message: QueuedMessage, can_delete: boolean, };
 
-export type MemberQueueStatus = "empty" | "queued" | "processing" | "running" | "blocked" | "paused";
+export type MemberQueueStatus = "empty" | "queued" | "starting" | "processing" | "running" | "waiting_approval" | "stopping" | "blocked" | "paused";
 
-export type MemberQueueSnapshot = { session_id: string, session_agent_id: string, agent_id: string, status: MemberQueueStatus, blocked: boolean, paused: boolean, can_continue: boolean, queued_count: bigint, items: Array<QueuedMessageListItem>, };
+export type MemberQueueSnapshot = { session_id: string,
+/**
+ * Session-scoped monotonic runtime revision used to discard stale snapshots/events.
+ */
+revision: bigint, session_agent_id: string, agent_id: string, status: MemberQueueStatus, blocked: boolean, paused: boolean, can_continue: boolean, queued_count: bigint, items: Array<QueuedMessageListItem>, };
 
-export type QueueStatus = { "status": "empty" } | { "status": "queued", messages: Array<QueuedMessage>, } | { "status": "processing", message: QueuedMessage, queued_count: bigint, } | { "status": "running", message: QueuedMessage, queued_count: bigint, } | { "status": "blocked", message: QueuedMessage, queued_count: bigint, } | { "status": "paused", message: QueuedMessage, queued_count: bigint, };
+export type QueueStatus = { "status": "empty" } | { "status": "queued", messages: Array<QueuedMessage>, } | { "status": "processing", message: QueuedMessage, queued_count: bigint, } | { "status": "starting", message: QueuedMessage, queued_count: bigint, } | { "status": "running", message: QueuedMessage, queued_count: bigint, } | { "status": "waiting_approval", message: QueuedMessage, queued_count: bigint, } | { "status": "stopping", message: QueuedMessage, queued_count: bigint, } | { "status": "blocked", message: QueuedMessage, queued_count: bigint, } | { "status": "paused", message: QueuedMessage, queued_count: bigint, };
 
 export type ChatQueueListResponse = { session_id: string, members: Array<MemberQueueSnapshot>, };
 

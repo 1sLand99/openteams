@@ -4,7 +4,7 @@ import {
   chatMessagesApi,
   chatSessionsApi,
 } from '@/lib/api';
-import { mapMessage, monogramFromName } from '@/lib/mappers';
+import { mapMessage } from '@/lib/mappers';
 import { resolveMessageReferences } from '@/lib/messageReferences';
 import { notifyBuildStatsUsageUpdated } from '@/lib/buildStatsEvents';
 import { notifySourceControlRefreshRequested } from '@/lib/sourceControlEvents';
@@ -12,21 +12,22 @@ import { notifyWorkflowGraphUpdated } from '@/lib/workflowEvents';
 import { notifyExecutorApprovalChanged } from '@/lib/executorApprovalEvents';
 import type { WorkspaceContextProps } from './workspaceContextContract';
 import type { ChatStreamEvent } from './workspaceChatStreamTypes';
-import type { RuntimeActiveRun } from './workspaceContextTypes';
+import {
+  activityRunIdsForSession,
+  deliveriesFromMemberQueue,
+  deliveryFromAgentRunStarted,
+  hasInflightDeliveryForSession,
+} from './chatDeliveryRuntime';
 import { useWorkspaceState } from './useWorkspaceState';
 import {
   CHAT_STREAM_RECONNECT_BASE_DELAY_MS,
   CHAT_STREAM_RECONNECT_MAX_DELAY_MS,
   chatStreamWebSocketUrl,
   filterMessagesForSession,
-  findRunningPlaceholderIndexesForIncoming,
-  isOptimisticPendingAgentPlaceholder,
-  isPendingAgentPlaceholder,
   isRunningSessionAgentState,
   matchesUserMessageIdentity,
   memberNotFoundToastMessage,
   orderMessagesForConversation,
-  pendingPlaceholderMatches,
   tokenUsageNotificationSignature,
   userMessageClientId,
 } from './workspaceContextUtils';
@@ -69,8 +70,8 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
     setAllMessages,
     memberQueuesBySessionAgentId,
     setMemberQueuesBySessionAgentId,
-    activeRunsByRunId,
-    setActiveRunsByRunId,
+    chatDeliveryRuntime,
+    dispatchChatDeliverySync,
     workflowRuntimeLinesByExecution,
     setWorkflowRuntimeLinesByExecution,
     messagesAsync,
@@ -188,9 +189,7 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
     setMembers,
     setProviders,
     setSessionRunningIndicator,
-    syncProcessingQueuePlaceholders,
     applyChatRuntimeSnapshot,
-    reconcileStartingPlaceholders,
     setSessionWorkflowRunningIndicator,
     setSessionWorkflowStatusIndicators,
     clearSessionScopedState,
@@ -270,34 +269,8 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
     (sid: string, incoming: Message) => {
       setAllMessages((prev) => {
         const current = filterMessagesForSession(sid, prev[sid] ?? []);
-        let carriedSessionAgentId = incoming.sessionAgentId;
-        let carriedSourceMessageId = incoming.sourceMessageId;
-        let carriedClientMessageId = incoming.clientMessageId;
-        const matchingPlaceholderIndexes = new Set(
-          findRunningPlaceholderIndexesForIncoming(current, incoming),
-        );
-        let replacementIndex: number | null = null;
-        const withoutPlaceholder = current.filter((message, index) => {
-          if (matchingPlaceholderIndexes.has(index)) {
-            replacementIndex =
-              replacementIndex === null
-                ? index
-                : Math.min(replacementIndex, index);
-            carriedSessionAgentId =
-              carriedSessionAgentId ?? message.sessionAgentId;
-            carriedSourceMessageId =
-              carriedSourceMessageId ?? message.sourceMessageId;
-            carriedClientMessageId =
-              carriedClientMessageId ?? message.clientMessageId;
-            return false;
-          }
-          return true;
-        });
         const nextMessage: Message = {
           ...incoming,
-          sessionAgentId: carriedSessionAgentId,
-          sourceMessageId: carriedSourceMessageId,
-          clientMessageId: carriedClientMessageId,
           isAgentRunning: undefined,
           isThinking: undefined,
         };
@@ -307,7 +280,7 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
           );
         }
         const nextClientMessageId = userMessageClientId(nextMessage);
-        const existingIndex = withoutPlaceholder.findIndex((message) => {
+        const existingIndex = current.findIndex((message) => {
           if (message.id === nextMessage.id) return true;
           return (
             nextMessage.isUser &&
@@ -317,41 +290,20 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
         });
         const next =
           existingIndex >= 0
-            ? withoutPlaceholder.map((message, index) =>
+            ? current.map((message, index) =>
                 index === existingIndex ? nextMessage : message,
               )
-            : (() => {
-                const inserted = [...withoutPlaceholder];
-                inserted.splice(
-                  replacementIndex === null
-                    ? inserted.length
-                    : Math.min(replacementIndex, inserted.length),
-                  0,
-                  nextMessage,
-                );
-                return inserted;
-              })();
-        const correlatedNext =
-          nextMessage.isUser && nextClientMessageId
-            ? next.map((message) =>
-                isPendingAgentPlaceholder(message) &&
-                message.clientMessageId === nextClientMessageId
-                  ? { ...message, sourceMessageId: nextMessage.id }
-                  : message,
-              )
-            : next;
+            : [...current, nextMessage];
         return {
           ...prev,
-          [sid]: resolveMessageReferences(
-            orderMessagesForConversation(correlatedNext),
-          ),
+          [sid]: resolveMessageReferences(orderMessagesForConversation(next)),
         };
       });
     },
     [],
   );
 
-  const insertRunningPlaceholder = useCallback(
+  const registerRunDelivery = useCallback(
     (event: Extract<ChatStreamEvent, { type: 'agent_run_started' }>) => {
       // A new run for this agent supersedes any optimistic-stop suppression.
       optimisticallyStoppedSessionAgentIdsRef.current.delete(
@@ -359,38 +311,20 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
       );
       setSessionRunningIndicator(event.session_id, true);
       void ensureQueuedRunSourceMessage(event);
-      setActiveRunsByRunId((prev) => {
-        const displayName = event.agent_name.startsWith('@')
-          ? event.agent_name
-          : `@${event.agent_name}`;
-        const nextRun: RuntimeActiveRun = {
-          run_id: event.run_id,
-          session_id: event.session_id,
-          session_agent_id: event.session_agent_id,
-          agent_id: event.agent_id,
-          agent_name: event.agent_name,
-          display_name: displayName,
-          avatar: monogramFromName(event.agent_name),
-          model: event.model ?? agentModelsByIdRef.current[event.agent_id] ?? null,
-          status: 'running',
-          source_message_id: event.source_message_id,
-          client_message_id: event.client_message_id ?? null,
-          created_at: event.started_at ?? new Date().toISOString(),
-        };
-        const next = { ...prev };
-        for (const [runId, run] of Object.entries(next)) {
-          if (
-            run.session_agent_id === event.session_agent_id &&
-            runId !== event.run_id
-          ) {
-            delete next[runId];
-          }
-        }
-        next[event.run_id] = nextRun;
-        return next;
+      // The delivery reducer owns run state: it upserts monotonically and
+      // correlates via the persisted run id / source message identity.
+      const delivery = deliveryFromAgentRunStarted(event);
+      dispatchChatDeliverySync({
+        type: 'delivery_upsert',
+        delivery: {
+          ...delivery,
+          model:
+            delivery.model ?? agentModelsByIdRef.current[event.agent_id] ?? null,
+        },
+        receivedAt: Date.now(),
       });
     },
-    [ensureQueuedRunSourceMessage, setSessionRunningIndicator],
+    [dispatchChatDeliverySync, ensureQueuedRunSourceMessage, setSessionRunningIndicator],
   );
 
   const handleWorkflowRuntimeLine = useCallback(
@@ -452,7 +386,7 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
       }
 
       if (parsed.type === 'agent_run_started' && parsed.session_id === sid) {
-        insertRunningPlaceholder(parsed);
+        registerRunDelivery(parsed);
         return;
       }
 
@@ -517,6 +451,44 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
 
       if (parsed.type === 'queue_updated' && parsed.session_id === sid) {
         mergeMemberQueueSnapshot(parsed.queue);
+        // Queue snapshots persistently carry `run_id` once a run is bound,
+        // so they bind the run to a delivery even when the replay-less
+        // `agent_run_started` event was missed. The member queue snapshot is
+        // authoritative per member: it also terminates deliveries it no
+        // longer represents. Unknown statuses request a resync instead of
+        // guessing a terminal state.
+        try {
+          // Queue rows carry no agent identity fields; fill the name in from
+          // the member directory so the card never falls back to 'agent'
+          // while waiting for `agent_run_started`.
+          const queueDeliveries = deliveriesFromMemberQueue(parsed.queue).map(
+            (delivery) => {
+              const name = delivery.agentId
+                ? agentNamesByIdRef.current[delivery.agentId]
+                : undefined;
+              if (!name || delivery.agentName) return delivery;
+              return {
+                ...delivery,
+                agentName: name,
+                displayName: name.startsWith('@') ? name : `@${name}`,
+              };
+            },
+          );
+          dispatchChatDeliverySync({
+            type: 'member_queue_snapshot',
+            sessionId: sid,
+            sessionAgentId: parsed.session_agent_id,
+            deliveries: queueDeliveries,
+            revision: Number(parsed.queue.revision),
+            receivedAt: Date.now(),
+          });
+        } catch (error) {
+          dispatchChatDeliverySync({
+            type: 'mark_needs_resync',
+            sessionId: sid,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
         return;
       }
 
@@ -559,16 +531,9 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
         }
         const incomingMessage = mapBackendChatMessage(parsed.message);
         upsertStreamedMessage(sid, incomingMessage);
-        if (incomingMessage.runId) {
-          setActiveRunsByRunId((prev) => {
-            if (!incomingMessage.runId || !prev[incomingMessage.runId]) {
-              return prev;
-            }
-            const next = { ...prev };
-            delete next[incomingMessage.runId];
-            return next;
-          });
-        }
+        // Note: a message carrying a runId (e.g. an intermediate agent
+        // protocol send) must NOT remove the active run. Only terminal
+        // `agent_state` events and fresh snapshots may end the projection.
         scheduleInboxRefresh();
         return;
       }
@@ -582,25 +547,24 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
         }
         if (isRunningSessionAgentState(parsed.state)) {
           setSessionRunningIndicator(sid, true);
+          // No delivery upsert here: cards are created exclusively from the
+          // durable delivery identity carried by `agent_run_started`
+          // (delivery_id) and `queue_updated` snapshots. An agent_state
+          // running event without those would only fabricate a provisional
+          // `run:` identity.
         } else {
-          setActiveRunsByRunId((prev) => {
-            const next = { ...prev };
-            let changed = false;
-            for (const [runId, run] of Object.entries(next)) {
-              if (
-                run.session_agent_id === parsed.session_agent_id &&
-                (!parsed.run_id || runId === parsed.run_id)
-              ) {
-                delete next[runId];
-                changed = true;
-              }
-            }
-            const hasRemainingRunningAgent = Object.values(next).some(
-              (run) => run.session_id === sid,
-            );
-            setSessionRunningIndicator(sid, hasRemainingRunningAgent);
-            return changed ? next : prev;
+          const nextDeliveryRuntime = dispatchChatDeliverySync({
+            type: 'delivery_terminal',
+            sessionId: sid,
+            sessionAgentId: parsed.session_agent_id,
+            runId: parsed.run_id ?? undefined,
+            status: parsed.state === 'dead' ? 'failed' : 'completed',
+            receivedAt: Date.now(),
           });
+          setSessionRunningIndicator(
+            sid,
+            hasInflightDeliveryForSession(nextDeliveryRuntime, sid),
+          );
           void refreshSessionWorkflowStatus(sid);
         }
         void refreshMembers();
@@ -614,23 +578,8 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
             'error',
           );
         }
-        setAllMessages((prev) => {
-          const current = filterMessagesForSession(sid, prev[sid] ?? []);
-          if (current.length === 0) return prev;
-          const updated = current.filter(
-            (msg) =>
-              !(
-                isOptimisticPendingAgentPlaceholder(msg) &&
-                pendingPlaceholderMatches(msg, {
-                  clientMessageId: parsed.client_message_id,
-                  sourceMessageId: parsed.message_id,
-                  agentName: parsed.agent_name,
-                })
-              ),
-          );
-          if (updated.length === current.length) return prev;
-          return { ...prev, [sid]: updated };
-        });
+        // No placeholder cleanup needed: there are no optimistic agent
+        // placeholders anymore; deliveries come from the backend.
       }
     };
 
@@ -692,8 +641,9 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
     };
   }, [
     activeSessionId,
+    dispatchChatDeliverySync,
     handleWorkflowRuntimeLine,
-    insertRunningPlaceholder,
+    registerRunDelivery,
     locale,
     mapBackendChatMessage,
     mergeMemberQueueSnapshot,
@@ -715,16 +665,14 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
     const syncVisibleRuns = () => {
       if (document.visibilityState !== 'visible' || !activeSessionId) return;
       runActivityStore.syncRuns(
-        Object.values(activeRunsByRunId)
-          .filter((run) => run.session_id === activeSessionId)
-          .map((run) => run.run_id),
+        activityRunIdsForSession(chatDeliveryRuntime, activeSessionId),
       );
     };
     document.addEventListener('visibilitychange', syncVisibleRuns);
     return () => {
       document.removeEventListener('visibilitychange', syncVisibleRuns);
     };
-  }, [activeRunsByRunId, activeSessionId, runActivityStore]);
+  }, [chatDeliveryRuntime, activeSessionId, runActivityStore]);
 
   useEffect(() => {
     if (!initialRefreshCompletedRef.current) return;
