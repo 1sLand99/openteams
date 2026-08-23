@@ -4,6 +4,168 @@ struct RunLifecycleControl {
     stop: CancellationToken,
 }
 
+#[cfg(feature = "qa-mode")]
+#[derive(Default)]
+struct ChatRunnerQaClaimGate {
+    armed: AtomicBool,
+    reached: AtomicBool,
+    reached_notify: tokio::sync::Notify,
+    release_notify: tokio::sync::Notify,
+}
+
+#[cfg(feature = "qa-mode")]
+impl ChatRunnerQaClaimGate {
+    async fn checkpoint(&self) {
+        if !self.armed.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        self.reached.store(true, Ordering::SeqCst);
+        self.reached_notify.notify_waiters();
+        self.release_notify.notified().await;
+        self.reached.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(any(test, feature = "qa-mode"))]
+#[derive(Default)]
+struct ChatRunnerStopTransitionGate {
+    armed: AtomicBool,
+    reached: AtomicBool,
+    reached_notify: tokio::sync::Notify,
+    release_notify: tokio::sync::Notify,
+}
+
+#[cfg(any(test, feature = "qa-mode"))]
+impl ChatRunnerStopTransitionGate {
+    async fn checkpoint(&self) {
+        if !self.armed.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        self.reached.store(true, Ordering::SeqCst);
+        self.reached_notify.notify_waiters();
+        self.release_notify.notified().await;
+        self.reached.store(false, Ordering::SeqCst);
+    }
+
+    fn arm(&self) {
+        self.reached.store(false, Ordering::SeqCst);
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_until_reached(&self) {
+        loop {
+            let reached = self.reached_notify.notified();
+            if self.reached.load(Ordering::SeqCst) {
+                return;
+            }
+            reached.await;
+        }
+    }
+
+    fn release(&self) {
+        self.release_notify.notify_one();
+    }
+}
+
+#[derive(Clone)]
+struct DeliveryAwareApprovalBridge {
+    inner: Arc<ExecutorApprovalBridge>,
+    runner: ChatRunner,
+    session_id: Uuid,
+    session_agent_id: Uuid,
+    run_id: Uuid,
+}
+
+impl DeliveryAwareApprovalBridge {
+    async fn transition_delivery(
+        &self,
+        expected_status: QueuedMessageStatus,
+        next_status: QueuedMessageStatus,
+    ) -> Result<(), ExecutorApprovalError> {
+        let service = QueuedMessageService::new();
+        let delivery = service
+            .find_by_run_id(&self.runner.db.pool, self.run_id)
+            .await
+            .map_err(ExecutorApprovalError::request_failed)?
+            .ok_or_else(|| {
+                ExecutorApprovalError::RequestFailed(format!(
+                    "run {} has no bound delivery",
+                    self.run_id
+                ))
+            })?;
+        if delivery.status != expected_status {
+            // Stop and terminal transitions win over a delayed approval callback.
+            return Ok(());
+        }
+        let updated = service
+            .transition_status_cas(
+                &self.runner.db.pool,
+                delivery.id,
+                delivery.revision,
+                expected_status,
+                next_status,
+            )
+            .await
+            .map_err(ExecutorApprovalError::request_failed)?;
+        if updated.is_none() {
+            return Err(ExecutorApprovalError::RequestFailed(format!(
+                "delivery {} changed during approval transition",
+                delivery.id
+            )));
+        }
+        self.runner
+            .emit_member_queue_update(self.session_id, self.session_agent_id)
+            .await;
+        Ok(())
+    }
+
+    async fn enter_waiting(&self) -> Result<(), ExecutorApprovalError> {
+        self.transition_delivery(
+            QueuedMessageStatus::Running,
+            QueuedMessageStatus::WaitingApproval,
+        )
+        .await
+    }
+
+    async fn leave_waiting(&self) -> Result<(), ExecutorApprovalError> {
+        self.transition_delivery(
+            QueuedMessageStatus::WaitingApproval,
+            QueuedMessageStatus::Running,
+        )
+        .await
+    }
+}
+
+#[async_trait]
+impl ExecutorApprovalService for DeliveryAwareApprovalBridge {
+    async fn request_tool_approval(
+        &self,
+        tool_name: &str,
+        tool_input: serde_json::Value,
+        tool_call_id: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ApprovalStatus, ExecutorApprovalError> {
+        self.enter_waiting().await?;
+        let result = self
+            .inner
+            .request_tool_approval(tool_name, tool_input, tool_call_id, cancel)
+            .await;
+        self.leave_waiting().await?;
+        result
+    }
+
+    async fn request_acp_tool_approval(
+        &self,
+        request: ExecutorApprovalRequest,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, ExecutorApprovalError> {
+        self.enter_waiting().await?;
+        let result = self.inner.request_acp_tool_approval(request, cancel).await;
+        self.leave_waiting().await?;
+        result
+    }
+}
+
 enum LifecycleEvent {
     ProcessExited(std::io::Result<std::process::ExitStatus>),
     ExitSignal(executors::executors::ExecutorExitResult),
@@ -74,12 +236,16 @@ pub struct ChatRunner {
     background_compaction_inflight: Arc<DashMap<Uuid, ()>>,
     workspace_live_log_bytes: Arc<DashMap<String, u64>>,
     workspace_janitor_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "qa-mode"))]
     stop_after_queue_binding: Arc<AtomicBool>,
+    #[cfg(feature = "qa-mode")]
+    qa_claim_gate: Arc<ChatRunnerQaClaimGate>,
     #[cfg(test)]
     executor_spawn_attempts: Arc<AtomicUsize>,
     #[cfg(test)]
     block_executor_spawn: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "qa-mode"))]
+    stop_transition_gate: Arc<ChatRunnerStopTransitionGate>,
     #[cfg(test)]
     mcp_preparation_diagnostic: Arc<StdMutex<Option<String>>>,
 }
@@ -103,15 +269,67 @@ impl ChatRunner {
             background_compaction_inflight: Arc::new(DashMap::new()),
             workspace_live_log_bytes: Arc::new(DashMap::new()),
             workspace_janitor_locks: Arc::new(DashMap::new()),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "qa-mode"))]
             stop_after_queue_binding: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "qa-mode")]
+            qa_claim_gate: Arc::new(ChatRunnerQaClaimGate::default()),
             #[cfg(test)]
             executor_spawn_attempts: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             block_executor_spawn: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(test, feature = "qa-mode"))]
+            stop_transition_gate: Arc::new(ChatRunnerStopTransitionGate::default()),
             #[cfg(test)]
             mcp_preparation_diagnostic: Arc::new(StdMutex::new(None)),
         }
+    }
+
+    /// Arm the qa-mode runner immediately after it has claimed a delivery and registered its
+    /// run control, but before any run binding can commit.
+    #[cfg(feature = "qa-mode")]
+    pub fn qa_pause_after_delivery_claim(&self) {
+        self.qa_claim_gate.reached.store(false, Ordering::SeqCst);
+        self.qa_claim_gate.armed.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "qa-mode")]
+    pub async fn qa_wait_for_delivery_claim(&self) {
+        loop {
+            let reached = self.qa_claim_gate.reached_notify.notified();
+            if self.qa_claim_gate.reached.load(Ordering::SeqCst) {
+                return;
+            }
+            reached.await;
+        }
+    }
+
+    #[cfg(feature = "qa-mode")]
+    pub fn qa_release_delivery_claim(&self) {
+        self.qa_claim_gate.release_notify.notify_one();
+    }
+
+    /// Stop the qa-mode lifecycle after the atomic bind commit, before an executor is spawned.
+    #[cfg(feature = "qa-mode")]
+    pub fn qa_stop_after_delivery_bind(&self, enabled: bool) {
+        self.stop_after_queue_binding
+            .store(enabled, Ordering::SeqCst);
+    }
+
+    /// Pause qa-mode stop after it reads the active delivery and run control, before the atomic
+    /// delivery/member stopping transition. This makes terminal-vs-stop ordering deterministic.
+    #[cfg(feature = "qa-mode")]
+    pub fn qa_pause_before_stop_transition(&self) {
+        self.stop_transition_gate.arm();
+    }
+
+    #[cfg(feature = "qa-mode")]
+    pub async fn qa_wait_for_stop_transition(&self) {
+        self.stop_transition_gate.wait_until_reached().await;
+    }
+
+    #[cfg(feature = "qa-mode")]
+    pub fn qa_release_stop_transition(&self) {
+        self.stop_transition_gate.release();
     }
 
     #[cfg(test)]
@@ -555,7 +773,7 @@ impl ChatRunner {
             Self::mention_status_as_str(&status),
             session_agent,
         )
-            .await;
+        .await;
 
         if let Some(agent_id) = agent_id {
             self.emit(
@@ -1125,25 +1343,39 @@ impl ChatRunner {
             }
         };
 
-        let result: Result<Option<QueuedMessage>, sqlx::Error> = if has_queued {
-            service
-                .mark_failed(&self.db.pool, entry.id, failure_reason)
-                .await
+        let next_status = if has_queued {
+            QueuedMessageStatus::Failed
         } else {
-            service
-                .skip_inflight(&self.db.pool, entry.id, failure_reason)
-                .await
+            QueuedMessageStatus::Skipped
         };
-
-        if let Err(err) = result {
-            tracing::warn!(
+        match service
+            .fail_or_skip_inflight_cas(
+                &self.db.pool,
+                entry.id,
+                entry.revision,
+                entry.status,
+                next_status,
+                failure_reason.clone(),
+            )
+            .await
+        {
+            Ok(Some(_)) => {
+                self.emit_member_queue_update(entry.session_id, entry.session_agent_id)
+                    .await;
+            }
+            Ok(None) => tracing::debug!(
+                entry_id = %entry.id,
+                expected_revision = entry.revision,
+                expected_status = ?entry.status,
+                failure_reason = ?failure_reason,
+                "stale queue failure did not finalize a newer delivery attempt"
+            ),
+            Err(err) => tracing::warn!(
                 entry_id = %entry.id,
                 error = %err,
                 "failed to finalize queue entry"
-            );
+            ),
         }
-        self.emit_member_queue_update(entry.session_id, entry.session_agent_id)
-            .await;
     }
 
     async fn resolve_session_agent_for_mention(
@@ -1317,24 +1549,23 @@ impl ChatRunner {
             project_member_id: Some(member.id),
             execution_config: member.execution_config.0.clone(),
         };
-        let session_agent = match ChatSessionAgent::create(&self.db.pool, &create, Uuid::new_v4())
-            .await
-        {
-            Ok(created) => created,
-            Err(err) => {
-                if let Some(existing) = ChatSessionAgent::find_by_session_and_project_member(
-                    &self.db.pool,
-                    session_id,
-                    member.id,
-                )
-                .await?
-                {
-                    existing
-                } else {
-                    return Err(err.into());
+        let session_agent =
+            match ChatSessionAgent::create(&self.db.pool, &create, Uuid::new_v4()).await {
+                Ok(created) => created,
+                Err(err) => {
+                    if let Some(existing) = ChatSessionAgent::find_by_session_and_project_member(
+                        &self.db.pool,
+                        session_id,
+                        member.id,
+                    )
+                    .await?
+                    {
+                        existing
+                    } else {
+                        return Err(err.into());
+                    }
                 }
-            }
-        };
+            };
 
         tracing::info!(
             session_id = %session_id,
@@ -1521,11 +1752,8 @@ impl ChatRunner {
         let member = target.member;
         let session_id = member.session_id;
         let claimed_queue_id = target.claimed_queue_id;
-        let Some(session_agent) = ChatSessionAgent::find_by_id(
-            &self.db.pool,
-            member.session_agent_id,
-        )
-        .await?
+        let Some(session_agent) =
+            ChatSessionAgent::find_by_id(&self.db.pool, member.session_agent_id).await?
         else {
             return Err(ChatRunnerError::AgentNotFound(member.member_name));
         };
@@ -1540,79 +1768,31 @@ impl ChatRunner {
         };
         agent.name = member.member_name;
 
-        if let Some(queue_id) = claimed_queue_id {
-            let Some(entry) = QueuedMessageService::new()
-                .find_by_id(&self.db.pool, queue_id)
-                .await?
-            else {
+        let queue_service = QueuedMessageService::new();
+        let starting_delivery = if let Some(queue_id) = claimed_queue_id {
+            let Some(entry) = queue_service.find_by_id(&self.db.pool, queue_id).await? else {
                 return Err(ChatRunnerError::Io(std::io::Error::other(format!(
-                    "claimed queue entry {queue_id} no longer exists"
+                    "claimed delivery {queue_id} no longer exists"
                 ))));
             };
-            if entry.status
-                != db::models::chat_message_queue::QueuedMessageStatus::Processing
-                || entry.session_id != session_id
+            if !matches!(
+                entry.status,
+                QueuedMessageStatus::Starting | QueuedMessageStatus::Processing
+            ) || entry.session_id != session_id
                 || entry.session_agent_id != session_agent.id
                 || entry.agent_id != agent.id
                 || entry.chat_message_id != source_message.id
             {
                 return Err(ChatRunnerError::Io(std::io::Error::other(format!(
-                    "claimed queue entry {queue_id} target mismatch"
+                    "claimed delivery {queue_id} target or state mismatch"
                 ))));
             }
-        }
-
-        let member_is_active = member_state_accepts_queued_messages(&session_agent.state);
-        let member_has_inflight_queue = if claimed_queue_id.is_some() {
-            false
+            entry
         } else {
-            QueuedMessageService::new()
-                .find_active_for_member(&self.db.pool, session_agent.id)
-                .await?
-                .is_some()
-        };
-        let member_queue_blocked = if member_is_active {
-            false
-        } else {
-            match QueuedMessageService::new()
-                .has_blocking_failure(&self.db.pool, session_agent.id)
-                .await
-            {
-                Ok(blocked) => blocked,
-                Err(err) => {
-                    tracing::warn!(
-                        session_agent_id = %session_agent.id,
-                        error = %err,
-                        "failed to check member queue blocking state"
-                    );
-                    false
-                }
-            }
-        };
-
-        if claimed_queue_id.is_some() && member_is_active {
-            return Err(ChatRunnerError::Io(std::io::Error::other(format!(
-                "claimed queue target {} is still active",
-                session_agent.id
-            ))));
-        }
-
-        if claimed_queue_id.is_none()
-            && (member_is_active || member_has_inflight_queue || member_queue_blocked)
-        {
-            // Queue the message for later processing instead of skipping or bypassing a failure.
-            tracing::debug!(
-                session_agent_id = %session_agent.id,
-                agent_id = %agent.id,
-                message_id = %source_message.id,
-                state = ?session_agent.state,
-                member_has_inflight_queue,
-                "chat session agent active, in-flight, or blocked; queueing message for later"
-            );
-
-            // Persist the wait as a durable, member-scoped queue row referencing the existing
-            // chat message, so the queue survives restarts and frontend refreshes.
-            let queued = match QueuedMessageService::new()
+            // Direct dispatch uses the same durable ledger as queued dispatch. Creating the row
+            // is idempotent on (chat_message_id, session_agent_id), so an HTTP retry cannot
+            // manufacture a second delivery or a second run.
+            let delivery = queue_service
                 .create_queued(
                     &self.db.pool,
                     &CreateQueuedMessage {
@@ -1622,69 +1802,88 @@ impl ChatRunner {
                         chat_message_id: source_message.id,
                     },
                 )
-                .await
-            {
-                Ok(queued) => queued,
-                Err(err) => {
-                    tracing::warn!(
-                        session_agent_id = %session_agent.id,
-                        message_id = %source_message.id,
-                        error = %err,
-                        "failed to persist queued message"
-                    );
-                    self.report_mention_failure(
-                        session_id,
-                        source_message.id,
-                        &agent.name,
-                        Some(agent.id),
-                        Some(&session_agent),
-                        format!("Failed to queue message for agent: {err}"),
-                    )
-                    .await;
-                    return Err(ChatRunnerError::Database(err));
-                }
-            };
+                .await?;
             self.emit_member_queue_update(session_id, session_agent.id)
                 .await;
 
-            if track_source_message {
-                // Emit a "received" status to indicate the message is queued
-                self.emit(
-                    session_id,
-                    ChatStreamEvent::MentionAcknowledged {
-                        session_id,
-                        message_id: source_message.id,
-                        session_agent_id: Some(session_agent.id),
-                        project_member_id: session_agent.project_member_id,
-                        mentioned_agent: agent.name.clone(),
-                        agent_id: agent.id,
-                        status: MentionStatus::Received,
-                    },
-                );
-
-                // Persist received status to message meta
-                self.update_mention_status(
-                    source_message.id,
-                    &agent.name,
-                    "received",
-                    Some(&session_agent),
-                )
-                    .await;
+            match delivery.status {
+                QueuedMessageStatus::Queued => {
+                    let Some(claimed) = queue_service
+                        .claim_next(&self.db.pool, session_agent.id)
+                        .await?
+                    else {
+                        if track_source_message {
+                            self.set_mention_status(
+                                session_id,
+                                source_message.id,
+                                &agent.name,
+                                Some(agent.id),
+                                Some(&session_agent),
+                                MentionStatus::Received,
+                            )
+                            .await;
+                        }
+                        return Ok(DispatchOutcome::Queued {
+                            queue_id: delivery.id,
+                        });
+                    };
+                    self.emit_member_queue_update(session_id, session_agent.id)
+                        .await;
+                    if claimed.id != delivery.id {
+                        // An older delivery won the FIFO claim. Start that exact row and leave
+                        // this message queued behind it.
+                        if track_source_message {
+                            self.set_mention_status(
+                                session_id,
+                                source_message.id,
+                                &agent.name,
+                                Some(agent.id),
+                                Some(&session_agent),
+                                MentionStatus::Received,
+                            )
+                            .await;
+                        }
+                        let claimed_session_agent_id = session_agent.id;
+                        Box::pin(self.dispatch_queued_entry(
+                            session_id,
+                            claimed_session_agent_id,
+                            claimed,
+                        ))
+                        .await;
+                        return Ok(DispatchOutcome::Queued {
+                            queue_id: delivery.id,
+                        });
+                    }
+                    claimed
+                }
+                QueuedMessageStatus::Running
+                | QueuedMessageStatus::WaitingApproval
+                | QueuedMessageStatus::Stopping => {
+                    return match delivery.run_id {
+                        Some(run_id) => Ok(DispatchOutcome::Started { run_id }),
+                        None => Ok(DispatchOutcome::Queued {
+                            queue_id: delivery.id,
+                        }),
+                    };
+                }
+                QueuedMessageStatus::Starting | QueuedMessageStatus::Processing => {
+                    return Ok(DispatchOutcome::Queued {
+                        queue_id: delivery.id,
+                    });
+                }
+                QueuedMessageStatus::Failed
+                | QueuedMessageStatus::Cancelled
+                | QueuedMessageStatus::Skipped
+                | QueuedMessageStatus::Completed => {
+                    return Ok(DispatchOutcome::Rejected {
+                        reason: "delivery_already_terminal".to_string(),
+                    });
+                }
             }
+        };
 
-            return Ok(DispatchOutcome::Queued {
-                queue_id: queued.id,
-            });
-        }
-
-        let session_agent = self
-            .sync_session_agent_execution_config_before_run(session_id, session_agent, agent.id)
-            .await?;
         let session_agent_id = session_agent.id;
         let agent_id = agent.id;
-        let run_model = resolve_effective_member_execution_config(&agent, &session_agent)
-            .map_err(|err| ChatRunnerError::Io(std::io::Error::other(err.to_string())))?
-            .model_name;
         let run_id = Uuid::new_v4();
         let startup_timing = Arc::new(startup_timing::RunStartupTiming::new(
             startup_timing::RunStartupIdentity {
@@ -1698,76 +1897,33 @@ impl ChatRunner {
         ));
         startup_timing.mark(startup_timing::StartupMilestoneName::RunScheduled, None);
 
-        let mut session_agent = if session_agent.state != ChatSessionAgentState::Running {
-            let updated = ChatSessionAgent::update_state(
-                &self.db.pool,
-                session_agent.id,
-                ChatSessionAgentState::Running,
-            )
-            .await?;
-            startup_timing.mark(
-                startup_timing::StartupMilestoneName::AgentStateRunningPersisted,
-                None,
-            );
-            updated
-        } else {
-            session_agent
-        };
-
-        let run_started_at = session_agent.updated_at;
+        let mut session_agent = session_agent;
+        let mut run_started_at = session_agent.updated_at;
         // Correlation ids that let the frontend stitch "user message -> run ->
         // final agent message" together precisely instead of guessing by
         // `session_agent_id`.
         let client_message_id = Self::extract_client_message_id(&source_message.meta);
-        // Register the stop control before broadcasting the running state so an
-        // immediate user stop request cannot miss the active run.
+        // Register stop control while the delivery is `starting`. A stop request can cancel the
+        // durable delivery before run binding, and the later bind CAS will then roll back.
         let stop = self.register_run_control(session_agent_id, run_id);
-
-        self.emit(
-            session_id,
-            ChatStreamEvent::AgentState {
-                session_agent_id,
-                agent_id,
-                state: ChatSessionAgentState::Running,
-                run_id: Some(run_id),
-                started_at: Some(session_agent.updated_at),
-            },
-        );
-        startup_timing.mark(
-            startup_timing::StartupMilestoneName::AgentStateRunningEmitted,
-            None,
-        );
-
-        if track_source_message {
-            // Emit MentionAcknowledged running event
-            self.emit(
-                session_id,
-                ChatStreamEvent::MentionAcknowledged {
-                    session_id,
-                    message_id: source_message.id,
-                    session_agent_id: Some(session_agent_id),
-                    project_member_id: session_agent.project_member_id,
-                    mentioned_agent: agent.name.clone(),
-                    agent_id: agent.id,
-                    status: MentionStatus::Running,
-                },
-            );
-
-            // Persist running status to message meta
-            self.update_mention_status(
-                source_message.id,
-                &agent.name,
-                "running",
-                Some(&session_agent),
-            )
-                .await;
-        }
+        #[cfg(feature = "qa-mode")]
+        self.qa_claim_gate.checkpoint().await;
 
         let chain_depth = self.extract_chain_depth(&source_message.meta);
         let protocol_retry_attempt = Self::extract_protocol_retry_attempt(&source_message.meta);
         let protocol_retry_meta = source_message.meta.get("protocol_retry").cloned();
 
         let result = async {
+            session_agent = self
+                .sync_session_agent_execution_config_before_run(
+                    session_id,
+                    session_agent.clone(),
+                    agent.id,
+                )
+                .await?;
+            let run_model = resolve_effective_member_execution_config(&agent, &session_agent)
+                .map_err(|err| ChatRunnerError::Io(std::io::Error::other(err.to_string())))?
+                .model_name;
             let workspace_path = self
                 .resolve_workspace_path_for_agent(
                     session_id,
@@ -1873,15 +2029,6 @@ impl ChatRunner {
                     context_snapshot.workspace_path.to_string_lossy()
                 )),
             );
-            if let Some(warning) = context_snapshot.compression_warning.clone() {
-                self.emit(
-                    session_id,
-                    ChatStreamEvent::CompressionWarning {
-                        session_id,
-                        warning: warning.into(),
-                    },
-                );
-            }
             let context_dir = context_snapshot
                 .workspace_path
                 .parent()
@@ -1987,23 +2134,63 @@ impl ChatRunner {
                 Some(input_path.to_string_lossy().to_string()),
             );
 
-            let _run = ChatRun::create(
-                &self.db.pool,
-                &CreateChatRun {
-                    session_id,
-                    session_agent_id,
-                    workspace_path: Some(workspace_path.clone()),
-                    run_index,
-                    run_dir: run_dir.to_string_lossy().to_string(),
-                    input_path: Some(input_path.to_string_lossy().to_string()),
-                    output_path: Some(output_path.to_string_lossy().to_string()),
-                    raw_log_path: Some(live_spool_path.to_string_lossy().to_string()),
-                    meta_path: Some(meta_path.to_string_lossy().to_string()),
-                },
-                run_id,
-            )
-            .await?;
+            let run_data = CreateChatRun {
+                session_id,
+                session_agent_id,
+                workspace_path: Some(workspace_path.clone()),
+                run_index,
+                run_dir: run_dir.to_string_lossy().to_string(),
+                input_path: Some(input_path.to_string_lossy().to_string()),
+                output_path: Some(output_path.to_string_lossy().to_string()),
+                raw_log_path: Some(live_spool_path.to_string_lossy().to_string()),
+                meta_path: Some(meta_path.to_string_lossy().to_string()),
+            };
+            let Some(binding) = queue_service
+                .bind_delivery_to_new_run(
+                    &self.db.pool,
+                    starting_delivery.id,
+                    starting_delivery.revision,
+                    &run_data,
+                    run_id,
+                )
+                .await?
+            else {
+                return if stop.is_cancelled() {
+                    Err(ChatRunnerError::StartupStopped)
+                } else {
+                    Err(ChatRunnerError::Io(std::io::Error::other(format!(
+                        "delivery {} changed before run binding",
+                        starting_delivery.id
+                    ))))
+                };
+            };
+            session_agent = binding.member;
+            run_started_at = session_agent.updated_at;
             startup_timing.mark(startup_timing::StartupMilestoneName::ChatRunCreated, None);
+            startup_timing.mark(
+                startup_timing::StartupMilestoneName::AgentStateRunningPersisted,
+                Some(format!("runtime_revision={}", binding.runtime_revision)),
+            );
+            startup_timing.mark(startup_timing::StartupMilestoneName::QueueBoundToRun, None);
+
+            // Every runtime projection below is emitted only after the atomic bind transaction
+            // committed the run, delivery, member state, session revision, and outbox row.
+            self.emit_member_queue_update(session_id, session_agent_id)
+                .await;
+            self.emit(
+                session_id,
+                ChatStreamEvent::AgentState {
+                    session_agent_id,
+                    agent_id,
+                    state: ChatSessionAgentState::Running,
+                    run_id: Some(run_id),
+                    started_at: Some(run_started_at),
+                },
+            );
+            startup_timing.mark(
+                startup_timing::StartupMilestoneName::AgentStateRunningEmitted,
+                None,
+            );
             // The activity endpoint resolves `run_id` through `chat_runs`, so do not
             // expose the run to clients until that row is queryable.
             self.emit(
@@ -2014,10 +2201,11 @@ impl ChatRunner {
                     agent_id,
                     agent_name: agent.name.clone(),
                     model: run_model.clone(),
+                    delivery_id: binding.delivery.id,
                     run_id,
                     source_message_id: source_message.id,
                     client_message_id: client_message_id.clone(),
-                    started_at: Some(session_agent.updated_at),
+                    started_at: Some(run_started_at),
                 },
             );
             startup_timing.mark(
@@ -2027,47 +2215,38 @@ impl ChatRunner {
                     .map(|id| format!("client_message_id={id}")),
             );
 
-            // Track this dispatch only after the chat_run row exists. `chat_message_queue.run_id`
-            // has a real FK to `chat_runs(id)`, so binding earlier fails under foreign_keys=ON.
-            let queue_service = QueuedMessageService::new();
-            if let Some(queue_id) = claimed_queue_id {
-                let Some(bound) = queue_service
-                    .bind_run(&self.db.pool, queue_id, run_id)
-                    .await?
-                else {
-                    return Err(ChatRunnerError::Io(std::io::Error::other(format!(
-                        "claimed queue entry {queue_id} is no longer processing"
-                    ))));
-                };
-                if bound.session_id != session_id
-                    || bound.session_agent_id != session_agent_id
-                    || bound.agent_id != agent_id
-                    || bound.chat_message_id != source_message.id
-                {
-                    return Err(ChatRunnerError::Io(std::io::Error::other(format!(
-                        "claimed queue entry {queue_id} target mismatch"
-                    ))));
-                }
-            } else {
-                queue_service
-                    .start_or_create_running(
-                        &self.db.pool,
-                        &CreateQueuedMessage {
-                            session_id,
-                            session_agent_id,
-                            agent_id,
-                            chat_message_id: source_message.id,
-                        },
-                        Uuid::new_v4(),
-                        run_id,
-                    )
-                    .await?;
+            if let Some(warning) = context_snapshot.compression_warning.clone() {
+                self.emit(
+                    session_id,
+                    ChatStreamEvent::CompressionWarning {
+                        session_id,
+                        warning: warning.into(),
+                    },
+                );
             }
-            startup_timing.mark(startup_timing::StartupMilestoneName::QueueBoundToRun, None);
-            self.emit_member_queue_update(session_id, session_agent_id)
+            if track_source_message {
+                self.emit(
+                    session_id,
+                    ChatStreamEvent::MentionAcknowledged {
+                        session_id,
+                        message_id: source_message.id,
+                        session_agent_id: Some(session_agent_id),
+                        project_member_id: session_agent.project_member_id,
+                        mentioned_agent: agent.name.clone(),
+                        agent_id,
+                        status: MentionStatus::Running,
+                    },
+                );
+                self.update_mention_status(
+                    source_message.id,
+                    &agent.name,
+                    "running",
+                    Some(&session_agent),
+                )
                 .await;
+            }
 
-            #[cfg(test)]
+            #[cfg(any(test, feature = "qa-mode"))]
             if self.stop_after_queue_binding.load(Ordering::Relaxed) {
                 return Ok(());
             }
@@ -2108,7 +2287,7 @@ impl ChatRunner {
                     "ACP Full Access enabled for chat run"
                 );
             }
-            executor.use_approvals(ExecutorApprovalBridge::new(
+            let approval_bridge = ExecutorApprovalBridge::new(
                 self.db.clone(),
                 ExecutorApprovalScope {
                     session_id,
@@ -2118,7 +2297,14 @@ impl ChatRunner {
                     workflow_execution_id: None,
                     workflow_step_id: None,
                 },
-            ));
+            );
+            executor.use_approvals(Arc::new(DeliveryAwareApprovalBridge {
+                inner: approval_bridge,
+                runner: self.clone(),
+                session_id,
+                session_agent_id,
+                run_id,
+            }));
             startup_timing.mark(
                 startup_timing::StartupMilestoneName::ExecutorConfigured,
                 Some(effective_execution.analytics_profile_label()),
@@ -2225,7 +2411,7 @@ impl ChatRunner {
                 &mut spawned,
                 msg_store.clone(),
                 raw_log_spool.clone(),
-            );
+            )?;
             startup_timing.mark(
                 startup_timing::StartupMilestoneName::LogForwardersStarted,
                 None,
@@ -2314,13 +2500,163 @@ impl ChatRunner {
             } else {
                 ChatSessionAgentState::Dead
             };
-            self.run_controls.remove(&session_agent_id);
+            let should_remove_control = self
+                .run_controls
+                .get(&session_agent_id)
+                .is_some_and(|control| control.run_id == run_id);
+            if should_remove_control {
+                self.run_controls.remove(&session_agent_id);
+            }
             startup_timing
                 .mark_and_persist(
                     startup_timing::StartupMilestoneName::StartupFailed,
                     result.as_ref().err().map(|err| err.to_string()),
                 )
                 .await;
+            let delivery_service = QueuedMessageService::new();
+            let current_delivery = delivery_service
+                .find_by_id(&self.db.pool, starting_delivery.id)
+                .await;
+            let (terminal_state_applied, run_was_bound) = match current_delivery {
+                Ok(Some(delivery)) if delivery.run_id == Some(run_id) => {
+                    let finalization = if startup_stopped {
+                        delivery_service
+                            .finalize_completed_run_cas(
+                                &self.db.pool,
+                                run_id,
+                                session_agent_id,
+                                delivery.revision,
+                                false,
+                            )
+                            .await
+                    } else {
+                        delivery_service
+                            .finalize_failed_run_cas(
+                                &self.db.pool,
+                                run_id,
+                                session_agent_id,
+                                delivery.revision,
+                                result
+                                    .as_ref()
+                                    .err()
+                                    .map(|err| format!("failed to start agent run: {err}")),
+                            )
+                            .await
+                    };
+                    match finalization {
+                        Ok(finalization) => (finalization.applied, true),
+                        Err(err) => {
+                            tracing::warn!(
+                                session_agent_id = %session_agent_id,
+                                run_id = %run_id,
+                                delivery_id = %delivery.id,
+                                delivery_revision = delivery.revision,
+                                error = %err,
+                                "failed to CAS-finalize bound startup"
+                            );
+                            (false, true)
+                        }
+                    }
+                }
+                Ok(Some(delivery))
+                    if matches!(
+                        delivery.status,
+                        QueuedMessageStatus::Starting | QueuedMessageStatus::Processing
+                    ) =>
+                {
+                    let next_status = if startup_stopped {
+                        QueuedMessageStatus::Cancelled
+                    } else if delivery_service
+                        .has_queued(&self.db.pool, session_agent_id)
+                        .await
+                        .unwrap_or(true)
+                    {
+                        QueuedMessageStatus::Failed
+                    } else {
+                        QueuedMessageStatus::Skipped
+                    };
+                    let transition = if startup_stopped {
+                        delivery_service
+                            .transition_status_cas(
+                                &self.db.pool,
+                                delivery.id,
+                                delivery.revision,
+                                delivery.status,
+                                next_status,
+                            )
+                            .await
+                    } else {
+                        delivery_service
+                            .fail_or_skip_inflight_cas(
+                                &self.db.pool,
+                                delivery.id,
+                                delivery.revision,
+                                delivery.status,
+                                next_status,
+                                result
+                                    .as_ref()
+                                    .err()
+                                    .map(|err| format!("failed to start agent run: {err}")),
+                            )
+                            .await
+                    };
+                    match transition {
+                        Ok(Some(_)) => (true, false),
+                        Ok(None) => (false, false),
+                        Err(err) => {
+                            tracing::warn!(
+                                session_agent_id = %session_agent_id,
+                                delivery_id = %delivery.id,
+                                delivery_revision = delivery.revision,
+                                error = %err,
+                                "failed to CAS-finalize pre-bind startup"
+                            );
+                            (false, false)
+                        }
+                    }
+                }
+                Ok(Some(delivery)) if delivery.status.is_terminal() => (false, false),
+                Ok(Some(delivery)) => {
+                    tracing::warn!(
+                        session_agent_id = %session_agent_id,
+                        delivery_id = %delivery.id,
+                        delivery_revision = delivery.revision,
+                        status = ?delivery.status,
+                        "startup ended with a delivery that cannot be finalized"
+                    );
+                    (false, delivery.run_id.is_some())
+                }
+                Ok(None) => (false, false),
+                Err(err) => {
+                    tracing::warn!(
+                        session_agent_id = %session_agent_id,
+                        delivery_id = %starting_delivery.id,
+                        error = %err,
+                        "failed to load delivery for startup finalization"
+                    );
+                    (false, false)
+                }
+            };
+            if terminal_state_applied {
+                self.emit_member_queue_update(session_id, session_agent_id)
+                    .await;
+            }
+            if terminal_state_applied {
+                self.emit(
+                    session_id,
+                    ChatStreamEvent::AgentState {
+                        session_agent_id,
+                        agent_id,
+                        state: if run_was_bound {
+                            final_state
+                        } else {
+                            ChatSessionAgentState::Idle
+                        },
+                        run_id: run_was_bound.then_some(run_id),
+                        started_at: None,
+                    },
+                );
+            }
             if let Err(err) = &result
                 && !startup_stopped
             {
@@ -2333,8 +2669,8 @@ impl ChatRunner {
                             agent_id: Some(agent_id),
                             agent_role: None,
                         })
-                            .with_session(session_id)
-                            .with_run(run_id),
+                        .with_session(session_id)
+                        .with_run(run_id),
                     )
                     .await;
                 let failure_detail = format!("Failed to start agent run: {err}");
@@ -2354,97 +2690,10 @@ impl ChatRunner {
                         &agent.name,
                         Some(agent_id),
                         Some(&session_agent),
-                        format!("Failed to start agent run: {err}"),
+                        failure_detail,
                     )
                     .await;
                 }
-            }
-            let finalization_applied = if startup_stopped {
-                match QueuedMessageService::new()
-                    .finalize_completed_run(&self.db.pool, run_id, session_agent_id, false)
-                    .await
-                {
-                    Ok(finalization) => finalization.applied,
-                    Err(err) => {
-                        tracing::warn!(
-                            session_agent_id = %session_agent_id,
-                            run_id = %run_id,
-                            error = %err,
-                            "failed to atomically finalize stopped startup"
-                        );
-                        false
-                    }
-                }
-            } else {
-                let failure_reason = result
-                    .as_ref()
-                    .err()
-                    .map(|err| format!("failed to start agent run: {err}"));
-                match QueuedMessageService::new()
-                    .finalize_failed_run(
-                        &self.db.pool,
-                        run_id,
-                        session_agent_id,
-                        failure_reason,
-                    )
-                    .await
-                {
-                    Ok(applied) => applied,
-                    Err(err) => {
-                        tracing::warn!(
-                            session_agent_id = %session_agent_id,
-                            run_id = %run_id,
-                            error = %err,
-                            "failed to atomically finalize failed startup"
-                        );
-                        false
-                    }
-                }
-            };
-            let terminal_state_applied = if finalization_applied {
-                self.emit_member_queue_update(session_id, session_agent_id)
-                    .await;
-                true
-            } else {
-                // Setup may fail before the chat run and queue row are created. In that case
-                // there is no persisted run guard to finalize, but the member still must leave
-                // its optimistic running projection. If a queue row does exist, fail closed:
-                // this may be a stale completion for a superseded run, so an unguarded state
-                // write would be unsafe.
-                match QueuedMessageService::new()
-                    .find_by_run_id(&self.db.pool, run_id)
-                    .await
-                {
-                    Ok(None) => ChatSessionAgent::update_state(
-                        &self.db.pool,
-                        session_agent_id,
-                        final_state.clone(),
-                    )
-                    .await
-                    .is_ok(),
-                    Ok(Some(_)) => false,
-                    Err(err) => {
-                        tracing::warn!(
-                            session_agent_id = %session_agent_id,
-                            run_id = %run_id,
-                            error = %err,
-                            "could not verify whether startup had a queue row; skipped unguarded state update"
-                        );
-                        false
-                    }
-                }
-            };
-            if terminal_state_applied {
-                self.emit(
-                    session_id,
-                    ChatStreamEvent::AgentState {
-                        session_agent_id,
-                        agent_id,
-                        state: final_state,
-                        run_id: Some(run_id),
-                        started_at: None,
-                    },
-                );
             }
             if startup_stopped && terminal_state_applied && track_source_message {
                 self.update_mention_status(

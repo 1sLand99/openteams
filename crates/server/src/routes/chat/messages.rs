@@ -187,7 +187,7 @@ pub async fn create_message(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<CreateChatMessageRequest>,
 ) -> Result<ResponseJson<ApiResponse<CreateChatMessageResponse>>, ApiError> {
-    let message = services::services::chat::create_message(
+    let result = services::services::chat::create_message_idempotent(
         &deployment.db().pool,
         session.id,
         payload.sender_type,
@@ -196,21 +196,24 @@ pub async fn create_message(
         payload.meta,
     )
     .await?;
+    let message = result.message;
 
-    emit_user_message_workflow_analytics(
-        workflow_analytics::analytics_if_enabled(
-            deployment.analytics().as_ref(),
-            deployment.analytics_enabled(),
-        ),
-        session.id,
-        Some(deployment.user_id()),
-        &message,
-    );
+    if result.created {
+        emit_user_message_workflow_analytics(
+            workflow_analytics::analytics_if_enabled(
+                deployment.analytics().as_ref(),
+                deployment.analytics_enabled(),
+            ),
+            session.id,
+            Some(deployment.user_id()),
+            &message,
+        );
 
-    deployment
-        .chat_runner()
-        .handle_message(&session, &message)
-        .await;
+        deployment
+            .chat_runner()
+            .handle_message(&session, &message)
+            .await;
+    }
 
     let runtime =
         build_session_runtime_snapshot(&deployment, &session, false, Some(&message)).await?;
@@ -229,6 +232,7 @@ pub async fn upload_message_attachments(
     let mut app_language: Option<String> = None;
     let mut content: Option<String> = None;
     let mut sender_handle: Option<String> = None;
+    let mut client_message_id: Option<String> = None;
     let mut reference_message_id: Option<Uuid> = None;
     let mut mentions: Vec<String> = Vec::new();
     let mut chat_input_mode: Option<&'static str> = None;
@@ -246,6 +250,12 @@ pub async fn upload_message_attachments(
                 let text = field.text().await?;
                 if !text.trim().is_empty() {
                     sender_handle = Some(text);
+                }
+            }
+            Some("client_message_id") => {
+                let text = field.text().await?;
+                if !text.trim().is_empty() {
+                    client_message_id = Some(text.trim().to_string());
                 }
             }
             Some("app_language") => {
@@ -338,6 +348,9 @@ pub async fn upload_message_attachments(
     if let Some(handle) = sender_handle {
         meta["sender_handle"] = serde_json::json!(handle);
     }
+    if let Some(client_message_id) = client_message_id {
+        meta["client_message_id"] = serde_json::json!(client_message_id);
+    }
     if let Some(reference_id) = reference_message_id {
         meta["reference"] = serde_json::json!({ "message_id": reference_id });
     }
@@ -348,7 +361,7 @@ pub async fn upload_message_attachments(
         meta["chat_input_mode"] = serde_json::json!(mode);
     }
 
-    let message = services::services::chat::create_message_with_id(
+    let result = services::services::chat::create_message_idempotent_with_id(
         &deployment.db().pool,
         session.id,
         ChatSenderType::User,
@@ -358,21 +371,35 @@ pub async fn upload_message_attachments(
         message_id,
     )
     .await?;
+    let message = result.message;
 
-    emit_user_message_workflow_analytics(
-        workflow_analytics::analytics_if_enabled(
-            deployment.analytics().as_ref(),
-            deployment.analytics_enabled(),
-        ),
-        session.id,
-        Some(deployment.user_id()),
-        &message,
-    );
+    if result.created {
+        emit_user_message_workflow_analytics(
+            workflow_analytics::analytics_if_enabled(
+                deployment.analytics().as_ref(),
+                deployment.analytics_enabled(),
+            ),
+            session.id,
+            Some(deployment.user_id()),
+            &message,
+        );
 
-    deployment
-        .chat_runner()
-        .handle_message(&session, &message)
-        .await;
+        deployment
+            .chat_runner()
+            .handle_message(&session, &message)
+            .await;
+    } else {
+        let unused_storage_dir = attachment_storage_dir(session.id, message_id);
+        if let Err(error) = fs::remove_dir_all(&unused_storage_dir).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %unused_storage_dir.display(),
+                error = %error,
+                "Failed to clean up replayed attachment upload"
+            );
+        }
+    }
 
     let runtime =
         build_session_runtime_snapshot(&deployment, &session, false, Some(&message)).await?;

@@ -49,6 +49,14 @@ const source = [
     'utf8',
   ),
   readFileSync(
+    new URL('./workspace/chatDeliveryRuntime.ts', import.meta.url),
+    'utf8',
+  ),
+  readFileSync(
+    new URL('./workspace/chatDeliveryResyncScheduler.ts', import.meta.url),
+    'utf8',
+  ),
+  readFileSync(
     new URL('./workspace/useWorkspaceState.ts', import.meta.url),
     'utf8',
   ),
@@ -68,10 +76,6 @@ const workflowSidebarStateSource = readFileSync(
 const refreshAllIndex = source.indexOf('const refreshAll = useCallback');
 const refreshProjectsIndex = source.indexOf('await refreshProjects();', refreshAllIndex);
 const refreshSessionsIndex = source.indexOf('refreshSessions(),', refreshAllIndex);
-const pendingPlaceholderIndex = source.indexOf(
-  'makePendingAgentPlaceholder(',
-);
-const sendApiIndex = source.indexOf('.send(sid,');
 
 check(
   'loads active sessions through status-filtered chat session API',
@@ -143,19 +147,16 @@ check(
   source,
 );
 check(
-  'member refreshes do not rebuild the chat websocket dependency chain',
-  source.includes(
-    'const membersAsyncDataRef = useRef<Member[]>(membersAsync.data)',
-  ) &&
-    source.includes('membersAsyncDataRef.current = membersAsync.data') &&
-    /const syncProcessingQueuePlaceholders = useCallback\([\s\S]*?membersAsyncDataRef\.current[\s\S]*?\n\s*\[\],\n\s*\);\n\s*const applyChatRuntimeSnapshot/.test(
-      source,
-    ),
+  'needsResync is consumed by the single-flight resync scheduler',
+  source.includes('new ChatDeliveryResyncScheduler({') &&
+    source.includes('sessionsNeedingResync(chatDeliveryRuntime)') &&
+    source.includes('scheduler.request(sessionId)') &&
+    source.includes('scheduler?.dispose()'),
   source,
 );
 check(
-  'stream events create placeholders, notify the run store, and replace final messages',
-  source.includes('insertRunningPlaceholder(parsed)') &&
+  'stream events register run deliveries, notify the run store, and replace final messages',
+  source.includes('registerRunDelivery(parsed)') &&
     source.includes('runActivityStore.notifyUpdated(') &&
     source.includes('const incomingMessage = mapBackendChatMessage(parsed.message)') &&
     source.includes('upsertStreamedMessage(sid, incomingMessage)'),
@@ -163,7 +164,7 @@ check(
 );
 check(
   'chat messages keep only run identity instead of copied activity lines',
-  source.includes("runId: run.status === 'starting' ? undefined : run.run_id") &&
+  source.includes("runId: delivery.status === 'starting' ? undefined : delivery.runId") &&
     !source.includes("type: 'agent_delta'") &&
     !source.includes('LIVE_DELTA_ACTIVITY_LINE_PREFIX') &&
     !source.includes('activity_lines: activityLines'),
@@ -188,22 +189,10 @@ check(
   source,
 );
 check(
-  'real sends stage immediate starting placeholders only for non-queued targets',
-  pendingPlaceholderIndex >= 0 &&
-    source.includes('PENDING_AGENT_MESSAGE_PREFIX') &&
-    source.includes('OPTIMISTIC_USER_MESSAGE_PREFIX') &&
-    source.includes('clientMessageId: userMsgId') &&
-    source.includes('const pendingAgentMessages = shouldPersistToBackend') &&
-    source.includes('const queuedSessionAgentIds = new Set(') &&
-    source.includes('const immediatePendingAgentMessages =') &&
-    source.includes('const messagesToAppend =') &&
-    source.includes('fallbackMention?: string | null') &&
+  'real sends rely on backend deliveries instead of optimistic placeholders',
+  source.includes('const shouldPersistToBackend') &&
     source.includes('sendMessageToSession') &&
     source.includes("/@([\\p{L}\\p{N}_-]+)/gu") &&
-    source.includes('stageOptimisticQueuedMessage') &&
-    source.includes('persistToBackend?: boolean') &&
-    source.includes("placeholderMember?: Pick<Member, 'avatar' | 'name' | 'modelName'> | null") &&
-    source.includes('const shouldPersistToBackend =') &&
     source.includes('const visibleMentions =') &&
     source.includes('mentions: visibleMentions') &&
     source.includes('options.routeMentions') &&
@@ -212,85 +201,49 @@ check(
     !source.includes('match[1].toLowerCase()') &&
     source.includes('meta.client_message_id = userMsgId') &&
     source.includes('upsertStreamedMessage(sid, incomingMessage)') &&
-    pendingPlaceholderIndex < sendApiIndex,
-  { pendingPlaceholderIndex, sendApiIndex },
-);
-check(
-  'pending placeholders can carry display member model without stale session agent id',
-    source.includes('const displayMember = fallbackMember ?? matchingPlaceholderMember ?? null') &&
-    source.includes('avatar: displayMember?.avatar ?? monogramFromName(sender)') &&
-    source.includes('model: displayMember?.modelName') &&
-    source.includes('sessionAgentId: fallbackMember?.id') &&
-    source.includes('options.placeholderMember'),
+    source.includes('applyChatRuntimeSnapshot(response.runtime)') &&
+    !source.includes('makePendingAgentPlaceholders(') &&
+    !source.includes('stageOptimisticQueuedMessage(') &&
+    !source.includes('immediatePendingAgentMessages'),
   source,
 );
 check(
-  'pending agent placeholders are matched by correlation ids before fallback',
-  source.includes('findPendingAgentPlaceholderIndex') &&
-    source.includes('pendingPlaceholderMatches') &&
-    source.includes('message.clientMessageId === match.clientMessageId') &&
-    source.includes('message.sourceMessageId === match.sourceMessageId') &&
-    source.includes('message.sessionAgentId === match.sessionAgentId') &&
-    source.includes('normalizedAgentHandle(message.sender) ===') &&
-    source.includes('const hasCorrelationId = Boolean(') &&
-    source.includes('clientMessageId: incoming.clientMessageId') &&
-    source.includes('client_message_id: event.client_message_id') &&
-    !source.includes('current.findIndex(isPendingAgentPlaceholder)'),
+  'delivery cards carry display member fields',
+  source.includes('deliveryCardToMessage') &&
+    source.includes('delivery.displayName ?? delivery.agentName') &&
+    source.includes('delivery.avatar || monogramFromName(displayName)') &&
+    source.includes('model: delivery.model ?? undefined'),
+  source,
+);
+
+check(
+  'new sends append only the user message while agent state comes from deliveries',
+  source.includes('No optimistic agent placeholders are staged locally') &&
+    source.includes('[...cur, userMsg]') &&
+    !source.includes('withoutStalePending') &&
+    !source.includes('immediatePendingAgentMessages') &&
+    !source.includes('stageOptimisticQueuedMessage'),
   source,
 );
 check(
-  'new sends prune stale pending placeholders only for immediate targets',
-  source.includes('withoutStalePending') &&
-    source.includes('immediatePendingSessionAgentIds') &&
-    source.includes('immediatePendingAgentMessages') &&
-    source.includes('[...withoutStalePending, ...messagesToAppend]'),
-  source,
-);
-check(
-  'workflow plan cards do not suppress optimistic agent placeholders',
+  'workflow plan cards coexist with the delivery-card projection',
   !source.includes('const isWorkflowPlanCardMessage =') &&
     !source.includes('const hasWorkflowPlanCard =') &&
     !source.includes('shouldCreatePendingAgentPlaceholder') &&
-    /const pendingAgentMessages = shouldPersistToBackend\s*\?\s*makePendingAgentPlaceholders/.test(
-      source,
-    ),
+    source.includes('mergePersistedWithDeliveryCards('),
   source,
 );
+
 check(
-  'starting placeholders upgrade in place and never downgrade a real run',
-  source.includes('correlateRunningPlaceholdersWithPending') &&
-    source.includes('const upgraded: Message = {') &&
-    source.includes('id: pending.id') &&
-    source.includes('nextCurrent[pendingIndex] = upgraded') &&
-    source.includes('if (existing.runId) return existing') &&
-    source.includes('createdAt: pending.createdAt ?? running.createdAt'),
-  source,
-);
-check(
-  'starting placeholders use unique client ids and reconcile without forced failure',
+  'no 30s starting reconcile; the delivery reducer is the runtime authority',
   source.includes('globalThis.crypto?.randomUUID?.()') &&
-    source.includes('STARTING_AGENT_RECONCILE_DELAY_MS = 30000') &&
-    source.includes('reconcileStartingPlaceholders') &&
-    source.includes('const keep = hasActiveRun || isQueued') &&
-    source.includes('applyChatRuntimeSnapshot(snapshot)') &&
+    !source.includes('STARTING_AGENT_RECONCILE_DELAY_MS') &&
+    !source.includes('reconcileStartingPlaceholders') &&
+    source.includes('dispatchChatDeliverySync') &&
     !source.includes('window.location.reload'),
   source,
 );
-check(
-  'a new run evicts stale running placeholders for the same agent session',
-  source.includes('evictStaleRunPlaceholders') &&
-    source.includes('message.runId !== runId') &&
-    source.includes('Boolean(message.runId)') &&
-    source.includes('message.sessionAgentId === sessionAgentId') &&
-    /evictStaleRunPlaceholders\(\s*currentWithoutQueuedSource,\s*event\.session_agent_id/.test(source) &&
-    /evictStaleRunPlaceholders\(\s*current,\s*line\.session_agent_id/.test(
-      source,
-    ) &&
-    source.includes('orderMessagesForConversation([') &&
-    source.includes('...pruned,') &&
-    source.includes('placeholder,'),
-  source,
-);
+
 check(
   'quoted messages are sent through backend reference meta instead of message content',
   source.includes('options: SendMessageOptions = {}') &&
@@ -340,59 +293,10 @@ check(
     source.includes('await syncSessionLeadAgent(sid, workflowLeadAgentId)'),
   source,
 );
-check(
-  'message refresh preserves running placeholders until stream replacement',
-  source.includes('mergePersistedWithRunningPlaceholders') &&
-    source.includes('isPendingAgentPlaceholder') &&
-    source.includes('isOptimisticUserMessage') &&
-    source.includes('persistedClientMessageIds') &&
-    source.includes('pendingIndex') &&
-    source.includes('activeSessionAgentIds') &&
-    source.includes('isActiveAgentState(sessionAgent.state)') &&
-    source.includes('!isActiveAgentState(parsed.state)'),
-  source,
-);
-check(
-  'agent run placeholders and final replies stay anchored to their source message',
-  source.includes('orderMessagesForConversation') &&
-    source.includes('firstMessageSourceKey') &&
-    source.includes('message.sourceMessageId && sourceKeys.has(message.sourceMessageId)') &&
-    source.includes('message.clientMessageId && sourceKeys.has(message.clientMessageId)') &&
-    source.includes('replacementIndex') &&
-    source.includes('orderMessagesForConversation(correlatedNext)') &&
-    source.includes('insertMessageByCreatedAt') &&
-    source.includes('createdAt: event.started_at ?? new Date().toISOString()') &&
-    source.includes('createdAt: run?.created_at ?? sessionAgent.updated_at'),
-  source,
-);
-check(
-  'hydrated run placeholders keep the optimistic pending placeholder anchor',
-  source.includes('correlateRunningPlaceholdersWithPending') &&
-    source.includes('pendingBySessionAgentId') &&
-    source.includes('pendingBySender') &&
-    source.includes('orphanPending') &&
-    source.includes('pendingPlaceholderSenderKey') &&
-    source.includes('consumedPendingPlaceholderIds') &&
-    source.includes('senderMatches.length === 1') &&
-    source.includes('runningPlaceholders.length === 1') &&
-    source.includes('sourceMessageId: pending.sourceMessageId') &&
-    source.includes('clientMessageId: pending.clientMessageId') &&
-    source.includes('createdAt: pending.createdAt ?? placeholder.createdAt') &&
-    !source.includes('!placeholder.runId ||') &&
-    source.includes('...correlated.current') &&
-    source.includes('...correlated.runningPlaceholders'),
-  source,
-);
-check(
-  'hydrated activity does not drop source-message anchors from live placeholders',
-  source.includes('mergeCarriedRunPlaceholder') &&
-    source.includes('incomingLineCount > existingLineCount') &&
-    source.includes('primary.sourceMessageId ?? secondary.sourceMessageId') &&
-    source.includes('primary.clientMessageId ?? secondary.clientMessageId') &&
-    source.includes('secondaryHasAnchor') &&
-    source.includes('mergeCarriedRunPlaceholder(existing, message)'),
-  source,
-);
+
+
+
+
 check(
   'visible messages are scoped to the active session cache',
   source.includes('const allMessagesRef = useRef<Record<string, Message[]>>({})') &&
@@ -410,20 +314,14 @@ check(
 );
 check(
   'optimistic user messages carry their owning session id',
-  source.includes('sessionId?: string') &&
+  source.includes('sessionId: string') &&
     source.includes('sessionId: sid') &&
     source.includes('sessionId,') &&
-    source.includes('sessionId: line.session_id') &&
+    source.includes('sessionId: delivery.sessionId') &&
     source.includes('sessionId: event.session_id'),
   source,
 );
-check(
-  'message refresh does not drop the immediate pending placeholder before agent state catches up',
-  source.includes('isOptimisticPendingAgentPlaceholder') &&
-    source.includes('PENDING_AGENT_MESSAGE_PREFIX}${OPTIMISTIC_USER_MESSAGE_PREFIX}') &&
-    source.includes('!isOptimisticPendingAgentPlaceholder(message)'),
-  source,
-);
+
 check(
   'optimistically stopped agents do not keep session running indicators active',
   source.includes('ignoredSessionAgentIds?: ReadonlySet<string>') &&
@@ -431,14 +329,12 @@ check(
     source.includes('optimisticallyStoppedSessionAgentIdsRef.current') &&
     source.includes('hasRemainingRunningAgent') &&
     source.includes('setSessionRunningIndicator(sid, hasRemainingRunningAgent)') &&
-    source.includes('message.sessionAgentId !== parsed.session_agent_id') &&
-    source.includes('wasStopRequested'),
+    source.includes('delivery.sessionAgentId !== sessionAgentId'),
   source,
 );
 check(
-  'stop-requested agent placeholders remain visible until the stopped message replaces them',
-  source.includes('persisted stop') &&
-    source.includes('!isActiveAgentState(parsed.state) && !wasStopRequested') &&
+  'stop-requested delivery cards remain visible until the stopped message replaces them',
+  source.includes('optimisticallyStoppedSessionAgentIdsRef.current.add(sessionAgentId)') &&
     source.includes('optimisticallyStoppedSessionAgentIdsRef.current.delete') &&
     source.includes('nextMessage.sessionAgentId'),
   source,
@@ -514,22 +410,12 @@ check(
     source.includes('refreshSessionRunningIndicators(sessionId)'),
   source,
 );
-check(
-  'pending placeholders are correlated and protected across refresh and stale agent state',
-  source.includes('PendingPlaceholderMatch') &&
-    source.includes('pendingPlaceholderMatches') &&
-    source.includes('clientMessageId: event.client_message_id') &&
-    source.includes('sourceMessageId: event.source_message_id') &&
-    source.includes('msg.runId === parsed.run_id') &&
-    source.includes("parsed.type === 'mention_error'"),
-  source,
-);
+
 check(
   'missing member mentions show a localized error naming the requested member',
   source.includes("parsed.reason === 'member_not_found'") &&
     source.includes('memberNotFoundToastMessage(locale, parsed.agent_name)') &&
-    source.includes("const key = 'toast.memberNotFound'") &&
-    source.includes('clientMessageId: parsed.client_message_id'),
+    source.includes("const key = 'toast.memberNotFound'"),
   source,
 );
 check(
@@ -546,33 +432,19 @@ check(
   source,
 );
 check(
-  'starting runtime placeholders do not expose a queryable activity run id',
-  source.includes("runId: run.status === 'starting' ? undefined : run.run_id"),
+  'starting delivery cards do not expose a queryable activity run id',
+  source.includes("runId: delivery.status === 'starting' ? undefined : delivery.runId"),
   source,
 );
 check(
-  'session switches suppress cached run placeholders until runtime hydration',
-  source.includes("const [runtimeHydratedSessionId, setRuntimeHydratedSessionId]") &&
-    source.includes("setRuntimeHydratedSessionId('')") &&
-    source.includes('setRuntimeHydratedSessionId(sid)') &&
-    source.includes('runtimeHydratedSessionId === activeSessionId'),
+  'no runtime hydration gate; delivery cards render directly from the reducer',
+  !source.includes('runtimeHydratedSessionId') &&
+    source.includes('deliveryCardsForSession(chatDeliveryRuntime, activeSessionId)') &&
+    source.includes('mergePersistedWithDeliveryCards('),
   source,
 );
-check(
-  'message refresh keeps a running placeholder even before a run row exists',
-  source.includes('const run = latestRunBySessionAgentId.get(sessionAgent.id)') &&
-    /id:\s*run\s*\?/.test(source) &&
-    source.includes('PENDING_AGENT_MESSAGE_PREFIX}running-${sessionAgent.id}') &&
-    source.includes('runId: run?.run_id'),
-  source,
-);
-check(
-  'running placeholders carry session agent ids for correlation',
-    source.includes('sessionAgentId: fallbackMember?.id') &&
-    source.includes('sessionAgentId: event.session_agent_id') &&
-    source.includes('carriedSessionAgentId'),
-  source,
-);
+
+
 check(
   'persists chat message font size preference in config.json',
   source.includes('CHAT_MESSAGE_FONT_SIZE_OPTIONS = [13, 14, 15, 16]') &&
@@ -619,30 +491,16 @@ check(
 );
 
 check(
-  'claimed queue messages create stable starting placeholders before run creation',
-  source.includes('reconcileProcessingQueuePlaceholders') &&
-    source.includes("String(item.message.status) !== 'processing'") &&
-    source.includes('QUEUE_PROCESSING_AGENT_MESSAGE_PREFIX') &&
-    source.includes('sourceMessageId = item.message.chat_message_id') &&
-    source.includes('syncProcessingQueuePlaceholders(queue.session_id, [queue])') &&
-    source.includes('clientMessageId,') &&
-    source.includes('sessionAgentId: queue.session_agent_id'),
+  'member queue snapshots authoritatively replace member deliveries',
+  source.includes("type: 'member_queue_snapshot'") &&
+    source.includes('deliveriesFromMemberQueue(parsed.queue)') &&
+    source.includes('Number(parsed.queue.revision)') &&
+    source.includes('representedKeys') &&
+    source.includes('representedRunIds'),
   source,
 );
 
-check(
-  'stages optimistic queued state for sends that target busy or blocked members',
-  source.includes('stageOptimisticQueuedMessage') &&
-    source.includes('shouldQueueForMember && pendingAgentMsg?.sessionAgentId') &&
-    source.includes('current?.session_id === sessionId') &&
-    source.includes('session_id: sessionId') &&
-    source.includes("targetMember?.status === 'run'") &&
-    source.includes('existingQueue?.blocked') &&
-    source.includes('existingQueue?.paused') &&
-    source.includes('queued_count: BigInt(') &&
-    source.includes('void refreshMemberQueues()'),
-  source,
-);
+
 
 check(
   'derives queued user visibility from persisted queue snapshots',
@@ -652,8 +510,8 @@ check(
     source.includes('queuedUserMessagesByIdFromSnapshot') &&
     source.includes("String(item.message.status) !== 'queued'") &&
     source.includes('item.message.chat_message_id') &&
-    source.includes('chatQueuesApi.listSession(sid).catch') &&
-    source.includes('queueResponse.members') &&
+    source.includes('chatQueuesApi.listSession(sid)') &&
+    source.includes('response.members') &&
     source.includes('queuedUserMessagesById,') &&
     source.includes('ensureQueuedRunSourceMessage') &&
     /chatMessagesApi\.get\(\s*event\.source_message_id/.test(source) &&

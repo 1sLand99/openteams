@@ -253,7 +253,9 @@ impl ChatSessionAgent {
                   FROM chat_message_queue queue
                   WHERE queue.session_agent_id = chat_session_agents.id
                     AND queue.run_id = ?2
-                    AND queue.status IN ('processing', 'running')
+                    AND queue.status IN (
+                        'starting', 'processing', 'running', 'waiting_approval', 'stopping'
+                    )
               )
             {CHAT_SESSION_AGENT_RETURNING}
             "#
@@ -261,6 +263,43 @@ impl ChatSessionAgent {
         .bind(id)
         .bind(run_id)
         .bind(state)
+        .fetch_optional(&mut **transaction)
+        .await
+    }
+
+    /// Mark the member stopping only while the exact run-bound delivery is still stopping.
+    pub async fn mark_stopping_for_delivery_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        id: Uuid,
+        delivery_id: Uuid,
+        delivery_revision: i64,
+        run_id: Uuid,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, ChatSessionAgent>(&format!(
+            r#"
+            UPDATE chat_session_agents
+            SET state = 'stopping',
+                updated_at = datetime('now', 'subsec')
+            WHERE id = ?1
+              AND state IN ('running', 'waitingapproval')
+              AND EXISTS (
+                  SELECT 1
+                  FROM chat_message_queue queue
+                  WHERE queue.id = ?2
+                    AND queue.revision = ?3
+                    AND queue.run_id = ?4
+                    AND queue.status = 'stopping'
+                    AND queue.session_agent_id = chat_session_agents.id
+                    AND queue.session_id = chat_session_agents.session_id
+                    AND queue.agent_id = chat_session_agents.agent_id
+              )
+            {CHAT_SESSION_AGENT_RETURNING}
+            "#
+        ))
+        .bind(id)
+        .bind(delivery_id)
+        .bind(delivery_revision)
+        .bind(run_id)
         .fetch_optional(&mut **transaction)
         .await
     }

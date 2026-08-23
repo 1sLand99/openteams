@@ -7,11 +7,8 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use db::models::{
-    chat_agent::ChatAgent,
-    chat_message::ChatMessage,
-    chat_run::ChatRun,
-    chat_session::ChatSession,
-    chat_session_agent::{ChatSessionAgent, ChatSessionAgentState},
+    chat_agent::ChatAgent, chat_message::ChatMessage, chat_message_queue::QueuedMessageStatus,
+    chat_run::ChatRun, chat_session::ChatSession, chat_session_agent::ChatSessionAgent,
     project_member::ProjectMember,
 };
 use deployment::Deployment;
@@ -40,6 +37,7 @@ pub enum ChatActiveRunStatus {
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct ChatActiveRun {
+    pub delivery_id: Uuid,
     pub run_id: Uuid,
     pub session_id: Uuid,
     pub session_agent_id: Uuid,
@@ -58,6 +56,7 @@ pub struct ChatActiveRun {
 #[ts(export)]
 pub struct ChatSessionRuntimeSnapshot {
     pub session_id: Uuid,
+    pub revision: i64,
     pub messages: Option<Vec<ChatMessage>>,
     pub active_runs: Vec<ChatActiveRun>,
     pub queues: Vec<MemberQueueSnapshot>,
@@ -89,6 +88,39 @@ pub async fn build_session_runtime_snapshot(
     session: &ChatSession,
     include_messages: bool,
     source_message: Option<&ChatMessage>,
+) -> Result<ChatSessionRuntimeSnapshot, ApiError> {
+    let queue_service = QueuedMessageService::new();
+    for _ in 0..3 {
+        let revision = queue_service
+            .current_runtime_revision(&deployment.db().pool, session.id)
+            .await?;
+        let snapshot = build_session_runtime_snapshot_once(
+            deployment,
+            session,
+            include_messages,
+            source_message,
+            revision,
+        )
+        .await?;
+        let current_revision = queue_service
+            .current_runtime_revision(&deployment.db().pool, session.id)
+            .await?;
+        if current_revision == revision {
+            return Ok(snapshot);
+        }
+    }
+
+    Err(ApiError::Conflict(
+        "Chat runtime changed while the snapshot was being built; retry the request.".to_string(),
+    ))
+}
+
+async fn build_session_runtime_snapshot_once(
+    deployment: &DeploymentImpl,
+    session: &ChatSession,
+    include_messages: bool,
+    source_message: Option<&ChatMessage>,
+    revision: i64,
 ) -> Result<ChatSessionRuntimeSnapshot, ApiError> {
     let pool = &deployment.db().pool;
     let session_agents = ChatSessionAgent::find_all_for_session(pool, session.id).await?;
@@ -128,12 +160,32 @@ pub async fn build_session_runtime_snapshot(
     }
 
     let mut active_runs = Vec::new();
-    for session_agent in session_agents
-        .iter()
-        .filter(|session_agent| active_run_status(&session_agent.state).is_some())
-    {
-        let status =
-            active_run_status(&session_agent.state).unwrap_or(ChatActiveRunStatus::Running);
+    for session_agent in &session_agents {
+        let Some(delivery) = queues
+            .iter()
+            .find(|queue| queue.session_agent_id == session_agent.id)
+            .and_then(|queue| {
+                queue
+                    .items
+                    .iter()
+                    .map(|item| &item.message)
+                    .find(|message| message.status.is_active() && message.run_id.is_some())
+            })
+        else {
+            continue;
+        };
+        let Some(status) = active_run_status(delivery.status) else {
+            continue;
+        };
+        let Some(run_id) = delivery.run_id else {
+            continue;
+        };
+        let Some(run) = ChatRun::find_by_id(pool, run_id)
+            .await?
+            .filter(|run| run.session_id == session.id && run.session_agent_id == session_agent.id)
+        else {
+            continue;
+        };
         let agent = agent_by_id.get(&session_agent.agent_id);
         let display_name = display_name_for_session_agent(
             session_agent,
@@ -144,21 +196,13 @@ pub async fn build_session_runtime_snapshot(
         let agent_name = agent
             .map(|agent| agent.name.clone())
             .unwrap_or_else(|| display_name.trim_start_matches('@').to_string());
-        let latest_run = ChatRun::find_latest_for_session_agent(pool, session_agent.id).await?;
-        let (run_id, created_at, status) =
-            match latest_run.filter(|run| run.session_id == session.id) {
-                Some(run) => (run.id, run.created_at, status),
-                None => (
-                    session_agent.id,
-                    session_agent.updated_at,
-                    ChatActiveRunStatus::Starting,
-                ),
-            };
         let (source_message_id, client_message_id) =
-            source_message_identity(source_message, session.id, created_at);
+            source_message_identity(pool, source_message, session.id, delivery.chat_message_id)
+                .await?;
 
         active_runs.push(ChatActiveRun {
-            run_id,
+            delivery_id: delivery.id,
+            run_id: run.id,
             session_id: session.id,
             session_agent_id: session_agent.id,
             agent_id: session_agent.agent_id,
@@ -169,7 +213,7 @@ pub async fn build_session_runtime_snapshot(
             status,
             source_message_id,
             client_message_id,
-            created_at,
+            created_at: run.created_at,
         });
     }
 
@@ -193,18 +237,26 @@ pub async fn build_session_runtime_snapshot(
 
     Ok(ChatSessionRuntimeSnapshot {
         session_id: session.id,
+        revision,
         messages,
         active_runs,
         queues,
     })
 }
 
-fn active_run_status(state: &ChatSessionAgentState) -> Option<ChatActiveRunStatus> {
-    match state {
-        ChatSessionAgentState::Running => Some(ChatActiveRunStatus::Running),
-        ChatSessionAgentState::Stopping => Some(ChatActiveRunStatus::Stopping),
-        ChatSessionAgentState::WaitingApproval => Some(ChatActiveRunStatus::WaitingApproval),
-        ChatSessionAgentState::Idle | ChatSessionAgentState::Dead => None,
+fn active_run_status(status: QueuedMessageStatus) -> Option<ChatActiveRunStatus> {
+    match status {
+        QueuedMessageStatus::Starting | QueuedMessageStatus::Processing => {
+            Some(ChatActiveRunStatus::Starting)
+        }
+        QueuedMessageStatus::Running => Some(ChatActiveRunStatus::Running),
+        QueuedMessageStatus::Stopping => Some(ChatActiveRunStatus::Stopping),
+        QueuedMessageStatus::WaitingApproval => Some(ChatActiveRunStatus::WaitingApproval),
+        QueuedMessageStatus::Queued
+        | QueuedMessageStatus::Failed
+        | QueuedMessageStatus::Cancelled
+        | QueuedMessageStatus::Skipped
+        | QueuedMessageStatus::Completed => None,
     }
 }
 
@@ -269,21 +321,75 @@ fn monogram_from_name(name: &str) -> String {
     }
 }
 
-fn source_message_identity(
+async fn source_message_identity(
+    pool: &sqlx::SqlitePool,
     source_message: Option<&ChatMessage>,
     session_id: Uuid,
-    run_created_at: DateTime<Utc>,
-) -> (Option<Uuid>, Option<String>) {
-    let Some(message) = source_message.filter(|message| message.session_id == session_id) else {
-        return (None, None);
+    chat_message_id: Uuid,
+) -> Result<(Option<Uuid>, Option<String>), sqlx::Error> {
+    let message = match source_message
+        .filter(|message| message.session_id == session_id && message.id == chat_message_id)
+    {
+        Some(message) => Some(message.clone()),
+        None => ChatMessage::find_by_id(pool, chat_message_id).await?,
     };
-    if run_created_at < message.created_at {
-        return (None, None);
-    }
+    let Some(message) = message.filter(|message| message.session_id == session_id) else {
+        return Ok((None, None));
+    };
     let client_message_id = message
         .meta
         .get("client_message_id")
         .and_then(|value| value.as_str())
         .map(ToString::to_string);
-    (Some(message.id), client_message_id)
+    Ok((Some(message.id), client_message_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_run_projection_serializes_stable_delivery_id() {
+        let delivery_id = Uuid::new_v4();
+        let value = serde_json::to_value(ChatActiveRun {
+            delivery_id,
+            run_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            session_agent_id: Uuid::new_v4(),
+            agent_id: Uuid::new_v4(),
+            agent_name: "Agent".to_string(),
+            display_name: "@Agent".to_string(),
+            avatar: "A".to_string(),
+            model: Some("test-model".to_string()),
+            status: ChatActiveRunStatus::Running,
+            source_message_id: Some(Uuid::new_v4()),
+            client_message_id: Some("client-message".to_string()),
+            created_at: Utc::now(),
+        })
+        .expect("serialize active run projection");
+
+        assert_eq!(value["delivery_id"], serde_json::json!(delivery_id));
+    }
+
+    #[test]
+    fn active_run_projection_uses_persisted_delivery_status() {
+        assert!(matches!(
+            active_run_status(QueuedMessageStatus::Starting),
+            Some(ChatActiveRunStatus::Starting)
+        ));
+        assert!(matches!(
+            active_run_status(QueuedMessageStatus::Running),
+            Some(ChatActiveRunStatus::Running)
+        ));
+        assert!(matches!(
+            active_run_status(QueuedMessageStatus::WaitingApproval),
+            Some(ChatActiveRunStatus::WaitingApproval)
+        ));
+        assert!(matches!(
+            active_run_status(QueuedMessageStatus::Stopping),
+            Some(ChatActiveRunStatus::Stopping)
+        ));
+        assert!(active_run_status(QueuedMessageStatus::Completed).is_none());
+        assert!(active_run_status(QueuedMessageStatus::Failed).is_none());
+    }
 }

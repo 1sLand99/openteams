@@ -11,6 +11,8 @@ const CHAT_MESSAGE_QUEUE_COLUMNS: &str = r#"
     agent_id,
     chat_message_id,
     status,
+    revision,
+    attempt_no,
     processing_started_at,
     run_id,
     failure_reason,
@@ -20,20 +22,80 @@ const CHAT_MESSAGE_QUEUE_COLUMNS: &str = r#"
 
 /// Lifecycle of a single queued member message.
 ///
-/// `queued` -> `processing` (claimed atomically) -> `running` (bound to a run) ->
-/// `completed` (success / normal stop) or `failed` (error). A `failed` entry blocks the
-/// member queue until the user continues, which moves it to `skipped`.
+/// `queued` -> `starting` (claimed atomically) -> `running` (bound to a run) -> a terminal
+/// state. `waiting_approval` and `stopping` are persisted runtime states, rather than frontend
+/// guesses. `processing` remains readable during rolling upgrades but new claims use `starting`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Type, Serialize, Deserialize, TS)]
 #[sqlx(type_name = "chat_message_queue_status", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 #[ts(use_ts_enum)]
 pub enum QueuedMessageStatus {
     Queued,
+    Starting,
+    /// Legacy spelling for a claimed delivery. New writes use [`Self::Starting`].
     Processing,
     Running,
+    WaitingApproval,
+    Stopping,
     Failed,
+    Cancelled,
     Skipped,
     Completed,
+}
+
+impl QueuedMessageStatus {
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Starting
+                | Self::Processing
+                | Self::Running
+                | Self::WaitingApproval
+                | Self::Stopping
+        )
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Failed | Self::Cancelled | Self::Skipped | Self::Completed
+        )
+    }
+
+    pub fn can_transition_to(self, next: Self) -> bool {
+        match self {
+            Self::Queued => matches!(next, Self::Starting | Self::Cancelled),
+            Self::Starting | Self::Processing => matches!(
+                next,
+                Self::Queued | Self::Running | Self::Failed | Self::Cancelled | Self::Skipped
+            ),
+            Self::Running => matches!(
+                next,
+                Self::Queued
+                    | Self::WaitingApproval
+                    | Self::Stopping
+                    | Self::Completed
+                    | Self::Failed
+                    | Self::Cancelled
+                    | Self::Skipped
+            ),
+            Self::WaitingApproval => matches!(
+                next,
+                Self::Queued
+                    | Self::Running
+                    | Self::Stopping
+                    | Self::Completed
+                    | Self::Failed
+                    | Self::Cancelled
+            ),
+            Self::Stopping => matches!(
+                next,
+                Self::Queued | Self::Completed | Self::Failed | Self::Cancelled
+            ),
+            Self::Failed => next == Self::Skipped,
+            Self::Cancelled | Self::Skipped | Self::Completed => false,
+        }
+    }
 }
 
 /// A durable, member-scoped queue entry referencing an existing `chat_messages` row.
@@ -45,6 +107,10 @@ pub struct ChatMessageQueue {
     pub agent_id: Uuid,
     pub chat_message_id: Uuid,
     pub status: QueuedMessageStatus,
+    /// Monotonic compare-and-set version for this delivery row.
+    pub revision: i64,
+    /// Number of times this delivery has been claimed from `queued`.
+    pub attempt_no: i64,
     pub processing_started_at: Option<DateTime<Utc>>,
     pub run_id: Option<Uuid>,
     pub failure_reason: Option<String>,
@@ -70,6 +136,38 @@ impl ChatMessageQueue {
         .await
     }
 
+    pub async fn current_runtime_revision(
+        pool: &SqlitePool,
+        session_id: Uuid,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT COALESCE((
+                 SELECT revision
+                 FROM chat_session_runtime_revisions
+                 WHERE session_id = ?1
+             ), 0)",
+        )
+        .bind(session_id)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn current_runtime_revision_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        session_id: Uuid,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT COALESCE((
+                 SELECT revision
+                 FROM chat_session_runtime_revisions
+                 WHERE session_id = ?1
+             ), 0)",
+        )
+        .bind(session_id)
+        .fetch_one(&mut **transaction)
+        .await
+    }
+
     /// All entries for a member, oldest first. Used to recover and display the queue.
     pub async fn list_for_member(
         pool: &SqlitePool,
@@ -86,7 +184,22 @@ impl ChatMessageQueue {
         .await
     }
 
-    /// The currently in-flight (`processing` or `running`) entry for a member, if any.
+    pub async fn list_for_member_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        session_agent_id: Uuid,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(&format!(
+            "SELECT {CHAT_MESSAGE_QUEUE_COLUMNS}
+             FROM chat_message_queue
+             WHERE session_agent_id = ?1
+             ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(session_agent_id)
+        .fetch_all(&mut **transaction)
+        .await
+    }
+
+    /// The currently active delivery for a member, if any.
     pub async fn find_active_for_member(
         pool: &SqlitePool,
         session_agent_id: Uuid,
@@ -94,7 +207,8 @@ impl ChatMessageQueue {
         sqlx::query_as::<_, Self>(&format!(
             "SELECT {CHAT_MESSAGE_QUEUE_COLUMNS}
              FROM chat_message_queue
-             WHERE session_agent_id = ?1 AND status IN ('processing', 'running')
+             WHERE session_agent_id = ?1
+               AND status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
              LIMIT 1"
         ))
         .bind(session_agent_id)
@@ -102,7 +216,7 @@ impl ChatMessageQueue {
         .await
     }
 
-    /// Processing entries that were claimed but never bound to a run.
+    /// Starting entries that were claimed but never bound to a run.
     ///
     /// These rows can survive a backend interruption even when the session-agent state was
     /// already persisted as `idle` or `dead`, so recovery cannot discover them from agent state
@@ -111,7 +225,7 @@ impl ChatMessageQueue {
         sqlx::query_as::<_, Self>(&format!(
             "SELECT {CHAT_MESSAGE_QUEUE_COLUMNS}
              FROM chat_message_queue
-             WHERE status = 'processing' AND run_id IS NULL
+             WHERE status IN ('starting', 'processing') AND run_id IS NULL
              ORDER BY created_at ASC, id ASC"
         ))
         .fetch_all(pool)
@@ -167,11 +281,23 @@ impl ChatMessageQueue {
         data: &CreateChatMessageQueue,
         id: Uuid,
     ) -> Result<Self, sqlx::Error> {
-        sqlx::query_as::<_, Self>(&format!(
+        let mut transaction = pool.begin().await?;
+        let row = Self::create_queued_in_transaction(&mut transaction, data, id).await?;
+        transaction.commit().await?;
+        Ok(row)
+    }
+
+    pub async fn create_queued_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        data: &CreateChatMessageQueue,
+        id: Uuid,
+    ) -> Result<Self, sqlx::Error> {
+        let inserted = sqlx::query_as::<_, Self>(&format!(
             "INSERT INTO chat_message_queue (
                  id, session_id, session_agent_id, agent_id, chat_message_id, status
              )
              VALUES (?1, ?2, ?3, ?4, ?5, 'queued')
+             ON CONFLICT(chat_message_id, session_agent_id) DO NOTHING
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
         ))
         .bind(id)
@@ -179,11 +305,31 @@ impl ChatMessageQueue {
         .bind(data.session_agent_id)
         .bind(data.agent_id)
         .bind(data.chat_message_id)
-        .fetch_one(pool)
-        .await
+        .fetch_optional(&mut **transaction)
+        .await?;
+
+        if let Some(row) = inserted {
+            return Ok(row);
+        }
+
+        let existing = sqlx::query_as::<_, Self>(&format!(
+            "SELECT {CHAT_MESSAGE_QUEUE_COLUMNS}
+             FROM chat_message_queue
+             WHERE chat_message_id = ?1 AND session_agent_id = ?2"
+        ))
+        .bind(data.chat_message_id)
+        .bind(data.session_agent_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if existing.session_id != data.session_id || existing.agent_id != data.agent_id {
+            return Err(sqlx::Error::Protocol(
+                "delivery key belongs to a different session or agent".to_string(),
+            ));
+        }
+        Ok(existing)
     }
 
-    /// Atomically claim the oldest `queued` entry for a member and move it to `processing`.
+    /// Atomically claim the oldest `queued` entry for a member and move it to `starting`.
     ///
     /// Returns `None` when there is nothing to claim, the member already has an in-flight entry,
     /// or the member is blocked by a `failed` entry. The `NOT EXISTS` guard (backed by the
@@ -196,7 +342,9 @@ impl ChatMessageQueue {
     ) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as::<_, Self>(&format!(
             "UPDATE chat_message_queue
-             SET status = 'processing',
+             SET status = 'starting',
+                 revision = revision + 1,
+                 attempt_no = attempt_no + 1,
                  processing_started_at = datetime('now', 'subsec'),
                  updated_at = datetime('now', 'subsec')
              WHERE id = (
@@ -207,7 +355,10 @@ impl ChatMessageQueue {
              )
              AND NOT EXISTS (
                  SELECT 1 FROM chat_message_queue
-                 WHERE session_agent_id = ?1 AND status IN ('processing', 'running', 'failed')
+                 WHERE session_agent_id = ?1
+                   AND status IN (
+                       'starting', 'processing', 'running', 'waiting_approval', 'stopping', 'failed'
+                   )
              )
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
         ))
@@ -235,55 +386,50 @@ impl ChatMessageQueue {
     /// Bind a message to a starting run and move it to `running`, creating the row if it does not
     /// already exist.
     ///
-    /// A message that waited in the queue already has a `queued`/`processing` row, which is
-    /// advanced in place. A message dispatched directly while the member was idle has no row yet,
-    /// so one is inserted straight into `running`. This keeps every dispatched message tracked by
-    /// exactly one queue row that the completion handler can finalize via [`Self::find_by_run_id`].
+    /// The delivery row is created idempotently before it is advanced. Repeating this operation
+    /// with the same source/target and run returns the same stable delivery without advancing its
+    /// revision again.
     pub async fn start_or_create_running(
         pool: &SqlitePool,
         data: &CreateChatMessageQueue,
         id: Uuid,
         run_id: Uuid,
     ) -> Result<Self, sqlx::Error> {
-        if let Some(row) = sqlx::query_as::<_, Self>(&format!(
+        let mut transaction = pool.begin().await?;
+        let delivery = Self::create_queued_in_transaction(&mut transaction, data, id).await?;
+        if delivery.status == QueuedMessageStatus::Running && delivery.run_id == Some(run_id) {
+            transaction.commit().await?;
+            return Ok(delivery);
+        }
+
+        let running = sqlx::query_as::<_, Self>(&format!(
             "UPDATE chat_message_queue
              SET status = 'running',
+                 revision = revision + 1,
+                 attempt_no = CASE WHEN status = 'queued' THEN attempt_no + 1 ELSE attempt_no END,
                  run_id = ?3,
                  processing_started_at = COALESCE(processing_started_at, datetime('now', 'subsec')),
                  updated_at = datetime('now', 'subsec')
-             WHERE session_agent_id = ?1
-               AND chat_message_id = ?2
-               AND status IN ('queued', 'processing')
+             WHERE id = ?1
+               AND revision = ?2
+               AND status IN ('queued', 'starting', 'processing')
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
         ))
-        .bind(data.session_agent_id)
-        .bind(data.chat_message_id)
+        .bind(delivery.id)
+        .bind(delivery.revision)
         .bind(run_id)
-        .fetch_optional(pool)
-        .await?
-        {
-            return Ok(row);
-        }
+        .fetch_optional(&mut *transaction)
+        .await?;
 
-        sqlx::query_as::<_, Self>(&format!(
-            "INSERT INTO chat_message_queue (
-                 id, session_id, session_agent_id, agent_id, chat_message_id,
-                 status, run_id, processing_started_at
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, datetime('now', 'subsec'))
-             RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
-        ))
-        .bind(id)
-        .bind(data.session_id)
-        .bind(data.session_agent_id)
-        .bind(data.agent_id)
-        .bind(data.chat_message_id)
-        .bind(run_id)
-        .fetch_one(pool)
-        .await
+        let Some(running) = running else {
+            transaction.rollback().await?;
+            return Err(sqlx::Error::RowNotFound);
+        };
+        transaction.commit().await?;
+        Ok(running)
     }
 
-    /// Reset any in-flight (`processing`/`running`) entries back to `queued` so they can be
+    /// Reset active entries back to `queued` so they can be
     /// re-dispatched. Used on startup/recovery when a backend interruption left rows stranded
     /// in an in-flight state. Returns the number of re-queued entries.
     pub async fn requeue_stale_inflight(
@@ -293,10 +439,12 @@ impl ChatMessageQueue {
         let result = sqlx::query(
             "UPDATE chat_message_queue
              SET status = 'queued',
+                 revision = revision + 1,
                  run_id = NULL,
                  processing_started_at = NULL,
                  updated_at = datetime('now', 'subsec')
-             WHERE session_agent_id = ?1 AND status IN ('processing', 'running')",
+             WHERE session_agent_id = ?1
+               AND status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')",
         )
         .bind(session_agent_id)
         .execute(pool)
@@ -304,7 +452,7 @@ impl ChatMessageQueue {
         Ok(result.rows_affected())
     }
 
-    /// Bind a claimed (`processing`) entry to its run and move it to `running`.
+    /// Bind a claimed (`starting`) entry to its run and move it to `running`.
     pub async fn bind_run(
         pool: &SqlitePool,
         id: Uuid,
@@ -313,9 +461,10 @@ impl ChatMessageQueue {
         sqlx::query_as::<_, Self>(&format!(
             "UPDATE chat_message_queue
              SET status = 'running',
+                 revision = revision + 1,
                  run_id = ?2,
                  updated_at = datetime('now', 'subsec')
-             WHERE id = ?1 AND status = 'processing'
+             WHERE id = ?1 AND status IN ('starting', 'processing')
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
         ))
         .bind(id)
@@ -324,13 +473,174 @@ impl ChatMessageQueue {
         .await
     }
 
+    pub async fn bind_run_cas_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        id: Uuid,
+        expected_revision: i64,
+        run_id: Uuid,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(&format!(
+            "UPDATE chat_message_queue
+             SET status = 'running',
+                 revision = revision + 1,
+                 run_id = ?3,
+                 updated_at = datetime('now', 'subsec')
+             WHERE id = ?1
+               AND revision = ?2
+               AND status IN ('starting', 'processing')
+             RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(expected_revision)
+        .bind(run_id)
+        .fetch_optional(&mut **transaction)
+        .await
+    }
+
+    /// Apply a legal delivery state transition guarded by the row revision and prior status.
+    pub async fn transition_status_cas(
+        pool: &SqlitePool,
+        id: Uuid,
+        expected_revision: i64,
+        expected_status: QueuedMessageStatus,
+        next_status: QueuedMessageStatus,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        if !expected_status.can_transition_to(next_status) {
+            return Err(sqlx::Error::Protocol(format!(
+                "illegal delivery transition: {expected_status:?} -> {next_status:?}"
+            )));
+        }
+
+        sqlx::query_as::<_, Self>(&format!(
+            "UPDATE chat_message_queue
+             SET status = ?4,
+                 revision = revision + 1,
+                 attempt_no = CASE
+                     WHEN status = 'queued' AND ?4 = 'starting' THEN attempt_no + 1
+                     ELSE attempt_no
+                 END,
+                 run_id = CASE WHEN ?4 = 'queued' THEN NULL ELSE run_id END,
+                 processing_started_at = CASE
+                     WHEN ?4 = 'queued' THEN NULL
+                     WHEN ?4 = 'starting' THEN COALESCE(
+                         processing_started_at,
+                         datetime('now', 'subsec')
+                     )
+                     ELSE processing_started_at
+                 END,
+                 updated_at = datetime('now', 'subsec')
+             WHERE id = ?1 AND revision = ?2 AND status = ?3
+             RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(expected_revision)
+        .bind(expected_status)
+        .bind(next_status)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Finalize one exact in-flight delivery attempt while preserving its failure reason.
+    pub async fn fail_or_skip_inflight_cas(
+        pool: &SqlitePool,
+        id: Uuid,
+        expected_revision: i64,
+        expected_status: QueuedMessageStatus,
+        next_status: QueuedMessageStatus,
+        failure_reason: Option<String>,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        if !expected_status.is_active() {
+            return Err(sqlx::Error::Protocol(format!(
+                "cannot fail terminal or queued delivery from {expected_status:?}"
+            )));
+        }
+        if !matches!(
+            next_status,
+            QueuedMessageStatus::Failed | QueuedMessageStatus::Skipped
+        ) {
+            return Err(sqlx::Error::Protocol(format!(
+                "failure transition target must be failed or skipped, got {next_status:?}"
+            )));
+        }
+
+        sqlx::query_as::<_, Self>(&format!(
+            "UPDATE chat_message_queue
+             SET status = ?4,
+                 revision = revision + 1,
+                 failure_reason = ?5,
+                 updated_at = datetime('now', 'subsec')
+             WHERE id = ?1
+               AND revision = ?2
+               AND status = ?3
+             RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(expected_revision)
+        .bind(expected_status)
+        .bind(next_status)
+        .bind(failure_reason)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Move a run-bound delivery to `stopping` while its owning member is still active.
+    ///
+    /// This is transaction-only so callers can update the member projection in the same commit.
+    pub async fn transition_run_to_stopping_cas_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        id: Uuid,
+        expected_revision: i64,
+        expected_status: QueuedMessageStatus,
+        run_id: Uuid,
+        session_agent_id: Uuid,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        if !matches!(
+            expected_status,
+            QueuedMessageStatus::Running | QueuedMessageStatus::WaitingApproval
+        ) {
+            return Err(sqlx::Error::Protocol(format!(
+                "illegal stop transition from {expected_status:?}"
+            )));
+        }
+
+        sqlx::query_as::<_, Self>(&format!(
+            "UPDATE chat_message_queue
+             SET status = 'stopping',
+                 revision = revision + 1,
+                 updated_at = datetime('now', 'subsec')
+             WHERE id = ?1
+               AND revision = ?2
+               AND status = ?3
+               AND run_id = ?4
+               AND session_agent_id = ?5
+               AND EXISTS (
+                   SELECT 1
+                   FROM chat_session_agents member
+                   WHERE member.id = chat_message_queue.session_agent_id
+                     AND member.session_id = chat_message_queue.session_id
+                     AND member.agent_id = chat_message_queue.agent_id
+                     AND member.state IN ('running', 'waitingapproval')
+               )
+             RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(expected_revision)
+        .bind(expected_status)
+        .bind(run_id)
+        .bind(session_agent_id)
+        .fetch_optional(&mut **transaction)
+        .await
+    }
+
     /// Mark an in-flight entry `completed` on success or normal stop.
     pub async fn mark_completed(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as::<_, Self>(&format!(
             "UPDATE chat_message_queue
              SET status = 'completed',
+                 revision = revision + 1,
                  updated_at = datetime('now', 'subsec')
-             WHERE id = ?1 AND status IN ('processing', 'running')
+             WHERE id = ?1
+               AND status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
         ))
         .bind(id)
@@ -349,8 +659,10 @@ impl ChatMessageQueue {
         let completed = sqlx::query_as::<_, Self>(&format!(
             "UPDATE chat_message_queue
              SET status = 'completed',
+                 revision = revision + 1,
                  updated_at = datetime('now', 'subsec')
-             WHERE run_id = ?1 AND status IN ('processing', 'running')
+             WHERE run_id = ?1
+               AND status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
         ))
         .bind(run_id)
@@ -359,7 +671,9 @@ impl ChatMessageQueue {
 
         let claimed = sqlx::query_as::<_, Self>(&format!(
             "UPDATE chat_message_queue
-             SET status = 'processing',
+             SET status = 'starting',
+                 revision = revision + 1,
+                 attempt_no = attempt_no + 1,
                  processing_started_at = datetime('now', 'subsec'),
                  updated_at = datetime('now', 'subsec')
              WHERE id = (
@@ -370,7 +684,10 @@ impl ChatMessageQueue {
              )
              AND NOT EXISTS (
                  SELECT 1 FROM chat_message_queue
-                 WHERE session_agent_id = ?1 AND status IN ('processing', 'running', 'failed')
+                 WHERE session_agent_id = ?1
+                   AND status IN (
+                       'starting', 'processing', 'running', 'waiting_approval', 'stopping', 'failed'
+                   )
              )
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
         ))
@@ -389,11 +706,34 @@ impl ChatMessageQueue {
         sqlx::query_as::<_, Self>(&format!(
             "UPDATE chat_message_queue
              SET status = 'completed',
+                 revision = revision + 1,
                  updated_at = datetime('now', 'subsec')
-             WHERE run_id = ?1 AND status IN ('processing', 'running')
+             WHERE run_id = ?1
+               AND status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
         ))
         .bind(run_id)
+        .fetch_optional(&mut **transaction)
+        .await
+    }
+
+    pub async fn mark_completed_by_run_cas_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        run_id: Uuid,
+        expected_revision: i64,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(&format!(
+            "UPDATE chat_message_queue
+             SET status = 'completed',
+                 revision = revision + 1,
+                 updated_at = datetime('now', 'subsec')
+             WHERE run_id = ?1
+               AND revision = ?2
+               AND status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
+             RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
+        ))
+        .bind(run_id)
+        .bind(expected_revision)
         .fetch_optional(&mut **transaction)
         .await
     }
@@ -404,7 +744,9 @@ impl ChatMessageQueue {
     ) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as::<_, Self>(&format!(
             "UPDATE chat_message_queue
-             SET status = 'processing',
+             SET status = 'starting',
+                 revision = revision + 1,
+                 attempt_no = attempt_no + 1,
                  processing_started_at = datetime('now', 'subsec'),
                  updated_at = datetime('now', 'subsec')
              WHERE id = (
@@ -415,7 +757,10 @@ impl ChatMessageQueue {
              )
              AND NOT EXISTS (
                  SELECT 1 FROM chat_message_queue
-                 WHERE session_agent_id = ?1 AND status IN ('processing', 'running', 'failed')
+                 WHERE session_agent_id = ?1
+                   AND status IN (
+                       'starting', 'processing', 'running', 'waiting_approval', 'stopping', 'failed'
+                   )
              )
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
         ))
@@ -441,13 +786,47 @@ impl ChatMessageQueue {
                      ) THEN 'failed'
                      ELSE 'skipped'
                  END,
+                 revision = revision + 1,
                  failure_reason = ?3,
                  updated_at = datetime('now', 'subsec')
-             WHERE run_id = ?1 AND status IN ('processing', 'running')
+             WHERE run_id = ?1
+               AND status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
         ))
         .bind(run_id)
         .bind(session_agent_id)
+        .bind(failure_reason)
+        .fetch_optional(&mut **transaction)
+        .await
+    }
+
+    pub async fn mark_failed_or_skipped_by_run_cas_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        run_id: Uuid,
+        session_agent_id: Uuid,
+        expected_revision: i64,
+        failure_reason: Option<String>,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(&format!(
+            "UPDATE chat_message_queue
+             SET status = CASE
+                     WHEN EXISTS (
+                         SELECT 1 FROM chat_message_queue queued
+                         WHERE queued.session_agent_id = ?2 AND queued.status = 'queued'
+                     ) THEN 'failed'
+                     ELSE 'skipped'
+                 END,
+                 revision = revision + 1,
+                 failure_reason = ?4,
+                 updated_at = datetime('now', 'subsec')
+             WHERE run_id = ?1
+               AND revision = ?3
+               AND status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
+             RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
+        ))
+        .bind(run_id)
+        .bind(session_agent_id)
+        .bind(expected_revision)
         .bind(failure_reason)
         .fetch_optional(&mut **transaction)
         .await
@@ -463,9 +842,11 @@ impl ChatMessageQueue {
         sqlx::query_as::<_, Self>(&format!(
             "UPDATE chat_message_queue
              SET status = 'failed',
+                 revision = revision + 1,
                  failure_reason = ?2,
                  updated_at = datetime('now', 'subsec')
-             WHERE id = ?1 AND status IN ('processing', 'running')
+             WHERE id = ?1
+               AND status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
         ))
         .bind(id)
@@ -486,9 +867,11 @@ impl ChatMessageQueue {
         sqlx::query_as::<_, Self>(&format!(
             "UPDATE chat_message_queue
              SET status = 'skipped',
+                 revision = revision + 1,
                  failure_reason = ?2,
                  updated_at = datetime('now', 'subsec')
-             WHERE id = ?1 AND status IN ('processing', 'running')
+             WHERE id = ?1
+               AND status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
         ))
         .bind(id)
@@ -506,6 +889,7 @@ impl ChatMessageQueue {
         let result = sqlx::query(
             "UPDATE chat_message_queue
              SET status = 'skipped',
+                 revision = revision + 1,
                  updated_at = datetime('now', 'subsec')
              WHERE session_agent_id = ?1 AND status = 'failed'",
         )
@@ -523,6 +907,22 @@ impl ChatMessageQueue {
                 .bind(id)
                 .execute(pool)
                 .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn delete_queued_cas(
+        pool: &SqlitePool,
+        id: Uuid,
+        expected_revision: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "DELETE FROM chat_message_queue
+             WHERE id = ?1 AND revision = ?2 AND status = 'queued'",
+        )
+        .bind(id)
+        .bind(expected_revision)
+        .execute(pool)
+        .await?;
         Ok(result.rows_affected())
     }
 
@@ -556,6 +956,49 @@ mod tests {
 
     use super::{ChatMessageQueue, CreateChatMessageQueue, QueuedMessageStatus};
 
+    async fn setup_runtime_revision_schema(pool: &SqlitePool) {
+        sqlx::query(
+            "CREATE TABLE chat_session_runtime_revisions (
+                 session_id BLOB PRIMARY KEY,
+                 revision INTEGER NOT NULL DEFAULT 0,
+                 updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("create runtime revisions");
+        sqlx::query(
+            "CREATE TRIGGER queue_revision_insert AFTER INSERT ON chat_message_queue BEGIN
+                 INSERT INTO chat_session_runtime_revisions (session_id, revision)
+                 VALUES (NEW.session_id, 1)
+                 ON CONFLICT(session_id) DO UPDATE SET revision = revision + 1;
+             END",
+        )
+        .execute(pool)
+        .await
+        .expect("create insert revision trigger");
+        sqlx::query(
+            "CREATE TRIGGER queue_revision_update AFTER UPDATE ON chat_message_queue BEGIN
+                 INSERT INTO chat_session_runtime_revisions (session_id, revision)
+                 VALUES (NEW.session_id, 1)
+                 ON CONFLICT(session_id) DO UPDATE SET revision = revision + 1;
+             END",
+        )
+        .execute(pool)
+        .await
+        .expect("create update revision trigger");
+        sqlx::query(
+            "CREATE TRIGGER queue_revision_delete AFTER DELETE ON chat_message_queue BEGIN
+                 INSERT INTO chat_session_runtime_revisions (session_id, revision)
+                 VALUES (OLD.session_id, 1)
+                 ON CONFLICT(session_id) DO UPDATE SET revision = revision + 1;
+             END",
+        )
+        .execute(pool)
+        .await
+        .expect("create delete revision trigger");
+    }
+
     async fn setup_pool() -> SqlitePool {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
@@ -569,7 +1012,13 @@ mod tests {
                 agent_id              BLOB NOT NULL,
                 chat_message_id       BLOB NOT NULL,
                 status                TEXT NOT NULL DEFAULT 'queued'
-                                        CHECK (status IN ('queued','processing','running','failed','skipped','completed')),
+                                        CHECK (status IN (
+                                            'queued','starting','processing','running',
+                                            'waiting_approval','stopping','failed','cancelled',
+                                            'skipped','completed'
+                                        )),
+                revision              INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+                attempt_no            INTEGER NOT NULL DEFAULT 0 CHECK (attempt_no >= 0),
                 processing_started_at TEXT,
                 run_id                BLOB,
                 failure_reason        TEXT,
@@ -585,12 +1034,20 @@ mod tests {
             r#"
             CREATE UNIQUE INDEX idx_chat_message_queue_one_active
                 ON chat_message_queue(session_agent_id)
-                WHERE status IN ('processing', 'running')
+                WHERE status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
             "#,
         )
         .execute(&pool)
         .await
         .expect("create partial unique index");
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_chat_message_queue_delivery_key
+             ON chat_message_queue(chat_message_id, session_agent_id)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create delivery key index");
+        setup_runtime_revision_schema(&pool).await;
         pool
     }
 
@@ -669,7 +1126,13 @@ mod tests {
                 agent_id              BLOB NOT NULL REFERENCES chat_agents(id) ON DELETE CASCADE,
                 chat_message_id       BLOB NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
                 status                TEXT NOT NULL DEFAULT 'queued'
-                                        CHECK (status IN ('queued','processing','running','failed','skipped','completed')),
+                                        CHECK (status IN (
+                                            'queued','starting','processing','running',
+                                            'waiting_approval','stopping','failed','cancelled',
+                                            'skipped','completed'
+                                        )),
+                revision              INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+                attempt_no            INTEGER NOT NULL DEFAULT 0 CHECK (attempt_no >= 0),
                 processing_started_at TEXT,
                 run_id                BLOB REFERENCES chat_runs(id) ON DELETE SET NULL,
                 failure_reason        TEXT,
@@ -685,12 +1148,20 @@ mod tests {
             r#"
             CREATE UNIQUE INDEX idx_chat_message_queue_one_active
                 ON chat_message_queue(session_agent_id)
-                WHERE status IN ('processing', 'running')
+                WHERE status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
             "#,
         )
         .execute(&pool)
         .await
         .expect("create partial unique index");
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_chat_message_queue_delivery_key
+             ON chat_message_queue(chat_message_id, session_agent_id)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create delivery key index");
+        setup_runtime_revision_schema(&pool).await;
         pool
     }
 
@@ -741,6 +1212,33 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_legacy_delivery(
+        pool: &SqlitePool,
+        id: Uuid,
+        data: &CreateChatMessageQueue,
+        status: &str,
+        run_id: Option<Uuid>,
+        updated_at: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO chat_message_queue (
+                 id, session_id, session_agent_id, agent_id, chat_message_id,
+                 status, run_id, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+        )
+        .bind(id)
+        .bind(data.session_id)
+        .bind(data.session_agent_id)
+        .bind(data.agent_id)
+        .bind(data.chat_message_id)
+        .bind(status)
+        .bind(run_id)
+        .bind(updated_at)
+        .execute(pool)
+        .await
+        .expect("insert legacy delivery");
+    }
+
     /// Enqueue an entry. `seq` makes `created_at` strictly ordering across entries so the
     /// in-memory clock granularity never makes the test flaky.
     async fn enqueue(pool: &SqlitePool, session_agent_id: Uuid, seq: i64) -> ChatMessageQueue {
@@ -777,7 +1275,7 @@ mod tests {
             .expect("claim")
             .expect("an entry to claim");
         assert_eq!(claimed.id, first.id);
-        assert_eq!(claimed.status, QueuedMessageStatus::Processing);
+        assert_eq!(claimed.status, QueuedMessageStatus::Starting);
         assert!(claimed.processing_started_at.is_some());
 
         // A second claim while one is in-flight returns nothing.
@@ -849,7 +1347,7 @@ mod tests {
         assert_eq!(completed.status, QueuedMessageStatus::Completed);
         let next = next.expect("next queued row");
         assert_eq!(next.id, second.id);
-        assert_eq!(next.status, QueuedMessageStatus::Processing);
+        assert_eq!(next.status, QueuedMessageStatus::Starting);
     }
 
     #[tokio::test]
@@ -906,7 +1404,7 @@ mod tests {
             .await
             .unwrap()
             .expect("claim after resume");
-        assert_eq!(next.status, QueuedMessageStatus::Processing);
+        assert_eq!(next.status, QueuedMessageStatus::Starting);
     }
 
     #[tokio::test]
@@ -1135,9 +1633,9 @@ mod tests {
         let advanced = ChatMessageQueue::start_or_create_running(
             &pool,
             &CreateChatMessageQueue {
-                session_id,
+                session_id: queued.session_id,
                 session_agent_id: member,
-                agent_id,
+                agent_id: queued.agent_id,
                 chat_message_id: queued.chat_message_id,
             },
             Uuid::new_v4(),
@@ -1244,6 +1742,415 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_queued_is_idempotent_for_delivery_key_and_keeps_stable_id() {
+        let pool = setup_pool().await;
+        let data = CreateChatMessageQueue {
+            session_id: Uuid::new_v4(),
+            session_agent_id: Uuid::new_v4(),
+            agent_id: Uuid::new_v4(),
+            chat_message_id: Uuid::new_v4(),
+        };
+        let first_id = Uuid::new_v4();
+        let first = ChatMessageQueue::create_queued(&pool, &data, first_id)
+            .await
+            .expect("create delivery");
+        let replay = ChatMessageQueue::create_queued(&pool, &data, Uuid::new_v4())
+            .await
+            .expect("replay delivery create");
+
+        assert_eq!(first.id, first_id);
+        assert_eq!(replay.id, first.id);
+        assert_eq!(replay.revision, 1);
+        assert_eq!(
+            ChatMessageQueue::list_for_member(&pool, data.session_agent_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            ChatMessageQueue::current_runtime_revision(&pool, data.session_id)
+                .await
+                .unwrap(),
+            1
+        );
+        let conflicting_target = CreateChatMessageQueue {
+            agent_id: Uuid::new_v4(),
+            ..data
+        };
+        assert!(matches!(
+            ChatMessageQueue::create_queued(&pool, &conflicting_target, Uuid::new_v4()).await,
+            Err(sqlx::Error::Protocol(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn revision_cas_rejects_stale_binding_and_advances_monotonically() {
+        let pool = setup_pool().await;
+        let member = Uuid::new_v4();
+        let queued = enqueue(&pool, member, 1).await;
+        assert_eq!(queued.revision, 1);
+        let starting = ChatMessageQueue::claim_next(&pool, member)
+            .await
+            .unwrap()
+            .expect("claim delivery");
+        assert_eq!(starting.revision, 2);
+        assert_eq!(starting.attempt_no, 1);
+
+        let mut stale_transaction = pool.begin().await.unwrap();
+        assert!(
+            ChatMessageQueue::bind_run_cas_in_transaction(
+                &mut stale_transaction,
+                starting.id,
+                starting.revision - 1,
+                Uuid::new_v4()
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        stale_transaction.commit().await.unwrap();
+        let mut binding_transaction = pool.begin().await.unwrap();
+        let running = ChatMessageQueue::bind_run_cas_in_transaction(
+            &mut binding_transaction,
+            starting.id,
+            starting.revision,
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap()
+        .expect("bind current revision");
+        binding_transaction.commit().await.unwrap();
+        assert_eq!(running.revision, 3);
+
+        let waiting = ChatMessageQueue::transition_status_cas(
+            &pool,
+            running.id,
+            running.revision,
+            QueuedMessageStatus::Running,
+            QueuedMessageStatus::WaitingApproval,
+        )
+        .await
+        .unwrap()
+        .expect("enter waiting approval");
+        assert_eq!(waiting.revision, 4);
+        assert_eq!(waiting.status, QueuedMessageStatus::WaitingApproval);
+    }
+
+    #[tokio::test]
+    async fn rolled_back_transition_does_not_publish_revision() {
+        let pool = setup_pool().await;
+        let member = Uuid::new_v4();
+        enqueue(&pool, member, 1).await;
+        let starting = ChatMessageQueue::claim_next(&pool, member)
+            .await
+            .unwrap()
+            .expect("claim delivery");
+        let runtime_revision =
+            ChatMessageQueue::current_runtime_revision(&pool, starting.session_id)
+                .await
+                .unwrap();
+
+        let mut transaction = pool.begin().await.unwrap();
+        let running = ChatMessageQueue::bind_run_cas_in_transaction(
+            &mut transaction,
+            starting.id,
+            starting.revision,
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+        assert!(running.is_some());
+        transaction.rollback().await.unwrap();
+
+        let persisted = ChatMessageQueue::find_by_id(&pool, starting.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, QueuedMessageStatus::Starting);
+        assert_eq!(persisted.revision, starting.revision);
+        assert_eq!(
+            ChatMessageQueue::current_runtime_revision(&pool, starting.session_id)
+                .await
+                .unwrap(),
+            runtime_revision
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_delivery_cannot_be_reopened() {
+        let pool = setup_pool().await;
+        let member = Uuid::new_v4();
+        enqueue(&pool, member, 1).await;
+        let starting = ChatMessageQueue::claim_next(&pool, member)
+            .await
+            .unwrap()
+            .unwrap();
+        let completed = ChatMessageQueue::mark_completed(&pool, starting.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(completed.status.is_terminal());
+        assert!(
+            ChatMessageQueue::transition_status_cas(
+                &pool,
+                completed.id,
+                completed.revision,
+                QueuedMessageStatus::Completed,
+                QueuedMessageStatus::Running,
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            ChatMessageQueue::mark_completed(&pool, completed.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_migration_normalizes_legacy_identity_conflicts() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("create sqlite memory pool");
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE chat_sessions (id BLOB PRIMARY KEY);
+            CREATE TABLE chat_agents (id BLOB PRIMARY KEY);
+            CREATE TABLE chat_session_agents (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                agent_id BLOB NOT NULL
+            );
+            CREATE TABLE chat_messages (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                sender_type TEXT NOT NULL,
+                meta TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE chat_runs (id BLOB PRIMARY KEY);
+            CREATE TABLE chat_message_queue (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                session_agent_id BLOB NOT NULL,
+                agent_id BLOB NOT NULL,
+                chat_message_id BLOB NOT NULL,
+                status TEXT NOT NULL,
+                processing_started_at TEXT,
+                run_id BLOB,
+                failure_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create legacy schema");
+
+        let session_id = Uuid::new_v4();
+        let agent_id = Uuid::new_v4();
+        let member_a = Uuid::new_v4();
+        let member_b = Uuid::new_v4();
+        sqlx::query("INSERT INTO chat_sessions (id) VALUES (?1)")
+            .bind(session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO chat_agents (id) VALUES (?1)")
+            .bind(agent_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for member_id in [member_a, member_b] {
+            sqlx::query(
+                "INSERT INTO chat_session_agents (id, session_id, agent_id) VALUES (?1, ?2, ?3)",
+            )
+            .bind(member_id)
+            .bind(session_id)
+            .bind(agent_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let completed_message_id = Uuid::new_v4();
+        let retry_message_id = Uuid::new_v4();
+        let running_message_id = Uuid::new_v4();
+        let conflicting_active_message_id = Uuid::new_v4();
+        for message_id in [
+            completed_message_id,
+            retry_message_id,
+            running_message_id,
+            conflicting_active_message_id,
+        ] {
+            sqlx::query(
+                "INSERT INTO chat_messages (
+                     id, session_id, sender_type, meta, created_at
+                 ) VALUES (?1, ?2, 'user', '{}', '2026-08-21T00:00:00.000')",
+            )
+            .bind(message_id)
+            .bind(session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let shared_run_id = Uuid::new_v4();
+        let conflicting_run_id = Uuid::new_v4();
+        for run_id in [shared_run_id, conflicting_run_id] {
+            sqlx::query("INSERT INTO chat_runs (id) VALUES (?1)")
+                .bind(run_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let completed_id = Uuid::new_v4();
+        let completed_data = CreateChatMessageQueue {
+            session_id,
+            session_agent_id: member_a,
+            agent_id,
+            chat_message_id: completed_message_id,
+        };
+        insert_legacy_delivery(
+            &pool,
+            completed_id,
+            &completed_data,
+            "completed",
+            Some(shared_run_id),
+            "2026-08-21T00:00:01.000",
+        )
+        .await;
+        insert_legacy_delivery(
+            &pool,
+            Uuid::new_v4(),
+            &completed_data,
+            "queued",
+            None,
+            "2026-08-21T00:00:09.000",
+        )
+        .await;
+
+        let retry_data = CreateChatMessageQueue {
+            session_id,
+            session_agent_id: member_b,
+            agent_id,
+            chat_message_id: retry_message_id,
+        };
+        insert_legacy_delivery(
+            &pool,
+            Uuid::new_v4(),
+            &retry_data,
+            "failed",
+            None,
+            "2026-08-21T00:00:08.000",
+        )
+        .await;
+        let queued_retry_id = Uuid::new_v4();
+        insert_legacy_delivery(
+            &pool,
+            queued_retry_id,
+            &retry_data,
+            "queued",
+            None,
+            "2026-08-21T00:00:02.000",
+        )
+        .await;
+
+        let running_id = Uuid::new_v4();
+        insert_legacy_delivery(
+            &pool,
+            running_id,
+            &CreateChatMessageQueue {
+                session_id,
+                session_agent_id: member_b,
+                agent_id,
+                chat_message_id: running_message_id,
+            },
+            "running",
+            Some(shared_run_id),
+            "2026-08-21T00:00:03.000",
+        )
+        .await;
+        let conflicting_active_id = Uuid::new_v4();
+        insert_legacy_delivery(
+            &pool,
+            conflicting_active_id,
+            &CreateChatMessageQueue {
+                session_id,
+                session_agent_id: member_b,
+                agent_id,
+                chat_message_id: conflicting_active_message_id,
+            },
+            "processing",
+            Some(conflicting_run_id),
+            "2026-08-21T00:00:04.000",
+        )
+        .await;
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/20260821090000_promote_chat_queue_to_deliveries.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("migrate legacy delivery conflicts");
+
+        let completed: (Uuid, String, Option<Uuid>) = sqlx::query_as(
+            "SELECT id, status, run_id FROM chat_message_queue
+             WHERE chat_message_id = ?1 AND session_agent_id = ?2",
+        )
+        .bind(completed_message_id)
+        .bind(member_a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(completed, (completed_id, "completed".to_string(), None));
+
+        let retry: (Uuid, String) = sqlx::query_as(
+            "SELECT id, status FROM chat_message_queue
+             WHERE chat_message_id = ?1 AND session_agent_id = ?2",
+        )
+        .bind(retry_message_id)
+        .bind(member_b)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retry, (queued_retry_id, "queued".to_string()));
+
+        let shared_run_owner: (Uuid, String) =
+            sqlx::query_as("SELECT id, status FROM chat_message_queue WHERE run_id = ?1")
+                .bind(shared_run_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(shared_run_owner, (running_id, "running".to_string()));
+        let conflicting_active: (String, Option<Uuid>, Option<String>) = sqlx::query_as(
+            "SELECT status, run_id, failure_reason FROM chat_message_queue WHERE id = ?1",
+        )
+        .bind(conflicting_active_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(conflicting_active.0, "skipped");
+        assert!(conflicting_active.1.is_none());
+        assert!(conflicting_active.2.is_some());
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM chat_message_queue
+             WHERE session_agent_id = ?1 AND status IN (
+                 'starting', 'processing', 'running', 'waiting_approval', 'stopping'
+             )",
+        )
+        .bind(member_b)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(active_count, 1);
+    }
+
+    #[tokio::test]
     async fn members_are_isolated() {
         let pool = setup_pool().await;
         let member_a = Uuid::new_v4();
@@ -1265,6 +2172,6 @@ mod tests {
             .await
             .unwrap()
             .expect("B can still claim independently");
-        assert_eq!(b_claim.status, QueuedMessageStatus::Processing);
+        assert_eq!(b_claim.status, QueuedMessageStatus::Starting);
     }
 }

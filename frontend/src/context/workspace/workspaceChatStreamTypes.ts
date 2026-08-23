@@ -16,6 +16,8 @@ export type ChatStreamEvent =
       agent_id: string;
       agent_name: string;
       model: string | null;
+      /** Stable durable delivery identity (`chat_message_queue.id`). */
+      delivery_id: string;
       run_id: string;
       source_message_id: string;
       client_message_id: string | null;

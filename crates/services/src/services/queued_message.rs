@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use db::models::{
     chat_message_queue::{ChatMessageQueue, CreateChatMessageQueue, QueuedMessageStatus},
+    chat_run::{ChatRun, CreateChatRun},
     chat_session_agent::{ChatSessionAgent, ChatSessionAgentState},
 };
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,8 @@ pub struct QueuedMessage {
     pub agent_id: Uuid,
     pub chat_message_id: Uuid,
     pub status: QueuedMessageStatus,
+    pub revision: i64,
+    pub attempt_no: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub processing_started_at: Option<DateTime<Utc>>,
@@ -31,8 +34,12 @@ pub struct QueuedMessage {
 pub enum MemberQueueStatus {
     Empty,
     Queued,
+    Starting,
+    /// Legacy projection value accepted during rolling upgrades.
     Processing,
     Running,
+    WaitingApproval,
+    Stopping,
     Blocked,
     Paused,
 }
@@ -48,6 +55,8 @@ pub struct QueuedMessageListItem {
 #[ts(export)]
 pub struct MemberQueueSnapshot {
     pub session_id: Uuid,
+    /// Session-scoped monotonic runtime revision used to discard stale snapshots/events.
+    pub revision: i64,
     pub session_agent_id: Uuid,
     pub agent_id: Uuid,
     pub status: MemberQueueStatus,
@@ -71,7 +80,19 @@ pub enum QueueStatus {
         message: QueuedMessage,
         queued_count: i64,
     },
+    Starting {
+        message: QueuedMessage,
+        queued_count: i64,
+    },
     Running {
+        message: QueuedMessage,
+        queued_count: i64,
+    },
+    WaitingApproval {
+        message: QueuedMessage,
+        queued_count: i64,
+    },
+    Stopping {
         message: QueuedMessage,
         queued_count: i64,
     },
@@ -98,6 +119,20 @@ pub struct CreateQueuedMessage {
 pub struct RunQueueFinalization {
     pub applied: bool,
     pub next: Option<QueuedMessage>,
+    pub runtime_revision: i64,
+}
+
+pub struct DeliveryRunBinding {
+    pub delivery: QueuedMessage,
+    pub run: ChatRun,
+    pub member: ChatSessionAgent,
+    pub runtime_revision: i64,
+}
+
+pub struct RunStoppingTransition {
+    pub delivery: QueuedMessage,
+    pub member: ChatSessionAgent,
+    pub runtime_revision: i64,
 }
 
 /// Database-backed service for managing member-scoped queued chat messages.
@@ -121,6 +156,8 @@ impl QueuedMessageService {
             agent_id: row.agent_id,
             chat_message_id: row.chat_message_id,
             status: row.status,
+            revision: row.revision,
+            attempt_no: row.attempt_no,
             created_at: row.created_at,
             updated_at: row.updated_at,
             processing_started_at: row.processing_started_at,
@@ -136,8 +173,11 @@ impl QueuedMessageService {
                 matches!(
                     message.status,
                     QueuedMessageStatus::Queued
+                        | QueuedMessageStatus::Starting
                         | QueuedMessageStatus::Processing
                         | QueuedMessageStatus::Running
+                        | QueuedMessageStatus::WaitingApproval
+                        | QueuedMessageStatus::Stopping
                         | QueuedMessageStatus::Failed
                 )
             })
@@ -146,6 +186,7 @@ impl QueuedMessageService {
 
     fn snapshot_from_messages(
         session_id: Uuid,
+        revision: i64,
         session_agent_id: Uuid,
         agent_id: Uuid,
         messages: Vec<QueuedMessage>,
@@ -164,14 +205,26 @@ impl QueuedMessageService {
             MemberQueueStatus::Paused
         } else if active_messages
             .iter()
+            .any(|message| message.status == QueuedMessageStatus::Stopping)
+        {
+            MemberQueueStatus::Stopping
+        } else if active_messages
+            .iter()
+            .any(|message| message.status == QueuedMessageStatus::WaitingApproval)
+        {
+            MemberQueueStatus::WaitingApproval
+        } else if active_messages
+            .iter()
             .any(|message| message.status == QueuedMessageStatus::Running)
         {
             MemberQueueStatus::Running
-        } else if active_messages
-            .iter()
-            .any(|message| message.status == QueuedMessageStatus::Processing)
-        {
-            MemberQueueStatus::Processing
+        } else if active_messages.iter().any(|message| {
+            matches!(
+                message.status,
+                QueuedMessageStatus::Starting | QueuedMessageStatus::Processing
+            )
+        }) {
+            MemberQueueStatus::Starting
         } else if queued_count > 0 {
             MemberQueueStatus::Queued
         } else {
@@ -180,6 +233,7 @@ impl QueuedMessageService {
 
         MemberQueueSnapshot {
             session_id,
+            revision,
             session_agent_id,
             agent_id,
             status,
@@ -283,7 +337,7 @@ impl QueuedMessageService {
         ChatMessageQueue::has_blocking_failure(pool, session_agent_id).await
     }
 
-    /// Atomically claim the oldest queued row for a member and move it to `processing`.
+    /// Atomically claim the oldest queued row for a member and move it to `starting`.
     pub async fn claim_next(
         &self,
         pool: &SqlitePool,
@@ -316,7 +370,7 @@ impl QueuedMessageService {
             .map(Self::from_row))
     }
 
-    /// Bind a `processing` row to a run and move it to `running`.
+    /// Bind a `starting` row to a run and move it to `running`.
     pub async fn bind_run(
         &self,
         pool: &SqlitePool,
@@ -326,6 +380,172 @@ impl QueuedMessageService {
         Ok(ChatMessageQueue::bind_run(pool, id, run_id)
             .await?
             .map(Self::from_row))
+    }
+
+    /// Atomically create the durable run, bind the claimed delivery, update the member runtime
+    /// projection, and advance the session revision. The caller must emit stream events only
+    /// after this method returns.
+    pub async fn bind_delivery_to_new_run(
+        &self,
+        pool: &SqlitePool,
+        delivery_id: Uuid,
+        expected_delivery_revision: i64,
+        run_data: &CreateChatRun,
+        run_id: Uuid,
+    ) -> Result<Option<DeliveryRunBinding>, sqlx::Error> {
+        let mut transaction = pool.begin().await?;
+        let run = ChatRun::create_in_transaction(&mut transaction, run_data, run_id).await?;
+        let Some(delivery) = ChatMessageQueue::bind_run_cas_in_transaction(
+            &mut transaction,
+            delivery_id,
+            expected_delivery_revision,
+            run_id,
+        )
+        .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+
+        if delivery.session_id != run_data.session_id
+            || delivery.session_agent_id != run_data.session_agent_id
+        {
+            transaction.rollback().await?;
+            return Err(sqlx::Error::Protocol(
+                "delivery and run target do not match".to_string(),
+            ));
+        }
+        let Some(member) = ChatSessionAgent::update_state_for_run_in_transaction(
+            &mut transaction,
+            run_data.session_agent_id,
+            run_id,
+            ChatSessionAgentState::Running,
+        )
+        .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        if member.session_id != delivery.session_id || member.agent_id != delivery.agent_id {
+            transaction.rollback().await?;
+            return Err(sqlx::Error::Protocol(
+                "delivery and member target do not match".to_string(),
+            ));
+        }
+        let runtime_revision = ChatMessageQueue::current_runtime_revision_in_transaction(
+            &mut transaction,
+            run_data.session_id,
+        )
+        .await?;
+        transaction.commit().await?;
+
+        Ok(Some(DeliveryRunBinding {
+            delivery: Self::from_row(delivery),
+            run,
+            member,
+            runtime_revision,
+        }))
+    }
+
+    pub async fn transition_status_cas(
+        &self,
+        pool: &SqlitePool,
+        id: Uuid,
+        expected_revision: i64,
+        expected_status: QueuedMessageStatus,
+        next_status: QueuedMessageStatus,
+    ) -> Result<Option<QueuedMessage>, sqlx::Error> {
+        Ok(ChatMessageQueue::transition_status_cas(
+            pool,
+            id,
+            expected_revision,
+            expected_status,
+            next_status,
+        )
+        .await?
+        .map(Self::from_row))
+    }
+
+    /// Atomically fail or auto-skip one exact in-flight attempt and retain its diagnostic.
+    /// A CAS miss returns `None`; callers must publish only after receiving `Some`.
+    pub async fn fail_or_skip_inflight_cas(
+        &self,
+        pool: &SqlitePool,
+        delivery_id: Uuid,
+        expected_delivery_revision: i64,
+        expected_delivery_status: QueuedMessageStatus,
+        next_status: QueuedMessageStatus,
+        failure_reason: Option<String>,
+    ) -> Result<Option<QueuedMessage>, sqlx::Error> {
+        Ok(ChatMessageQueue::fail_or_skip_inflight_cas(
+            pool,
+            delivery_id,
+            expected_delivery_revision,
+            expected_delivery_status,
+            next_status,
+            failure_reason,
+        )
+        .await?
+        .map(Self::from_row))
+    }
+
+    /// Atomically project an active run as stopping in both the delivery ledger and member row.
+    /// A stale delivery, run, status, revision, or inactive member returns `None` with no writes.
+    pub async fn transition_run_to_stopping_cas(
+        &self,
+        pool: &SqlitePool,
+        delivery_id: Uuid,
+        expected_delivery_revision: i64,
+        expected_delivery_status: QueuedMessageStatus,
+        run_id: Uuid,
+        session_agent_id: Uuid,
+    ) -> Result<Option<RunStoppingTransition>, sqlx::Error> {
+        let mut transaction = pool.begin().await?;
+        let Some(delivery) = ChatMessageQueue::transition_run_to_stopping_cas_in_transaction(
+            &mut transaction,
+            delivery_id,
+            expected_delivery_revision,
+            expected_delivery_status,
+            run_id,
+            session_agent_id,
+        )
+        .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let Some(member) = ChatSessionAgent::mark_stopping_for_delivery_in_transaction(
+            &mut transaction,
+            session_agent_id,
+            delivery.id,
+            delivery.revision,
+            run_id,
+        )
+        .await?
+        else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let runtime_revision = ChatMessageQueue::current_runtime_revision_in_transaction(
+            &mut transaction,
+            delivery.session_id,
+        )
+        .await?;
+        transaction.commit().await?;
+
+        Ok(Some(RunStoppingTransition {
+            delivery: Self::from_row(delivery),
+            member,
+            runtime_revision,
+        }))
+    }
+
+    pub async fn current_runtime_revision(
+        &self,
+        pool: &SqlitePool,
+        session_id: Uuid,
+    ) -> Result<i64, sqlx::Error> {
+        ChatMessageQueue::current_runtime_revision(pool, session_id).await
     }
 
     pub async fn complete_run_and_claim_next(
@@ -348,6 +568,39 @@ impl QueuedMessageService {
         session_agent_id: Uuid,
         claim_next: bool,
     ) -> Result<RunQueueFinalization, sqlx::Error> {
+        let Some(delivery) = self.find_by_run_id(pool, run_id).await? else {
+            let session_id = ChatSessionAgent::find_by_id(pool, session_agent_id)
+                .await?
+                .ok_or(sqlx::Error::RowNotFound)?
+                .session_id;
+            return Ok(RunQueueFinalization {
+                applied: false,
+                next: None,
+                runtime_revision: self.current_runtime_revision(pool, session_id).await?,
+            });
+        };
+        self.finalize_completed_run_cas(
+            pool,
+            run_id,
+            session_agent_id,
+            delivery.revision,
+            claim_next,
+        )
+        .await
+    }
+
+    pub async fn finalize_completed_run_cas(
+        &self,
+        pool: &SqlitePool,
+        run_id: Uuid,
+        session_agent_id: Uuid,
+        expected_delivery_revision: i64,
+        claim_next: bool,
+    ) -> Result<RunQueueFinalization, sqlx::Error> {
+        let session_id = ChatSessionAgent::find_by_id(pool, session_agent_id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?
+            .session_id;
         let mut transaction = pool.begin().await?;
         let updated_agent = ChatSessionAgent::update_state_for_run_in_transaction(
             &mut transaction,
@@ -358,19 +611,26 @@ impl QueuedMessageService {
         .await?;
         if updated_agent.is_none() {
             transaction.rollback().await?;
+            let runtime_revision = self.current_runtime_revision(pool, session_id).await?;
             return Ok(RunQueueFinalization {
                 applied: false,
                 next: None,
+                runtime_revision,
             });
         }
-        let completed =
-            ChatMessageQueue::mark_completed_by_run_in_transaction(&mut transaction, run_id)
-                .await?;
+        let completed = ChatMessageQueue::mark_completed_by_run_cas_in_transaction(
+            &mut transaction,
+            run_id,
+            expected_delivery_revision,
+        )
+        .await?;
         if completed.is_none() {
             transaction.rollback().await?;
+            let runtime_revision = self.current_runtime_revision(pool, session_id).await?;
             return Ok(RunQueueFinalization {
                 applied: false,
                 next: None,
+                runtime_revision,
             });
         }
         let next = if claim_next {
@@ -378,10 +638,14 @@ impl QueuedMessageService {
         } else {
             None
         };
+        let runtime_revision =
+            ChatMessageQueue::current_runtime_revision_in_transaction(&mut transaction, session_id)
+                .await?;
         transaction.commit().await?;
         Ok(RunQueueFinalization {
             applied: true,
             next: next.map(Self::from_row),
+            runtime_revision,
         })
     }
 
@@ -393,6 +657,33 @@ impl QueuedMessageService {
         session_agent_id: Uuid,
         failure_reason: Option<String>,
     ) -> Result<bool, sqlx::Error> {
+        let Some(delivery) = self.find_by_run_id(pool, run_id).await? else {
+            return Ok(false);
+        };
+        Ok(self
+            .finalize_failed_run_cas(
+                pool,
+                run_id,
+                session_agent_id,
+                delivery.revision,
+                failure_reason,
+            )
+            .await?
+            .applied)
+    }
+
+    pub async fn finalize_failed_run_cas(
+        &self,
+        pool: &SqlitePool,
+        run_id: Uuid,
+        session_agent_id: Uuid,
+        expected_delivery_revision: i64,
+        failure_reason: Option<String>,
+    ) -> Result<RunQueueFinalization, sqlx::Error> {
+        let session_id = ChatSessionAgent::find_by_id(pool, session_agent_id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?
+            .session_id;
         let mut transaction = pool.begin().await?;
         let updated_agent = ChatSessionAgent::update_state_for_run_in_transaction(
             &mut transaction,
@@ -403,21 +694,37 @@ impl QueuedMessageService {
         .await?;
         if updated_agent.is_none() {
             transaction.rollback().await?;
-            return Ok(false);
+            return Ok(RunQueueFinalization {
+                applied: false,
+                next: None,
+                runtime_revision: self.current_runtime_revision(pool, session_id).await?,
+            });
         }
-        let finalized = ChatMessageQueue::mark_failed_or_skipped_by_run_in_transaction(
+        let finalized = ChatMessageQueue::mark_failed_or_skipped_by_run_cas_in_transaction(
             &mut transaction,
             run_id,
             session_agent_id,
+            expected_delivery_revision,
             failure_reason,
         )
         .await?;
         if finalized.is_none() {
             transaction.rollback().await?;
-            return Ok(false);
+            return Ok(RunQueueFinalization {
+                applied: false,
+                next: None,
+                runtime_revision: self.current_runtime_revision(pool, session_id).await?,
+            });
         }
+        let runtime_revision =
+            ChatMessageQueue::current_runtime_revision_in_transaction(&mut transaction, session_id)
+                .await?;
         transaction.commit().await?;
-        Ok(true)
+        Ok(RunQueueFinalization {
+            applied: true,
+            next: None,
+            runtime_revision,
+        })
     }
 
     /// Mark `processing` or `running` as `completed` after success or a normal stop.
@@ -470,6 +777,15 @@ impl QueuedMessageService {
         ChatMessageQueue::delete_queued(pool, id).await
     }
 
+    pub async fn delete_queued_cas(
+        &self,
+        pool: &SqlitePool,
+        id: Uuid,
+        expected_revision: i64,
+    ) -> Result<u64, sqlx::Error> {
+        ChatMessageQueue::delete_queued_cas(pool, id, expected_revision).await
+    }
+
     /// Count other queue rows that reference the same source `chat_messages` row, excluding the
     /// given queue id. Used to decide whether the source message can be cleaned up after a queued
     /// row is deleted.
@@ -502,9 +818,20 @@ impl QueuedMessageService {
         session_agent_id: Uuid,
         agent_id: Uuid,
     ) -> Result<MemberQueueSnapshot, sqlx::Error> {
-        let messages = self.list_for_member(pool, session_agent_id).await?;
+        let mut transaction = pool.begin().await?;
+        let revision =
+            ChatMessageQueue::current_runtime_revision_in_transaction(&mut transaction, session_id)
+                .await?;
+        let messages =
+            ChatMessageQueue::list_for_member_in_transaction(&mut transaction, session_agent_id)
+                .await?
+                .into_iter()
+                .map(Self::from_row)
+                .collect();
+        transaction.commit().await?;
         Ok(Self::snapshot_from_messages(
             session_id,
+            revision,
             session_agent_id,
             agent_id,
             messages,
@@ -544,6 +871,28 @@ impl QueuedMessageService {
 
         if let Some(message) = messages
             .iter()
+            .find(|message| message.status == QueuedMessageStatus::Stopping)
+            .cloned()
+        {
+            return Ok(QueueStatus::Stopping {
+                message,
+                queued_count,
+            });
+        }
+
+        if let Some(message) = messages
+            .iter()
+            .find(|message| message.status == QueuedMessageStatus::WaitingApproval)
+            .cloned()
+        {
+            return Ok(QueueStatus::WaitingApproval {
+                message,
+                queued_count,
+            });
+        }
+
+        if let Some(message) = messages
+            .iter()
             .find(|message| message.status == QueuedMessageStatus::Running)
             .cloned()
         {
@@ -555,10 +904,15 @@ impl QueuedMessageService {
 
         if let Some(message) = messages
             .iter()
-            .find(|message| message.status == QueuedMessageStatus::Processing)
+            .find(|message| {
+                matches!(
+                    message.status,
+                    QueuedMessageStatus::Starting | QueuedMessageStatus::Processing
+                )
+            })
             .cloned()
         {
-            return Ok(QueueStatus::Processing {
+            return Ok(QueueStatus::Starting {
                 message,
                 queued_count,
             });
@@ -583,6 +937,36 @@ mod tests {
 
     use super::*;
 
+    async fn setup_runtime_revision_schema(pool: &SqlitePool) {
+        sqlx::query(
+            "CREATE TABLE chat_session_runtime_revisions (
+                 session_id BLOB PRIMARY KEY,
+                 revision INTEGER NOT NULL DEFAULT 0,
+                 updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+             )",
+        )
+        .execute(pool)
+        .await
+        .expect("create runtime revisions");
+        for (name, timing, row) in [
+            ("queue_revision_insert", "INSERT", "NEW"),
+            ("queue_revision_update", "UPDATE", "NEW"),
+            ("queue_revision_delete", "DELETE", "OLD"),
+        ] {
+            let trigger = format!(
+                "CREATE TRIGGER {name} AFTER {timing} ON chat_message_queue BEGIN
+                     INSERT INTO chat_session_runtime_revisions (session_id, revision)
+                     VALUES ({row}.session_id, 1)
+                     ON CONFLICT(session_id) DO UPDATE SET revision = revision + 1;
+                 END"
+            );
+            sqlx::query(&trigger)
+                .execute(pool)
+                .await
+                .expect("create queue revision trigger");
+        }
+    }
+
     async fn setup_pool() -> SqlitePool {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
@@ -596,7 +980,13 @@ mod tests {
                 agent_id              BLOB NOT NULL,
                 chat_message_id       BLOB NOT NULL,
                 status                TEXT NOT NULL DEFAULT 'queued'
-                                        CHECK (status IN ('queued','processing','running','failed','skipped','completed')),
+                                        CHECK (status IN (
+                                            'queued','starting','processing','running',
+                                            'waiting_approval','stopping','failed','cancelled',
+                                            'skipped','completed'
+                                        )),
+                revision              INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+                attempt_no            INTEGER NOT NULL DEFAULT 0 CHECK (attempt_no >= 0),
                 processing_started_at TEXT,
                 run_id                BLOB,
                 failure_reason        TEXT,
@@ -612,12 +1002,47 @@ mod tests {
             r#"
             CREATE UNIQUE INDEX idx_chat_message_queue_one_active
                 ON chat_message_queue(session_agent_id)
-                WHERE status IN ('processing', 'running')
+                WHERE status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
             "#,
         )
         .execute(&pool)
         .await
         .expect("create partial unique index");
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_chat_message_queue_delivery_key
+             ON chat_message_queue(chat_message_id, session_agent_id)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create delivery key index");
+        setup_runtime_revision_schema(&pool).await;
+        sqlx::query(
+            r#"
+            CREATE TABLE chat_runs (
+                id BLOB PRIMARY KEY,
+                session_id BLOB NOT NULL,
+                session_agent_id BLOB NOT NULL,
+                workspace_path TEXT,
+                run_index INTEGER NOT NULL,
+                run_dir TEXT NOT NULL,
+                input_path TEXT,
+                output_path TEXT,
+                raw_log_path TEXT,
+                meta_path TEXT,
+                log_state TEXT NOT NULL DEFAULT 'live',
+                artifact_state TEXT NOT NULL DEFAULT 'full',
+                log_truncated INTEGER NOT NULL DEFAULT 0,
+                log_capture_degraded INTEGER NOT NULL DEFAULT 0,
+                pruned_at TEXT,
+                prune_reason TEXT,
+                retention_summary_json TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create chat_runs table");
         sqlx::query(
             r#"
             CREATE TABLE chat_session_agents (
@@ -657,6 +1082,20 @@ mod tests {
         .execute(pool)
         .await
         .expect("insert running member");
+    }
+
+    async fn insert_idle_member(pool: &SqlitePool, member: Uuid, data: &CreateQueuedMessage) {
+        sqlx::query(
+            "INSERT INTO chat_session_agents (
+                 id, session_id, agent_id, state, member_name
+             ) VALUES (?1, ?2, ?3, 'idle', 'Target')",
+        )
+        .bind(member)
+        .bind(data.session_id)
+        .bind(data.agent_id)
+        .execute(pool)
+        .await
+        .expect("insert idle member");
     }
 
     fn sample_create(session_agent_id: Uuid) -> CreateQueuedMessage {
@@ -708,6 +1147,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_reuses_delivery_and_versions_snapshots_monotonically() {
+        let pool = setup_pool().await;
+        let service = QueuedMessageService::new();
+        let member = Uuid::new_v4();
+        let data = sample_create(member);
+        let created = service
+            .create_queued(&pool, &data)
+            .await
+            .expect("create delivery");
+        let replay = service
+            .create_queued(&pool, &data)
+            .await
+            .expect("replay delivery creation");
+        assert_eq!(replay.id, created.id);
+
+        let queued_snapshot = service
+            .snapshot_for_member(&pool, data.session_id, member, data.agent_id)
+            .await
+            .expect("queued snapshot");
+        let starting = service
+            .claim_next(&pool, member)
+            .await
+            .expect("claim")
+            .expect("delivery starts");
+        let starting_snapshot = service
+            .snapshot_for_member(&pool, data.session_id, member, data.agent_id)
+            .await
+            .expect("starting snapshot");
+
+        assert_eq!(starting.id, created.id);
+        assert_eq!(starting_snapshot.status, MemberQueueStatus::Starting);
+        assert!(starting_snapshot.revision > queued_snapshot.revision);
+        // Applying the responses in reverse order must leave the newer revision authoritative.
+        let mut projected = starting_snapshot.clone();
+        if queued_snapshot.revision > projected.revision {
+            projected = queued_snapshot;
+        }
+        assert_eq!(projected.revision, starting_snapshot.revision);
+        assert_eq!(projected.status, MemberQueueStatus::Starting);
+    }
+
+    #[tokio::test]
     async fn service_claims_binds_and_completes_with_cas_states() {
         let pool = setup_pool().await;
         let service = QueuedMessageService::new();
@@ -721,7 +1202,7 @@ mod tests {
             .unwrap()
             .expect("claim first");
         assert_eq!(claimed.id, first.id);
-        assert_eq!(claimed.status, QueuedMessageStatus::Processing);
+        assert_eq!(claimed.status, QueuedMessageStatus::Starting);
         assert!(service.claim_next(&pool, member).await.unwrap().is_none());
 
         let run_id = Uuid::new_v4();
@@ -746,6 +1227,469 @@ mod tests {
             .unwrap()
             .expect("claim next");
         assert_eq!(next.id, second.id);
+    }
+
+    #[tokio::test]
+    async fn run_creation_delivery_binding_member_state_and_revision_are_atomic() {
+        let pool = setup_pool().await;
+        let service = QueuedMessageService::new();
+        let member = Uuid::new_v4();
+        let data = sample_create(member);
+        insert_idle_member(&pool, member, &data).await;
+        service
+            .create_queued(&pool, &data)
+            .await
+            .expect("create delivery");
+        let starting = service
+            .claim_next(&pool, member)
+            .await
+            .expect("claim")
+            .expect("starting delivery");
+        let before_revision = service
+            .current_runtime_revision(&pool, data.session_id)
+            .await
+            .unwrap();
+        let run_id = Uuid::new_v4();
+        let run_data = CreateChatRun {
+            session_id: data.session_id,
+            session_agent_id: member,
+            workspace_path: Some("/tmp/workspace".to_string()),
+            run_index: 1,
+            run_dir: "/tmp/run".to_string(),
+            input_path: None,
+            output_path: None,
+            raw_log_path: None,
+            meta_path: None,
+        };
+
+        let binding = service
+            .bind_delivery_to_new_run(&pool, starting.id, starting.revision, &run_data, run_id)
+            .await
+            .expect("bind transaction")
+            .expect("binding applied");
+
+        assert_eq!(binding.delivery.status, QueuedMessageStatus::Running);
+        assert_eq!(binding.delivery.run_id, Some(run_id));
+        assert_eq!(binding.member.state, ChatSessionAgentState::Running);
+        assert_eq!(binding.run.id, run_id);
+        assert!(binding.runtime_revision > before_revision);
+        let stale_run_id = Uuid::new_v4();
+        assert!(
+            service
+                .bind_delivery_to_new_run(
+                    &pool,
+                    starting.id,
+                    starting.revision,
+                    &CreateChatRun {
+                        run_index: 2,
+                        ..run_data
+                    },
+                    stale_run_id,
+                )
+                .await
+                .expect("stale bind is not an error")
+                .is_none()
+        );
+        assert!(
+            ChatRun::find_by_id(&pool, stale_run_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_transition_atomically_updates_waiting_delivery_member_and_revision() {
+        let pool = setup_pool().await;
+        let service = QueuedMessageService::new();
+        let member = Uuid::new_v4();
+        let data = sample_create(member);
+        insert_running_member(&pool, member, &data).await;
+        service
+            .create_queued(&pool, &data)
+            .await
+            .expect("create delivery");
+        let starting = service
+            .claim_next(&pool, member)
+            .await
+            .expect("claim delivery")
+            .expect("starting delivery");
+        let run_id = Uuid::new_v4();
+        let running = service
+            .bind_run(&pool, starting.id, run_id)
+            .await
+            .expect("bind run")
+            .expect("running delivery");
+        let waiting = service
+            .transition_status_cas(
+                &pool,
+                running.id,
+                running.revision,
+                QueuedMessageStatus::Running,
+                QueuedMessageStatus::WaitingApproval,
+            )
+            .await
+            .expect("enter approval")
+            .expect("waiting delivery");
+        ChatSessionAgent::update_state(&pool, member, ChatSessionAgentState::WaitingApproval)
+            .await
+            .expect("project waiting member");
+        let before_revision = service
+            .current_runtime_revision(&pool, data.session_id)
+            .await
+            .expect("runtime revision before stop");
+
+        assert!(
+            service
+                .transition_run_to_stopping_cas(
+                    &pool,
+                    waiting.id,
+                    waiting.revision,
+                    QueuedMessageStatus::WaitingApproval,
+                    Uuid::new_v4(),
+                    member,
+                )
+                .await
+                .expect("wrong run is a CAS miss")
+                .is_none()
+        );
+        assert_eq!(
+            service
+                .current_runtime_revision(&pool, data.session_id)
+                .await
+                .expect("revision after rejected stop"),
+            before_revision
+        );
+
+        let stopped = service
+            .transition_run_to_stopping_cas(
+                &pool,
+                waiting.id,
+                waiting.revision,
+                QueuedMessageStatus::WaitingApproval,
+                run_id,
+                member,
+            )
+            .await
+            .expect("stop transaction")
+            .expect("stop applied");
+
+        assert_eq!(stopped.delivery.id, waiting.id);
+        assert_eq!(stopped.delivery.status, QueuedMessageStatus::Stopping);
+        assert_eq!(stopped.delivery.revision, waiting.revision + 1);
+        assert_eq!(stopped.delivery.run_id, Some(run_id));
+        assert_eq!(stopped.member.id, member);
+        assert_eq!(stopped.member.state, ChatSessionAgentState::Stopping);
+        assert_eq!(stopped.runtime_revision, before_revision + 1);
+        assert!(
+            service
+                .transition_run_to_stopping_cas(
+                    &pool,
+                    waiting.id,
+                    waiting.revision,
+                    QueuedMessageStatus::WaitingApproval,
+                    run_id,
+                    member,
+                )
+                .await
+                .expect("stale repeated stop")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_transition_rolls_back_delivery_when_member_update_fails() {
+        let pool = setup_pool().await;
+        let service = QueuedMessageService::new();
+        let member = Uuid::new_v4();
+        let data = sample_create(member);
+        insert_running_member(&pool, member, &data).await;
+        service
+            .create_queued(&pool, &data)
+            .await
+            .expect("create delivery");
+        let starting = service
+            .claim_next(&pool, member)
+            .await
+            .expect("claim delivery")
+            .expect("starting delivery");
+        let run_id = Uuid::new_v4();
+        let running = service
+            .bind_run(&pool, starting.id, run_id)
+            .await
+            .expect("bind run")
+            .expect("running delivery");
+        sqlx::query(
+            "CREATE TRIGGER reject_member_stopping
+             BEFORE UPDATE OF state ON chat_session_agents
+             WHEN NEW.state = 'stopping'
+             BEGIN
+                 SELECT RAISE(ABORT, 'reject stopping projection');
+             END",
+        )
+        .execute(&pool)
+        .await
+        .expect("install member failure trigger");
+        let before_revision = service
+            .current_runtime_revision(&pool, data.session_id)
+            .await
+            .expect("runtime revision before failed stop");
+
+        assert!(
+            service
+                .transition_run_to_stopping_cas(
+                    &pool,
+                    running.id,
+                    running.revision,
+                    QueuedMessageStatus::Running,
+                    run_id,
+                    member,
+                )
+                .await
+                .is_err()
+        );
+
+        let persisted = service
+            .find_by_id(&pool, running.id)
+            .await
+            .expect("load delivery after rollback")
+            .expect("delivery exists");
+        assert_eq!(persisted.status, QueuedMessageStatus::Running);
+        assert_eq!(persisted.revision, running.revision);
+        assert_eq!(
+            ChatSessionAgent::find_by_id(&pool, member)
+                .await
+                .expect("load member after rollback")
+                .expect("member exists")
+                .state,
+            ChatSessionAgentState::Running
+        );
+        assert_eq!(
+            service
+                .current_runtime_revision(&pool, data.session_id)
+                .await
+                .expect("runtime revision after rollback"),
+            before_revision
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_finalize_wins_over_stale_stop_projection() {
+        let pool = setup_pool().await;
+        let service = QueuedMessageService::new();
+        let member = Uuid::new_v4();
+        let data = sample_create(member);
+        insert_running_member(&pool, member, &data).await;
+        service
+            .create_queued(&pool, &data)
+            .await
+            .expect("create delivery");
+        let starting = service
+            .claim_next(&pool, member)
+            .await
+            .expect("claim delivery")
+            .expect("starting delivery");
+        let run_id = Uuid::new_v4();
+        let running = service
+            .bind_run(&pool, starting.id, run_id)
+            .await
+            .expect("bind run")
+            .expect("running delivery");
+
+        // Deterministically schedule the old two-write race: its delivery write lands, terminal
+        // finalization wins next, then the stale stop request resumes with its original CAS data.
+        let legacy_stopping = service
+            .transition_status_cas(
+                &pool,
+                running.id,
+                running.revision,
+                QueuedMessageStatus::Running,
+                QueuedMessageStatus::Stopping,
+            )
+            .await
+            .expect("legacy delivery stop")
+            .expect("delivery moved to stopping");
+        let terminal = service
+            .finalize_completed_run_cas(&pool, run_id, member, legacy_stopping.revision, false)
+            .await
+            .expect("terminal finalize wins race");
+        assert!(terminal.applied);
+
+        assert!(
+            service
+                .transition_run_to_stopping_cas(
+                    &pool,
+                    running.id,
+                    running.revision,
+                    QueuedMessageStatus::Running,
+                    run_id,
+                    member,
+                )
+                .await
+                .expect("stale stop is a CAS miss")
+                .is_none()
+        );
+        assert_eq!(
+            ChatSessionAgent::find_by_id(&pool, member)
+                .await
+                .expect("load member after race")
+                .expect("member exists")
+                .state,
+            ChatSessionAgentState::Idle
+        );
+        let completed = service
+            .find_by_id(&pool, running.id)
+            .await
+            .expect("load delivery after race")
+            .expect("delivery exists");
+        assert_eq!(completed.status, QueuedMessageStatus::Completed);
+        assert_eq!(
+            service
+                .current_runtime_revision(&pool, data.session_id)
+                .await
+                .expect("runtime revision after stale stop"),
+            terminal.runtime_revision
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_or_skip_inflight_cas_persists_reason_and_revision() {
+        for next_status in [QueuedMessageStatus::Failed, QueuedMessageStatus::Skipped] {
+            let pool = setup_pool().await;
+            let service = QueuedMessageService::new();
+            let member = Uuid::new_v4();
+            let data = sample_create(member);
+            service
+                .create_queued(&pool, &data)
+                .await
+                .expect("create delivery");
+            let starting = service
+                .claim_next(&pool, member)
+                .await
+                .expect("claim delivery")
+                .expect("starting delivery");
+            let before_revision = service
+                .current_runtime_revision(&pool, data.session_id)
+                .await
+                .expect("runtime revision before failure");
+            let reason = format!("{next_status:?} diagnostic");
+
+            let finalized = service
+                .fail_or_skip_inflight_cas(
+                    &pool,
+                    starting.id,
+                    starting.revision,
+                    QueuedMessageStatus::Starting,
+                    next_status,
+                    Some(reason.clone()),
+                )
+                .await
+                .expect("finalize exact attempt")
+                .expect("failure CAS applied");
+
+            assert_eq!(finalized.status, next_status);
+            assert_eq!(finalized.revision, starting.revision + 1);
+            assert_eq!(finalized.failure_reason.as_deref(), Some(reason.as_str()));
+            assert_eq!(
+                service
+                    .current_runtime_revision(&pool, data.session_id)
+                    .await
+                    .expect("runtime revision after failure"),
+                before_revision + 1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fail_or_skip_inflight_cas_miss_has_no_side_effects() {
+        let pool = setup_pool().await;
+        let service = QueuedMessageService::new();
+        let member = Uuid::new_v4();
+        let data = sample_create(member);
+        service
+            .create_queued(&pool, &data)
+            .await
+            .expect("create delivery");
+        let starting = service
+            .claim_next(&pool, member)
+            .await
+            .expect("claim delivery")
+            .expect("starting delivery");
+        let before_revision = service
+            .current_runtime_revision(&pool, data.session_id)
+            .await
+            .expect("runtime revision before invalid target");
+
+        assert!(
+            service
+                .fail_or_skip_inflight_cas(
+                    &pool,
+                    starting.id,
+                    starting.revision,
+                    QueuedMessageStatus::Starting,
+                    QueuedMessageStatus::Completed,
+                    Some("must not persist".to_string()),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            service
+                .current_runtime_revision(&pool, data.session_id)
+                .await
+                .expect("revision after invalid target"),
+            before_revision
+        );
+
+        let failed = service
+            .fail_or_skip_inflight_cas(
+                &pool,
+                starting.id,
+                starting.revision,
+                QueuedMessageStatus::Starting,
+                QueuedMessageStatus::Failed,
+                Some("first attempt failed".to_string()),
+            )
+            .await
+            .expect("first failure transition")
+            .expect("first failure applied");
+        let applied_revision = service
+            .current_runtime_revision(&pool, data.session_id)
+            .await
+            .expect("revision after first failure");
+
+        assert!(
+            service
+                .fail_or_skip_inflight_cas(
+                    &pool,
+                    starting.id,
+                    starting.revision,
+                    QueuedMessageStatus::Starting,
+                    QueuedMessageStatus::Skipped,
+                    Some("stale attempt must not overwrite".to_string()),
+                )
+                .await
+                .expect("stale failure CAS")
+                .is_none()
+        );
+        let persisted = service
+            .find_by_id(&pool, starting.id)
+            .await
+            .expect("load finalized delivery")
+            .expect("delivery exists");
+        assert_eq!(persisted.status, QueuedMessageStatus::Failed);
+        assert_eq!(persisted.revision, failed.revision);
+        assert_eq!(
+            persisted.failure_reason.as_deref(),
+            Some("first attempt failed")
+        );
+        assert_eq!(
+            service
+                .current_runtime_revision(&pool, data.session_id)
+                .await
+                .expect("revision after stale failure"),
+            applied_revision
+        );
     }
 
     #[tokio::test]
@@ -789,7 +1733,7 @@ mod tests {
             .await
             .unwrap()
             .expect("claim after continue");
-        assert_eq!(next.status, QueuedMessageStatus::Processing);
+        assert_eq!(next.status, QueuedMessageStatus::Starting);
     }
 
     #[tokio::test]
@@ -855,7 +1799,7 @@ mod tests {
             .expect("claim next");
 
         assert_eq!(next.id, second.id);
-        assert_eq!(next.status, QueuedMessageStatus::Processing);
+        assert_eq!(next.status, QueuedMessageStatus::Starting);
     }
 
     #[tokio::test]
@@ -892,14 +1836,21 @@ mod tests {
             .expect("first claimed");
         assert_eq!(claimed.id, first.id);
         let run_id = Uuid::new_v4();
-        service
+        let running = service
             .bind_run(&pool, claimed.id, run_id)
             .await
             .expect("bind run")
             .expect("run bound");
 
+        let stale = service
+            .finalize_completed_run_cas(&pool, run_id, member, running.revision - 1, true)
+            .await
+            .expect("stale CAS is handled");
+        assert!(!stale.applied);
+        assert!(stale.next.is_none());
+
         let finalized = service
-            .finalize_completed_run(&pool, run_id, member, true)
+            .finalize_completed_run_cas(&pool, run_id, member, running.revision, true)
             .await
             .expect("finalize completed run");
 

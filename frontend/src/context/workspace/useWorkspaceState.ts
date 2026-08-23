@@ -3,6 +3,7 @@
   useCallback,
   useContext,
   useEffect,
+  useReducer,
   useRef,
   useState,
 } from 'react';
@@ -96,123 +97,46 @@ import {
   resolveChatInputMode,
   toSessionChatInputMode,
   type ListUpdater,
-  type RuntimeActiveRun,
   type WorkflowRuntimeLine,
   ChatInputMode,
   ToastTone,
   WorkspaceToast,
 } from './workspaceContextTypes';
 import {
-  chatStreamWebSocketUrl,
-  PENDING_AGENT_MESSAGE_PREFIX,
-  OPTIMISTIC_USER_MESSAGE_PREFIX,
-  QUEUE_PROCESSING_AGENT_MESSAGE_PREFIX,
-  createClientMessageId,
   ACTIVE_SESSION_ID_STORAGE_KEY,
   SELECTED_PROJECT_ID_STORAGE_KEY,
   RUNNING_AGENT_SESSION_IDS_STORAGE_KEY,
   UNREAD_AGENT_COMPLETION_SESSION_IDS_STORAGE_KEY,
   ACKED_WORKFLOW_INPUT_IDS_STORAGE_KEY,
   ACKED_WORKFLOW_ERROR_SESSION_IDS_STORAGE_KEY,
-  CHAT_STREAM_RECONNECT_BASE_DELAY_MS,
-  CHAT_STREAM_RECONNECT_MAX_DELAY_MS,
-  SIDEBAR_RUNNING_INDICATOR_POLL_MS,
-  STARTING_AGENT_RECONCILE_DELAY_MS,
-  INBOX_REFRESH_INTERVAL_MS,
-  INBOX_LIGHT_REFRESH_DELAY_MS,
-  INBOX_LIST_LIMIT,
   CHAT_MESSAGE_FONT_SIZE_DEFAULT,
-  CHAT_MESSAGE_FONT_SIZE_OPTIONS,
   EMPTY_INBOX_SUMMARY,
-  InboxNotificationSource,
-  DEFAULT_NOTIFICATION_INBOX_SOURCES,
-  DEFAULT_NOTIFICATION_CONFIG,
-  SOUND_FILE_VALUES,
-  notificationInboxSourcesFrom,
-  notificationConfigFromWorkspaceConfig,
-  inboxNotificationSourceForKind,
-  inboxSourceEnabledForKind,
-  filterInboxItemsForEnabledSources,
-  inboxCountValue,
-  decrementInboxSummaryEntries,
-  countUnreadInboxItems,
-  filterInboxSummaryForEnabledSources,
-  inboxNotificationSettingsSignature,
-  browserNotificationApi,
-  showInboxSystemNotification,
-  playInboxNotificationSound,
-  isAutoReadableInboxItem,
-  isThemePreference,
   resolveSystemTheme,
   readSessionIdSet,
   writeSessionIdSet,
   normalizeChatMessageFontSize,
-  themePreferenceFromConfig,
   themePreferenceToConfig,
   resolveBrowserLocale,
-  localeFromConfig,
   localeToConfig,
-  chatMessageFontSizeFromConfig,
   chatMessageFontSizeToConfig,
-  isPendingAgentPlaceholder,
-  isActiveAgentState,
-  isRunningSessionAgentState,
-  hasRunningSessionAgent,
-  SessionRunningIndicators,
-  loadSessionRunningIndicators,
   isOptimisticUserMessage,
-  isOptimisticPendingAgentPlaceholder,
   userMessageClientId,
-  messageIdentityKeys,
-  firstMessageSourceKey,
-  orderMessagesForConversation,
-  messageCreatedAtMs,
-  insertMessageByCreatedAt,
-  matchesUserMessageIdentity,
-  queuedChatMessageKeysForSession,
-  queuedSessionAgentIdsByMessageKey,
-  isStartingPlaceholderRepresentedInQueue,
-  isQueuedUserMessageFromSnapshot,
-  isQueuedPendingPlaceholderFromSnapshot,
   filterQueuedUserMessagesFromSnapshot,
-  queuedUserMessagesByIdFromSnapshot,
-  PendingPlaceholderMatch,
-  normalizedAgentHandle,
-  normalizePendingPlaceholderMatch,
-  pendingPlaceholderMatches,
-  findPendingAgentPlaceholderIndex,
-  evictStaleRunPlaceholders,
-  mergeCarriedRunPlaceholder,
-  correlateRunningPlaceholdersWithPending,
-  findRunningPlaceholderIndexesForIncoming,
-  isRecord,
-  hasNonNegativeNumberField,
-  hasCompleteTokenUsageBreakdown,
-  hasRealCompleteTokenUsage,
-  firstNumberField,
-  tokenUsageBreakdownSignature,
-  tokenUsageNotificationSignature,
-  extractAgentMentions,
-  asAgentHandle,
-  memberNotFoundToastMessage,
-  optimisticAgentPlaceholderId,
-  makePendingAgentPlaceholder,
-  makePendingAgentPlaceholders,
-  queueProcessingPlaceholderId,
-  isQueueProcessingPlaceholder,
-  reconcileProcessingQueuePlaceholders,
-  resolveProjectMainAgentMember,
-  resolveProjectMainAgentId,
-  resolveProjectMainAgentName,
-  withSessionId,
-  withSessionIdsBySession,
   filterMessagesForSession,
-  mergePersistedWithRunningPlaceholders,
-  normalizeActiveRun,
-  activeRunToMessage,
-  activeRunMessagesForSession,
-  mergeSessionMessagesWithActiveRuns,
 } from './workspaceContextUtils';
+import {
+  EMPTY_CHAT_DELIVERY_RUNTIME_STATE,
+  chatDeliveryRuntimeReducer,
+  deliveriesFromRuntimeSnapshot,
+  deliveryCardToMessage,
+  deliveryCardsForSession,
+  hasInflightDeliveryForSession,
+  mergePersistedWithDeliveryCards,
+  sessionsNeedingResync,
+  type ChatDeliveryRuntimeAction,
+  type ChatDeliveryRuntimeState,
+} from './chatDeliveryRuntime';
+import { ChatDeliveryResyncScheduler } from './chatDeliveryResyncScheduler';
 
 export const useWorkspaceState = () => {
   const runActivityStore = useRunActivityStore();
@@ -258,9 +182,33 @@ export const useWorkspaceState = () => {
   const allMessagesRef = useRef<Record<string, Message[]>>({});
   const [memberQueuesBySessionAgentId, setMemberQueuesBySessionAgentId] =
     useState<MemberQueuesBySessionAgentId>({});
-  const [activeRunsByRunId, setActiveRunsByRunId] = useState<
-    Record<string, RuntimeActiveRun>
-  >({});
+  // The delivery runtime is the single writer for chat run state. Snapshots,
+  // member-queue snapshots and stream events all flow through its reducer,
+  // which guarantees monotonic status transitions and that stale snapshots
+  // can never wipe newer streamed runs.
+  const [chatDeliveryRuntime, dispatchChatDelivery] = useReducer(
+    chatDeliveryRuntimeReducer,
+    EMPTY_CHAT_DELIVERY_RUNTIME_STATE,
+  );
+  const chatDeliveryRuntimeRef = useRef(chatDeliveryRuntime);
+  useEffect(() => {
+    chatDeliveryRuntimeRef.current = chatDeliveryRuntime;
+  }, [chatDeliveryRuntime]);
+  // The single dispatch entry point: computes the next state, updates the ref
+  // synchronously (so same-tick events never read a stale base) and returns
+  // the next state for callers that need an immediate preview.
+  const dispatchChatDeliverySync = useCallback(
+    (action: ChatDeliveryRuntimeAction): ChatDeliveryRuntimeState => {
+      const next = chatDeliveryRuntimeReducer(
+        chatDeliveryRuntimeRef.current,
+        action,
+      );
+      chatDeliveryRuntimeRef.current = next;
+      dispatchChatDelivery(action);
+      return next;
+    },
+    [],
+  );
   const [workflowRuntimeLinesByExecution, setWorkflowRuntimeLinesByExecution] =
     useState<Record<string, WorkflowRuntimeLine[]>>({});
   const [messagesAsync, setMessagesAsync] = useState<
@@ -269,12 +217,6 @@ export const useWorkspaceState = () => {
   const [membersAsync, setMembersAsync] = useState<
     AsyncResourceState<Member[]>
   >(() => initialAsync([]));
-  // Queue reconciliation needs the latest member labels, but the callback is
-  // also part of the chat stream dependency chain. Reading through a ref keeps
-  // member refreshes from tearing down the WebSocket while preserving fresh
-  // member data for newly claimed queue items.
-  const membersAsyncDataRef = useRef<Member[]>(membersAsync.data);
-  membersAsyncDataRef.current = membersAsync.data;
   const [mainAgentName, setMainAgentName] = useState<string | null>(null);
   const [providersAsync, setProvidersAsync] = useState<
     AsyncResourceState<Provider[]>
@@ -649,13 +591,15 @@ export const useWorkspaceState = () => {
           allMessagesRef.current[activeSessionId] ?? [],
         )
       : [];
-    const sessionActiveRunMessages = activeSessionId
-      ? activeRunMessagesForSession(activeRunsByRunId, activeSessionId)
+    const sessionDeliveryCards = activeSessionId
+      ? deliveryCardsForSession(chatDeliveryRuntime, activeSessionId).map(
+          deliveryCardToMessage,
+        )
       : [];
     const sessionSnapshot = activeSessionId
-      ? mergeSessionMessagesWithActiveRuns(
-          sessionMessages,
-          sessionActiveRunMessages,
+      ? mergePersistedWithDeliveryCards(
+          sessionMessages.filter((message) => !message.isAgentRunning),
+          sessionDeliveryCards,
         )
       : [];
     setMessagesAsync(
@@ -669,7 +613,7 @@ export const useWorkspaceState = () => {
           : [],
       ),
     );
-  }, [activeRunsByRunId, activeSessionId, memberQueuesBySessionAgentId]);
+  }, [chatDeliveryRuntime, activeSessionId, memberQueuesBySessionAgentId]);
 
   // Keep the cached workspace path in sync with the active session so the
   // WebSocket `file_change_refresh` handler always refreshes the right path.
@@ -803,32 +747,11 @@ export const useWorkspaceState = () => {
     },
     [syncSessionAgentActivityIndicator],
   );
-  const syncProcessingQueuePlaceholders = useCallback(
-    (sessionId: string, queues: ReadonlyArray<MemberQueueSnapshot>) => {
-      setAllMessages((prev) => {
-        const current = filterMessagesForSession(
-          sessionId,
-          prev[sessionId] ?? [],
-        );
-        let next = current;
-        for (const queue of queues) {
-          if (queue.session_id !== sessionId) continue;
-          next = reconcileProcessingQueuePlaceholders(
-            next,
-            queue,
-            membersAsyncDataRef.current,
-          );
-        }
-        const unchanged =
-          next.length === current.length &&
-          next.every((message, index) => message === current[index]);
-        return unchanged ? prev : { ...prev, [sessionId]: next };
-      });
-    },
-    [],
-  );
   const applyChatRuntimeSnapshot = useCallback(
-    (snapshot: ChatSessionRuntimeSnapshot) => {
+    (
+      snapshot: ChatSessionRuntimeSnapshot,
+      options?: { requestedAt?: number },
+    ): ChatDeliveryRuntimeState => {
       const sid = snapshot.session_id;
       setMemberQueuesBySessionAgentId((prev) => {
         const next = { ...prev };
@@ -842,115 +765,112 @@ export const useWorkspaceState = () => {
         }
         return next;
       });
-      syncProcessingQueuePlaceholders(sid, snapshot.queues);
-      setActiveRunsByRunId((prev) => {
-        const next = { ...prev };
-        const existingSessionRuns = Object.values(prev).filter(
-          (run) => run.session_id === sid,
-        );
-        for (const [runId, run] of Object.entries(next)) {
-          if (run.session_id === sid) {
-            delete next[runId];
-          }
-        }
-        for (const run of snapshot.active_runs) {
-          const existingRealRun = existingSessionRuns.find(
-            (candidate) =>
-              candidate.session_agent_id === run.session_agent_id &&
-              candidate.status !== 'starting' &&
-              (candidate.client_message_id === run.client_message_id ||
-                !run.client_message_id),
-          );
-          if (run.status === 'starting' && existingRealRun) {
-            next[existingRealRun.run_id] = existingRealRun;
-            continue;
-          }
-          next[run.run_id] = normalizeActiveRun(run);
-        }
-        return next;
+      // Route the snapshot through the delivery reducer. Revision and
+      // local-clock guards inside the reducer decide between authoritative
+      // replacement and merge-only hydration, so stale snapshots can never
+      // wipe runs reported by stream events.
+      let snapshotDeliveries;
+      try {
+        snapshotDeliveries = deliveriesFromRuntimeSnapshot(snapshot);
+      } catch (error) {
+        // Unknown delivery status: request an authoritative resync instead
+        // of guessing a terminal state.
+        return dispatchChatDeliverySync({
+          type: 'mark_needs_resync',
+          sessionId: sid,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+      const nextDeliveryRuntime = dispatchChatDeliverySync({
+        type: 'snapshot_received',
+        sessionId: sid,
+        deliveries: snapshotDeliveries,
+        revision: Number(snapshot.revision),
+        requestedAt: options?.requestedAt ?? Date.now(),
+        receivedAt: Date.now(),
       });
       runActivityStore.syncRuns(
         snapshot.active_runs
           .filter((run) => run.status !== 'starting')
           .map((run) => run.run_id),
       );
-      setSessionRunningIndicator(sid, snapshot.active_runs.length > 0);
+      setSessionRunningIndicator(
+        sid,
+        hasInflightDeliveryForSession(nextDeliveryRuntime, sid),
+      );
       if (snapshot.messages) {
         const mapped = mapMessages(snapshot.messages as unknown as BackendChatMessage[], {
           agentNamesById: agentNamesByIdRef.current,
           agentModelsById: agentModelsByIdRef.current,
         });
-        const activeRuns = snapshot.active_runs.map(normalizeActiveRun);
-        const activeSessionAgentIds = new Set(
-          activeRuns.map((run) => run.session_agent_id),
-        );
-        const runningPlaceholders = activeRuns.map(activeRunToMessage);
         setAllMessages((prev) => {
           const current = filterMessagesForSession(sid, prev[sid] ?? []);
+          const persistedClientIds = new Set(
+            mapped
+              .map(userMessageClientId)
+              .filter((id): id is string => Boolean(id)),
+          );
+          const carried = current.filter((message) => {
+            if (message.isAgentRunning || !isOptimisticUserMessage(message)) {
+              return false;
+            }
+            const clientId = userMessageClientId(message);
+            return clientId !== undefined && !persistedClientIds.has(clientId);
+          });
           return {
             ...prev,
-            [sid]: resolveMessageReferences(
-              mergePersistedWithRunningPlaceholders(
-                mapped,
-                current,
-                activeSessionAgentIds,
-                runningPlaceholders,
-              ),
-            ),
+            [sid]: resolveMessageReferences([...mapped, ...carried]),
           };
         });
       }
+      return nextDeliveryRuntime;
     },
     [
+      dispatchChatDeliverySync,
       runActivityStore,
       setSessionRunningIndicator,
-      syncProcessingQueuePlaceholders,
     ],
   );
-  const reconcileStartingPlaceholders = useCallback(
-    async (sessionId: string, clientMessageId: string): Promise<void> => {
-      let snapshot: ChatSessionRuntimeSnapshot;
-      try {
-        snapshot = await chatRuntimeApi.getSnapshot(sessionId);
-      } catch {
-        return;
-      }
-      applyChatRuntimeSnapshot(snapshot);
 
-      setAllMessages((prev) => {
-        const current = filterMessagesForSession(
+  // needsResync consumer: a revision gap, an ambiguous terminal transition or
+  // an unknown delivery status triggers the single-flight resync scheduler,
+  // which fetches an authoritative snapshot with timed backoff retries until
+  // the reducer accepts one and clears the flag.
+  const applyChatRuntimeSnapshotRef = useRef(applyChatRuntimeSnapshot);
+  applyChatRuntimeSnapshotRef.current = applyChatRuntimeSnapshot;
+  const dispatchChatDeliverySyncRef = useRef(dispatchChatDeliverySync);
+  dispatchChatDeliverySyncRef.current = dispatchChatDeliverySync;
+  const resyncSchedulerRef = useRef<ChatDeliveryResyncScheduler | null>(null);
+  if (resyncSchedulerRef.current === null) {
+    resyncSchedulerRef.current = new ChatDeliveryResyncScheduler({
+      getSnapshot: (sessionId) => chatRuntimeApi.getSnapshot(sessionId),
+      applySnapshot: (snapshot, requestedAt) => {
+        applyChatRuntimeSnapshotRef.current(snapshot, { requestedAt });
+      },
+      onError: (sessionId) => {
+        dispatchChatDeliverySyncRef.current({
+          type: 'snapshot_failed',
           sessionId,
-          prev[sessionId] ?? [],
-        );
-        let changed = false;
-        const next = current.filter((message) => {
-          if (
-            !isPendingAgentPlaceholder(message) ||
-            message.clientMessageId !== clientMessageId
-          ) {
-            return true;
-          }
-          const hasActiveRun = snapshot.active_runs.some(
-            (run) =>
-              message.sessionAgentId
-                ? run.session_agent_id === message.sessionAgentId
-                : normalizedAgentHandle(run.display_name || run.agent_name) ===
-                  normalizedAgentHandle(message.sender),
-          );
-          const isQueued = isStartingPlaceholderRepresentedInQueue(
-            message,
-            snapshot.queues,
-            sessionId,
-          );
-          const keep = hasActiveRun || isQueued;
-          if (!keep) changed = true;
-          return keep;
+          receivedAt: Date.now(),
         });
-        return changed ? { ...prev, [sessionId]: next } : prev;
-      });
-    },
-    [applyChatRuntimeSnapshot],
-  );
+      },
+      shouldResync: (sessionId) =>
+        sessionsNeedingResync(chatDeliveryRuntimeRef.current).includes(
+          sessionId,
+        ),
+    });
+  }
+  useEffect(() => {
+    const scheduler = resyncSchedulerRef.current;
+    return () => scheduler?.dispose();
+  }, []);
+  useEffect(() => {
+    const scheduler = resyncSchedulerRef.current;
+    if (!scheduler) return;
+    for (const sessionId of sessionsNeedingResync(chatDeliveryRuntime)) {
+      scheduler.request(sessionId);
+    }
+  }, [chatDeliveryRuntime]);
   const setSessionWorkflowRunningIndicator = useCallback(
     (sessionId: string, hasRunningWorkflow: boolean) => {
       if (!sessionId) return;
@@ -1199,8 +1119,9 @@ export const useWorkspaceState = () => {
     setAllMessages,
     memberQueuesBySessionAgentId,
     setMemberQueuesBySessionAgentId,
-    activeRunsByRunId,
-    setActiveRunsByRunId,
+    chatDeliveryRuntime,
+    dispatchChatDeliverySync,
+    chatDeliveryRuntimeRef,
     workflowRuntimeLinesByExecution,
     setWorkflowRuntimeLinesByExecution,
     messagesAsync,
@@ -1324,9 +1245,7 @@ export const useWorkspaceState = () => {
     setMembers,
     setProviders,
     setSessionRunningIndicator,
-    syncProcessingQueuePlaceholders,
     applyChatRuntimeSnapshot,
-    reconcileStartingPlaceholders,
     setSessionWorkflowRunningIndicator,
     setSessionWorkflowStatusIndicators,
     clearSessionScopedState,

@@ -11,6 +11,8 @@ use db::{
     models::{
         chat_agent::{ChatAgent, CreateChatAgent},
         chat_message::{ChatMessage, ChatSenderType},
+        chat_message_queue::QueuedMessageStatus,
+        chat_run::ChatRun,
         chat_session::{ChatSession, ChatSessionStatus, ChatSessionWorktreeMode},
         chat_session_agent::{ChatSessionAgent, ChatSessionAgentState},
         member_execution_config::MemberExecutionConfig,
@@ -37,8 +39,7 @@ use uuid::Uuid;
 
 use super::{
     AgentProtocolError, AgentProtocolMessageType, ChatProtocolNoticeCode, ChatRunner,
-    ChatRunnerError,
-    ChatStreamEvent, LifecycleEvent, MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON,
+    ChatRunnerError, ChatStreamEvent, LifecycleEvent, MARKDOWN_PROTOCOL_OUTPUT_EXAMPLE_JSON,
     MAX_PROTOCOL_PARSE_RETRIES, PROTOCOL_OUTPUT_SCHEMA_JSON, RUNS_MAX_TOTAL_BYTES_PER_WORKSPACE,
     RUNS_PRUNE_TARGET_BYTES_PER_WORKSPACE, ResolvedPromptLanguage, RunCompletionStatus,
     TokenUsageInfo,
@@ -47,7 +48,7 @@ use super::{
 use crate::services::{
     chat,
     config::UiLanguage,
-    queued_message::{CreateQueuedMessage, QueuedMessageService},
+    queued_message::{CreateQueuedMessage, MemberQueueStatus, QueuedMessageService},
     session_worktree::SessionWorktreeService,
     test_support::{
         ADAPTER_DIAGNOSTIC_SECRET, CANONICAL_MCP_SECRET, TracingCapture,
@@ -357,7 +358,12 @@ async fn setup_chat_runner_db() -> DBService {
                 agent_id BLOB NOT NULL,
                 chat_message_id BLOB NOT NULL,
                 status TEXT NOT NULL DEFAULT 'queued'
-                    CHECK (status IN ('queued','processing','running','failed','skipped','completed')),
+                    CHECK (status IN (
+                        'queued','starting','processing','running','waiting_approval','stopping',
+                        'failed','cancelled','skipped','completed'
+                    )),
+                revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+                attempt_no INTEGER NOT NULL DEFAULT 0 CHECK (attempt_no >= 0),
                 processing_started_at TEXT,
                 run_id BLOB,
                 failure_reason TEXT,
@@ -368,7 +374,58 @@ async fn setup_chat_runner_db() -> DBService {
         r#"
             CREATE UNIQUE INDEX idx_chat_message_queue_one_active
                 ON chat_message_queue(session_agent_id)
-                WHERE status IN ('processing', 'running')
+                WHERE status IN (
+                    'starting', 'processing', 'running', 'waiting_approval', 'stopping'
+                )
+            "#,
+        r#"
+            CREATE UNIQUE INDEX idx_chat_message_queue_delivery_key
+                ON chat_message_queue(chat_message_id, session_agent_id)
+            "#,
+        r#"
+            CREATE UNIQUE INDEX idx_chat_message_queue_run_id
+                ON chat_message_queue(run_id)
+                WHERE run_id IS NOT NULL
+            "#,
+        r#"
+            CREATE TABLE chat_session_runtime_revisions (
+                session_id BLOB PRIMARY KEY,
+                revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
+            )
+            "#,
+        r#"
+            CREATE TRIGGER chat_message_queue_runtime_revision_after_insert
+            AFTER INSERT ON chat_message_queue
+            BEGIN
+                INSERT INTO chat_session_runtime_revisions (session_id, revision, updated_at)
+                VALUES (NEW.session_id, 1, datetime('now', 'subsec'))
+                ON CONFLICT(session_id) DO UPDATE SET
+                    revision = revision + 1,
+                    updated_at = excluded.updated_at;
+            END
+            "#,
+        r#"
+            CREATE TRIGGER chat_message_queue_runtime_revision_after_update
+            AFTER UPDATE ON chat_message_queue
+            BEGIN
+                INSERT INTO chat_session_runtime_revisions (session_id, revision, updated_at)
+                VALUES (NEW.session_id, 1, datetime('now', 'subsec'))
+                ON CONFLICT(session_id) DO UPDATE SET
+                    revision = revision + 1,
+                    updated_at = excluded.updated_at;
+            END
+            "#,
+        r#"
+            CREATE TRIGGER chat_message_queue_runtime_revision_after_delete
+            AFTER DELETE ON chat_message_queue
+            BEGIN
+                INSERT INTO chat_session_runtime_revisions (session_id, revision, updated_at)
+                VALUES (OLD.session_id, 1, datetime('now', 'subsec'))
+                ON CONFLICT(session_id) DO UPDATE SET
+                    revision = revision + 1,
+                    updated_at = excluded.updated_at;
+            END
             "#,
     ] {
         sqlx::query(statement)
@@ -540,7 +597,11 @@ async fn active_workflow_blocks_plan_generation_without_overwriting_its_card() {
         "A workflow execution is already active in this session."
     );
     assert_eq!(
-        notice.meta.0.get("type").and_then(serde_json::Value::as_str),
+        notice
+            .meta
+            .0
+            .get("type")
+            .and_then(serde_json::Value::as_str),
         Some("workflow_plan_generation_blocked")
     );
 }
@@ -664,15 +725,16 @@ async fn refreshes_workflow_member_config_and_freezes_each_run_snapshot() {
         .expect("read project session")
         .expect("project session exists");
 
-    let refresh = crate::services::member_execution::refresh_session_agent_execution_config_before_run(
-        &db.pool,
-        &session,
-        stale_agent,
-        agent.id,
-        Some(workflow_session.id),
-    )
-    .await
-    .expect("refresh before workflow run");
+    let refresh =
+        crate::services::member_execution::refresh_session_agent_execution_config_before_run(
+            &db.pool,
+            &session,
+            stale_agent,
+            agent.id,
+            Some(workflow_session.id),
+        )
+        .await
+        .expect("refresh before workflow run");
     let synced = refresh.session_agent;
 
     assert!(refresh.changed);
@@ -689,10 +751,11 @@ async fn refreshes_workflow_member_config_and_freezes_each_run_snapshot() {
         executors::executors::BaseCodingAgent::Pi
     );
     assert_eq!(effective.model_name.as_deref(), Some("new-model"));
-    let refreshed_workflow_session = WorkflowAgentSession::find_by_id(&db.pool, workflow_session.id)
-        .await
-        .expect("read refreshed workflow session")
-        .expect("workflow session exists");
+    let refreshed_workflow_session =
+        WorkflowAgentSession::find_by_id(&db.pool, workflow_session.id)
+            .await
+            .expect("read refreshed workflow session")
+            .expect("workflow session exists");
     assert_eq!(refreshed_workflow_session.agent_session_id, None);
     assert_eq!(refreshed_workflow_session.agent_message_id, None);
 
@@ -799,7 +862,10 @@ async fn refreshes_workflow_member_config_and_freezes_each_run_snapshot() {
         .await
         .expect("refresh before run two");
     assert!(run_two_refresh.changed);
-    assert_eq!(run_two_refresh.session_agent.execution_config.0, next_member_config);
+    assert_eq!(
+        run_two_refresh.session_agent.execution_config.0,
+        next_member_config
+    );
     assert_eq!(run_two_refresh.session_agent.agent_session_id, None);
 
     let mut run_two_env = ExecutionEnv::new(
@@ -821,7 +887,10 @@ async fn refreshes_workflow_member_config_and_freezes_each_run_snapshot() {
 
     assert_eq!(run_one_snapshot.server_names(), ["run-one"]);
     assert_eq!(run_two_snapshot.server_names(), ["run-two"]);
-    assert_ne!(run_one_snapshot.config_hash(), run_two_snapshot.config_hash());
+    assert_ne!(
+        run_one_snapshot.config_hash(),
+        run_two_snapshot.config_hash()
+    );
 }
 
 #[tokio::test]
@@ -983,7 +1052,10 @@ async fn missing_mentioned_member_emits_correlated_error_and_marks_mention_faile
         .await
         .expect("load missing-mention message")
         .expect("missing-mention message exists");
-    assert_eq!(persisted.meta["mention_statuses"]["MissingMember"], "failed");
+    assert_eq!(
+        persisted.meta["mention_statuses"]["MissingMember"],
+        "failed"
+    );
 
     let messages = ChatMessage::find_by_session_id(&db.pool, session_id, None)
         .await
@@ -1256,14 +1328,14 @@ async fn mention_resolution_distinguishes_members_sharing_one_backing_agent() {
     assert_ne!(backend.session_agent_id, reviewer.session_agent_id);
     assert_eq!(backend.member_name, "BackendMember");
     assert_eq!(reviewer.member_name, "ReviewMember");
-    let member_names = crate::services::chat::member_name_overrides_for_session(
-        &db.pool,
-        session_id,
-    )
-    .await
-    .expect("load member names by session identity");
+    let member_names =
+        crate::services::chat::member_name_overrides_for_session(&db.pool, session_id)
+            .await
+            .expect("load member names by session identity");
     assert_eq!(
-        member_names.get(&backend.session_agent_id).map(String::as_str),
+        member_names
+            .get(&backend.session_agent_id)
+            .map(String::as_str),
         Some("BackendMember")
     );
     assert_eq!(
@@ -1380,12 +1452,10 @@ async fn self_mention_is_rejected_by_session_member_id_and_persisted() {
         outcome,
         super::DispatchOutcome::Rejected { ref reason } if reason == "self_mention"
     ));
-    let targets = db::models::chat_message_target::ChatMessageTarget::find_by_message(
-        &db.pool,
-        message_id,
-    )
-    .await
-    .expect("load targets");
+    let targets =
+        db::models::chat_message_target::ChatMessageTarget::find_by_message(&db.pool, message_id)
+            .await
+            .expect("load targets");
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].session_agent_id, Some(session_member.id));
     assert_eq!(
@@ -1650,6 +1720,608 @@ async fn queued_dispatch_keeps_claimed_session_agent_when_backing_names_collide(
             .expect("list second member queue")
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn direct_dispatch_commits_delivery_run_member_and_revision_before_running_events() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    runner
+        .stop_after_queue_binding
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let workspace = tempfile::tempdir().expect("create direct dispatch workspace");
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "AtomicTarget").await;
+    let member = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: Some("AtomicTarget".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create atomic target member");
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@AtomicTarget verify atomic bind".to_string(),
+        Some(json!({ "client_message_id": "atomic-direct-1" })),
+    )
+    .await
+    .expect("create direct source message");
+    let mut events = runner.subscribe(session_id);
+
+    let outcome = runner
+        .run_agent_for_mention(session_id, "AtomicTarget", 0, &message)
+        .await
+        .expect("dispatch direct delivery");
+    let run_id = match outcome {
+        super::DispatchOutcome::Started { run_id } => run_id,
+        other => panic!("expected started direct delivery, got {other:?}"),
+    };
+
+    let delivery = QueuedMessageService::new()
+        .find_by_run_id(&db.pool, run_id)
+        .await
+        .expect("load bound delivery")
+        .expect("bound delivery exists");
+    assert_eq!(delivery.status, QueuedMessageStatus::Running);
+    assert_eq!(delivery.chat_message_id, message.id);
+    assert_eq!(delivery.session_agent_id, member.id);
+    assert_eq!(delivery.revision, 3);
+    assert_eq!(delivery.attempt_no, 1);
+    let persisted_run = ChatRun::find_by_id(&db.pool, run_id)
+        .await
+        .expect("load committed run")
+        .expect("committed run exists");
+    assert_eq!(persisted_run.session_agent_id, member.id);
+    let persisted_member = ChatSessionAgent::find_by_id(&db.pool, member.id)
+        .await
+        .expect("load committed member")
+        .expect("committed member exists");
+    assert_eq!(persisted_member.state, ChatSessionAgentState::Running);
+
+    let queue_snapshot = QueuedMessageService::new()
+        .snapshot_for_member(&db.pool, session_id, member.id, agent.id)
+        .await
+        .expect("load versioned queue snapshot");
+    assert_eq!(queue_snapshot.status, MemberQueueStatus::Running);
+    assert_eq!(queue_snapshot.revision, 3);
+    let events = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    let running_queue_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                ChatStreamEvent::QueueUpdated { queue, .. }
+                    if queue.status == MemberQueueStatus::Running && queue.revision == 3
+            )
+        })
+        .expect("running queue event after bind commit");
+    let (run_started_index, run_started_event) = events
+        .iter()
+        .enumerate()
+        .find(|(_, event)| {
+            matches!(
+                event,
+                ChatStreamEvent::AgentRunStarted {
+                    delivery_id: event_delivery_id,
+                    run_id: event_run_id,
+                    ..
+                } if *event_delivery_id == delivery.id && *event_run_id == run_id
+            )
+        })
+        .expect("run started event carries the committed delivery identity");
+    let run_started_json =
+        serde_json::to_value(run_started_event).expect("serialize run started event");
+    assert_eq!(run_started_json["delivery_id"], json!(delivery.id));
+    assert!(running_queue_index < run_started_index);
+}
+
+#[tokio::test]
+async fn concurrent_direct_dispatch_claims_exactly_one_delivery_for_member() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    runner
+        .stop_after_queue_binding
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let workspace = tempfile::tempdir().expect("create concurrent dispatch workspace");
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "ConcurrentTarget").await;
+    let member = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: Some("ConcurrentTarget".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create concurrent target member");
+    let first = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@ConcurrentTarget first".to_string(),
+        None,
+    )
+    .await
+    .expect("create first direct source");
+    let second = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@ConcurrentTarget second".to_string(),
+        None,
+    )
+    .await
+    .expect("create second direct source");
+    let mut events = runner.subscribe(session_id);
+
+    let (first_result, second_result) = tokio::join!(
+        runner.run_agent_for_mention(session_id, "ConcurrentTarget", 0, &first),
+        runner.run_agent_for_mention(session_id, "ConcurrentTarget", 0, &second),
+    );
+    let outcomes = [
+        first_result.expect("dispatch first direct delivery"),
+        second_result.expect("dispatch second direct delivery"),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, super::DispatchOutcome::Started { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, super::DispatchOutcome::Queued { .. }))
+            .count(),
+        1
+    );
+
+    let deliveries = QueuedMessageService::new()
+        .list_for_member(&db.pool, member.id)
+        .await
+        .expect("list concurrent deliveries");
+    assert_eq!(deliveries.len(), 2);
+    assert_eq!(
+        deliveries
+            .iter()
+            .filter(|delivery| delivery.status == QueuedMessageStatus::Running)
+            .count(),
+        1
+    );
+    assert_eq!(
+        deliveries
+            .iter()
+            .filter(|delivery| delivery.status == QueuedMessageStatus::Queued)
+            .count(),
+        1
+    );
+    assert_eq!(
+        ChatRun::list_all(&db.pool).await.expect("list runs").len(),
+        1
+    );
+    let started_events = std::iter::from_fn(|| events.try_recv().ok())
+        .filter(|event| matches!(event, ChatStreamEvent::AgentRunStarted { .. }))
+        .count();
+    assert_eq!(started_events, 1);
+}
+
+#[tokio::test]
+async fn stop_agent_cancels_starting_delivery_with_revisioned_transition() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "StartingStopTarget").await;
+    let member = insert_test_session_agent(&db, session_id, agent.id).await;
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "stop before bind".to_string(),
+        None,
+    )
+    .await
+    .expect("create starting stop source");
+    let service = QueuedMessageService::new();
+    let queued = service
+        .create_queued(
+            &db.pool,
+            &CreateQueuedMessage {
+                session_id,
+                session_agent_id: member.id,
+                agent_id: agent.id,
+                chat_message_id: message.id,
+            },
+        )
+        .await
+        .expect("create starting delivery");
+    let starting = service
+        .claim_next(&db.pool, member.id)
+        .await
+        .expect("claim starting delivery")
+        .expect("starting delivery exists");
+    assert_eq!(starting.id, queued.id);
+    assert_eq!(starting.status, QueuedMessageStatus::Starting);
+    let run_id = Uuid::new_v4();
+    let stop = runner.register_run_control(member.id, run_id);
+
+    runner
+        .stop_agent(session_id, member.id)
+        .await
+        .expect("stop starting delivery");
+
+    assert!(stop.is_cancelled());
+    let cancelled = service
+        .find_by_id(&db.pool, queued.id)
+        .await
+        .expect("load cancelled delivery")
+        .expect("cancelled delivery exists");
+    assert_eq!(cancelled.status, QueuedMessageStatus::Cancelled);
+    assert_eq!(cancelled.revision, starting.revision + 1);
+    assert!(cancelled.run_id.is_none());
+    let member_after = ChatSessionAgent::find_by_id(&db.pool, member.id)
+        .await
+        .expect("load member after starting stop")
+        .expect("member after starting stop exists");
+    assert_eq!(member_after.state, ChatSessionAgentState::Idle);
+}
+
+#[tokio::test]
+async fn recovery_reuses_delivery_after_crash_at_bound_run_boundary() {
+    let db = setup_chat_runner_db().await;
+    let first_runner = ChatRunner::new(db.clone());
+    first_runner
+        .stop_after_queue_binding
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let workspace = tempfile::tempdir().expect("create recovery workspace");
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "RecoveryTarget").await;
+    let member = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: Some("RecoveryTarget".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create recovery target member");
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@RecoveryTarget recover bound run".to_string(),
+        None,
+    )
+    .await
+    .expect("create recovery source");
+    first_runner
+        .run_agent_for_mention(session_id, "RecoveryTarget", 0, &message)
+        .await
+        .expect("bind first run before simulated crash");
+    let service = QueuedMessageService::new();
+    let before = service
+        .list_for_member(&db.pool, member.id)
+        .await
+        .expect("load delivery before recovery")
+        .pop()
+        .expect("delivery before recovery exists");
+    assert_eq!(before.status, QueuedMessageStatus::Running);
+    assert_eq!(before.attempt_no, 1);
+
+    let recovery_runner = ChatRunner::new(db.clone());
+    recovery_runner
+        .block_executor_spawn
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        recovery_runner
+            .recover_orphaned_session_agents()
+            .await
+            .expect("recover bound run boundary"),
+        1
+    );
+
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let delivery = service
+                .find_by_id(&db.pool, before.id)
+                .await
+                .expect("poll recovered delivery")
+                .expect("recovered delivery exists");
+            if delivery.status.is_terminal() {
+                break delivery;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("recovered delivery reaches terminal state");
+    assert_eq!(recovered.id, before.id);
+    assert_eq!(recovered.attempt_no, 2);
+    assert_eq!(recovered.status, QueuedMessageStatus::Skipped);
+    assert_eq!(
+        ChatRun::list_all(&db.pool)
+            .await
+            .expect("list recovered runs")
+            .len(),
+        2
+    );
+    let snapshot = service
+        .snapshot_for_member(&db.pool, session_id, member.id, agent.id)
+        .await
+        .expect("load recovered snapshot");
+    assert_eq!(snapshot.status, MemberQueueStatus::Empty);
+    assert!(snapshot.revision >= 7);
+}
+
+#[tokio::test]
+async fn prebind_configuration_failure_finalizes_claimed_delivery() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "InvalidRunnerTarget").await;
+    let member = insert_test_session_agent(&db, session_id, agent.id).await;
+    sqlx::query("UPDATE chat_agents SET runner_type = 'invalid-runner' WHERE id = ?1")
+        .bind(agent.id)
+        .execute(&db.pool)
+        .await
+        .expect("make runner configuration invalid");
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@InvalidRunnerTarget fail before bind".to_string(),
+        None,
+    )
+    .await
+    .expect("create invalid runner source message");
+
+    runner
+        .run_agent_for_mention(session_id, "InvalidRunnerTarget", 0, &message)
+        .await
+        .expect_err("invalid runner must fail before bind");
+
+    let delivery = QueuedMessageService::new()
+        .list_for_member(&db.pool, member.id)
+        .await
+        .expect("load finalized prebind delivery")
+        .pop()
+        .expect("prebind delivery exists");
+    assert_eq!(delivery.status, QueuedMessageStatus::Skipped);
+    assert!(
+        delivery
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.trim().is_empty()),
+        "pre-bind CAS terminal delivery must retain a non-empty failure reason"
+    );
+    assert_eq!(delivery.revision, 3);
+    assert_eq!(delivery.attempt_no, 1);
+    assert!(delivery.run_id.is_none());
+    assert!(
+        ChatRun::list_all(&db.pool)
+            .await
+            .expect("list prebind failure runs")
+            .is_empty()
+    );
+    assert_eq!(
+        ChatSessionAgent::find_by_id(&db.pool, member.id)
+            .await
+            .expect("load member after prebind failure")
+            .expect("member after prebind failure exists")
+            .state,
+        ChatSessionAgentState::Idle
+    );
+    assert!(!runner.run_controls.contains_key(&member.id));
+}
+
+#[tokio::test]
+async fn stale_dispatch_failure_does_not_finalize_retried_delivery() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "StaleDispatchFailureTarget").await;
+    let member = insert_test_session_agent(&db, session_id, agent.id).await;
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "retry after dispatch failure".to_string(),
+        None,
+    )
+    .await
+    .expect("create stale dispatch source");
+    let service = QueuedMessageService::new();
+    let queued = service
+        .create_queued(
+            &db.pool,
+            &CreateQueuedMessage {
+                session_id,
+                session_agent_id: member.id,
+                agent_id: agent.id,
+                chat_message_id: message.id,
+            },
+        )
+        .await
+        .expect("create stale dispatch delivery");
+    let stale_claim = service
+        .claim_next(&db.pool, member.id)
+        .await
+        .expect("claim first attempt")
+        .expect("first attempt exists");
+    let requeued = service
+        .transition_status_cas(
+            &db.pool,
+            queued.id,
+            stale_claim.revision,
+            stale_claim.status,
+            QueuedMessageStatus::Queued,
+        )
+        .await
+        .expect("requeue first attempt")
+        .expect("first attempt requeued");
+    let retried = service
+        .claim_next(&db.pool, member.id)
+        .await
+        .expect("claim retry")
+        .expect("retry exists");
+    assert_eq!(retried.id, stale_claim.id);
+    assert_eq!(retried.attempt_no, stale_claim.attempt_no + 1);
+    assert!(retried.revision > requeued.revision);
+    let revision_before_stale_failure = service
+        .current_runtime_revision(&db.pool, session_id)
+        .await
+        .expect("load revision before stale failure");
+
+    runner
+        .fail_or_skip_queue_entry(&stale_claim, Some("late first-attempt failure".to_string()))
+        .await;
+
+    let after = service
+        .find_by_id(&db.pool, retried.id)
+        .await
+        .expect("load delivery after stale failure")
+        .expect("delivery survives stale failure");
+    assert_eq!(after.status, QueuedMessageStatus::Starting);
+    assert_eq!(after.revision, retried.revision);
+    assert_eq!(after.attempt_no, retried.attempt_no);
+    assert_eq!(
+        service
+            .current_runtime_revision(&db.pool, session_id)
+            .await
+            .expect("load revision after stale failure"),
+        revision_before_stale_failure
+    );
+    assert_eq!(
+        ChatSessionAgent::find_by_id(&db.pool, member.id)
+            .await
+            .expect("load retry member")
+            .expect("retry member exists")
+            .state,
+        ChatSessionAgentState::Idle
+    );
+}
+
+#[tokio::test]
+async fn terminal_finalize_wins_stop_without_reverting_member_to_stopping() {
+    let db = setup_chat_runner_db().await;
+    let runner = ChatRunner::new(db.clone());
+    runner
+        .stop_after_queue_binding
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let workspace = tempfile::tempdir().expect("create terminal stop race workspace");
+    let session_id = Uuid::new_v4();
+    insert_test_chat_session(&db, session_id).await;
+    let agent = insert_test_chat_agent(&db, "TerminalStopRaceTarget").await;
+    let member = ChatSessionAgent::create(
+        &db.pool,
+        &db::models::chat_session_agent::CreateChatSessionAgent {
+            session_id,
+            agent_id: agent.id,
+            member_name: Some("TerminalStopRaceTarget".to_string()),
+            workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            allowed_skill_ids: Vec::new(),
+            project_member_id: None,
+            execution_config: MemberExecutionConfig::default(),
+        },
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("create terminal stop race member");
+    let message = chat::create_message(
+        &db.pool,
+        session_id,
+        ChatSenderType::User,
+        None,
+        "@TerminalStopRaceTarget bind before stop race".to_string(),
+        None,
+    )
+    .await
+    .expect("create terminal stop race source");
+    runner
+        .run_agent_for_mention(session_id, "TerminalStopRaceTarget", 0, &message)
+        .await
+        .expect("bind terminal stop race run");
+    let service = QueuedMessageService::new();
+    let running = service
+        .find_active_for_member(&db.pool, member.id)
+        .await
+        .expect("load running stop race delivery")
+        .expect("running stop race delivery exists");
+    assert_eq!(running.status, QueuedMessageStatus::Running);
+    let run_id = running.run_id.expect("running delivery is bound");
+
+    runner.stop_transition_gate.arm();
+    let stop_runner = runner.clone();
+    let stop_task =
+        tokio::spawn(async move { stop_runner.stop_agent(session_id, member.id).await });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        runner.stop_transition_gate.wait_until_reached(),
+    )
+    .await
+    .expect("stop reaches stale-read boundary");
+
+    let finalization = service
+        .finalize_completed_run_cas(&db.pool, run_id, member.id, running.revision, false)
+        .await
+        .expect("terminal finalization wins stop race");
+    assert!(finalization.applied);
+    runner.stop_transition_gate.release();
+    stop_task
+        .await
+        .expect("join stop race task")
+        .expect("stop race returns successfully");
+
+    let completed = service
+        .find_by_id(&db.pool, running.id)
+        .await
+        .expect("load completed stop race delivery")
+        .expect("completed stop race delivery exists");
+    assert_eq!(completed.status, QueuedMessageStatus::Completed);
+    assert_eq!(completed.revision, running.revision + 1);
+    assert_eq!(
+        ChatSessionAgent::find_by_id(&db.pool, member.id)
+            .await
+            .expect("load member after stop race")
+            .expect("member after stop race exists")
+            .state,
+        ChatSessionAgentState::Idle
     );
 }
 
@@ -2131,21 +2803,23 @@ async fn exit_signal_waits_for_cleanup_before_finished() {
         .send(executors::executors::ExecutorExitResult::Success)
         .expect("send exit signal");
 
-    let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
-        ExitWatcherArgs {
-            child,
-            stop,
-            executor_cancel: None,
-            exit_signal: Some(exit_rx),
-            cleanup: Some(cleanup),
-            msg_store: msg_store.clone(),
-            completion_status: completion_status.clone(),
-            terminal_failure_reason,
-            log_forwarders: empty_log_forwarders(),
-        },
-        Uuid::new_v4(),
-        std::time::Duration::from_secs(3),
-    ));
+    let watcher = tokio::spawn(
+        ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
+            ExitWatcherArgs {
+                child,
+                stop,
+                executor_cancel: None,
+                exit_signal: Some(exit_rx),
+                cleanup: Some(cleanup),
+                msg_store: msg_store.clone(),
+                completion_status: completion_status.clone(),
+                terminal_failure_reason,
+                log_forwarders: empty_log_forwarders(),
+            },
+            Uuid::new_v4(),
+            std::time::Duration::from_secs(3),
+        ),
+    );
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(finished_count(&msg_store), 0);
@@ -2172,11 +2846,9 @@ async fn exit_signal_preserves_authoritative_failure_reason() {
     let terminal_failure_reason = Arc::new(Mutex::new(None));
     let (exit_tx, exit_rx) = oneshot::channel();
     exit_tx
-        .send(
-            executors::executors::ExecutorExitResult::FailureWithError(
-                "OpenTeamsCli request timed out after 2400s without session activity".to_string(),
-            ),
-        )
+        .send(executors::executors::ExecutorExitResult::FailureWithError(
+            "OpenTeamsCli request timed out after 2400s without session activity".to_string(),
+        ))
         .expect("send exit signal");
 
     ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
@@ -2239,21 +2911,23 @@ async fn stop_request_uses_same_cleanup_flow() {
     let completion_status = Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8()));
     let terminal_failure_reason = Arc::new(Mutex::new(None));
 
-    let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
-        ExitWatcherArgs {
-            child,
-            stop: stop.clone(),
-            executor_cancel: Some(executor_cancel.clone()),
-            exit_signal: None,
-            cleanup: Some(cleanup),
-            msg_store: msg_store.clone(),
-            completion_status: completion_status.clone(),
-            terminal_failure_reason,
-            log_forwarders: empty_log_forwarders(),
-        },
-        Uuid::new_v4(),
-        std::time::Duration::from_millis(100),
-    ));
+    let watcher = tokio::spawn(
+        ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
+            ExitWatcherArgs {
+                child,
+                stop: stop.clone(),
+                executor_cancel: Some(executor_cancel.clone()),
+                exit_signal: None,
+                cleanup: Some(cleanup),
+                msg_store: msg_store.clone(),
+                completion_status: completion_status.clone(),
+                terminal_failure_reason,
+                log_forwarders: empty_log_forwarders(),
+            },
+            Uuid::new_v4(),
+            std::time::Duration::from_millis(100),
+        ),
+    );
 
     stop.cancel();
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
@@ -2278,23 +2952,23 @@ async fn watcher_drop_releases_run_cleanup_without_touching_siblings() {
     std::fs::write(&vendor_file, "preserve").expect("vendor fixture");
     let (cleanup_path, cleanup) = test_run_cleanup(workspace.path());
     let child = sleep_command(1).group_spawn().expect("spawn child");
-    let watcher = tokio::spawn(ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
-        ExitWatcherArgs {
-            child,
-            stop: CancellationToken::new(),
-            executor_cancel: None,
-            exit_signal: None,
-            cleanup: Some(cleanup),
-            msg_store: Arc::new(MsgStore::new()),
-            completion_status: Arc::new(AtomicU8::new(
-                RunCompletionStatus::Succeeded.as_u8(),
-            )),
-            terminal_failure_reason: Arc::new(Mutex::new(None)),
-            log_forwarders: empty_log_forwarders(),
-        },
-        Uuid::new_v4(),
-        std::time::Duration::from_millis(100),
-    ));
+    let watcher = tokio::spawn(
+        ChatRunner::watch_executor_lifecycle_and_cleanup_with_timeout(
+            ExitWatcherArgs {
+                child,
+                stop: CancellationToken::new(),
+                executor_cancel: None,
+                exit_signal: None,
+                cleanup: Some(cleanup),
+                msg_store: Arc::new(MsgStore::new()),
+                completion_status: Arc::new(AtomicU8::new(RunCompletionStatus::Succeeded.as_u8())),
+                terminal_failure_reason: Arc::new(Mutex::new(None)),
+                log_forwarders: empty_log_forwarders(),
+            },
+            Uuid::new_v4(),
+            std::time::Duration::from_millis(100),
+        ),
+    );
     tokio::task::yield_now().await;
     assert!(cleanup_path.exists());
 
@@ -2350,7 +3024,7 @@ async fn stop_request_waits_for_executor_exit_signal_before_finished() {
 }
 
 #[tokio::test]
-async fn stop_agent_cancels_pre_registered_run_control() {
+async fn stop_agent_with_control_but_without_delivery_recovers_to_idle() {
     let db = setup_chat_runner_db().await;
     let runner = ChatRunner::new(db.clone());
     let session_id = Uuid::new_v4();
@@ -2395,11 +3069,15 @@ async fn stop_agent_cancels_pre_registered_run_control() {
         .await
         .expect("lookup session agent")
         .expect("session agent exists");
-    assert_eq!(session_agent.state, ChatSessionAgentState::Stopping);
+    assert_eq!(
+        session_agent.state,
+        ChatSessionAgentState::Idle,
+        "an anomalous active member without a durable delivery must recover, not enter the legacy stopping compatibility state"
+    );
 }
 
 #[tokio::test]
-async fn stop_agent_cancels_run_while_waiting_for_approval() {
+async fn stop_agent_recovers_deliveryless_waiting_approval_to_idle() {
     let db = setup_chat_runner_db().await;
     let runner = ChatRunner::new(db.clone());
     let session_id = Uuid::new_v4();
@@ -2436,7 +3114,7 @@ async fn stop_agent_cancels_run_while_waiting_for_approval() {
         .await
         .expect("lookup session agent")
         .expect("session agent exists");
-    assert_eq!(session_agent.state, ChatSessionAgentState::Stopping);
+    assert_eq!(session_agent.state, ChatSessionAgentState::Idle);
 }
 
 #[test]
@@ -2753,7 +3431,10 @@ async fn recover_orphaned_session_agents_dispatches_queued_idle_member_without_r
         .expect("lookup recovered member")
         .expect("recovered member exists");
     assert_eq!(session_agent.state, ChatSessionAgentState::Idle);
-    assert_eq!(session_agent.pty_session_key.as_deref(), Some("preserved-pty"));
+    assert_eq!(
+        session_agent.pty_session_key.as_deref(),
+        Some("preserved-pty")
+    );
     assert_eq!(
         session_agent.agent_session_id.as_deref(),
         Some("preserved-session")
@@ -3055,10 +3736,7 @@ async fn persist_protocol_retry_attempt_message_keeps_run_activity_anchor() {
         messages[0].meta["protocol_retry"]["current_run_id"],
         json!(run_id)
     );
-    assert_eq!(
-        messages[0].meta["protocol_retry"]["next_attempt"],
-        json!(2)
-    );
+    assert_eq!(messages[0].meta["protocol_retry"]["next_attempt"], json!(2));
 }
 
 #[tokio::test]
@@ -4580,8 +5258,9 @@ fn pi_acp_quota_token_usage_is_parsed_for_free_chat_records() {
 
 #[test]
 fn pi_session_follow_up_uses_acp_session_load_semantics() {
-    use executors::executors::{BaseCodingAgent, ExecutorError};
     use std::io;
+
+    use executors::executors::{BaseCodingAgent, ExecutorError};
 
     let agent = ChatAgent {
         runner_type: "PI".to_string(),
@@ -4604,9 +5283,8 @@ fn pi_session_follow_up_uses_acp_session_load_semantics() {
     assert!(display.contains("Follow-up is not supported"));
     assert!(display.contains("Unknown sessionId"));
 
-    let startup_error = ExecutorError::Io(io::Error::other(
-        "ACP startup failed: connection refused",
-    ));
+    let startup_error =
+        ExecutorError::Io(io::Error::other("ACP startup failed: connection refused"));
     assert!(
         !matches!(startup_error, ExecutorError::FollowUpNotSupported(_)),
         "ACP startup failure must not be classified as FollowUpNotSupported"
@@ -4615,20 +5293,18 @@ fn pi_session_follow_up_uses_acp_session_load_semantics() {
 
 #[test]
 fn pi_layered_error_mapping_preserves_acp_startup_failures() {
-    use executors::executors::ExecutorError;
     use std::io;
 
-    let startup_io = ExecutorError::Io(io::Error::other(
-        "ACP startup failed: connection refused",
-    ));
+    use executors::executors::ExecutorError;
+
+    let startup_io = ExecutorError::Io(io::Error::other("ACP startup failed: connection refused"));
     let display = format!("{startup_io}");
     assert!(
         display.contains("ACP startup failed"),
         "ACP startup failure must preserve prefix in Display: {display}"
     );
 
-    let auth_error =
-        ExecutorError::AuthRequired("ACP startup failed: AuthRequired".to_string());
+    let auth_error = ExecutorError::AuthRequired("ACP startup failed: AuthRequired".to_string());
     assert!(
         matches!(auth_error, ExecutorError::AuthRequired(_)),
         "ACP auth failure must be AuthRequired variant"
@@ -4646,8 +5322,10 @@ fn pi_layered_error_mapping_preserves_acp_startup_failures() {
     assert!(fu_display.contains("Pi ACP could not reuse"));
 
     assert!(
-        !matches!(startup_io, ExecutorError::FollowUpNotSupported(_)
-            | ExecutorError::AuthRequired(_)),
+        !matches!(
+            startup_io,
+            ExecutorError::FollowUpNotSupported(_) | ExecutorError::AuthRequired(_)
+        ),
         "Io, FollowUpNotSupported, and AuthRequired must be distinct variants"
     );
 }
@@ -4655,13 +5333,16 @@ fn pi_layered_error_mapping_preserves_acp_startup_failures() {
 #[cfg(unix)]
 #[tokio::test]
 async fn pi_free_chat_dispatches_through_service_and_projects_records() {
-    use db::models::chat_session_agent::CreateChatSessionAgent;
     use std::os::unix::fs::PermissionsExt;
+
+    use db::models::chat_session_agent::CreateChatSessionAgent;
 
     let _fixture_lock = super::PI_FIXTURE_TEST_LOCK.lock().await;
 
-    const PI_FIXTURE_DIR: &str =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../executors/tests/fixtures/pi_acp");
+    const PI_FIXTURE_DIR: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../executors/tests/fixtures/pi_acp"
+    );
 
     let temp = tempfile::tempdir().expect("pi qa workspace");
     let root = temp.path();
@@ -4681,19 +5362,35 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
 
     let mode = 0o755;
     let npx_path = bin.join("npx");
-    std::fs::write(&npx_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_npx.sh")).unwrap()).unwrap();
+    std::fs::write(
+        &npx_path,
+        std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_npx.sh")).unwrap(),
+    )
+    .unwrap();
     std::fs::set_permissions(&npx_path, std::fs::Permissions::from_mode(mode)).unwrap();
 
     let pi_acp_path = bin.join("pi-acp");
-    std::fs::write(&pi_acp_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_acp.mjs")).unwrap()).unwrap();
+    std::fs::write(
+        &pi_acp_path,
+        std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_acp.mjs")).unwrap(),
+    )
+    .unwrap();
     std::fs::set_permissions(&pi_acp_path, std::fs::Permissions::from_mode(mode)).unwrap();
 
     let pi_bin_path = nm_bin.join("pi");
-    std::fs::write(&pi_bin_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi.mjs")).unwrap()).unwrap();
+    std::fs::write(
+        &pi_bin_path,
+        std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi.mjs")).unwrap(),
+    )
+    .unwrap();
     std::fs::set_permissions(&pi_bin_path, std::fs::Permissions::from_mode(mode)).unwrap();
 
     let mcp_bin_path = nm_bin.join("pi-mcp-adapter");
-    std::fs::write(&mcp_bin_path, std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_mcp_adapter.mjs")).unwrap()).unwrap();
+    std::fs::write(
+        &mcp_bin_path,
+        std::fs::read_to_string(format!("{PI_FIXTURE_DIR}/fake_pi_mcp_adapter.mjs")).unwrap(),
+    )
+    .unwrap();
     std::fs::set_permissions(&mcp_bin_path, std::fs::Permissions::from_mode(mode)).unwrap();
 
     let workspace = root.join("workspace");
@@ -4707,7 +5404,15 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
 
     unsafe {
         std::env::set_var("OPENTEAMS_PI_QA_NPX_PATH", &npx_path);
-        std::env::set_var("PATH", format!("{}:{}:{}", bin.display(), nm_bin.display(), std::env::var("PATH").unwrap_or_default()));
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}:{}",
+                bin.display(),
+                nm_bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
         std::env::set_var("HOME", root.join("home"));
         std::env::set_var("OPENTEAMS_FAKE_PI_PROMPTS", &prompts);
         std::env::set_var("OPENTEAMS_FAKE_PI_CHILD_PID_FILE", &pids);
@@ -4799,8 +5504,7 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
             .expect("find sa")
             .expect("sa exists");
         if sa.agent_session_id.is_some()
-            && (sa.state == ChatSessionAgentState::Idle
-                || sa.state == ChatSessionAgentState::Dead)
+            && (sa.state == ChatSessionAgentState::Idle || sa.state == ChatSessionAgentState::Dead)
         {
             run_completed = true;
             break;
@@ -4830,10 +5534,7 @@ async fn pi_free_chat_dispatches_through_service_and_projects_records() {
         sa.agent_session_id.is_some(),
         "session ID must be persisted"
     );
-    assert_eq!(
-        sa.agent_session_id.as_deref(),
-        Some("pi-offline-session")
-    );
+    assert_eq!(sa.agent_session_id.as_deref(), Some("pi-offline-session"));
 
     let messages = sqlx::query_as::<_, (String, String)>(
         "SELECT sender_type, content FROM chat_messages WHERE session_id = ? ORDER BY created_at",
@@ -4975,18 +5676,13 @@ async fn chat_lifecycle_prepares_mcp_before_any_executor_spawn() {
     assert_eq!(missing.spawn_attempts, 0);
     assert_eq!(missing.state, ChatSessionAgentState::Dead);
 
-    let codex = run_chat_startup_until_spawn_boundary(
-        "CODEX",
-        Some(Default::default()),
-        None,
-    )
-    .await;
+    let codex =
+        run_chat_startup_until_spawn_boundary("CODEX", Some(Default::default()), None).await;
     assert!(codex.error.contains("test blocked executor spawn"));
     assert_eq!(codex.spawn_attempts, 1);
     assert_eq!(codex.state, ChatSessionAgentState::Dead);
 
-    let spawn =
-        run_chat_startup_until_spawn_boundary("PI", Some(Default::default()), None).await;
+    let spawn = run_chat_startup_until_spawn_boundary("PI", Some(Default::default()), None).await;
     assert!(spawn.error.contains("test blocked executor spawn"));
     assert_eq!(spawn.spawn_attempts, 1);
     assert_eq!(spawn.state, ChatSessionAgentState::Dead);
@@ -5080,9 +5776,21 @@ async fn chat_mcp_preparation_failure_redacts_canonical_and_adapter_secrets_ever
             !surface.contains(ADAPTER_DIAGNOSTIC_SECRET),
             "{label} leaked the adapter diagnostic secret: {surface}"
         );
-        assert!(surface.contains(&expected_hash), "{label} omitted the safe MCP hash");
-        assert!(surface.contains("mcp_server_count=2"), "{label} omitted the server count");
-        assert!(surface.contains("local-safe-name"), "{label} omitted a safe server name");
-        assert!(surface.contains("remote-safe-name"), "{label} omitted a safe server name");
+        assert!(
+            surface.contains(&expected_hash),
+            "{label} omitted the safe MCP hash"
+        );
+        assert!(
+            surface.contains("mcp_server_count=2"),
+            "{label} omitted the server count"
+        );
+        assert!(
+            surface.contains("local-safe-name"),
+            "{label} omitted a safe server name"
+        );
+        assert!(
+            surface.contains("remote-safe-name"),
+            "{label} omitted a safe server name"
+        );
     }
 }
