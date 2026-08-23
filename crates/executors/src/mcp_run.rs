@@ -73,20 +73,35 @@ pub struct PreparedMcpRun {
     cleanup: Option<ExecutorRunCleanup>,
 }
 
-/// Secret-safe failure metadata for the public run-scoped MCP preparation boundary.
+/// Failure metadata for the public run-scoped MCP preparation boundary.
 ///
-/// Adapter errors are deliberately classified and dropped rather than retained as a
-/// source: diagnostics may contain command arguments, headers, or environment values.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error(
-    "Run-scoped MCP preparation failed: {kind}; mcp_config_hash={config_hash}; mcp_server_count={server_count}; mcp_server_names={server_names:?}"
-)]
+/// Configuration diagnostics are preserved so users can correct the rejected
+/// configuration. Resource and adapter runtime errors remain classified because
+/// they may contain command arguments, headers, or environment values.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpRunPreparationError {
     kind: McpRunPreparationFailureKind,
     config_hash: String,
     server_count: usize,
     server_names: Vec<String>,
+    configuration_error: Option<String>,
 }
+
+impl fmt::Display for McpRunPreparationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Run-scoped MCP preparation failed: {}; mcp_config_hash={}; mcp_server_count={}; mcp_server_names={:?}",
+            self.kind, self.config_hash, self.server_count, self.server_names
+        )?;
+        if let Some(configuration_error) = &self.configuration_error {
+            write!(formatter, "; Configuration error: {configuration_error}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for McpRunPreparationError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum McpRunPreparationFailureKind {
@@ -111,6 +126,7 @@ impl McpRunPreparationError {
             config_hash: "unavailable".to_string(),
             server_count: 0,
             server_names: Vec::new(),
+            configuration_error: None,
         }
     }
 
@@ -122,10 +138,10 @@ impl McpRunPreparationError {
     }
 
     pub fn from_executor_error(canonical: &MemberMcpConfig, error: ExecutorError) -> Self {
-        let kind = match error {
-            ExecutorError::McpNotSupported => McpRunPreparationFailureKind::NotSupported,
+        let (kind, configuration_error) = match error {
+            ExecutorError::McpNotSupported => (McpRunPreparationFailureKind::NotSupported, None),
             ExecutorError::McpIsolationNotImplemented => {
-                McpRunPreparationFailureKind::IsolationNotImplemented
+                (McpRunPreparationFailureKind::IsolationNotImplemented, None)
             }
             ExecutorError::Io(_)
             | ExecutorError::SpawnError(_)
@@ -134,17 +150,22 @@ impl McpRunPreparationError {
             | ExecutorError::TomlDeserialize(_)
             | ExecutorError::Yaml(_)
             | ExecutorError::CommandBuild(_)
-            | ExecutorError::ExecutableNotFound { .. } => {
-                McpRunPreparationFailureKind::ResourcePreparationFailed
-            }
+            | ExecutorError::ExecutableNotFound { .. } => (
+                McpRunPreparationFailureKind::ResourcePreparationFailed,
+                None,
+            ),
             ExecutorError::FollowUpNotSupported(_)
             | ExecutorError::UnknownExecutorType(_)
             | ExecutorError::ExecutorApprovalError(_)
             | ExecutorError::SetupHelperNotSupported
-            | ExecutorError::AuthRequired(_)
-            | ExecutorError::Configuration(_) => McpRunPreparationFailureKind::AdapterRejected,
+            | ExecutorError::AuthRequired(_) => {
+                (McpRunPreparationFailureKind::AdapterRejected, None)
+            }
+            ExecutorError::Configuration(message) => {
+                (McpRunPreparationFailureKind::AdapterRejected, Some(message))
+            }
         };
-        Self::from_kind(kind, canonical)
+        Self::from_kind_and_configuration_error(kind, canonical, configuration_error)
     }
 
     pub fn kind(&self) -> McpRunPreparationFailureKind {
@@ -164,6 +185,14 @@ impl McpRunPreparationError {
     }
 
     fn from_kind(kind: McpRunPreparationFailureKind, canonical: &MemberMcpConfig) -> Self {
+        Self::from_kind_and_configuration_error(kind, canonical, None)
+    }
+
+    fn from_kind_and_configuration_error(
+        kind: McpRunPreparationFailureKind,
+        canonical: &MemberMcpConfig,
+        configuration_error: Option<String>,
+    ) -> Self {
         let server_names = canonical.mcp_servers.keys().cloned().collect::<Vec<_>>();
         Self {
             kind,
@@ -171,6 +200,7 @@ impl McpRunPreparationError {
                 .unwrap_or_else(|_| "unavailable".to_string()),
             server_count: server_names.len(),
             server_names,
+            configuration_error,
         }
     }
 }
@@ -588,6 +618,33 @@ mod tests {
             McpRunPreparationFailureKind::ResourcePreparationFailed
         );
         assert_eq!(error.server_count(), 1);
+    }
+
+    #[test]
+    fn configuration_diagnostics_are_preserved_at_the_public_preparation_boundary() {
+        let canonical = MemberMcpConfig {
+            mcp_servers: [(
+                "computer-use".to_string(),
+                json!({"command": "mcp-tool", "cwd": "."}),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let diagnostic = "Codex rejected mcpServers.computer-use.cwd";
+
+        let error = McpRunPreparationError::from_executor_error(
+            &canonical,
+            ExecutorError::Configuration(diagnostic.to_string()),
+        );
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+
+        for output in [&display, &debug] {
+            assert!(output.contains(diagnostic));
+            assert!(output.contains("computer-use"));
+        }
+        assert!(display.contains("Configuration error:"));
+        assert_eq!(error.kind(), McpRunPreparationFailureKind::AdapterRejected);
     }
 
     #[test]

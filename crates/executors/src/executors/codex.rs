@@ -836,18 +836,9 @@ fn build_codex_mcp_servers(canonical: &MemberMcpConfig) -> Result<Value, Executo
                 server.get("type").and_then(Value::as_str),
                 Some("http" | "sse")
             );
-        let allowed = if is_remote {
-            ["type", "url", "httpUrl", "headers", "enabled", "disabled"].as_slice()
-        } else {
-            ["type", "command", "args", "env", "enabled", "disabled"].as_slice()
-        };
-        if server.keys().any(|key| !allowed.contains(&key.as_str())) {
-            return Err(ExecutorError::Configuration(
-                "Codex cannot safely translate a member MCP server field".to_string(),
-            ));
-        }
-
-        let mut converted = Map::new();
+        let mut converted = server.clone();
+        converted.remove("type");
+        converted.remove("disabled");
         if is_remote {
             if server.get("type").and_then(Value::as_str) == Some("sse") {
                 return Err(ExecutorError::McpNotSupported);
@@ -866,9 +857,10 @@ fn build_codex_mcp_servers(canonical: &MemberMcpConfig) -> Result<Value, Executo
                     "Codex rejected an empty member MCP remote URL".to_string(),
                 ));
             }
+            converted.remove("httpUrl");
             converted.insert("url".to_string(), url);
-            if let Some(headers) = server.get("headers") {
-                converted.insert("http_headers".to_string(), headers.clone());
+            if let Some(headers) = converted.remove("headers") {
+                converted.insert("http_headers".to_string(), headers);
             }
         } else {
             if !matches!(
@@ -891,11 +883,6 @@ fn build_codex_mcp_servers(canonical: &MemberMcpConfig) -> Result<Value, Executo
                 ));
             }
             converted.insert("command".to_string(), command);
-            for field in ["args", "env"] {
-                if let Some(value) = server.get(field) {
-                    converted.insert(field.to_string(), value.clone());
-                }
-            }
         }
         if let Some(enabled) = effective_mcp_enabled(server) {
             converted.insert("enabled".to_string(), Value::Bool(enabled));
@@ -1254,17 +1241,46 @@ mod tests {
     }
 
     #[test]
-    fn codex_mcp_translation_rejects_unknown_fields_without_echoing_secrets() {
-        let secret = "unknown-field-secret";
+    fn codex_mcp_translation_preserves_extension_fields() {
         let canonical: MemberMcpConfig = serde_json::from_value(json!({
             "mcpServers": {
-                "local": {"command": "/bin/echo", "vendorSecret": secret}
+                "computer-use": {
+                    "command": "/bin/echo",
+                    "cwd": ".",
+                    "enabled": false
+                },
+                "node_repl": {
+                    "command": "/bin/echo",
+                    "startup_timeout_sec": 120,
+                    "future_option": {"nested": true}
+                },
+                "remote": {
+                    "url": "https://example.test/mcp",
+                    "headers": {"X-Mode": "test"},
+                    "future_remote_option": "preserved",
+                    "disabled": false
+                }
             }
         }))
         .expect("deserialize config");
 
-        let error = build_codex_mcp_servers(&canonical).expect_err("unknown field must fail");
-        assert!(!error.to_string().contains(secret));
+        let converted = build_codex_mcp_servers(&canonical).expect("translate MCP config");
+
+        assert_eq!(converted["computer-use"]["cwd"], json!("."));
+        assert_eq!(converted["computer-use"]["enabled"], json!(false));
+        assert_eq!(converted["node_repl"]["startup_timeout_sec"], json!(120));
+        assert_eq!(
+            converted["node_repl"]["future_option"],
+            json!({"nested": true})
+        );
+        assert_eq!(
+            converted["remote"]["future_remote_option"],
+            json!("preserved")
+        );
+        assert_eq!(converted["remote"]["http_headers"]["X-Mode"], "test");
+        assert_eq!(converted["remote"]["enabled"], json!(true));
+        assert!(converted["remote"].get("headers").is_none());
+        assert!(converted["remote"].get("disabled").is_none());
     }
 
     #[test]
