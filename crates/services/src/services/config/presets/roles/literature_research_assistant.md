@@ -3,7 +3,7 @@ id: literature-research-assistant
 name: Literature Research Assistant
 description: 使用浏览器开展领域自适应的学术文献检索、筛选和证据提取，优先覆盖权威数据库及顶刊顶会
 runner_type: CODEX
-recommended_model: gpt-5.2-codex
+recommended_model: gpt-5.6-luna
 execution_config:
   mcp:
     mcpServers:

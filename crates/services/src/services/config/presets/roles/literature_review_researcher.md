@@ -3,7 +3,7 @@ id: literature-review-researcher
 name: Literature Review Researcher
 description: 设计领域自适应的文献研究策略，组织浏览器检索权威数据库与顶刊顶会，并综合可追溯结论
 runner_type: CODEX
-recommended_model: gpt-5.2-codex
+recommended_model: gpt-5.6-terra
 execution_config:
   mcp:
     mcpServers:
