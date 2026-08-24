@@ -59,6 +59,7 @@ pub struct AcpClient {
     tool_calls: Arc<Mutex<HashMap<String, ToolCallUpdate>>>,
     token_usage: Arc<Mutex<AcpTokenUsageAccumulator>>,
     terminal_api_error: Arc<Mutex<Option<DetectedApiError>>>,
+    turn_had_activity: Arc<AtomicBool>,
 }
 
 impl AcpClient {
@@ -95,6 +96,7 @@ impl AcpClient {
             tool_calls: Arc::new(Mutex::new(HashMap::new())),
             token_usage: Arc::new(Mutex::new(AcpTokenUsageAccumulator::default())),
             terminal_api_error: Arc::new(Mutex::new(None)),
+            turn_had_activity: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -120,6 +122,9 @@ impl AcpClient {
     ) -> Result<(), Error> {
         if !self.forward_session_updates.load(Ordering::Acquire) {
             return Ok(());
+        }
+        if session_update_has_turn_activity(&notification.update) {
+            self.turn_had_activity.store(true, Ordering::Release);
         }
         self.token_usage
             .lock()
@@ -170,7 +175,12 @@ impl AcpClient {
         self.token_usage.lock().await.begin_turn();
         *self.terminal_api_error.lock().await = None;
         self.tool_calls.lock().await.clear();
+        self.turn_had_activity.store(false, Ordering::Release);
         self.forward_session_updates.store(true, Ordering::Release);
+    }
+
+    pub fn current_turn_had_activity(&self) -> bool {
+        self.turn_had_activity.load(Ordering::Acquire)
     }
 
     pub async fn take_terminal_api_error(&self) -> Option<DetectedApiError> {
@@ -181,6 +191,7 @@ impl AcpClient {
         &self,
         mut request: RequestPermissionRequest,
     ) -> Result<RequestPermissionResponse, Error> {
+        self.turn_had_activity.store(true, Ordering::Release);
         request.tool_call = self.enrich_tool_call(request.tool_call).await;
         self.send_event(AcpEvent::RequestPermission(request.clone()))
             .await;
@@ -672,6 +683,21 @@ fn detect_pi_agent_error_notification(update: &SessionUpdate) -> Option<Detected
     )
 }
 
+fn session_update_has_turn_activity(update: &SessionUpdate) -> bool {
+    match update {
+        SessionUpdate::AgentMessageChunk(chunk) | SessionUpdate::AgentThoughtChunk(chunk) => {
+            match &chunk.content {
+                ContentBlock::Text(text) => !text.text.trim().is_empty(),
+                _ => true,
+            }
+        }
+        SessionUpdate::ToolCall(_) | SessionUpdate::ToolCallUpdate(_) | SessionUpdate::Plan(_) => {
+            true
+        }
+        _ => false,
+    }
+}
+
 fn merge_tool_call_update(cached: &mut ToolCallUpdate, update: &ToolCallUpdate) {
     if let Some(kind) = update.fields.kind {
         cached.fields.kind = Some(kind);
@@ -946,6 +972,23 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    #[test]
+    fn turn_activity_ignores_metadata_and_blank_agent_chunks() {
+        let usage = SessionUpdate::UsageUpdate(
+            agent_client_protocol::schema::v1::UsageUpdate::new(10, 100),
+        );
+        let blank = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+            TextContent::new(" \n"),
+        )));
+        let message = SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+            TextContent::new("response"),
+        )));
+
+        assert!(!session_update_has_turn_activity(&usage));
+        assert!(!session_update_has_turn_activity(&blank));
+        assert!(session_update_has_turn_activity(&message));
     }
 
     #[test]

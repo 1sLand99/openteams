@@ -36,6 +36,7 @@ struct QaSession {
     cwd: PathBuf,
     mcp_names: Vec<String>,
     model: String,
+    thought_level: String,
     mode: String,
 }
 
@@ -67,14 +68,40 @@ fn mode_config_option(current_mode: &str) -> SessionConfigOption {
     .category(SessionConfigOptionCategory::Other("mode".into()))
 }
 
+fn thought_levels_for_model(model: &str) -> Vec<SessionConfigSelectOption> {
+    let levels = if model == "gpt-5.6-luna(openai)" {
+        vec!["low", "high", "max", "on"]
+    } else {
+        vec!["on"]
+    };
+    levels
+        .into_iter()
+        .map(|level| SessionConfigSelectOption::new(level, format!("Thinking {level}")))
+        .collect()
+}
+
+fn thought_config_option(session: &QaSession) -> SessionConfigOption {
+    SessionConfigOption::select(
+        "thinking",
+        "Thinking",
+        session.thought_level.clone(),
+        thought_levels_for_model(&session.model),
+    )
+    .category(SessionConfigOptionCategory::ThoughtLevel)
+}
+
 fn session_config_options(
     session: &QaSession,
     advertise_model: bool,
+    advertise_thought: bool,
     advertise_mode: bool,
 ) -> Vec<SessionConfigOption> {
     let mut options = Vec::new();
     if advertise_model {
         options.push(model_config_option(&session.model));
+    }
+    if advertise_thought {
+        options.push(thought_config_option(session));
     }
     if advertise_mode {
         options.push(mode_config_option(&session.mode));
@@ -119,12 +146,14 @@ fn send_replayed_session_history(
 }
 
 /// Serve the fake Agent over stdio. The prompt can select deterministic
-/// scenarios with `[qa:write]`, `[qa:approval]`, `[qa:sleep]` and `[qa:error]`.
+/// scenarios with `[qa:write]`, `[qa:approval]`, `[qa:sleep]`, `[qa:empty]`
+/// and `[qa:error]`.
 pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
     let disable_follow_up = std::env::var_os("ACP_QA_DISABLE_FOLLOW_UP").is_some();
     let require_auth = std::env::var_os("ACP_QA_REQUIRE_AUTH").is_some();
     let expire_auth = std::env::var_os("ACP_QA_EXPIRE_AUTH").is_some();
     let advertise_config = std::env::var_os("ACP_QA_CONFIG_OPTIONS").is_some();
+    let advertise_thought = std::env::var_os("ACP_QA_THOUGHT_OPTIONS").is_some();
     let advertise_mode = std::env::var_os("ACP_QA_MODE_OPTIONS").is_some();
     let refuse_mode_set = std::env::var_os("ACP_QA_REFUSE_MODE_SET").is_some();
     let replay_count = std::env::var("ACP_QA_REPLAY_NOTIFICATION_COUNT")
@@ -215,10 +244,15 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     cwd: request.cwd,
                     mcp_names: mcp_names(&request.mcp_servers),
                     model: "gemini-3.1-pro-preview".to_string(),
+                    thought_level: "on".to_string(),
                     mode: "yolo".to_string(),
                 };
-                let config_options =
-                    session_config_options(&session, advertise_config, advertise_mode);
+                let config_options = session_config_options(
+                    &session,
+                    advertise_config,
+                    advertise_thought,
+                    advertise_mode,
+                );
                 sessions_for_new
                     .lock()
                     .await
@@ -242,10 +276,15 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     cwd: request.cwd,
                     mcp_names: mcp_names(&request.mcp_servers),
                     model: "gemini-3.1-pro-preview".to_string(),
+                    thought_level: "on".to_string(),
                     mode: "yolo".to_string(),
                 };
-                let config_options =
-                    session_config_options(&session, advertise_config, advertise_mode);
+                let config_options = session_config_options(
+                    &session,
+                    advertise_config,
+                    advertise_thought,
+                    advertise_mode,
+                );
                 sessions_for_resume
                     .lock()
                     .await
@@ -274,10 +313,15 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     cwd: request.cwd,
                     mcp_names: mcp_names(&request.mcp_servers),
                     model: "gemini-3.1-pro-preview".to_string(),
+                    thought_level: "on".to_string(),
                     mode: "yolo".to_string(),
                 };
-                let config_options =
-                    session_config_options(&session, advertise_config, advertise_mode);
+                let config_options = session_config_options(
+                    &session,
+                    advertise_config,
+                    advertise_thought,
+                    advertise_mode,
+                );
                 sessions_for_load
                     .lock()
                     .await
@@ -319,6 +363,13 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     {
                         session.model.clone_from(&selected);
                     }
+                    "thinking"
+                        if thought_levels_for_model(&session.model)
+                            .iter()
+                            .any(|level| level.value.0.as_ref() == selected.as_str()) =>
+                    {
+                        session.thought_level.clone_from(&selected);
+                    }
                     "mode" if ["default", "auto", "yolo"].contains(&selected.as_str()) => {
                         if !refuse_mode_set {
                             session.mode.clone_from(&selected);
@@ -330,7 +381,12 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                     }
                 }
                 responder.respond(SetSessionConfigOptionResponse::new(
-                    session_config_options(session, advertise_config, advertise_mode),
+                    session_config_options(
+                        session,
+                        advertise_config,
+                        advertise_thought,
+                        advertise_mode,
+                    ),
                 ))
             },
             agent_client_protocol::on_receive_request!(),
@@ -424,11 +480,17 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                         request.session_id.clone(),
                         SessionUpdate::UsageUpdate(UsageUpdate::new(37, 128)),
                     ))?;
-                    let (mcp, model, mode) = session
+                    if text.contains("[qa:empty]") {
+                        return responder.respond(
+                            PromptResponse::new(StopReason::EndTurn).usage(Usage::new(37, 30, 7)),
+                        );
+                    }
+                    let (mcp, model, thought_level, mode) = session
                         .map(|session| {
                             (
                                 session.mcp_names.join(","),
                                 session.model,
+                                session.thought_level,
                                 session.mode,
                             )
                         })
@@ -445,7 +507,7 @@ pub async fn run_stdio_agent() -> agent_client_protocol::Result<()> {
                         .to_string()
                     } else {
                         format!(
-                            "QA ACP response: {text}; approval={approval}; mcp={mcp}; model={model}; mode={mode}"
+                            "QA ACP response: {text}; approval={approval}; mcp={mcp}; model={model}; thought={thought_level}; mode={mode}"
                         )
                     };
                     connection.send_notification(SessionNotification::new(

@@ -110,6 +110,13 @@ impl AcpAgentHarness {
         self
     }
 
+    /// Promote an empty successful `end_turn` to an authentication error for
+    /// Agents known to use that response when their credentials are rejected.
+    pub fn with_empty_end_turn_auth_error(mut self, message: impl Into<String>) -> Self {
+        self.config.empty_end_turn_auth_error = Some(message.into());
+        self
+    }
+
     pub fn with_auth_method_id(mut self, method_id: impl Into<String>) -> Self {
         self.config.auth_method_id = Some(method_id.into());
         self
@@ -180,6 +187,11 @@ impl AcpAgentHarness {
             .required_session_mode
             .as_ref()
             .map(|selection| (selection.option_id.as_str(), &selection.value))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn empty_end_turn_auth_error(&self) -> Option<&str> {
+        self.config.empty_end_turn_auth_error.as_deref()
     }
 
     pub fn with_full_access(mut self, full_access: bool) -> Self {
@@ -1245,6 +1257,12 @@ async fn run_connection(
     if let Some(error) = client.take_terminal_api_error().await {
         return Err(agent_client_protocol::Error::internal_error().data(error.message));
     }
+    if response.stop_reason == StopReason::EndTurn
+        && !client.current_turn_had_activity()
+        && let Some(message) = config.empty_end_turn_auth_error
+    {
+        return Err(agent_client_protocol::Error::auth_required().data(message));
+    }
     output
         .send(AcpEvent::Done(
             serde_json::to_string(&response.stop_reason).unwrap_or_default(),
@@ -1326,19 +1344,40 @@ async fn apply_session_preferences(
             "thought level",
         ),
     ];
+    let mut applied_overrides = vec![false; preferences.options.len()];
 
     for (category, desired, label) in category_preferences {
+        let category_override_indices = preferences
+            .options
+            .iter()
+            .enumerate()
+            .filter_map(|(index, selection)| {
+                options
+                    .iter()
+                    .find(|option| option.id.0.as_ref() == selection.option_id)
+                    .is_some_and(|option| option_matches_category(option, &category))
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if !category_override_indices.is_empty() {
+            for index in category_override_indices {
+                let selection = &preferences.options[index];
+                let option = validated_config_option_for_selection(options, selection)?;
+                set_config_option_and_verify(
+                    connection,
+                    session_id,
+                    &option,
+                    selection.value.clone(),
+                    options,
+                )
+                .await?;
+                applied_overrides[index] = true;
+            }
+            continue;
+        }
         let Some(desired) = desired else {
             continue;
         };
-        if preferences.options.iter().any(|selection| {
-            options
-                .iter()
-                .find(|option| option.id.0.as_ref() == selection.option_id)
-                .is_some_and(|option| option_matches_category(option, &category))
-        }) {
-            continue;
-        }
         let Some(option) = find_category_option(options, &category) else {
             if category == SessionConfigOptionCategory::ThoughtLevel
                 && preferences.native_thought_level_fallback
@@ -1357,29 +1396,11 @@ async fn apply_session_preferences(
         set_config_option_and_verify(connection, session_id, &option, value, options).await?;
     }
 
-    for selection in &preferences.options {
-        let option = options
-            .iter()
-            .find(|option| option.id.0.as_ref() == selection.option_id)
-            .cloned()
-            .ok_or_else(|| {
-                invalid_config(format!(
-                    "ACP config option `{}` was not advertised",
-                    selection.option_id
-                ))
-            })?;
-        if protocol_option_controls_session_mode(&option) {
-            return Err(invalid_config(format!(
-                "ACP config option `{}` controls the reserved session mode",
-                selection.option_id
-            )));
+    for (index, selection) in preferences.options.iter().enumerate() {
+        if applied_overrides[index] {
+            continue;
         }
-        if !config_value_supported(&option, &selection.value) {
-            return Err(invalid_config(format!(
-                "ACP config value for `{}` was not advertised",
-                selection.option_id
-            )));
-        }
+        let option = validated_config_option_for_selection(options, selection)?;
         set_config_option_and_verify(
             connection,
             session_id,
@@ -1390,6 +1411,35 @@ async fn apply_session_preferences(
         .await?;
     }
     Ok(effective_model_from_options(options))
+}
+
+fn validated_config_option_for_selection(
+    options: &[SessionConfigOption],
+    selection: &super::AcpConfigSelection,
+) -> agent_client_protocol::Result<SessionConfigOption> {
+    let option = options
+        .iter()
+        .find(|option| option.id.0.as_ref() == selection.option_id)
+        .cloned()
+        .ok_or_else(|| {
+            invalid_config(format!(
+                "ACP config option `{}` was not advertised",
+                selection.option_id
+            ))
+        })?;
+    if protocol_option_controls_session_mode(&option) {
+        return Err(invalid_config(format!(
+            "ACP config option `{}` controls the reserved session mode",
+            selection.option_id
+        )));
+    }
+    if !config_value_supported(&option, &selection.value) {
+        return Err(invalid_config(format!(
+            "ACP config value for `{}` was not advertised",
+            selection.option_id
+        )));
+    }
+    Ok(option)
 }
 
 async fn apply_legacy_session_preferences(
@@ -1818,6 +1868,18 @@ mod tests {
             harness.config.resume_policy,
             AcpResumePolicy::UnknownSessionStartsNew
         );
+    }
+
+    #[test]
+    fn empty_end_turn_auth_error_is_an_explicit_adapter_capability() {
+        let harness = AcpAgentHarness::new()
+            .with_empty_end_turn_auth_error("fixture authentication guidance");
+
+        assert_eq!(
+            harness.empty_end_turn_auth_error(),
+            Some("fixture authentication guidance")
+        );
+        assert_eq!(AcpAgentHarness::new().empty_end_turn_auth_error(), None);
     }
 
     #[test]
