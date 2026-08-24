@@ -1,6 +1,10 @@
 {
   "settings.providers.custom.modality.image": "图像",
   "settings.providers.custom.modality.text": "文本",
+  "settings.providers.custom.deleteConfirmTitle": "删除自定义供应商？",
+  "settings.providers.custom.deleteConfirmDescription": "将移除该供应商配置及其模型。",
+  "settings.providers.custom.deleted": "自定义供应商已删除。",
+  "settings.providers.custom.deleteFailed": "删除自定义供应商失败。",
   "settings.account.desc": "管理开发者资料配置。",
   "settings.account.emailEndpoint": "账号",
   "settings.account.title": "账户设置",

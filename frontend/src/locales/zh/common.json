@@ -48,6 +48,7 @@
   "brandTag": "openteams",
   "bugsFixed": "修复 Bug",
   "cancel": "取消",
+  "delete": "删除",
   "chatMarkdown.copied": "已复制！",
   "chatMarkdown.copy": "复制为 Markdown",
   "codeLocalAlways": "代码完全保留在您本地物理机。确保安全。",
