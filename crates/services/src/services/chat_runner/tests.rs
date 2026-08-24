@@ -2224,14 +2224,12 @@ async fn stale_dispatch_failure_does_not_finalize_retried_delivery() {
         .await
         .expect("claim first attempt")
         .expect("first attempt exists");
-    let requeued = service
-        .transition_status_cas(
-            &db.pool,
-            queued.id,
-            stale_claim.revision,
-            stale_claim.status,
-            QueuedMessageStatus::Queued,
-        )
+    let requeued = db::models::chat_message_queue::ChatMessageQueue::recover_inflight_cas(
+        &db.pool,
+        queued.id,
+        stale_claim.revision,
+        stale_claim.status,
+    )
         .await
         .expect("requeue first attempt")
         .expect("first attempt requeued");
