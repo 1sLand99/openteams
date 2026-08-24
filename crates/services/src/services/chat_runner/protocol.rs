@@ -1092,24 +1092,33 @@ impl ChatRunner {
                 );
             }
 
-            let routed_message = chat::create_message(
-                &self.db.pool,
-                session_id,
-                ChatSenderType::Agent,
-                Some(agent_id),
-                content,
-                Some(meta),
-            )
-            .await?;
+            let routed_message = if let Some(ref session) = session {
+                self.persist_and_dispatch_message(
+                    session,
+                    ChatSenderType::Agent,
+                    Some(agent_id),
+                    content,
+                    Some(meta),
+                    Uuid::new_v4(),
+                )
+                .await?
+                .message
+            } else {
+                let message = chat::create_message(
+                    &self.db.pool,
+                    session_id,
+                    ChatSenderType::Agent,
+                    Some(agent_id),
+                    content,
+                    Some(meta),
+                )
+                .await?;
+                self.emit_message_new(session_id, message.clone());
+                message
+            };
             InboxService::new()
                 .notify_chat_agent_message(&self.db.pool, &routed_message, Some(agent_name))
                 .await;
-
-            if let Some(ref session) = session {
-                self.handle_message(session, &routed_message).await;
-            } else {
-                self.emit_message_new(session_id, routed_message);
-            }
 
             send_count += 1;
         }

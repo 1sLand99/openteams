@@ -316,6 +316,88 @@ async fn prompt_error_and_abnormal_exit_are_reported_without_hanging() {
 }
 
 #[tokio::test]
+async fn empty_end_turn_auth_error_is_opt_in_and_visible() {
+    let workspace = std::env::temp_dir().join(format!("openteams-acp-qa-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&workspace)
+        .await
+        .expect("create workspace");
+    let executor = AcpQaExecutor {
+        command: env!("CARGO_BIN_EXE_acp-qa-agent").to_string(),
+        ..AcpQaExecutor::default()
+    };
+
+    let (default_events, default_exit) =
+        run_turn(&executor, &workspace, None, &[], "[qa:empty]").await;
+    assert!(matches!(default_exit, ExecutorExitResult::Success));
+    assert!(
+        default_events
+            .iter()
+            .any(|event| matches!(event, AcpEvent::Done(_)))
+    );
+    assert!(
+        !default_events
+            .iter()
+            .any(|event| matches!(event, AcpEvent::Message(_)))
+    );
+
+    let harness = AcpAgentHarness::new()
+        .with_empty_end_turn_auth_error("QA authentication expired; sign in and retry");
+    let spawned = harness
+        .spawn_with_command(
+            &workspace,
+            "[qa:empty]".to_string(),
+            CommandParts::new(env!("CARGO_BIN_EXE_acp-qa-agent").to_string(), Vec::new()),
+            &ExecutionEnv::new(
+                RepoContext::new(workspace.clone(), Vec::new()),
+                false,
+                String::new(),
+            ),
+            &CmdOverrides::default(),
+            None,
+        )
+        .await
+        .expect("spawn opted-in empty turn");
+    let (events, exit) = read_spawned_turn(spawned).await;
+
+    assert!(matches!(exit, ExecutorExitResult::Failure));
+    assert!(events.iter().any(|event| {
+        matches!(event, AcpEvent::Error(message) if message.contains("QA authentication expired"))
+    }));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AcpEvent::Done(_)))
+    );
+
+    let nonempty = harness
+        .spawn_with_command(
+            &workspace,
+            "normal response".to_string(),
+            CommandParts::new(env!("CARGO_BIN_EXE_acp-qa-agent").to_string(), Vec::new()),
+            &ExecutionEnv::new(
+                RepoContext::new(workspace.clone(), Vec::new()),
+                false,
+                String::new(),
+            ),
+            &CmdOverrides::default(),
+            None,
+        )
+        .await
+        .expect("spawn non-empty turn");
+    let (nonempty_events, nonempty_exit) = read_spawned_turn(nonempty).await;
+    assert!(matches!(nonempty_exit, ExecutorExitResult::Success));
+    assert!(
+        nonempty_events
+            .iter()
+            .any(|event| matches!(event, AcpEvent::Message(_)))
+    );
+
+    tokio::fs::remove_dir_all(workspace)
+        .await
+        .expect("remove workspace");
+}
+
+#[tokio::test]
 async fn cancellation_notifies_agent_and_finishes_promptly() {
     let workspace = std::env::temp_dir().join(format!("openteams-acp-qa-{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&workspace)
@@ -421,6 +503,61 @@ async fn stable_config_option_is_applied_verified_and_used_for_usage_identity() 
             event,
             AcpEvent::TokenUsage(usage)
                 if usage.runtime_model_id.as_deref() == Some("gpt-5.6-luna")
+        )
+    }));
+
+    tokio::fs::remove_dir_all(workspace)
+        .await
+        .expect("remove workspace");
+}
+
+#[tokio::test]
+async fn model_override_precedes_model_dependent_thought_preference() {
+    let workspace = std::env::temp_dir().join(format!("openteams-acp-qa-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&workspace)
+        .await
+        .expect("create workspace");
+    let mut env = ExecutionEnv::new(
+        RepoContext::new(workspace.clone(), Vec::new()),
+        false,
+        String::new(),
+    );
+    env.insert("ACP_QA_CONFIG_OPTIONS", "1");
+    env.insert("ACP_QA_THOUGHT_OPTIONS", "1");
+
+    let model_override = AcpConfigOverride {
+        option_id: "session-model".to_string(),
+        value: AcpConfigValue::ValueId {
+            value: "gpt-5.6-luna(openai)".to_string(),
+        },
+        label_snapshot: Some("Model".to_string()),
+        category_snapshot: Some("model".to_string()),
+    };
+    let harness = AcpAgentHarness::new()
+        .with_native_thought_level_fallback("max")
+        .with_config_override(&model_override);
+    let spawned = harness
+        .spawn_with_command(
+            &workspace,
+            "model-dependent thought turn".to_string(),
+            CommandParts::new(env!("CARGO_BIN_EXE_acp-qa-agent").to_string(), Vec::new()),
+            &env,
+            &CmdOverrides::default(),
+            None,
+        )
+        .await
+        .expect("model override must refresh thought options before applying max");
+    let (events, exit) = read_spawned_turn(spawned).await;
+
+    assert!(matches!(exit, ExecutorExitResult::Success));
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AcpEvent::Message(chunk)
+                if serde_json::to_string(chunk).is_ok_and(|json| {
+                    json.contains("model=gpt-5.6-luna(openai)")
+                        && json.contains("thought=max")
+                })
         )
     }));
 

@@ -1,6 +1,10 @@
 {
   "settings.providers.custom.modality.image": "Image",
   "settings.providers.custom.modality.text": "Text",
+  "settings.providers.custom.deleteConfirmTitle": "Delete custom provider?",
+  "settings.providers.custom.deleteConfirmDescription": "This will remove the provider configuration and its models.",
+  "settings.providers.custom.deleted": "Custom provider deleted.",
+  "settings.providers.custom.deleteFailed": "Failed to delete custom provider.",
   "settings.account.desc": "Manage developer profiling configurations.",
   "settings.account.emailEndpoint": "Account",
   "settings.account.title": "Account settings",

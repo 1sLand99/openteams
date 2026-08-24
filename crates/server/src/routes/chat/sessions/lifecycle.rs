@@ -239,7 +239,7 @@ pub async fn stream_session_ws(
         );
 
     Ok(ws.on_upgrade(move |socket| async move {
-        if let Err(err) = handle_chat_stream_ws(socket, rx, approval_rx).await {
+        if let Err(err) = handle_chat_stream_ws(socket, session.id, rx, approval_rx).await {
             tracing::warn!("chat stream ws closed: {}", err);
         }
     }))
@@ -247,6 +247,7 @@ pub async fn stream_session_ws(
 
 async fn handle_chat_stream_ws(
     socket: WebSocket,
+    session_id: Uuid,
     mut rx: tokio::sync::broadcast::Receiver<services::services::chat_runner::ChatStreamEvent>,
     mut approval_rx: tokio::sync::broadcast::Receiver<
         services::services::approvals::executor_approvals::ExecutorApprovalEvent,
@@ -261,7 +262,14 @@ async fn handle_chat_stream_ws(
         let json = tokio::select! {
             event = rx.recv() => match event {
                 Ok(event) => serde_json::to_string(&event)?,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    serde_json::to_string(
+                        &services::services::chat_runner::ChatStreamEvent::RuntimeResyncRequired {
+                            session_id,
+                            reason: format!("websocket_lagged:{skipped}"),
+                        },
+                    )?
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
             event = approval_rx.recv() => match event {

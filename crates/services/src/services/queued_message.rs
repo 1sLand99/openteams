@@ -26,6 +26,7 @@ pub struct QueuedMessage {
     pub processing_started_at: Option<DateTime<Utc>>,
     pub run_id: Option<Uuid>,
     pub failure_reason: Option<String>,
+    pub failure_resolved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -148,7 +149,7 @@ impl QueuedMessageService {
         Self
     }
 
-    fn from_row(row: ChatMessageQueue) -> QueuedMessage {
+    pub(crate) fn from_row(row: ChatMessageQueue) -> QueuedMessage {
         QueuedMessage {
             id: row.id,
             session_id: row.session_id,
@@ -163,6 +164,7 @@ impl QueuedMessageService {
             processing_started_at: row.processing_started_at,
             run_id: row.run_id,
             failure_reason: row.failure_reason,
+            failure_resolved_at: row.failure_resolved_at,
         }
     }
 
@@ -178,8 +180,8 @@ impl QueuedMessageService {
                         | QueuedMessageStatus::Running
                         | QueuedMessageStatus::WaitingApproval
                         | QueuedMessageStatus::Stopping
-                        | QueuedMessageStatus::Failed
-                )
+                ) || (message.status == QueuedMessageStatus::Failed
+                    && message.failure_resolved_at.is_none())
             })
             .collect()
     }
@@ -853,7 +855,10 @@ impl QueuedMessageService {
 
         if let Some(message) = messages
             .iter()
-            .find(|message| message.status == QueuedMessageStatus::Failed)
+            .find(|message| {
+                message.status == QueuedMessageStatus::Failed
+                    && message.failure_resolved_at.is_none()
+            })
             .cloned()
         {
             return if queued_count > 0 {
@@ -990,6 +995,7 @@ mod tests {
                 processing_started_at TEXT,
                 run_id                BLOB,
                 failure_reason        TEXT,
+                failure_resolved_at   TEXT,
                 created_at            TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
                 updated_at            TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
             )
@@ -1693,7 +1699,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failure_blocks_until_continue_skips_failed_item() {
+    async fn failure_blocks_until_continue_resolves_failed_item() {
         let pool = setup_pool().await;
         let service = QueuedMessageService::new();
         let member = Uuid::new_v4();
@@ -1728,6 +1734,13 @@ mod tests {
             service.skip_failed_for_member(&pool, member).await.unwrap(),
             1
         );
+        let resolved_failure = service
+            .find_by_id(&pool, failed.id)
+            .await
+            .unwrap()
+            .expect("resolved failure remains persisted");
+        assert_eq!(resolved_failure.status, QueuedMessageStatus::Failed);
+        assert!(resolved_failure.failure_resolved_at.is_some());
         let next = service
             .claim_next(&pool, member)
             .await

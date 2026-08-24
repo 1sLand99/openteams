@@ -75,16 +75,16 @@ const dispatchSync = (
 };
 
 const scheduler = new ChatDeliveryResyncScheduler({
-  getSnapshot,
-  applySnapshot: (snapshot, requestedAt) => {
+  recover: async (sessionId, requestedAt) => {
+    const snapshot = await getSnapshot(sessionId);
     dispatchSync({
-      type: 'snapshot_received',
-      sessionId: snapshot.session_id,
-      deliveries: deliveriesFromRuntimeSnapshot(snapshot),
-      revision: Number(snapshot.revision),
-      requestedAt,
-      receivedAt: now,
-    });
+        type: 'snapshot_received',
+        sessionId: snapshot.session_id,
+        deliveries: deliveriesFromRuntimeSnapshot(snapshot),
+        revision: Number(snapshot.revision),
+        requestedAt,
+        receivedAt: now,
+      });
   },
   onError: (sessionId) => {
     dispatchSync({ type: 'snapshot_failed', sessionId, receivedAt: now });

@@ -10,6 +10,25 @@ export type FileChangeEntry = {
 
 export type ChatStreamEvent =
   | {
+      type: 'runtime_delta';
+      session_id: string;
+      revision: number;
+      event_type:
+        | 'delivery_created'
+        | 'delivery_updated'
+        | 'delivery_deleted';
+      payload: {
+        delivery_id: string;
+        delivery_revision: number;
+        queue: MemberQueueSnapshot | null;
+      };
+    }
+  | {
+      type: 'runtime_resync_required';
+      session_id: string;
+      reason: string;
+    }
+  | {
       type: 'agent_run_started';
       session_id: string;
       session_agent_id: string;

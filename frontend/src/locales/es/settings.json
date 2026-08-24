@@ -1,6 +1,10 @@
 {
   "settings.providers.custom.modality.image": "Imagen",
   "settings.providers.custom.modality.text": "Texto",
+  "settings.providers.custom.deleteConfirmTitle": "¿Eliminar el proveedor personalizado?",
+  "settings.providers.custom.deleteConfirmDescription": "Esto eliminará la configuración del proveedor y sus modelos.",
+  "settings.providers.custom.deleted": "Proveedor personalizado eliminado.",
+  "settings.providers.custom.deleteFailed": "No se pudo eliminar el proveedor personalizado.",
   "settings.account.desc": "Gestiona la configuración del perfil de desarrollador.",
   "settings.account.emailEndpoint": "Cuenta",
   "settings.account.title": "Configuración de cuenta",

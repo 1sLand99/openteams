@@ -28,6 +28,7 @@ import type {
   ChatQueueListResponse,
   ChatRunActivityResponse,
   ChatRunRetentionListResponse,
+  ChatRuntimeReplayResponse,
   ChatSessionRuntimeSnapshot,
   ChatSessionStatus,
   ChatSessionWorktreeMode,
@@ -72,6 +73,7 @@ import type {
   ProjectRepoIntegration,
   ProjectWorkItem,
   ProjectWorkItemComment,
+  QueuedMessage,
   ProjectWorkItemDetailResponse,
   ProjectWorkItemExecutionLink,
   ProfilesContent,
@@ -121,6 +123,8 @@ import type {
 
 export interface ChatMessageMutationResponse {
   message: BackendChatMessage;
+  deliveries: QueuedMessage[];
+  revision: bigint;
   runtime: ChatSessionRuntimeSnapshot;
 }
 
@@ -1317,6 +1321,21 @@ export const chatRuntimeApi = {
       { cache: "no-store" },
     );
     return handleApiResponse<ChatSessionRuntimeSnapshot>(r);
+  },
+  replay: async (
+    sessionId: string,
+    afterRevision: number,
+    options?: { limit?: number; includeMessages?: boolean },
+  ): Promise<ChatRuntimeReplayResponse> => {
+    const r = await makeRequest(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/runtime/replay${qs({
+        after_revision: afterRevision,
+        limit: options?.limit,
+        include_messages: options?.includeMessages,
+      })}`,
+      { cache: "no-store" },
+    );
+    return handleApiResponse<ChatRuntimeReplayResponse>(r);
   },
 };
 

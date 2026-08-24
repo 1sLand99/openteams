@@ -182,6 +182,23 @@ struct ResolvedSessionMember {
     member_name: String,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedMessageDelivery {
+    member: ResolvedSessionMember,
+    ordinal: i64,
+    route_kind: db::models::chat_message_target::ChatMessageTargetRouteKind,
+    resolution_status:
+        db::models::chat_message_target::ChatMessageTargetResolutionStatus,
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistedChatMessageDeliveryBundle {
+    pub message: ChatMessage,
+    pub deliveries: Vec<QueuedMessage>,
+    pub revision: i64,
+    pub created: bool,
+}
+
 struct AgentRunTarget {
     member: ResolvedSessionMember,
     claimed_queue_id: Option<Uuid>,
@@ -229,6 +246,9 @@ pub struct ChatRunner {
     analytics: Option<AnalyticsService>,
     analytics_enabled: Arc<AtomicBool>,
     streams: Arc<DashMap<Uuid, broadcast::Sender<ChatStreamEvent>>>,
+    runtime_outbox_publish_lock: Arc<Mutex<()>>,
+    runtime_outbox_notify: Arc<Notify>,
+    runtime_outbox_publisher_started: Arc<AtomicBool>,
     // Store per-run lifecycle controls, key = session_agent_id
     run_controls: Arc<DashMap<Uuid, RunLifecycleControl>>,
     // Session-level background context compaction dedupe.
@@ -265,6 +285,9 @@ impl ChatRunner {
             analytics,
             analytics_enabled,
             streams: Arc::new(DashMap::new()),
+            runtime_outbox_publish_lock: Arc::new(Mutex::new(())),
+            runtime_outbox_notify: Arc::new(Notify::new()),
+            runtime_outbox_publisher_started: Arc::new(AtomicBool::new(false)),
             run_controls: Arc::new(DashMap::new()),
             background_compaction_inflight: Arc::new(DashMap::new()),
             workspace_live_log_bytes: Arc::new(DashMap::new()),
@@ -533,6 +556,97 @@ impl ChatRunner {
         self.sender_for(session_id).subscribe()
     }
 
+    /// Start the recovery publisher once. Database rows remain the source of
+    /// truth; the notification and interval merely reduce delivery latency.
+    pub fn start_runtime_outbox_publisher(&self) {
+        if self
+            .runtime_outbox_publisher_started
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let runner = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            let mut retention_interval =
+                tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+            loop {
+                let run_retention = tokio::select! {
+                    _ = interval.tick() => false,
+                    _ = runner.runtime_outbox_notify.notified() => false,
+                    _ = retention_interval.tick() => true,
+                };
+                if let Err(error) = runner.publish_runtime_outbox().await {
+                    tracing::warn!(%error, "failed to publish chat runtime outbox");
+                }
+                if run_retention
+                    && let Err(error) = ChatRuntimeOutboxService::new()
+                        .delete_published_before(
+                            &runner.db.pool,
+                            Utc::now() - chrono::Duration::days(7),
+                        )
+                        .await
+                {
+                    tracing::warn!(%error, "failed to prune published chat runtime outbox rows");
+                }
+            }
+        });
+    }
+
+    /// Drain committed runtime outbox rows in session/revision order. A row is
+    /// acknowledged only after its versioned event has been handed to the
+    /// process-local stream. Duplicate handoff is safe and expected after a
+    /// crash between send and acknowledgement.
+    pub async fn publish_runtime_outbox(&self) -> Result<usize, sqlx::Error> {
+        let _guard = self.runtime_outbox_publish_lock.lock().await;
+        let service = ChatRuntimeOutboxService::new();
+        let mut published = 0;
+        loop {
+            let records = service.unpublished(&self.db.pool, 256).await?;
+            if records.is_empty() {
+                break;
+            }
+            let batch_len = records.len();
+            for record in records {
+                let delta = service.delta_for_record(&self.db.pool, &record).await?;
+                self.emit(
+                    delta.session_id,
+                    ChatStreamEvent::RuntimeDelta {
+                        session_id: delta.session_id,
+                        revision: delta.revision,
+                        event_type: delta.event_type,
+                        payload: delta.payload.clone(),
+                    },
+                );
+                // Rolling-upgrade compatibility: legacy consumers still see
+                // the queue event, but it is now derived from the committed
+                // outbox rather than emitted by mutation call sites.
+                if let Some(queue) = delta.payload.queue {
+                    self.emit(
+                        delta.session_id,
+                        ChatStreamEvent::QueueUpdated {
+                            session_id: delta.session_id,
+                            session_agent_id: queue.session_agent_id,
+                            queue,
+                        },
+                    );
+                }
+                service
+                    .mark_published(&self.db.pool, record.sequence)
+                    .await?;
+                published += 1;
+            }
+            if batch_len < 256 {
+                break;
+            }
+        }
+        Ok(published)
+    }
+
+    fn notify_runtime_outbox_publisher(&self) {
+        self.runtime_outbox_notify.notify_one();
+    }
+
     pub fn emit_message_new(&self, session_id: Uuid, message: ChatMessage) {
         self.emit(session_id, ChatStreamEvent::MessageNew { message });
     }
@@ -545,53 +659,10 @@ impl ChatRunner {
         self.emit(session_id, ChatStreamEvent::WorkItemNew { work_item });
     }
 
-    pub fn emit_queue_update(&self, session_id: Uuid, queue: MemberQueueSnapshot) {
-        self.emit(
-            session_id,
-            ChatStreamEvent::QueueUpdated {
-                session_id,
-                session_agent_id: queue.session_agent_id,
-                queue,
-            },
-        );
-    }
-
-    async fn emit_member_queue_update(&self, session_id: Uuid, session_agent_id: Uuid) {
-        let Some(session_agent) =
-            (match ChatSessionAgent::find_by_id(&self.db.pool, session_agent_id).await {
-                Ok(agent) => agent,
-                Err(err) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        session_agent_id = %session_agent_id,
-                        error = %err,
-                        "failed to load member before queue update event"
-                    );
-                    return;
-                }
-            })
-        else {
-            return;
-        };
-
-        match QueuedMessageService::new()
-            .snapshot_for_member(
-                &self.db.pool,
-                session_id,
-                session_agent.id,
-                session_agent.agent_id,
-            )
-            .await
-        {
-            Ok(snapshot) => self.emit_queue_update(session_id, snapshot),
-            Err(err) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    session_agent_id = %session_agent_id,
-                    error = %err,
-                    "failed to build queue update event"
-                );
-            }
+    async fn emit_member_queue_update(&self, _session_id: Uuid, _session_agent_id: Uuid) {
+        self.notify_runtime_outbox_publisher();
+        if let Err(error) = self.publish_runtime_outbox().await {
+            tracing::warn!(%error, "failed to publish member queue runtime update");
         }
     }
 
@@ -791,6 +862,75 @@ impl ChatRunner {
         }
     }
 
+    async fn report_missing_member_mention(
+        &self,
+        session_id: Uuid,
+        message: &ChatMessage,
+        mention: &str,
+    ) {
+        self.update_mention_status(
+            message.id,
+            mention,
+            Self::mention_status_as_str(&MentionStatus::Failed),
+            None,
+        )
+        .await;
+        self.emit(
+            session_id,
+            ChatStreamEvent::MentionError {
+                session_id,
+                message_id: message.id,
+                client_message_id: Self::extract_client_message_id(&message.meta),
+                session_agent_id: None,
+                project_member_id: None,
+                agent_name: mention.to_string(),
+                agent_id: None,
+                reason: "member_not_found".to_string(),
+            },
+        );
+        let member_handle = if mention.starts_with('@') {
+            mention.to_string()
+        } else {
+            format!("@{mention}")
+        };
+        let system_meta = serde_json::json!({
+            "mention_failure": {
+                "source_message_id": message.id,
+                "mentioned_agent": mention,
+                "reason": "member_not_found",
+            },
+            "i18n": {
+                "key": "message.memberNotFound",
+                "params": {
+                    "member": member_handle,
+                },
+            },
+        });
+        match chat::create_message(
+            &self.db.pool,
+            session_id,
+            ChatSenderType::System,
+            None,
+            format!("Member {member_handle} does not exist."),
+            Some(system_meta),
+        )
+        .await
+        {
+            Ok(system_message) => self.emit_message_new(session_id, system_message),
+            Err(err) => tracing::warn!(
+                error = %err,
+                mention = mention,
+                session_id = %session_id,
+                "failed to persist missing-member system message"
+            ),
+        }
+        tracing::warn!(
+            mention = mention,
+            session_id = %session_id,
+            "mentioned chat member does not exist"
+        );
+    }
+
     async fn report_mention_failure(
         &self,
         session_id: Uuid,
@@ -934,6 +1074,347 @@ impl ChatRunner {
         }
     }
 
+    async fn resolve_default_member_for_user_payload(
+        &self,
+        session: &ChatSession,
+        mentions: &[String],
+        meta: &serde_json::Value,
+    ) -> Result<Option<ResolvedSessionMember>, ChatRunnerError> {
+        if !mentions.is_empty()
+            || meta
+                .get("chat_input_mode")
+                .and_then(serde_json::Value::as_str)
+                != Some("workflow")
+        {
+            return Ok(None);
+        }
+
+        let session_agents =
+            ChatSessionAgent::find_all_for_session(&self.db.pool, session.id).await?;
+        if session_agents.is_empty() {
+            return Ok(None);
+        }
+        let agents = ChatAgent::find_all(&self.db.pool).await?;
+        match resolve_lead_agent(session, &session_agents, &agents) {
+            Ok((_lead_agent, lead_session_agent)) => {
+                Ok(Some(Self::resolved_session_member(lead_session_agent)))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    async fn resolve_message_deliveries(
+        &self,
+        session: &ChatSession,
+        sender_type: ChatSenderType,
+        sender_session_agent_id: Option<Uuid>,
+        mentions: &[String],
+        meta: &serde_json::Value,
+    ) -> Result<(Vec<ResolvedMessageDelivery>, Vec<String>), ChatRunnerError> {
+        let chain_depth = meta
+            .get("chain_depth")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32;
+        let max_agent_chain_depth = config::load_config_from_file(&config_path())
+            .await
+            .max_agent_chain_depth
+            .max(1);
+        if chain_depth >= max_agent_chain_depth {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        if sender_type == ChatSenderType::User
+            && let Some(default_member) = self
+                .resolve_default_member_for_user_payload(session, mentions, meta)
+                .await?
+        {
+            return Ok((
+                vec![ResolvedMessageDelivery {
+                    member: default_member,
+                    ordinal: 0,
+                    route_kind:
+                        db::models::chat_message_target::ChatMessageTargetRouteKind::DefaultLead,
+                    resolution_status: db::models::chat_message_target::ChatMessageTargetResolutionStatus::Resolved,
+                }],
+                Vec::new(),
+            ));
+        }
+
+        let mut resolved = Vec::with_capacity(mentions.len());
+        let mut missing = Vec::new();
+        let mut seen_members = HashSet::with_capacity(mentions.len());
+        for (ordinal, mention) in mentions.iter().enumerate() {
+            if sender_type == ChatSenderType::Agent
+                && mention.eq_ignore_ascii_case(RESERVED_USER_HANDLE)
+            {
+                continue;
+            }
+            match self
+                .resolve_session_agent_for_mention(session.id, mention)
+                .await?
+            {
+                Some(member) if seen_members.insert(member.session_agent_id) => {
+                    let resolution_status = if sender_type == ChatSenderType::Agent
+                        && sender_session_agent_id == Some(member.session_agent_id)
+                    {
+                        db::models::chat_message_target::ChatMessageTargetResolutionStatus::Rejected
+                    } else {
+                        db::models::chat_message_target::ChatMessageTargetResolutionStatus::Resolved
+                    };
+                    resolved.push(ResolvedMessageDelivery {
+                        member,
+                        ordinal: ordinal as i64,
+                        route_kind: if sender_type == ChatSenderType::Agent {
+                            db::models::chat_message_target::ChatMessageTargetRouteKind::AgentProtocol
+                        } else {
+                            db::models::chat_message_target::ChatMessageTargetRouteKind::ExplicitMention
+                        },
+                        resolution_status,
+                    });
+                }
+                Some(_) => {}
+                None => missing.push(mention.clone()),
+            }
+        }
+        Ok((resolved, missing))
+    }
+
+    fn delivery_target_inputs(
+        resolved: &[ResolvedMessageDelivery],
+    ) -> Vec<chat::ResolvedChatMessageTarget> {
+        resolved
+            .iter()
+            .map(|target| chat::ResolvedChatMessageTarget {
+                ordinal: target.ordinal,
+                session_agent_id: target.member.session_agent_id,
+                project_member_id: target.member.project_member_id,
+                agent_id: target.member.agent_id,
+                member_name_snapshot: target.member.member_name.clone(),
+                route_kind: target.route_kind,
+                resolution_status: target.resolution_status,
+            })
+            .collect()
+    }
+
+    fn activate_persisted_message_bundle(
+        &self,
+        session_id: Uuid,
+        message: ChatMessage,
+        resolved: Vec<ResolvedMessageDelivery>,
+        missing: Vec<String>,
+        dispatch_deliveries: Vec<db::models::chat_message_queue::ChatMessageQueue>,
+        created: bool,
+    ) {
+        if created {
+            self.emit_message_new(session_id, message.clone());
+        }
+
+        let runner = self.clone();
+        tokio::spawn(async move {
+            let mut member_ids = HashSet::new();
+            for target in &resolved {
+                if target.resolution_status
+                    != db::models::chat_message_target::ChatMessageTargetResolutionStatus::Resolved
+                {
+                    continue;
+                }
+                member_ids.insert(target.member.session_agent_id);
+                if created {
+                    match ChatSessionAgent::find_by_id(
+                        &runner.db.pool,
+                        target.member.session_agent_id,
+                    )
+                    .await
+                    {
+                        Ok(Some(session_agent)) => {
+                            runner
+                                .set_mention_status(
+                                    session_id,
+                                    message.id,
+                                    &target.member.member_name,
+                                    Some(target.member.agent_id),
+                                    Some(&session_agent),
+                                    MentionStatus::Received,
+                                )
+                                .await;
+                        }
+                        Ok(None) => {}
+                        Err(err) => tracing::warn!(
+                            session_agent_id = %target.member.session_agent_id,
+                            error = %err,
+                            "failed to load persisted delivery target after message commit"
+                        ),
+                    }
+                }
+            }
+            for delivery in &dispatch_deliveries {
+                member_ids.insert(delivery.session_agent_id);
+            }
+            for session_agent_id in member_ids {
+                runner
+                    .emit_member_queue_update(session_id, session_agent_id)
+                    .await;
+            }
+
+            for delivery in dispatch_deliveries {
+                let runner = runner.clone();
+                let entry = QueuedMessageService::from_row(delivery);
+                tokio::spawn(async move {
+                    runner
+                        .dispatch_queued_entry(entry.session_id, entry.session_agent_id, entry)
+                        .await;
+                });
+            }
+            if created {
+                for mention in missing {
+                    runner
+                        .report_missing_member_mention(session_id, &message, &mention)
+                        .await;
+                }
+            }
+        });
+    }
+
+    /// Persist the message, resolved targets and delivery ledger rows atomically, then wake the
+    /// runner after commit. User idempotency replays repair any legacy partial delivery bundle.
+    pub async fn persist_and_dispatch_message(
+        &self,
+        session: &ChatSession,
+        sender_type: ChatSenderType,
+        sender_id: Option<Uuid>,
+        content: String,
+        mut meta: Option<serde_json::Value>,
+        message_id: Uuid,
+    ) -> Result<PersistedChatMessageDeliveryBundle, ChatRunnerError> {
+        let client_message_id = if sender_type == ChatSenderType::User {
+            chat::normalized_client_message_id(meta.as_ref())?
+        } else {
+            None
+        };
+        if let Some(client_message_id) = client_message_id.as_ref()
+            && let Some(meta_object) = meta.as_mut().and_then(serde_json::Value::as_object_mut)
+        {
+            meta_object.insert(
+                "client_message_id".to_string(),
+                serde_json::Value::String(client_message_id.clone()),
+            );
+        }
+
+        if let Some(client_message_id) = client_message_id.as_ref()
+            && let Some(existing) = ChatMessage::find_idempotent_user_message(
+                &self.db.pool,
+                session.id,
+                client_message_id,
+            )
+            .await?
+        {
+            let (resolved, missing) = self
+                .resolve_message_deliveries(
+                    session,
+                    existing.sender_type.clone(),
+                    existing.sender_session_agent_id,
+                    &existing.mentions.0,
+                    &existing.meta.0,
+                )
+                .await?;
+            let bundle = chat::ensure_message_delivery_bundle(
+                &self.db.pool,
+                &existing,
+                &Self::delivery_target_inputs(&resolved),
+            )
+            .await?;
+            self.activate_persisted_message_bundle(
+                session.id,
+                bundle.message.clone(),
+                resolved,
+                missing,
+                bundle.dispatch_deliveries,
+                false,
+            );
+            return Ok(PersistedChatMessageDeliveryBundle {
+                message: bundle.message,
+                deliveries: bundle
+                    .deliveries
+                    .into_iter()
+                    .map(QueuedMessageService::from_row)
+                    .collect(),
+                revision: bundle.runtime_revision,
+                created: false,
+            });
+        }
+
+        let data = chat::prepare_chat_message(
+            &self.db.pool,
+            session.id,
+            sender_type,
+            sender_id,
+            content,
+            meta,
+        )
+        .await?;
+        let sender_session_agent_id = data
+            .meta
+            .get("session_agent_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok());
+        let (initial_resolved, initial_missing) = self
+            .resolve_message_deliveries(
+                session,
+                data.sender_type.clone(),
+                sender_session_agent_id,
+                &data.mentions,
+                &data.meta,
+            )
+            .await?;
+        let mut bundle = chat::create_message_delivery_bundle_with_id(
+            &self.db.pool,
+            &data,
+            &Self::delivery_target_inputs(&initial_resolved),
+            client_message_id.as_deref(),
+            message_id,
+        )
+        .await?;
+        let (resolved, missing) = if bundle.created {
+            (initial_resolved, initial_missing)
+        } else {
+            let resolved = self
+                .resolve_message_deliveries(
+                    session,
+                    bundle.message.sender_type.clone(),
+                    bundle.message.sender_session_agent_id,
+                    &bundle.message.mentions.0,
+                    &bundle.message.meta.0,
+                )
+                .await?;
+            bundle = chat::ensure_message_delivery_bundle(
+                &self.db.pool,
+                &bundle.message,
+                &Self::delivery_target_inputs(&resolved.0),
+            )
+            .await?;
+            resolved
+        };
+        let created = bundle.created;
+        self.activate_persisted_message_bundle(
+            session.id,
+            bundle.message.clone(),
+            resolved,
+            missing,
+            bundle.dispatch_deliveries,
+            created,
+        );
+        Ok(PersistedChatMessageDeliveryBundle {
+            message: bundle.message,
+            deliveries: bundle
+                .deliveries
+                .into_iter()
+                .map(QueuedMessageService::from_row)
+                .collect(),
+            revision: bundle.runtime_revision,
+            created,
+        })
+    }
+
     pub async fn handle_message(&self, session: &ChatSession, message: &ChatMessage) {
         self.emit_message_new(session.id, message.clone());
 
@@ -1015,67 +1496,8 @@ impl ChatRunner {
                 .await
             {
                 Ok(DispatchOutcome::Rejected { reason }) if reason == "member_not_found" => {
-                    self.update_mention_status(
-                        message.id,
-                        &mention,
-                        Self::mention_status_as_str(&MentionStatus::Failed),
-                        None,
-                    )
-                    .await;
-                    self.emit(
-                        session_id,
-                        ChatStreamEvent::MentionError {
-                            session_id,
-                            message_id: message.id,
-                            client_message_id: Self::extract_client_message_id(&message.meta),
-                            session_agent_id: None,
-                            project_member_id: None,
-                            agent_name: mention.clone(),
-                            agent_id: None,
-                            reason: "member_not_found".to_string(),
-                        },
-                    );
-                    let member_handle = if mention.starts_with('@') {
-                        mention.clone()
-                    } else {
-                        format!("@{mention}")
-                    };
-                    let system_meta = serde_json::json!({
-                        "mention_failure": {
-                            "source_message_id": message.id,
-                            "mentioned_agent": mention,
-                            "reason": "member_not_found",
-                        },
-                        "i18n": {
-                            "key": "message.memberNotFound",
-                            "params": {
-                                "member": member_handle,
-                            },
-                        },
-                    });
-                    match chat::create_message(
-                        &self.db.pool,
-                        session_id,
-                        ChatSenderType::System,
-                        None,
-                        format!("Member {member_handle} does not exist."),
-                        Some(system_meta),
-                    )
-                    .await
-                    {
-                        Ok(system_message) => self.emit_message_new(session_id, system_message),
-                        Err(err) => tracing::warn!(
-                            error = %err,
-                            mention = mention,
-                            session_id = %session_id,
-                            "failed to persist missing-member system message"
-                        ),
-                    }
-                    tracing::warn!(
-                        mention = mention,
-                        session_id = %session_id,
-                        "mentioned chat member does not exist"
-                    );
+                    self.report_missing_member_mention(session_id, message, &mention)
+                        .await;
                 }
                 Ok(DispatchOutcome::Rejected { reason }) => tracing::debug!(
                     mention = mention,

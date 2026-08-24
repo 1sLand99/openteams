@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool, Type};
+use sqlx::{FromRow, Sqlite, SqlitePool, Transaction, Type};
 use ts_rs::TS;
 use uuid::Uuid;
 
@@ -64,6 +64,16 @@ impl ChatMessageTarget {
         pool: &SqlitePool,
         data: &CreateChatMessageTarget,
     ) -> Result<Self, sqlx::Error> {
+        let mut transaction = pool.begin().await?;
+        let target = Self::create_in_transaction(&mut transaction, data).await?;
+        transaction.commit().await?;
+        Ok(target)
+    }
+
+    pub async fn create_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        data: &CreateChatMessageTarget,
+    ) -> Result<Self, sqlx::Error> {
         sqlx::query_as::<_, Self>(
             r#"
             INSERT INTO chat_message_targets (
@@ -92,7 +102,7 @@ impl ChatMessageTarget {
         .bind(&data.member_name_snapshot)
         .bind(data.route_kind)
         .bind(data.resolution_status)
-        .fetch_one(pool)
+        .fetch_one(&mut **transaction)
         .await
     }
 
@@ -111,6 +121,24 @@ impl ChatMessageTarget {
         )
         .bind(message_id)
         .fetch_all(pool)
+        .await
+    }
+
+    pub async fn find_by_message_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        message_id: Uuid,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(
+            r#"
+            SELECT message_id, ordinal, session_id, session_agent_id, project_member_id,
+                   agent_id, member_name_snapshot, route_kind, resolution_status, created_at
+            FROM chat_message_targets
+            WHERE message_id = ?1
+            ORDER BY ordinal ASC
+            "#,
+        )
+        .bind(message_id)
+        .fetch_all(&mut **transaction)
         .await
     }
 

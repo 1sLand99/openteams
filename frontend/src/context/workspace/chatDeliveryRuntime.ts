@@ -18,7 +18,7 @@ import { orderMessagesForConversation } from './workspaceContextUtils';
  *
  * Identity: the backend delivery id (`chat_message_queue.id`, keyed as
  * `queue:<id>`) is the single canonical identity for starting and running
- * deliveries — `agent_run_started`, active runs and queue items all carry it.
+ * deliveries. Versioned queue deltas and runtime snapshots both carry it.
  * Observations correlate via the persisted `runId` binding or the exact
  * (sessionAgentId, sourceMessageId) pair — never same-agent guessing.
  *
@@ -142,6 +142,12 @@ export type ChatDeliveryRuntimeAction =
       type: 'snapshot_failed';
       sessionId: string;
       error?: string;
+      receivedAt: number;
+    }
+  | {
+      type: 'replay_completed';
+      sessionId: string;
+      revision: number;
       receivedAt: number;
     }
   | {
@@ -394,11 +400,15 @@ const applyMemberQueueSnapshot = (
       next[key] = delivery;
     }
   }
+  const version = withStreamedRevision(
+    session,
+    action.revision,
+    action.receivedAt,
+  );
   return {
     ...session,
-    ...withStreamedRevision(session, action.revision, action.receivedAt),
-    needsResync: false,
-    lastError: undefined,
+    ...version,
+    lastError: version.needsResync ? session.lastError : undefined,
     deliveries: changed ? next : deliveries,
   };
 };
@@ -517,6 +527,17 @@ export const chatDeliveryRuntimeReducer = (
       return withSession(state, action.sessionId, {
         ...session,
         lastError: action.error ?? session.lastError,
+      });
+    }
+    case 'replay_completed': {
+      const session = sessionRuntimeOf(state, action.sessionId);
+      if (action.revision < session.revision) return state;
+      return withSession(state, action.sessionId, {
+        ...session,
+        revision: action.revision,
+        lastEventAt: Math.max(session.lastEventAt, action.receivedAt),
+        needsResync: false,
+        lastError: undefined,
       });
     }
     case 'mark_needs_resync': {

@@ -269,13 +269,11 @@ const createConsumerHarness = (
   };
 
   const scheduler = new ChatDeliveryResyncScheduler({
-    getSnapshot: (sessionId) => {
+    recover: async (sessionId, requestedAt) => {
       getSnapshotCalls.push(sessionId);
-      return new Promise<ChatSessionRuntimeSnapshot>((resolve, reject) => {
+      const snapshot = await new Promise<ChatSessionRuntimeSnapshot>((resolve, reject) => {
         pendingFetches.push({ sessionId, resolve, reject });
       });
-    },
-    applySnapshot: (snapshot, requestedAt) => {
       harness.dispatchSync({
         type: 'snapshot_received',
         sessionId: snapshot.session_id,

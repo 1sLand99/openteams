@@ -1,14 +1,20 @@
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use db::models::{
-        chat_agent::{ChatAgent, CreateChatAgent},
-        chat_message::{ChatMessage, ChatSenderType},
-        chat_session::{ChatSession, CreateChatSession},
-        chat_session_agent::{ChatSessionAgent, ChatSessionAgentState},
-        member_execution_config::MemberExecutionConfig,
-        project::CreateProject,
-        project_member::{ProjectMember, ProjectMemberType},
+    use db::{
+        DBService,
+        models::{
+            chat_agent::{ChatAgent, CreateChatAgent},
+            chat_message::{ChatMessage, ChatSenderType},
+            chat_message_target::ChatMessageTargetRouteKind,
+            chat_session::{ChatSession, CreateChatSession},
+            chat_session_agent::{
+                ChatSessionAgent, ChatSessionAgentState, CreateChatSessionAgent,
+            },
+            member_execution_config::MemberExecutionConfig,
+            project::CreateProject,
+            project_member::{ProjectMember, ProjectMemberType},
+        },
     };
     use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
     use uuid::Uuid;
@@ -16,15 +22,23 @@ mod tests {
     use super::{
         CompressionType, SimplifiedMessage, all_agents_running, build_message_analytics_metrics,
         build_summarization_prompt, compress_messages_if_needed, create_message,
-        create_message_idempotent, create_message_idempotent_with_id, create_message_with_id,
+        create_message_delivery_bundle_with_id, create_message_idempotent,
+        create_message_idempotent_with_id, create_message_with_id,
         create_session_with_project_members, effective_agent_name,
+        ensure_message_delivery_bundle,
         is_protocol_notice_history_message, is_workflow_chat_input_mode,
         limit_summary_input_messages, member_name_overrides_for_session, normalized_member_name,
         parse_agent_send_mentions, parse_mentions, parse_user_message_mentions,
+        prepare_chat_message, ResolvedChatMessageTarget,
         prioritize_summary_agents, select_messages_to_compress_by_token,
         should_include_message_in_history,
     };
-    use crate::services::{project::ProjectService, repo::RepoService};
+    use crate::services::{
+        chat_runner::{ChatRunner, ChatStreamEvent},
+        chat_runtime_outbox::ChatRuntimeOutboxService,
+        project::ProjectService,
+        repo::RepoService,
+    };
 
     #[test]
     fn parses_mentions_with_basic_tokens() {
@@ -542,6 +556,467 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(mapping_count, 1);
+    }
+
+    async fn setup_atomic_delivery_fixture() -> (
+        SqlitePool,
+        ChatSession,
+        ChatAgent,
+        ChatSessionAgent,
+    ) {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect atomic delivery database");
+        sqlx::migrate!("../db/migrations")
+            .run(&pool)
+            .await
+            .expect("run chat delivery migrations");
+        let session = ChatSession::create(
+            &pool,
+            &CreateChatSession {
+                title: Some("Atomic delivery".to_string()),
+                workspace_path: Some("/tmp/openteams-atomic-delivery".to_string()),
+                project_id: None,
+                worktree_mode: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create delivery session");
+        let agent = ChatAgent::create(
+            &pool,
+            &CreateChatAgent {
+                name: "AtomicTarget".to_string(),
+                runner_type: "CLAUDE_CODE".to_string(),
+                system_prompt: None,
+                tools_enabled: None,
+                model_name: None,
+                owner_project_id: None,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create delivery agent");
+        let member = ChatSessionAgent::create(
+            &pool,
+            &CreateChatSessionAgent {
+                session_id: session.id,
+                agent_id: agent.id,
+                member_name: Some(agent.name.clone()),
+                workspace_path: Some("/tmp/openteams-atomic-delivery".to_string()),
+                allowed_skill_ids: Vec::new(),
+                project_member_id: None,
+                execution_config: MemberExecutionConfig::default(),
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("create delivery member");
+        (pool, session, agent, member)
+    }
+
+    #[tokio::test]
+    async fn message_target_delivery_and_outbox_commit_as_one_idempotent_bundle() {
+        let (pool, session, agent, member) = setup_atomic_delivery_fixture().await;
+        let client_message_id = "atomic-bundle-1";
+        let meta = Some(serde_json::json!({
+            "client_message_id": client_message_id,
+            "mentions": [agent.name]
+        }));
+        let data = prepare_chat_message(
+            &pool,
+            session.id,
+            ChatSenderType::User,
+            None,
+            "persist everything".to_string(),
+            meta,
+        )
+        .await
+        .expect("prepare atomic message");
+        let targets = vec![ResolvedChatMessageTarget {
+            ordinal: 0,
+            session_agent_id: member.id,
+            project_member_id: member.project_member_id,
+            agent_id: agent.id,
+            member_name_snapshot: member.member_name.clone(),
+            route_kind: ChatMessageTargetRouteKind::ExplicitMention,
+            resolution_status:
+                db::models::chat_message_target::ChatMessageTargetResolutionStatus::Resolved,
+        }];
+
+        let first = create_message_delivery_bundle_with_id(
+            &pool,
+            &data,
+            &targets,
+            Some(client_message_id),
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("persist atomic delivery bundle");
+        assert!(first.created);
+        assert_eq!(first.targets.len(), 1);
+        assert_eq!(first.deliveries.len(), 1);
+        assert_eq!(first.dispatch_deliveries.len(), 1);
+        assert_eq!(
+            first.deliveries[0].status,
+            db::models::chat_message_queue::QueuedMessageStatus::Starting
+        );
+        assert!(first.runtime_revision >= 2);
+
+        let replay = create_message_delivery_bundle_with_id(
+            &pool,
+            &data,
+            &targets,
+            Some(client_message_id),
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("replay atomic delivery bundle");
+        assert!(!replay.created);
+        assert_eq!(replay.message.id, first.message.id);
+        assert_eq!(replay.deliveries[0].id, first.deliveries[0].id);
+        assert_eq!(replay.runtime_revision, first.runtime_revision);
+
+        for (table, expected) in [
+            ("chat_messages", 1_i64),
+            ("chat_message_targets", 1_i64),
+            ("chat_message_queue", 1_i64),
+            ("chat_message_idempotency", 1_i64),
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .expect("count persisted bundle rows");
+            assert_eq!(count, expected, "unexpected {table} row count");
+        }
+        let outbox_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM chat_runtime_outbox")
+                .fetch_one(&pool)
+                .await
+                .expect("count atomic outbox rows");
+        assert_eq!(outbox_count, first.runtime_revision);
+    }
+
+    #[tokio::test]
+    async fn runtime_outbox_replays_contiguous_revisions_and_detects_retention_gap() {
+        let (pool, session, agent, member) = setup_atomic_delivery_fixture().await;
+        let data = prepare_chat_message(
+            &pool,
+            session.id,
+            ChatSenderType::User,
+            None,
+            "replay delivery".to_string(),
+            Some(serde_json::json!({
+                "client_message_id": "runtime-replay-1",
+                "mentions": [agent.name]
+            })),
+        )
+        .await
+        .expect("prepare replay message");
+        create_message_delivery_bundle_with_id(
+            &pool,
+            &data,
+            &[ResolvedChatMessageTarget {
+                ordinal: 0,
+                session_agent_id: member.id,
+                project_member_id: member.project_member_id,
+                agent_id: agent.id,
+                member_name_snapshot: member.member_name,
+                route_kind: ChatMessageTargetRouteKind::ExplicitMention,
+                resolution_status:
+                    db::models::chat_message_target::ChatMessageTargetResolutionStatus::Resolved,
+            }],
+            Some("runtime-replay-1"),
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("persist replay delivery");
+
+        let service = ChatRuntimeOutboxService::new();
+        let replay = service
+            .replay_after(&pool, session.id, 0, 256)
+            .await
+            .expect("replay contiguous outbox");
+        assert!(!replay.requires_snapshot);
+        assert_eq!(replay.current_revision, 2);
+        assert_eq!(
+            replay
+                .events
+                .iter()
+                .map(|event| event.revision)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(
+            replay
+                .events
+                .iter()
+                .all(|event| event.payload.queue.is_some())
+        );
+
+        sqlx::query(
+            "DELETE FROM chat_runtime_outbox WHERE session_id = ?1 AND revision = 1",
+        )
+        .bind(session.id)
+        .execute(&pool)
+        .await
+        .expect("simulate replay retention");
+        let gap = service
+            .replay_after(&pool, session.id, 0, 256)
+            .await
+            .expect("detect replay gap");
+        assert!(gap.requires_snapshot);
+        assert!(gap.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_outbox_publisher_restart_retries_unpublished_revision() {
+        let (pool, session, agent, member) = setup_atomic_delivery_fixture().await;
+        let data = prepare_chat_message(
+            &pool,
+            session.id,
+            ChatSenderType::User,
+            None,
+            "publish delivery".to_string(),
+            Some(serde_json::json!({
+                "client_message_id": "runtime-publisher-1",
+                "mentions": [agent.name]
+            })),
+        )
+        .await
+        .expect("prepare publisher message");
+        create_message_delivery_bundle_with_id(
+            &pool,
+            &data,
+            &[ResolvedChatMessageTarget {
+                ordinal: 0,
+                session_agent_id: member.id,
+                project_member_id: member.project_member_id,
+                agent_id: agent.id,
+                member_name_snapshot: member.member_name,
+                route_kind: ChatMessageTargetRouteKind::ExplicitMention,
+                resolution_status:
+                    db::models::chat_message_target::ChatMessageTargetResolutionStatus::Resolved,
+            }],
+            Some("runtime-publisher-1"),
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("persist publisher delivery");
+
+        let runner = ChatRunner::new(DBService { pool: pool.clone() });
+        let mut receiver = runner.subscribe(session.id);
+        assert_eq!(
+            runner
+                .publish_runtime_outbox()
+                .await
+                .expect("publish committed outbox"),
+            2
+        );
+        let revisions = std::iter::from_fn(|| receiver.try_recv().ok())
+            .filter_map(|event| match event {
+                ChatStreamEvent::RuntimeDelta { revision, .. } => Some(revision),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(revisions, vec![1, 2]);
+
+        sqlx::query(
+            "UPDATE chat_runtime_outbox SET published_at = NULL
+             WHERE session_id = ?1 AND revision = 2",
+        )
+        .bind(session.id)
+        .execute(&pool)
+        .await
+        .expect("simulate crash before outbox acknowledgement");
+
+        let restarted = ChatRunner::new(DBService { pool: pool.clone() });
+        let mut restarted_receiver = restarted.subscribe(session.id);
+        assert_eq!(
+            restarted
+                .publish_runtime_outbox()
+                .await
+                .expect("resume unpublished outbox"),
+            1
+        );
+        let replayed = std::iter::from_fn(|| restarted_receiver.try_recv().ok())
+            .find_map(|event| match event {
+                ChatStreamEvent::RuntimeDelta { revision, .. } => Some(revision),
+                _ => None,
+            });
+        assert_eq!(replayed, Some(2));
+        let unpublished: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM chat_runtime_outbox WHERE published_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count unpublished outbox rows");
+        assert_eq!(unpublished, 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_client_message_retry_returns_one_complete_bundle() {
+        let (pool, session, agent, member) = setup_atomic_delivery_fixture().await;
+        let client_message_id = "atomic-concurrent-retry";
+        let data = prepare_chat_message(
+            &pool,
+            session.id,
+            ChatSenderType::User,
+            None,
+            "persist concurrently".to_string(),
+            Some(serde_json::json!({
+                "client_message_id": client_message_id,
+                "mentions": [agent.name]
+            })),
+        )
+        .await
+        .expect("prepare concurrent message");
+        let targets = vec![ResolvedChatMessageTarget {
+            ordinal: 0,
+            session_agent_id: member.id,
+            project_member_id: member.project_member_id,
+            agent_id: agent.id,
+            member_name_snapshot: member.member_name,
+            route_kind: ChatMessageTargetRouteKind::ExplicitMention,
+            resolution_status:
+                db::models::chat_message_target::ChatMessageTargetResolutionStatus::Resolved,
+        }];
+
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let (first, second) = tokio::join!(
+            create_message_delivery_bundle_with_id(
+                &pool,
+                &data,
+                &targets,
+                Some(client_message_id),
+                first_id,
+            ),
+            create_message_delivery_bundle_with_id(
+                &pool,
+                &data,
+                &targets,
+                Some(client_message_id),
+                second_id,
+            ),
+        );
+        let first = first.expect("first concurrent send");
+        let second = second.expect("second concurrent send");
+        assert_ne!(first.created, second.created);
+        assert_eq!(first.message.id, second.message.id);
+        assert_eq!(first.deliveries.len(), 1);
+        assert_eq!(second.deliveries.len(), 1);
+        assert_eq!(first.deliveries[0].id, second.deliveries[0].id);
+
+        let counts: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT
+                 (SELECT COUNT(*) FROM chat_messages),
+                 (SELECT COUNT(*) FROM chat_message_targets),
+                 (SELECT COUNT(*) FROM chat_message_queue),
+                 (SELECT COUNT(*) FROM chat_message_idempotency)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count concurrent bundle rows");
+        assert_eq!(counts, (1, 1, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn delivery_target_failure_rolls_back_message_idempotency_and_outbox() {
+        let (pool, session, agent, _member) = setup_atomic_delivery_fixture().await;
+        let client_message_id = "atomic-bundle-rollback";
+        let data = prepare_chat_message(
+            &pool,
+            session.id,
+            ChatSenderType::User,
+            None,
+            "must roll back".to_string(),
+            Some(serde_json::json!({
+                "client_message_id": client_message_id,
+                "mentions": [agent.name]
+            })),
+        )
+        .await
+        .expect("prepare rollback message");
+        let invalid_target = ResolvedChatMessageTarget {
+            ordinal: 0,
+            session_agent_id: Uuid::new_v4(),
+            project_member_id: None,
+            agent_id: agent.id,
+            member_name_snapshot: agent.name,
+            route_kind: ChatMessageTargetRouteKind::ExplicitMention,
+            resolution_status:
+                db::models::chat_message_target::ChatMessageTargetResolutionStatus::Resolved,
+        };
+
+        assert!(
+            create_message_delivery_bundle_with_id(
+                &pool,
+                &data,
+                &[invalid_target],
+                Some(client_message_id),
+                Uuid::new_v4(),
+            )
+            .await
+            .is_err()
+        );
+        for table in [
+            "chat_messages",
+            "chat_message_targets",
+            "chat_message_queue",
+            "chat_message_idempotency",
+            "chat_runtime_outbox",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .expect("count rolled-back rows");
+            assert_eq!(count, 0, "{table} retained partial bundle state");
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_repairs_legacy_message_missing_target_and_delivery() {
+        let (pool, session, agent, member) = setup_atomic_delivery_fixture().await;
+        let client_message_id = "legacy-incomplete-bundle";
+        let legacy = create_message_idempotent(
+            &pool,
+            session.id,
+            ChatSenderType::User,
+            None,
+            "repair me".to_string(),
+            Some(serde_json::json!({
+                "client_message_id": client_message_id,
+                "mentions": [agent.name]
+            })),
+        )
+        .await
+        .expect("persist legacy split message");
+        assert!(legacy.created);
+
+        let repaired = ensure_message_delivery_bundle(
+            &pool,
+            &legacy.message,
+            &[ResolvedChatMessageTarget {
+                ordinal: 0,
+                session_agent_id: member.id,
+                project_member_id: member.project_member_id,
+                agent_id: agent.id,
+                member_name_snapshot: member.member_name,
+                route_kind: ChatMessageTargetRouteKind::ExplicitMention,
+                resolution_status:
+                    db::models::chat_message_target::ChatMessageTargetResolutionStatus::Resolved,
+            }],
+        )
+        .await
+        .expect("repair legacy delivery bundle");
+        assert!(!repaired.created);
+        assert_eq!(repaired.targets.len(), 1);
+        assert_eq!(repaired.deliveries.len(), 1);
+        assert_eq!(repaired.dispatch_deliveries.len(), 1);
+        assert_eq!(repaired.message.id, legacy.message.id);
     }
 
     #[tokio::test]

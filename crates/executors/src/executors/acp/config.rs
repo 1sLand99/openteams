@@ -356,6 +356,9 @@ pub struct AcpRunConfig {
     pub auth_method_id: Option<String>,
     pub session: AcpSessionPreferences,
     pub resume_policy: AcpResumePolicy,
+    /// Adapter-provided guidance for Agents that encode an authentication
+    /// failure as an empty successful `end_turn` response.
+    pub empty_end_turn_auth_error: Option<String>,
     pub client_services: AcpClientServicePolicy,
     pub additional_directories: Vec<PathBuf>,
     pub mcp_servers: Vec<McpServer>,
@@ -368,6 +371,7 @@ impl Default for AcpRunConfig {
             auth_method_id: None,
             session: AcpSessionPreferences::default(),
             resume_policy: AcpResumePolicy::default(),
+            empty_end_turn_auth_error: None,
             client_services: AcpClientServicePolicy::default(),
             additional_directories: Vec::new(),
             mcp_servers: Vec::new(),

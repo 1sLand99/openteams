@@ -1,25 +1,19 @@
-import type { ChatSessionRuntimeSnapshot } from '@/types';
-
 /**
  * Single-flight resync scheduler for the chat delivery runtime.
  *
  * The reducer flags `needsResync` on revision gaps, ambiguous terminal
  * transitions and unknown delivery statuses. This scheduler is the consumer:
- * every flag triggers exactly one in-flight authoritative snapshot fetch per
- * session; failures retry on a timed backoff (a real timer, so a first
- * failure can never stall forever); success clears the flag via the applied
- * snapshot; `dispose()` cancels pending retries and swallows late responses.
+ * every flag triggers exactly one in-flight authoritative replay/snapshot
+ * recovery per session; failures retry on a timed backoff (a real timer, so a
+ * first failure can never stall forever); `dispose()` cancels pending retries
+ * and swallows late responses.
  *
  * All side effects (fetch, apply, clock, timers) are injectable so the
  * behavior is testable without React or real timers.
  */
 
 export interface ChatDeliveryResyncSchedulerOptions {
-  getSnapshot: (sessionId: string) => Promise<ChatSessionRuntimeSnapshot>;
-  applySnapshot: (
-    snapshot: ChatSessionRuntimeSnapshot,
-    requestedAt: number,
-  ) => void;
+  recover: (sessionId: string, requestedAt: number) => Promise<void>;
   onError?: (sessionId: string) => void;
   /**
    * Checked after a successful fetch: when it reports a continuing need
@@ -76,7 +70,7 @@ export class ChatDeliveryResyncScheduler {
     return Math.min(max, base * 2 ** attempts);
   }
 
-  /** Ask for an authoritative snapshot. Idempotent per in-flight request. */
+  /** Ask for authoritative replay/snapshot recovery. Idempotent per request. */
   request(sessionId: string): void {
     if (this.disposed || !sessionId) return;
     const entry = this.entries.get(sessionId);
@@ -108,12 +102,11 @@ export class ChatDeliveryResyncScheduler {
     this.entries.set(sessionId, current);
     const requestedAt = this.now();
     this.options
-      .getSnapshot(sessionId)
-      .then((snapshot) => {
+      .recover(sessionId, requestedAt)
+      .then(() => {
         if (this.disposed) return;
         const requestedAgain = current.requestedAgain;
         this.entries.delete(sessionId);
-        this.options.applySnapshot(snapshot, requestedAt);
         if (this.disposed) return;
         // A gap raised while this fetch was in flight leaves the flag set
         // (stale responses never clear it); continue the cycle immediately

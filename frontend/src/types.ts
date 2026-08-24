@@ -18,6 +18,10 @@ import type {
 export type {
   ChatActiveRun,
   ChatActiveRunStatus,
+  ChatRuntimeDelta,
+  ChatRuntimeDeltaPayload,
+  ChatRuntimeOutboxEventType,
+  ChatRuntimeReplayResponse,
   ChatMemberQueueResponse,
   ChatQueueListResponse,
   ChatSessionRuntimeSnapshot,

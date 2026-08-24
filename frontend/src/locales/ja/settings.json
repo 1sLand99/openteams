@@ -1,6 +1,10 @@
 {
   "settings.providers.custom.modality.image": "画像",
   "settings.providers.custom.modality.text": "テキスト",
+  "settings.providers.custom.deleteConfirmTitle": "カスタムプロバイダーを削除しますか？",
+  "settings.providers.custom.deleteConfirmDescription": "プロバイダー設定とそのモデルが削除されます。",
+  "settings.providers.custom.deleted": "カスタムプロバイダーを削除しました。",
+  "settings.providers.custom.deleteFailed": "カスタムプロバイダーの削除に失敗しました。",
   "settings.account.desc": "開発者プロフィール設定を管理します。",
   "settings.account.emailEndpoint": "アカウント",
   "settings.account.title": "アカウント設定",

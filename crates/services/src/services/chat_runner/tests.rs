@@ -367,6 +367,7 @@ async fn setup_chat_runner_db() -> DBService {
                 processing_started_at TEXT,
                 run_id BLOB,
                 failure_reason TEXT,
+                failure_resolved_at TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
             )
@@ -395,6 +396,21 @@ async fn setup_chat_runner_db() -> DBService {
             )
             "#,
         r#"
+            CREATE TABLE chat_runtime_outbox (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id BLOB NOT NULL,
+                revision INTEGER NOT NULL,
+                delivery_id BLOB NOT NULL,
+                delivery_revision INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                session_agent_id BLOB,
+                agent_id BLOB,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                published_at TEXT,
+                UNIQUE(session_id, revision)
+            )
+            "#,
+        r#"
             CREATE TRIGGER chat_message_queue_runtime_revision_after_insert
             AFTER INSERT ON chat_message_queue
             BEGIN
@@ -403,6 +419,14 @@ async fn setup_chat_runner_db() -> DBService {
                 ON CONFLICT(session_id) DO UPDATE SET
                     revision = revision + 1,
                     updated_at = excluded.updated_at;
+                INSERT INTO chat_runtime_outbox (
+                    session_id, revision, delivery_id, delivery_revision, event_type,
+                    session_agent_id, agent_id
+                )
+                SELECT NEW.session_id, revision, NEW.id, NEW.revision, 'delivery_created',
+                       NEW.session_agent_id, NEW.agent_id
+                FROM chat_session_runtime_revisions
+                WHERE session_id = NEW.session_id;
             END
             "#,
         r#"
@@ -414,6 +438,14 @@ async fn setup_chat_runner_db() -> DBService {
                 ON CONFLICT(session_id) DO UPDATE SET
                     revision = revision + 1,
                     updated_at = excluded.updated_at;
+                INSERT INTO chat_runtime_outbox (
+                    session_id, revision, delivery_id, delivery_revision, event_type,
+                    session_agent_id, agent_id
+                )
+                SELECT NEW.session_id, revision, NEW.id, NEW.revision, 'delivery_updated',
+                       NEW.session_agent_id, NEW.agent_id
+                FROM chat_session_runtime_revisions
+                WHERE session_id = NEW.session_id;
             END
             "#,
         r#"
@@ -425,6 +457,14 @@ async fn setup_chat_runner_db() -> DBService {
                 ON CONFLICT(session_id) DO UPDATE SET
                     revision = revision + 1,
                     updated_at = excluded.updated_at;
+                INSERT INTO chat_runtime_outbox (
+                    session_id, revision, delivery_id, delivery_revision, event_type,
+                    session_agent_id, agent_id
+                )
+                SELECT OLD.session_id, revision, OLD.id, OLD.revision, 'delivery_deleted',
+                       OLD.session_agent_id, OLD.agent_id
+                FROM chat_session_runtime_revisions
+                WHERE session_id = OLD.session_id;
             END
             "#,
     ] {
@@ -1884,20 +1924,19 @@ async fn concurrent_direct_dispatch_claims_exactly_one_delivery_for_member() {
         first_result.expect("dispatch first direct delivery"),
         second_result.expect("dispatch second direct delivery"),
     ];
-    assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| matches!(outcome, super::DispatchOutcome::Started { .. }))
-            .count(),
-        1
-    );
-    assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| matches!(outcome, super::DispatchOutcome::Queued { .. }))
-            .count(),
-        1
-    );
+    let started_count = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, super::DispatchOutcome::Started { .. }))
+        .count();
+    let queued_count = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, super::DispatchOutcome::Queued { .. }))
+        .count();
+    // A caller may claim and start the older delivery while returning its own newer delivery as
+    // queued, so FIFO-concurrent dispatch can legitimately report two queued outcomes. The
+    // persisted delivery ledger below is the authoritative assertion.
+    assert!(started_count <= 1);
+    assert_eq!(started_count + queued_count, outcomes.len());
 
     let deliveries = QueuedMessageService::new()
         .list_for_member(&db.pool, member.id)
@@ -2184,14 +2223,12 @@ async fn stale_dispatch_failure_does_not_finalize_retried_delivery() {
         .await
         .expect("claim first attempt")
         .expect("first attempt exists");
-    let requeued = service
-        .transition_status_cas(
-            &db.pool,
-            queued.id,
-            stale_claim.revision,
-            stale_claim.status,
-            QueuedMessageStatus::Queued,
-        )
+    let requeued = db::models::chat_message_queue::ChatMessageQueue::recover_inflight_cas(
+        &db.pool,
+        queued.id,
+        stale_claim.revision,
+        stale_claim.status,
+    )
         .await
         .expect("requeue first attempt")
         .expect("first attempt requeued");

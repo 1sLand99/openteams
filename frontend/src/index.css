@@ -2123,6 +2123,11 @@ body[data-mode="light"] .settings-provider-main {
 }
 
 body[data-mode="light"] .provider-settings-panel {
+  --canvas: #fbfbfc;
+  --surface-1: #ffffff;
+  --surface-2: #f5f6f8;
+  --surface-3: #eef0f3;
+  --surface-4: #e8eaee;
   --ink: #050506;
   --ink-muted: #282b31;
   --ink-subtle: #666c76;

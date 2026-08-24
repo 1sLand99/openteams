@@ -23,6 +23,7 @@ use db::{
         chat_run::{
             ChatRun, ChatRunArtifactState, ChatRunLogState, ChatRunRetentionSummary, CreateChatRun,
         },
+        chat_runtime_outbox::ChatRuntimeOutboxEventType,
         chat_session::{ChatSession, ChatSessionWorktreeMode},
         chat_session_agent::{ChatSessionAgent, ChatSessionAgentState, CreateChatSessionAgent},
         chat_skill::ChatSkill,
@@ -51,7 +52,7 @@ use tokio::{
     fs,
     io::AsyncWriteExt,
     process::Command,
-    sync::{Mutex, broadcast},
+    sync::{Mutex, Notify, broadcast},
 };
 use tokio_util::io::ReaderStream;
 use ts_rs::TS;
@@ -67,6 +68,7 @@ use uuid::Uuid;
 
 use crate::services::{
     approvals::executor_approvals::{ExecutorApprovalBridge, ExecutorApprovalScope},
+    chat_runtime_outbox::{ChatRuntimeDeltaPayload, ChatRuntimeOutboxService},
     inbox::InboxService,
     member_execution::{
         build_effective_member_executor_for_run, executor_acp_full_access_enabled,
