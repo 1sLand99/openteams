@@ -1292,9 +1292,10 @@ async fn delivery_failure_blocks_continue_and_starts_next() -> Result<()> {
     let first_terminal = fixture.delivery(first_run.delivery.id).await?;
     let second_terminal = fixture.delivery(second_run.delivery.id).await?;
     ensure!(
-        first_terminal.status == QueuedMessageStatus::Skipped
+        first_terminal.status == QueuedMessageStatus::Failed
+            && first_terminal.failure_resolved_at.is_some()
             && second_terminal.status == QueuedMessageStatus::Completed,
-        "continue did not preserve skipped failure and completed successor"
+        "continue did not preserve resolved failure and completed successor"
     );
     let run_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_runs WHERE session_id = ?1")
         .bind(fixture.session.id)
@@ -1988,9 +1989,10 @@ async fn delivery_failure_blocks_continue_and_starts_next() -> Result<()> {
         QueuedMessageStatus::Completed,
     )
     .await?;
-    let first_skipped = fixture.delivery(first_failed.id).await?;
+    let first_resolved = fixture.delivery(first_failed.id).await?;
     ensure!(
-        first_skipped.status == QueuedMessageStatus::Skipped
+        first_resolved.status == QueuedMessageStatus::Failed
+            && first_resolved.failure_resolved_at.is_some()
             && second_completed.id == second_queued.id
             && second_completed.run_id.is_some(),
         "continue did not preserve identity and start the queued successor"
@@ -2011,7 +2013,7 @@ async fn delivery_failure_blocks_continue_and_starts_next() -> Result<()> {
             "first_running_delivery": first_running,
             "failed_delivery": first_failed,
             "blocked_snapshot": blocked_snapshot,
-            "failed_delivery_after_continue": first_skipped,
+            "failed_delivery_after_continue": first_resolved,
             "successor_delivery": second_completed,
             "database": { "runs": run_count },
             "runtime_revision": fixture.revision().await?,

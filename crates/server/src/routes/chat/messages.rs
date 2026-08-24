@@ -23,6 +23,7 @@ use deployment::Deployment;
 use serde::{Deserialize, Serialize};
 use services::services::{
     chat::{ChatAttachmentMeta, emit_user_message_workflow_analytics},
+    queued_message::QueuedMessage,
     workflow::{
         workflow_analytics,
         workflow_orchestrator::{
@@ -69,6 +70,8 @@ pub struct CreateChatMessageRequest {
 #[ts(export)]
 pub struct CreateChatMessageResponse {
     pub message: ChatMessage,
+    pub deliveries: Vec<QueuedMessage>,
+    pub revision: i64,
     pub runtime: ChatSessionRuntimeSnapshot,
 }
 
@@ -187,15 +190,17 @@ pub async fn create_message(
     State(deployment): State<DeploymentImpl>,
     Json(payload): Json<CreateChatMessageRequest>,
 ) -> Result<ResponseJson<ApiResponse<CreateChatMessageResponse>>, ApiError> {
-    let result = services::services::chat::create_message_idempotent(
-        &deployment.db().pool,
-        session.id,
-        payload.sender_type,
-        payload.sender_id,
-        payload.content,
-        payload.meta,
-    )
-    .await?;
+    let result = deployment
+        .chat_runner()
+        .persist_and_dispatch_message(
+            &session,
+            payload.sender_type,
+            payload.sender_id,
+            payload.content,
+            payload.meta,
+            Uuid::new_v4(),
+        )
+        .await?;
     let message = result.message;
 
     if result.created {
@@ -208,18 +213,18 @@ pub async fn create_message(
             Some(deployment.user_id()),
             &message,
         );
-
-        deployment
-            .chat_runner()
-            .handle_message(&session, &message)
-            .await;
     }
 
     let runtime =
         build_session_runtime_snapshot(&deployment, &session, false, Some(&message)).await?;
 
     Ok(ResponseJson(ApiResponse::success(
-        CreateChatMessageResponse { message, runtime },
+        CreateChatMessageResponse {
+            message,
+            deliveries: result.deliveries,
+            revision: result.revision,
+            runtime,
+        },
     )))
 }
 
@@ -361,16 +366,33 @@ pub async fn upload_message_attachments(
         meta["chat_input_mode"] = serde_json::json!(mode);
     }
 
-    let result = services::services::chat::create_message_idempotent_with_id(
-        &deployment.db().pool,
-        session.id,
-        ChatSenderType::User,
-        None,
-        content,
-        Some(meta),
-        message_id,
-    )
-    .await?;
+    let result = match deployment
+        .chat_runner()
+        .persist_and_dispatch_message(
+            &session,
+            ChatSenderType::User,
+            None,
+            content,
+            Some(meta),
+            message_id,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            let unused_storage_dir = attachment_storage_dir(session.id, message_id);
+            if let Err(cleanup_error) = fs::remove_dir_all(&unused_storage_dir).await
+                && cleanup_error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    path = %unused_storage_dir.display(),
+                    error = %cleanup_error,
+                    "Failed to clean up attachment upload after message transaction failure"
+                );
+            }
+            return Err(err.into());
+        }
+    };
     let message = result.message;
 
     if result.created {
@@ -383,11 +405,6 @@ pub async fn upload_message_attachments(
             Some(deployment.user_id()),
             &message,
         );
-
-        deployment
-            .chat_runner()
-            .handle_message(&session, &message)
-            .await;
     } else {
         let unused_storage_dir = attachment_storage_dir(session.id, message_id);
         if let Err(error) = fs::remove_dir_all(&unused_storage_dir).await
@@ -405,7 +422,12 @@ pub async fn upload_message_attachments(
         build_session_runtime_snapshot(&deployment, &session, false, Some(&message)).await?;
 
     Ok(ResponseJson(ApiResponse::success(
-        CreateChatMessageResponse { message, runtime },
+        CreateChatMessageResponse {
+            message,
+            deliveries: result.deliveries,
+            revision: result.revision,
+            runtime,
+        },
     )))
 }
 
@@ -830,21 +852,21 @@ pub async fn resend_message(
         ));
     }
 
-    let new_message = services::services::chat::create_message(
-        &deployment.db().pool,
-        session.id,
-        original.sender_type,
-        original.sender_id,
-        original.content.clone(),
-        Some(original.meta.0.clone()),
-    )
-    .await
-    .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-
+    let mut meta = original.meta.0.clone();
+    if let Some(meta) = meta.as_object_mut() {
+        meta.remove("client_message_id");
+    }
     deployment
         .chat_runner()
-        .handle_message(&session, &new_message)
-        .await;
+        .persist_and_dispatch_message(
+            &session,
+            original.sender_type,
+            original.sender_id,
+            original.content.clone(),
+            Some(meta),
+            Uuid::new_v4(),
+        )
+        .await?;
 
     Ok(ResponseJson(ApiResponse::success(())))
 }

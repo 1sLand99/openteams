@@ -45,6 +45,8 @@ pub struct DeleteQueuedMessageResponse {
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct ContinueQueuedMessageResponse {
+    /// Legacy response name. This counts failed rows resolved in place; their status stays
+    /// `failed` and `failure_resolved_at` records the continue action.
     pub skipped_failed_count: u64,
     pub queue: MemberQueueSnapshot,
 }
@@ -204,7 +206,7 @@ pub async fn continue_member_queue(
     let before = snapshot_for_agent(&service, pool, &session_agent).await?;
     ensure_continue_allowed(&before)?;
 
-    let skipped_failed_count = service
+    let resolved_failed_count = service
         .skip_failed_for_member(pool, session_agent_id)
         .await?;
     let unblocked = snapshot_for_agent(&service, pool, &session_agent).await?;
@@ -224,7 +226,7 @@ pub async fn continue_member_queue(
 
     Ok(ResponseJson(ApiResponse::success(
         ContinueQueuedMessageResponse {
-            skipped_failed_count,
+            skipped_failed_count: resolved_failed_count,
             queue,
         },
     )))

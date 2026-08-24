@@ -72,6 +72,7 @@ import type {
   ProjectRepoIntegration,
   ProjectWorkItem,
   ProjectWorkItemComment,
+  QueuedMessage,
   ProjectWorkItemDetailResponse,
   ProjectWorkItemExecutionLink,
   ProfilesContent,
@@ -121,6 +122,8 @@ import type {
 
 export interface ChatMessageMutationResponse {
   message: BackendChatMessage;
+  deliveries: QueuedMessage[];
+  revision: bigint;
   runtime: ChatSessionRuntimeSnapshot;
 }
 

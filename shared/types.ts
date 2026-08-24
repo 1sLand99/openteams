@@ -849,7 +849,7 @@ export type ContinueMergeRequest = { commit_message?: string | null, };
 
 export type CreateChatMessageRequest = { sender_type: ChatSenderType, sender_id: string | null, content: string, meta: JsonValue | null, };
 
-export type CreateChatMessageResponse = { message: ChatMessage, runtime: ChatSessionRuntimeSnapshot, };
+export type CreateChatMessageResponse = { message: ChatMessage, deliveries: Array<QueuedMessage>, revision: bigint, runtime: ChatSessionRuntimeSnapshot, };
 
 export type UserReviewResponseRequest = { review_id: string, action: string, feedback: string | null, expected_step_id: string | null, };
 
@@ -1357,7 +1357,7 @@ export type GitBranch = { name: string, is_current: boolean, is_remote: boolean,
 
 export enum QueuedMessageStatus { queued = "queued", starting = "starting", processing = "processing", running = "running", waiting_approval = "waiting_approval", stopping = "stopping", failed = "failed", cancelled = "cancelled", skipped = "skipped", completed = "completed" }
 
-export type QueuedMessage = { id: string, session_id: string, session_agent_id: string, agent_id: string, chat_message_id: string, status: QueuedMessageStatus, revision: bigint, attempt_no: bigint, created_at: string, updated_at: string, processing_started_at: string | null, run_id: string | null, failure_reason: string | null, };
+export type QueuedMessage = { id: string, session_id: string, session_agent_id: string, agent_id: string, chat_message_id: string, status: QueuedMessageStatus, revision: bigint, attempt_no: bigint, created_at: string, updated_at: string, processing_started_at: string | null, run_id: string | null, failure_reason: string | null, failure_resolved_at: string | null, };
 
 export type QueuedMessageListItem = { message: QueuedMessage, can_delete: boolean, };
 
@@ -1383,7 +1383,12 @@ export type DeleteQueuedMessageResponse = { deleted_id: string, queue: MemberQue
  */
 deleted_chat_message_id: string | null, };
 
-export type ContinueQueuedMessageResponse = { skipped_failed_count: bigint, queue: MemberQueueSnapshot, };
+export type ContinueQueuedMessageResponse = {
+/**
+ * Legacy response name. This counts failed rows resolved in place; their status stays
+ * `failed` and `failure_resolved_at` records the continue action.
+ */
+skipped_failed_count: bigint, queue: MemberQueueSnapshot, };
 
 export type ConflictOp = "rebase" | "merge" | "cherry_pick" | "revert";
 

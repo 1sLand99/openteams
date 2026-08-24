@@ -16,6 +16,7 @@ const CHAT_MESSAGE_QUEUE_COLUMNS: &str = r#"
     processing_started_at,
     run_id,
     failure_reason,
+    failure_resolved_at,
     created_at,
     updated_at
 "#;
@@ -67,12 +68,11 @@ impl QueuedMessageStatus {
             Self::Queued => matches!(next, Self::Starting | Self::Cancelled),
             Self::Starting | Self::Processing => matches!(
                 next,
-                Self::Queued | Self::Running | Self::Failed | Self::Cancelled | Self::Skipped
+                Self::Running | Self::Failed | Self::Cancelled | Self::Skipped
             ),
             Self::Running => matches!(
                 next,
-                Self::Queued
-                    | Self::WaitingApproval
+                Self::WaitingApproval
                     | Self::Stopping
                     | Self::Completed
                     | Self::Failed
@@ -81,20 +81,17 @@ impl QueuedMessageStatus {
             ),
             Self::WaitingApproval => matches!(
                 next,
-                Self::Queued
-                    | Self::Running
-                    | Self::Stopping
-                    | Self::Completed
-                    | Self::Failed
-                    | Self::Cancelled
+                Self::Running | Self::Stopping | Self::Completed | Self::Failed | Self::Cancelled
             ),
-            Self::Stopping => matches!(
-                next,
-                Self::Queued | Self::Completed | Self::Failed | Self::Cancelled
-            ),
-            Self::Failed => next == Self::Skipped,
-            Self::Cancelled | Self::Skipped | Self::Completed => false,
+            Self::Stopping => matches!(next, Self::Completed | Self::Failed | Self::Cancelled),
+            Self::Failed | Self::Cancelled | Self::Skipped | Self::Completed => false,
         }
+    }
+
+    /// Recovery is deliberately outside the normal delivery graph. Only a supervisor that has
+    /// established the owning executor is orphaned may return an active attempt to `queued`.
+    pub fn can_recover_to_queued(self) -> bool {
+        self.is_active()
     }
 }
 
@@ -114,6 +111,8 @@ pub struct ChatMessageQueue {
     pub processing_started_at: Option<DateTime<Utc>>,
     pub run_id: Option<Uuid>,
     pub failure_reason: Option<String>,
+    /// Set when the user continues past a failed terminal delivery.
+    pub failure_resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -199,6 +198,36 @@ impl ChatMessageQueue {
         .await
     }
 
+    pub async fn list_for_message(
+        pool: &SqlitePool,
+        chat_message_id: Uuid,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(&format!(
+            "SELECT {CHAT_MESSAGE_QUEUE_COLUMNS}
+             FROM chat_message_queue
+             WHERE chat_message_id = ?1
+             ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(chat_message_id)
+        .fetch_all(pool)
+        .await
+    }
+
+    pub async fn list_for_message_in_transaction(
+        transaction: &mut Transaction<'_, Sqlite>,
+        chat_message_id: Uuid,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(&format!(
+            "SELECT {CHAT_MESSAGE_QUEUE_COLUMNS}
+             FROM chat_message_queue
+             WHERE chat_message_id = ?1
+             ORDER BY created_at ASC, id ASC"
+        ))
+        .bind(chat_message_id)
+        .fetch_all(&mut **transaction)
+        .await
+    }
+
     /// The currently active delivery for a member, if any.
     pub async fn find_active_for_member(
         pool: &SqlitePool,
@@ -267,7 +296,9 @@ impl ChatMessageQueue {
         let (exists,): (bool,) = sqlx::query_as(
             "SELECT EXISTS(
                  SELECT 1 FROM chat_message_queue
-                 WHERE session_agent_id = ?1 AND status = 'failed'
+                 WHERE session_agent_id = ?1
+                   AND status = 'failed'
+                   AND failure_resolved_at IS NULL
              )",
         )
         .bind(session_agent_id)
@@ -356,8 +387,9 @@ impl ChatMessageQueue {
              AND NOT EXISTS (
                  SELECT 1 FROM chat_message_queue
                  WHERE session_agent_id = ?1
-                   AND status IN (
-                       'starting', 'processing', 'running', 'waiting_approval', 'stopping', 'failed'
+                   AND (
+                       status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
+                       OR (status = 'failed' AND failure_resolved_at IS NULL)
                    )
              )
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
@@ -429,27 +461,54 @@ impl ChatMessageQueue {
         Ok(running)
     }
 
-    /// Reset active entries back to `queued` so they can be
-    /// re-dispatched. Used on startup/recovery when a backend interruption left rows stranded
-    /// in an in-flight state. Returns the number of re-queued entries.
-    pub async fn requeue_stale_inflight(
+    pub async fn recover_inflight_cas(
         pool: &SqlitePool,
-        session_agent_id: Uuid,
-    ) -> Result<u64, sqlx::Error> {
-        let result = sqlx::query(
+        id: Uuid,
+        expected_revision: i64,
+        expected_status: QueuedMessageStatus,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        if !expected_status.can_recover_to_queued() {
+            return Err(sqlx::Error::Protocol(format!(
+                "delivery status {expected_status:?} cannot be recovered to queued"
+            )));
+        }
+        sqlx::query_as::<_, Self>(&format!(
             "UPDATE chat_message_queue
              SET status = 'queued',
                  revision = revision + 1,
                  run_id = NULL,
                  processing_started_at = NULL,
                  updated_at = datetime('now', 'subsec')
-             WHERE session_agent_id = ?1
-               AND status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')",
-        )
-        .bind(session_agent_id)
-        .execute(pool)
-        .await?;
-        Ok(result.rows_affected())
+             WHERE id = ?1 AND revision = ?2 AND status = ?3
+             RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
+        ))
+        .bind(id)
+        .bind(expected_revision)
+        .bind(expected_status)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Supervisor-only recovery wrapper. Each candidate is guarded by its observed revision and
+    /// state so a concurrent stop or finalization wins over recovery.
+    pub async fn requeue_stale_inflight(
+        pool: &SqlitePool,
+        session_agent_id: Uuid,
+    ) -> Result<u64, sqlx::Error> {
+        let candidates = Self::list_for_member(pool, session_agent_id).await?;
+        let mut recovered = 0;
+        for candidate in candidates
+            .into_iter()
+            .filter(|candidate| candidate.status.can_recover_to_queued())
+        {
+            if Self::recover_inflight_cas(pool, candidate.id, candidate.revision, candidate.status)
+                .await?
+                .is_some()
+            {
+                recovered += 1;
+            }
+        }
+        Ok(recovered)
     }
 
     /// Bind a claimed (`starting`) entry to its run and move it to `running`.
@@ -685,8 +744,9 @@ impl ChatMessageQueue {
              AND NOT EXISTS (
                  SELECT 1 FROM chat_message_queue
                  WHERE session_agent_id = ?1
-                   AND status IN (
-                       'starting', 'processing', 'running', 'waiting_approval', 'stopping', 'failed'
+                   AND (
+                       status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
+                       OR (status = 'failed' AND failure_resolved_at IS NULL)
                    )
              )
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
@@ -758,8 +818,9 @@ impl ChatMessageQueue {
              AND NOT EXISTS (
                  SELECT 1 FROM chat_message_queue
                  WHERE session_agent_id = ?1
-                   AND status IN (
-                       'starting', 'processing', 'running', 'waiting_approval', 'stopping', 'failed'
+                   AND (
+                       status IN ('starting', 'processing', 'running', 'waiting_approval', 'stopping')
+                       OR (status = 'failed' AND failure_resolved_at IS NULL)
                    )
              )
              RETURNING {CHAT_MESSAGE_QUEUE_COLUMNS}"
@@ -880,18 +941,20 @@ impl ChatMessageQueue {
         .await
     }
 
-    /// Continue execution after a failure: move all `failed` entries for a member to `skipped`
-    /// so `claim_next` can pick up the remaining queue. Returns the number of skipped entries.
+    /// Continue execution after a failure without rewriting terminal history. The legacy method
+    /// name is retained for API compatibility; it now resolves the failed blockers in place.
     pub async fn skip_failed_for_member(
         pool: &SqlitePool,
         session_agent_id: Uuid,
     ) -> Result<u64, sqlx::Error> {
         let result = sqlx::query(
             "UPDATE chat_message_queue
-             SET status = 'skipped',
+             SET failure_resolved_at = datetime('now', 'subsec'),
                  revision = revision + 1,
                  updated_at = datetime('now', 'subsec')
-             WHERE session_agent_id = ?1 AND status = 'failed'",
+             WHERE session_agent_id = ?1
+               AND status = 'failed'
+               AND failure_resolved_at IS NULL",
         )
         .bind(session_agent_id)
         .execute(pool)
@@ -955,6 +1018,38 @@ mod tests {
     use uuid::Uuid;
 
     use super::{ChatMessageQueue, CreateChatMessageQueue, QueuedMessageStatus};
+
+    #[test]
+    fn normal_transition_graph_keeps_recovery_and_terminal_history_explicit() {
+        for status in [
+            QueuedMessageStatus::Starting,
+            QueuedMessageStatus::Processing,
+            QueuedMessageStatus::Running,
+            QueuedMessageStatus::WaitingApproval,
+            QueuedMessageStatus::Stopping,
+        ] {
+            assert!(!status.can_transition_to(QueuedMessageStatus::Queued));
+            assert!(status.can_recover_to_queued());
+        }
+        assert!(QueuedMessageStatus::Processing.can_transition_to(QueuedMessageStatus::Running));
+        assert!(
+            QueuedMessageStatus::Running.can_transition_to(QueuedMessageStatus::WaitingApproval)
+        );
+        assert!(
+            QueuedMessageStatus::WaitingApproval.can_transition_to(QueuedMessageStatus::Running)
+        );
+        for terminal in [
+            QueuedMessageStatus::Failed,
+            QueuedMessageStatus::Cancelled,
+            QueuedMessageStatus::Skipped,
+            QueuedMessageStatus::Completed,
+        ] {
+            assert!(!terminal.can_transition_to(QueuedMessageStatus::Queued));
+            assert!(!terminal.can_transition_to(QueuedMessageStatus::Starting));
+            assert!(!terminal.can_transition_to(QueuedMessageStatus::Skipped));
+            assert!(!terminal.can_recover_to_queued());
+        }
+    }
 
     async fn setup_runtime_revision_schema(pool: &SqlitePool) {
         sqlx::query(
@@ -1022,6 +1117,7 @@ mod tests {
                 processing_started_at TEXT,
                 run_id                BLOB,
                 failure_reason        TEXT,
+                failure_resolved_at   TEXT,
                 created_at            TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
                 updated_at            TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
             )
@@ -1136,6 +1232,7 @@ mod tests {
                 processing_started_at TEXT,
                 run_id                BLOB REFERENCES chat_runs(id) ON DELETE SET NULL,
                 failure_reason        TEXT,
+                failure_resolved_at   TEXT,
                 created_at            TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
                 updated_at            TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
             )
@@ -1351,7 +1448,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failure_blocks_queue_until_skipped() {
+    async fn failure_blocks_queue_until_resolved_without_rewriting_terminal_status() {
         let pool = setup_pool().await;
         let member = Uuid::new_v4();
         let first = enqueue(&pool, member, 1).await;
@@ -1394,6 +1491,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(skipped, 1);
+        let resolved_failure = ChatMessageQueue::find_by_id(&pool, failed.id)
+            .await
+            .unwrap()
+            .expect("resolved failure remains persisted");
+        assert_eq!(resolved_failure.status, QueuedMessageStatus::Failed);
+        assert!(resolved_failure.failure_resolved_at.is_some());
         assert!(
             !ChatMessageQueue::has_blocking_failure(&pool, member)
                 .await
@@ -1712,6 +1815,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_cas_does_not_overwrite_a_newer_delivery_transition() {
+        let pool = setup_pool().await;
+        let member = Uuid::new_v4();
+        enqueue(&pool, member, 1).await;
+        let starting = ChatMessageQueue::claim_next(&pool, member)
+            .await
+            .unwrap()
+            .unwrap();
+        let running = ChatMessageQueue::bind_run(&pool, starting.id, Uuid::new_v4())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let stale = ChatMessageQueue::recover_inflight_cas(
+            &pool,
+            running.id,
+            starting.revision,
+            QueuedMessageStatus::Starting,
+        )
+        .await
+        .unwrap();
+        assert!(stale.is_none());
+        let recovered = ChatMessageQueue::recover_inflight_cas(
+            &pool,
+            running.id,
+            running.revision,
+            QueuedMessageStatus::Running,
+        )
+        .await
+        .unwrap()
+        .expect("recover exact orphan attempt");
+        assert_eq!(recovered.status, QueuedMessageStatus::Queued);
+        assert!(recovered.run_id.is_none());
+    }
+
+    #[tokio::test]
     async fn list_unbound_processing_excludes_rows_already_bound_to_runs() {
         let pool = setup_pool().await;
         let unbound_member = Uuid::new_v4();
@@ -1942,6 +2081,7 @@ mod tests {
                 processing_started_at TEXT,
                 run_id BLOB,
                 failure_reason TEXT,
+                failure_resolved_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );

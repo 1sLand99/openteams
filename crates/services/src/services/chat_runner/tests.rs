@@ -367,6 +367,7 @@ async fn setup_chat_runner_db() -> DBService {
                 processing_started_at TEXT,
                 run_id BLOB,
                 failure_reason TEXT,
+                failure_resolved_at TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec'))
             )

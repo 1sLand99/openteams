@@ -12,6 +12,11 @@ use dashmap::DashMap;
 use db::models::{
     chat_agent::ChatAgent,
     chat_message::{ChatMessage, ChatSenderType, CreateChatMessage},
+    chat_message_queue::{ChatMessageQueue, CreateChatMessageQueue, QueuedMessageStatus},
+    chat_message_target::{
+        ChatMessageTarget, ChatMessageTargetResolutionStatus, ChatMessageTargetRouteKind,
+        CreateChatMessageTarget,
+    },
     chat_session::{ChatSession, ChatSessionStatus},
     chat_session_agent::{ChatSessionAgent, ChatSessionAgentState},
 };
@@ -29,7 +34,7 @@ use futures::StreamExt;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use thiserror::Error;
 use tokio::{fs, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;

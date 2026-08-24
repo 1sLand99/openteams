@@ -24,7 +24,29 @@ pub struct IdempotentChatMessage {
     pub created: bool,
 }
 
-fn normalized_client_message_id(
+#[derive(Debug, Clone)]
+pub struct ResolvedChatMessageTarget {
+    pub ordinal: i64,
+    pub session_agent_id: Uuid,
+    pub project_member_id: Option<Uuid>,
+    pub agent_id: Uuid,
+    pub member_name_snapshot: String,
+    pub route_kind: ChatMessageTargetRouteKind,
+    pub resolution_status: ChatMessageTargetResolutionStatus,
+}
+
+#[derive(Debug, Clone)]
+pub struct IdempotentChatMessageDeliveryBundle {
+    pub message: ChatMessage,
+    pub targets: Vec<ChatMessageTarget>,
+    pub deliveries: Vec<ChatMessageQueue>,
+    /// Claimed, unbound deliveries that the runner may start only after commit.
+    pub dispatch_deliveries: Vec<ChatMessageQueue>,
+    pub runtime_revision: i64,
+    pub created: bool,
+}
+
+pub(crate) fn normalized_client_message_id(
     meta: Option<&Value>,
 ) -> Result<Option<String>, ChatServiceError> {
     let Some(client_message_id) = meta
@@ -42,6 +64,199 @@ fn normalized_client_message_id(
         ));
     }
     Ok(Some(client_message_id.to_string()))
+}
+
+async fn persist_delivery_bundle_rows(
+    transaction: &mut Transaction<'_, Sqlite>,
+    message: &ChatMessage,
+    resolved_targets: &[ResolvedChatMessageTarget],
+) -> Result<
+    (
+        Vec<ChatMessageTarget>,
+        Vec<ChatMessageQueue>,
+        Vec<ChatMessageQueue>,
+    ),
+    sqlx::Error,
+> {
+    let mut member_ids = Vec::with_capacity(resolved_targets.len());
+    let mut seen_member_ids = HashSet::with_capacity(resolved_targets.len());
+
+    for target in resolved_targets {
+        let persisted = ChatMessageTarget::create_in_transaction(
+            transaction,
+            &CreateChatMessageTarget {
+                message_id: message.id,
+                ordinal: target.ordinal,
+                session_id: message.session_id,
+                session_agent_id: Some(target.session_agent_id),
+                project_member_id: target.project_member_id,
+                agent_id: target.agent_id,
+                member_name_snapshot: target.member_name_snapshot.clone(),
+                route_kind: target.route_kind,
+                resolution_status: target.resolution_status,
+            },
+        )
+        .await?;
+        if persisted.session_agent_id != Some(target.session_agent_id) {
+            return Err(sqlx::Error::Protocol(
+                "persisted chat message target changed delivery identity".to_string(),
+            ));
+        }
+        if target.resolution_status == ChatMessageTargetResolutionStatus::Resolved {
+            ChatMessageQueue::create_queued_in_transaction(
+                transaction,
+                &CreateChatMessageQueue {
+                    session_id: message.session_id,
+                    session_agent_id: target.session_agent_id,
+                    agent_id: target.agent_id,
+                    chat_message_id: message.id,
+                },
+                Uuid::new_v4(),
+            )
+            .await?;
+            if seen_member_ids.insert(target.session_agent_id) {
+                member_ids.push(target.session_agent_id);
+            }
+        }
+    }
+
+    let mut dispatch_deliveries = Vec::with_capacity(member_ids.len());
+    let mut dispatch_ids = HashSet::with_capacity(member_ids.len());
+    for session_agent_id in member_ids {
+        if let Some(claimed) =
+            ChatMessageQueue::claim_next_in_transaction(transaction, session_agent_id).await?
+            && dispatch_ids.insert(claimed.id)
+        {
+            dispatch_deliveries.push(claimed);
+        }
+    }
+
+    let targets =
+        ChatMessageTarget::find_by_message_in_transaction(transaction, message.id).await?;
+    let deliveries =
+        ChatMessageQueue::list_for_message_in_transaction(transaction, message.id).await?;
+    for delivery in &deliveries {
+        if matches!(
+            delivery.status,
+            QueuedMessageStatus::Starting | QueuedMessageStatus::Processing
+        ) && delivery.run_id.is_none()
+            && dispatch_ids.insert(delivery.id)
+        {
+            dispatch_deliveries.push(delivery.clone());
+        }
+    }
+
+    Ok((targets, deliveries, dispatch_deliveries))
+}
+
+async fn load_message_delivery_bundle(
+    pool: &SqlitePool,
+    message: ChatMessage,
+) -> Result<IdempotentChatMessageDeliveryBundle, ChatServiceError> {
+    let targets = ChatMessageTarget::find_by_message(pool, message.id).await?;
+    let deliveries = ChatMessageQueue::list_for_message(pool, message.id).await?;
+    let dispatch_deliveries = deliveries
+        .iter()
+        .filter(|delivery| {
+            matches!(
+                delivery.status,
+                QueuedMessageStatus::Starting | QueuedMessageStatus::Processing
+            ) && delivery.run_id.is_none()
+        })
+        .cloned()
+        .collect();
+    let runtime_revision =
+        ChatMessageQueue::current_runtime_revision(pool, message.session_id).await?;
+    Ok(IdempotentChatMessageDeliveryBundle {
+        message,
+        targets,
+        deliveries,
+        dispatch_deliveries,
+        runtime_revision,
+        created: false,
+    })
+}
+
+/// Persist a message and all of its resolved delivery targets in one transaction.
+///
+/// Queue triggers allocate the session runtime revision and outbox rows inside this transaction.
+/// Claimed rows are returned to the runner but must not be dispatched until this function returns.
+pub(crate) async fn create_message_delivery_bundle_with_id(
+    pool: &SqlitePool,
+    data: &CreateChatMessage,
+    resolved_targets: &[ResolvedChatMessageTarget],
+    client_message_id: Option<&str>,
+    message_id: Uuid,
+) -> Result<IdempotentChatMessageDeliveryBundle, ChatServiceError> {
+    let mut transaction = pool.begin().await?;
+    if let Some(client_message_id) = client_message_id {
+        let claimed = ChatMessage::claim_idempotency_key_in_transaction(
+            &mut transaction,
+            data.session_id,
+            client_message_id,
+            message_id,
+        )
+        .await?;
+        if !claimed {
+            transaction.rollback().await?;
+            let existing = ChatMessage::find_idempotent_user_message(
+                pool,
+                data.session_id,
+                client_message_id,
+            )
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
+            return load_message_delivery_bundle(pool, existing).await;
+        }
+    }
+
+    let message = ChatMessage::create_in_transaction(&mut transaction, data, message_id).await?;
+    let (targets, deliveries, dispatch_deliveries) =
+        persist_delivery_bundle_rows(&mut transaction, &message, resolved_targets).await?;
+    sqlx::query("UPDATE chat_sessions SET updated_at = datetime('now', 'subsec') WHERE id = ?1")
+        .bind(data.session_id)
+        .execute(&mut *transaction)
+        .await?;
+    let runtime_revision = ChatMessageQueue::current_runtime_revision_in_transaction(
+        &mut transaction,
+        data.session_id,
+    )
+    .await?;
+    transaction.commit().await?;
+
+    Ok(IdempotentChatMessageDeliveryBundle {
+        message,
+        targets,
+        deliveries,
+        dispatch_deliveries,
+        runtime_revision,
+        created: true,
+    })
+}
+
+/// Fill target/delivery rows missing from messages written by the legacy split transaction path.
+pub(crate) async fn ensure_message_delivery_bundle(
+    pool: &SqlitePool,
+    message: &ChatMessage,
+    resolved_targets: &[ResolvedChatMessageTarget],
+) -> Result<IdempotentChatMessageDeliveryBundle, ChatServiceError> {
+    let mut transaction = pool.begin().await?;
+    let (targets, deliveries, dispatch_deliveries) =
+        persist_delivery_bundle_rows(&mut transaction, message, resolved_targets).await?;
+    let runtime_revision = ChatMessageQueue::current_runtime_revision_in_transaction(
+        &mut transaction,
+        message.session_id,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(IdempotentChatMessageDeliveryBundle {
+        message: message.clone(),
+        targets,
+        deliveries,
+        dispatch_deliveries,
+        runtime_revision,
+        created: false,
+    })
 }
 
 /// Create a user message exactly once for a session/client key. A retry returns the original
@@ -175,7 +390,7 @@ pub async fn create_message_with_id(
     Ok(message)
 }
 
-async fn prepare_chat_message(
+pub(crate) async fn prepare_chat_message(
     pool: &SqlitePool,
     session_id: Uuid,
     sender_type: ChatSenderType,
