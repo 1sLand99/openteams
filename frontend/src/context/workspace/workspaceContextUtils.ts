@@ -95,7 +95,6 @@ export const chatStreamWebSocketUrl = (path: string): string => {
   return url.toString();
 };
 
-export const PENDING_AGENT_MESSAGE_PREFIX = 'pending-agent-';
 export const OPTIMISTIC_USER_MESSAGE_PREFIX = 'msg-user-';
 export const createClientMessageId = (): string => {
   const uuid = globalThis.crypto?.randomUUID?.();
@@ -489,13 +488,6 @@ export const chatMessageFontSizeToConfig = (
 ): Config['chat_bubble_font_size'] =>
   `px${normalizeChatMessageFontSize(value)}` as Config['chat_bubble_font_size'];
 
-export const isPendingAgentPlaceholder = (message: Message): boolean =>
-  Boolean(
-    message.isAgentRunning &&
-    !message.runId &&
-    message.id.startsWith(PENDING_AGENT_MESSAGE_PREFIX),
-  );
-
 export const isActiveAgentState = (state: string | undefined): boolean =>
   state === 'running' || state === 'stopping' || state === 'waitingapproval';
 
@@ -714,24 +706,6 @@ export const queuedSessionAgentIdsByMessageKey = (
   return targets;
 };
 
-export const isStartingPlaceholderRepresentedInQueue = (
-  message: Message,
-  queues: ReadonlyArray<MemberQueueSnapshot>,
-  sessionId: string,
-): boolean => {
-  if (!isPendingAgentPlaceholder(message) || !message.sessionAgentId) {
-    return false;
-  }
-  const sessionAgentId = message.sessionAgentId;
-  const queuedTargets = queuedSessionAgentIdsByMessageKey(queues, sessionId);
-  const messageKeys = [message.sourceMessageId, message.clientMessageId].filter(
-    (key): key is string => Boolean(key),
-  );
-  return messageKeys.some((key) =>
-    queuedTargets.get(key)?.has(sessionAgentId),
-  );
-};
-
 export const isQueuedUserMessageFromSnapshot = (
   message: Message,
   queuedMessageKeys: ReadonlySet<string>,
@@ -743,13 +717,6 @@ export const isQueuedUserMessageFromSnapshot = (
     Boolean(clientMessageId && queuedMessageKeys.has(clientMessageId))
   );
 };
-
-export const isQueuedPendingPlaceholderFromSnapshot = (
-  message: Message,
-  queues: ReadonlyArray<MemberQueueSnapshot>,
-  sessionId: string,
-): boolean =>
-  isStartingPlaceholderRepresentedInQueue(message, queues, sessionId);
 
 export const filterQueuedUserMessagesFromSnapshot = (
   messages: Message[],
@@ -764,15 +731,6 @@ export const filterQueuedUserMessagesFromSnapshot = (
   );
   return messages.filter(
     (message) => {
-      if (
-        isQueuedPendingPlaceholderFromSnapshot(
-          message,
-          queues,
-          sessionId,
-        )
-      ) {
-        return false;
-      }
       if (!isQueuedUserMessageFromSnapshot(message, queuedMessageKeys)) {
         return true;
       }

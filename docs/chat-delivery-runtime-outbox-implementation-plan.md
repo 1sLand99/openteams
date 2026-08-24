@@ -5,8 +5,8 @@ description: "Implementation plan for making chat delivery state durable, idempo
 
 # Chat delivery runtime and outbox implementation plan
 
-Status: P0 implemented; P1 and P2 pending  
-Acceptance source: `docs/qa/chat-delivery-e2e-acceptance.md`  
+Status: P0 and P1 implemented; P2 pending
+Acceptance source: `docs/qa/chat-delivery-e2e-acceptance.md`
 Primary owners: database delivery ledger, chat runner, chat HTTP API, frontend runtime projection
 
 ## Outcome
@@ -125,20 +125,21 @@ decision, and claim/block/snapshot queries consider only unresolved failures blo
 
 ## P1: versioned runtime outbox
 
-Status: pending.
+Status: implemented.
 
 ### Publisher
 
-Add a background publisher that claims unpublished `chat_runtime_outbox` rows in session/revision
-order, loads the authoritative delivery payload, publishes a typed envelope, and records publication
-after successful handoff. Duplicate publication is allowed; missing database state is not.
+The background publisher drains unpublished `chat_runtime_outbox` rows in session/revision order,
+loads the authoritative affected-member queue projection, publishes a typed envelope, and records
+publication after handoff. Duplicate publication is allowed; missing database state is not.
 
 ```text
-{ session_id, revision, event_type, delivery }
+{ session_id, revision, event_type, payload }
 ```
 
-All runtime broadcasts must originate from committed outbox rows. Remove direct delivery-state
-broadcasts after consumers have switched.
+The compatibility `queue_updated` event is now derived by the publisher from the same committed
+outbox row. `agent_run_started` and member-state events remain available during rolling upgrades,
+but the new frontend no longer treats either as delivery truth.
 
 ### Snapshot and replay contract
 
@@ -149,6 +150,11 @@ broadcasts after consumers have switched.
 - Snapshot failure preserves the current projection and exposes an error.
 - WebSocket lag explicitly requests resynchronisation instead of silently dropping events.
 
+GET `/api/chat/sessions/{session_id}/runtime/replay?after_revision=N` returns contiguous retained
+events. A missing first revision, a legacy row without member identity, or a cursor outside the
+available range returns a complete snapshot instead. Published rows are retained for seven days;
+publisher restart resumes rows whose `published_at` is still null.
+
 ### P1 verification gate
 
 - Duplicate, out-of-order, and missing events converge to the database snapshot.
@@ -158,7 +164,7 @@ broadcasts after consumers have switched.
 
 ## P1: frontend projection cutover
 
-Status: pending.
+Status: implemented.
 
 Use one reducer partitioned by session and render:
 
@@ -170,10 +176,11 @@ ConversationItem = PersistedMessage | DeliveryCard
 hold local `submitting` command state; after the response, persisted deliveries own all queued,
 starting, running, approval, stopping, and failure UI.
 
-Only delivery terminal events remove an active card. `message_new` only appends a persisted message.
-After shadow comparison shows the new projection matches the backend snapshot, remove placeholder
-IDs, run/source/name correlation, hydration display gates, timed reconciliation, dual active-run
-merges, and localStorage runtime compensation.
+Only versioned delivery deltas or an authoritative snapshot remove an active card. `message_new`
+only appends a persisted message, while `agent_state` remains a member scheduling projection. The
+client ignores old/duplicate revisions, refuses to advance its contiguous cursor across a gap, and
+uses replay before falling back to a full snapshot. Placeholder IDs and their queue-correlation
+helpers have been removed; delivery runtime is not persisted in localStorage.
 
 ## P2: lease and crash recovery
 

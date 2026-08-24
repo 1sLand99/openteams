@@ -1,5 +1,10 @@
 import { useCallback, useEffect } from 'react';
-import type { BackendChatMessage, MemberQueueSnapshot, Message } from '@/types';
+import type {
+  BackendChatMessage,
+  ChatRuntimeDelta,
+  MemberQueueSnapshot,
+  Message,
+} from '@/types';
 import {
   chatMessagesApi,
   chatSessionsApi,
@@ -15,7 +20,6 @@ import type { ChatStreamEvent } from './workspaceChatStreamTypes';
 import {
   activityRunIdsForSession,
   deliveriesFromMemberQueue,
-  deliveryFromAgentRunStarted,
   hasInflightDeliveryForSession,
 } from './chatDeliveryRuntime';
 import { useWorkspaceState } from './useWorkspaceState';
@@ -71,6 +75,7 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
     memberQueuesBySessionAgentId,
     setMemberQueuesBySessionAgentId,
     chatDeliveryRuntime,
+    chatDeliveryRuntimeRef,
     dispatchChatDeliverySync,
     workflowRuntimeLinesByExecution,
     setWorkflowRuntimeLinesByExecution,
@@ -190,6 +195,7 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
     setProviders,
     setSessionRunningIndicator,
     applyChatRuntimeSnapshot,
+    applyChatRuntimeDelta,
     setSessionWorkflowRunningIndicator,
     setSessionWorkflowStatusIndicators,
     clearSessionScopedState,
@@ -311,20 +317,10 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
       );
       setSessionRunningIndicator(event.session_id, true);
       void ensureQueuedRunSourceMessage(event);
-      // The delivery reducer owns run state: it upserts monotonically and
-      // correlates via the persisted run id / source message identity.
-      const delivery = deliveryFromAgentRunStarted(event);
-      dispatchChatDeliverySync({
-        type: 'delivery_upsert',
-        delivery: {
-          ...delivery,
-          model:
-            delivery.model ?? agentModelsByIdRef.current[event.agent_id] ?? null,
-        },
-        receivedAt: Date.now(),
-      });
+      // Compatibility metadata only. Durable runtime state is exclusively
+      // applied from versioned outbox deltas/snapshots.
     },
-    [dispatchChatDeliverySync, ensureQueuedRunSourceMessage, setSessionRunningIndicator],
+    [ensureQueuedRunSourceMessage, setSessionRunningIndicator],
   );
 
   const handleWorkflowRuntimeLine = useCallback(
@@ -382,6 +378,23 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
       try {
         parsed = JSON.parse(event.data) as ChatStreamEvent;
       } catch {
+        return;
+      }
+
+      if (parsed.type === 'runtime_delta' && parsed.session_id === sid) {
+        applyChatRuntimeDelta(parsed as unknown as ChatRuntimeDelta);
+        return;
+      }
+
+      if (
+        parsed.type === 'runtime_resync_required' &&
+        parsed.session_id === sid
+      ) {
+        dispatchChatDeliverySync({
+          type: 'mark_needs_resync',
+          sessionId: sid,
+          reason: parsed.reason,
+        });
         return;
       }
 
@@ -451,16 +464,32 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
 
       if (parsed.type === 'queue_updated' && parsed.session_id === sid) {
         mergeMemberQueueSnapshot(parsed.queue);
-        // Queue snapshots persistently carry `run_id` once a run is bound,
-        // so they bind the run to a delivery even when the replay-less
-        // `agent_run_started` event was missed. The member queue snapshot is
-        // authoritative per member: it also terminates deliveries it no
-        // longer represents. Unknown statuses request a resync instead of
-        // guessing a terminal state.
+        // Rolling-upgrade path for servers that only emit queue snapshots.
+        // The member queue snapshot is authoritative per member and carries
+        // the durable delivery/run binding. Unknown statuses request a resync
+        // instead of guessing a terminal state.
         try {
-          // Queue rows carry no agent identity fields; fill the name in from
-          // the member directory so the card never falls back to 'agent'
-          // while waiting for `agent_run_started`.
+          const revision = Number(parsed.queue.revision);
+          const current = chatDeliveryRuntimeRef.current.sessions[sid];
+          if (!current || current.revision < 0) {
+            dispatchChatDeliverySync({
+              type: 'mark_needs_resync',
+              sessionId: sid,
+              reason: 'legacy queue event received before runtime hydration',
+            });
+            return;
+          }
+          if (revision <= current.revision) return;
+          if (revision !== current.revision + 1) {
+            dispatchChatDeliverySync({
+              type: 'mark_needs_resync',
+              sessionId: sid,
+              reason: `legacy queue revision gap ${current.revision}->${revision}`,
+            });
+            return;
+          }
+          // Fill display metadata from the member directory; the durable
+          // queue projection intentionally stores identity, not presentation.
           const queueDeliveries = deliveriesFromMemberQueue(parsed.queue).map(
             (delivery) => {
               const name = delivery.agentId
@@ -548,23 +577,11 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
         if (isRunningSessionAgentState(parsed.state)) {
           setSessionRunningIndicator(sid, true);
           // No delivery upsert here: cards are created exclusively from the
-          // durable delivery identity carried by `agent_run_started`
-          // (delivery_id) and `queue_updated` snapshots. An agent_state
-          // running event without those would only fabricate a provisional
-          // `run:` identity.
+          // versioned outbox delta/snapshot. An agent_state event is only a
+          // member scheduling projection and has no delivery revision.
         } else {
-          const nextDeliveryRuntime = dispatchChatDeliverySync({
-            type: 'delivery_terminal',
-            sessionId: sid,
-            sessionAgentId: parsed.session_agent_id,
-            runId: parsed.run_id ?? undefined,
-            status: parsed.state === 'dead' ? 'failed' : 'completed',
-            receivedAt: Date.now(),
-          });
-          setSessionRunningIndicator(
-            sid,
-            hasInflightDeliveryForSession(nextDeliveryRuntime, sid),
-          );
+          // Member state is only a scheduling projection. The delivery card
+          // ends when a versioned outbox delta removes/finalises it.
           void refreshSessionWorkflowStatus(sid);
         }
         void refreshMembers();
@@ -596,6 +613,11 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
       ws.onopen = () => {
         reconnectAttempt = 0;
         if (hasConnectedOnce) {
+          dispatchChatDeliverySync({
+            type: 'mark_needs_resync',
+            sessionId: sid,
+            reason: 'chat websocket reconnected',
+          });
           void refreshMessages();
           void refreshMembers();
           void refreshMemberQueues();
@@ -644,6 +666,7 @@ export const useWorkspaceChatRuntime = (options: ChatRuntimeOptions) => {
     dispatchChatDeliverySync,
     handleWorkflowRuntimeLine,
     registerRunDelivery,
+    applyChatRuntimeDelta,
     locale,
     mapBackendChatMessage,
     mergeMemberQueueSnapshot,

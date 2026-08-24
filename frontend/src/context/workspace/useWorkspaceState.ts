@@ -19,6 +19,7 @@ import {
   BackendChatSession,
   BackendChatSessionAgent,
   ChatActiveRun,
+  ChatRuntimeDelta,
   ChatSessionRuntimeSnapshot,
   QuotedMessageReference,
   Provider,
@@ -128,6 +129,7 @@ import {
   EMPTY_CHAT_DELIVERY_RUNTIME_STATE,
   chatDeliveryRuntimeReducer,
   deliveriesFromRuntimeSnapshot,
+  deliveriesFromMemberQueue,
   deliveryCardToMessage,
   deliveryCardsForSession,
   hasInflightDeliveryForSession,
@@ -832,21 +834,157 @@ export const useWorkspaceState = () => {
     ],
   );
 
+  const applyChatRuntimeDelta = useCallback(
+    (
+      delta: ChatRuntimeDelta,
+      receivedAt = Date.now(),
+    ): ChatDeliveryRuntimeState => {
+      const sessionId = delta.session_id;
+      const revision = Number(delta.revision);
+      const current = chatDeliveryRuntimeRef.current.sessions[sessionId];
+      if (!Number.isSafeInteger(revision)) {
+        return dispatchChatDeliverySync({
+          type: 'mark_needs_resync',
+          sessionId,
+          reason: 'runtime revision exceeds JavaScript safe integer range',
+        });
+      }
+      // A live delta cannot establish history from an unknown cursor, and a
+      // gap must not advance the cursor. Replay therefore always starts from
+      // the last contiguous revision rather than the highest observed one.
+      if (!current || current.revision < 0) {
+        return dispatchChatDeliverySync({
+          type: 'mark_needs_resync',
+          sessionId,
+          reason: 'runtime delta received before initial hydration',
+        });
+      }
+      if (revision <= current.revision) {
+        return chatDeliveryRuntimeRef.current;
+      }
+      if (revision !== current.revision + 1) {
+        return dispatchChatDeliverySync({
+          type: 'mark_needs_resync',
+          sessionId,
+          reason: `runtime revision gap ${current.revision}->${revision}`,
+        });
+      }
+      const queue = delta.payload.queue;
+      if (!queue) {
+        return dispatchChatDeliverySync({
+          type: 'mark_needs_resync',
+          sessionId,
+          reason: `runtime delta ${revision} requires a full snapshot`,
+        });
+      }
+      setMemberQueuesBySessionAgentId((prev) => ({
+        ...prev,
+        [queue.session_agent_id]: queue,
+      }));
+      let deliveries;
+      try {
+        deliveries = deliveriesFromMemberQueue(queue).map((delivery) => {
+          const name = delivery.agentId
+            ? agentNamesByIdRef.current[delivery.agentId]
+            : undefined;
+          if (!name || delivery.agentName) return delivery;
+          return {
+            ...delivery,
+            agentName: name,
+            displayName: name.startsWith('@') ? name : `@${name}`,
+            model:
+              delivery.model ??
+              (delivery.agentId
+                ? agentModelsByIdRef.current[delivery.agentId]
+                : undefined),
+          };
+        });
+      } catch (error) {
+        return dispatchChatDeliverySync({
+          type: 'mark_needs_resync',
+          sessionId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+      const next = dispatchChatDeliverySync({
+        type: 'member_queue_snapshot',
+        sessionId,
+        sessionAgentId: queue.session_agent_id,
+        deliveries,
+        revision,
+        receivedAt,
+      });
+      setSessionRunningIndicator(
+        sessionId,
+        hasInflightDeliveryForSession(next, sessionId),
+      );
+      return next;
+    },
+    [dispatchChatDeliverySync, setSessionRunningIndicator],
+  );
+
   // needsResync consumer: a revision gap, an ambiguous terminal transition or
   // an unknown delivery status triggers the single-flight resync scheduler,
   // which fetches an authoritative snapshot with timed backoff retries until
   // the reducer accepts one and clears the flag.
   const applyChatRuntimeSnapshotRef = useRef(applyChatRuntimeSnapshot);
   applyChatRuntimeSnapshotRef.current = applyChatRuntimeSnapshot;
+  const applyChatRuntimeDeltaRef = useRef(applyChatRuntimeDelta);
+  applyChatRuntimeDeltaRef.current = applyChatRuntimeDelta;
   const dispatchChatDeliverySyncRef = useRef(dispatchChatDeliverySync);
   dispatchChatDeliverySyncRef.current = dispatchChatDeliverySync;
+  const recoverChatRuntime = useCallback(
+    async (sessionId: string, requestedAt: number): Promise<void> => {
+      let cursor =
+        chatDeliveryRuntimeRef.current.sessions[sessionId]?.revision ?? -1;
+      if (cursor < 0) {
+        const snapshot = await chatRuntimeApi.getSnapshot(sessionId);
+        applyChatRuntimeSnapshotRef.current(snapshot, { requestedAt });
+        return;
+      }
+
+      for (;;) {
+        const replay = await chatRuntimeApi.replay(sessionId, cursor);
+        if (replay.snapshot) {
+          applyChatRuntimeSnapshotRef.current(replay.snapshot, { requestedAt });
+          return;
+        }
+        for (const delta of replay.events) {
+          applyChatRuntimeDeltaRef.current(delta);
+        }
+        const nextRevision = Number(replay.next_revision);
+        const currentRevision = Number(replay.current_revision);
+        if (
+          !Number.isSafeInteger(nextRevision) ||
+          !Number.isSafeInteger(currentRevision) ||
+          nextRevision < cursor
+        ) {
+          throw new Error('invalid chat runtime replay cursor');
+        }
+        cursor = nextRevision;
+        if (!replay.has_more) {
+          dispatchChatDeliverySyncRef.current({
+            type: 'replay_completed',
+            sessionId,
+            revision: currentRevision,
+            receivedAt: Date.now(),
+          });
+          return;
+        }
+        if (replay.events.length === 0) {
+          throw new Error('chat runtime replay made no progress');
+        }
+      }
+    },
+    [],
+  );
+  const recoverChatRuntimeRef = useRef(recoverChatRuntime);
+  recoverChatRuntimeRef.current = recoverChatRuntime;
   const resyncSchedulerRef = useRef<ChatDeliveryResyncScheduler | null>(null);
   if (resyncSchedulerRef.current === null) {
     resyncSchedulerRef.current = new ChatDeliveryResyncScheduler({
-      getSnapshot: (sessionId) => chatRuntimeApi.getSnapshot(sessionId),
-      applySnapshot: (snapshot, requestedAt) => {
-        applyChatRuntimeSnapshotRef.current(snapshot, { requestedAt });
-      },
+      recover: (sessionId, requestedAt) =>
+        recoverChatRuntimeRef.current(sessionId, requestedAt),
       onError: (sessionId) => {
         dispatchChatDeliverySyncRef.current({
           type: 'snapshot_failed',
@@ -1246,6 +1384,7 @@ export const useWorkspaceState = () => {
     setProviders,
     setSessionRunningIndicator,
     applyChatRuntimeSnapshot,
+    applyChatRuntimeDelta,
     setSessionWorkflowRunningIndicator,
     setSessionWorkflowStatusIndicators,
     clearSessionScopedState,

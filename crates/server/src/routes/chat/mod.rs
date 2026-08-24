@@ -33,6 +33,7 @@ pub fn router(deployment: &DeploymentImpl) -> Router<DeploymentImpl> {
         .route("/unpin", axum::routing::post(sessions::unpin_session))
         .route("/stream", get(sessions::stream_session_ws))
         .route("/runtime", get(runtime::get_session_runtime_snapshot))
+        .route("/runtime/replay", get(runtime::replay_session_runtime))
         .route("/executor-approvals", get(executor_approvals::list_pending))
         .route(
             "/executor-approvals/{request_id}/resolve",

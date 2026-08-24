@@ -15,6 +15,7 @@ use deployment::Deployment;
 use serde::{Deserialize, Serialize};
 use services::services::{
     chat::should_include_message_in_history,
+    chat_runtime_outbox::{CHAT_RUNTIME_REPLAY_LIMIT, ChatRuntimeDelta, ChatRuntimeOutboxService},
     member_execution::resolve_effective_member_execution_config,
     queued_message::{MemberQueueSnapshot, QueuedMessageService},
 };
@@ -68,6 +69,26 @@ pub struct ChatSessionRuntimeQuery {
     pub include_messages: Option<bool>,
 }
 
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct ChatRuntimeReplayQuery {
+    pub after_revision: i64,
+    pub limit: Option<i64>,
+    pub include_messages: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ChatRuntimeReplayResponse {
+    pub session_id: Uuid,
+    pub after_revision: i64,
+    pub current_revision: i64,
+    pub next_revision: i64,
+    pub has_more: bool,
+    pub events: Vec<ChatRuntimeDelta>,
+    pub snapshot: Option<ChatSessionRuntimeSnapshot>,
+}
+
 pub async fn get_session_runtime_snapshot(
     Extension(session): Extension<ChatSession>,
     State(deployment): State<DeploymentImpl>,
@@ -81,6 +102,59 @@ pub async fn get_session_runtime_snapshot(
     )
     .await?;
     Ok(ResponseJson(ApiResponse::success(snapshot)))
+}
+
+pub async fn replay_session_runtime(
+    Extension(session): Extension<ChatSession>,
+    State(deployment): State<DeploymentImpl>,
+    Query(query): Query<ChatRuntimeReplayQuery>,
+) -> Result<ResponseJson<ApiResponse<ChatRuntimeReplayResponse>>, ApiError> {
+    let limit = query.limit.unwrap_or(CHAT_RUNTIME_REPLAY_LIMIT);
+    if !(1..=CHAT_RUNTIME_REPLAY_LIMIT).contains(&limit) {
+        return Err(ApiError::BadRequest(format!(
+            "runtime replay limit must be between 1 and {CHAT_RUNTIME_REPLAY_LIMIT}"
+        )));
+    }
+    let page = ChatRuntimeOutboxService::new()
+        .replay_after(
+            &deployment.db().pool,
+            session.id,
+            query.after_revision,
+            limit,
+        )
+        .await?;
+
+    let snapshot = if page.requires_snapshot {
+        Some(
+            build_session_runtime_snapshot(
+                &deployment,
+                &session,
+                query.include_messages.unwrap_or(false),
+                None,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let next_revision = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.revision)
+        .or_else(|| page.events.last().map(|event| event.revision))
+        .unwrap_or(query.after_revision);
+    let has_more = snapshot.is_none() && next_revision < page.current_revision;
+
+    Ok(ResponseJson(ApiResponse::success(
+        ChatRuntimeReplayResponse {
+            session_id: session.id,
+            after_revision: query.after_revision,
+            current_revision: page.current_revision,
+            next_revision,
+            has_more,
+            events: page.events,
+            snapshot,
+        },
+    )))
 }
 
 pub async fn build_session_runtime_snapshot(

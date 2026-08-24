@@ -123,6 +123,20 @@ pub struct FileChangeEntry {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
 pub enum ChatStreamEvent {
+    /// Durable delivery delta published from `chat_runtime_outbox` after the
+    /// transaction that allocated `revision` committed.
+    RuntimeDelta {
+        session_id: Uuid,
+        revision: i64,
+        event_type: ChatRuntimeOutboxEventType,
+        payload: ChatRuntimeDeltaPayload,
+    },
+    /// Transport-level signal: live events may have been skipped, so the
+    /// client must recover through runtime replay/snapshot.
+    RuntimeResyncRequired {
+        session_id: Uuid,
+        reason: String,
+    },
     MessageNew {
         message: ChatMessage,
     },

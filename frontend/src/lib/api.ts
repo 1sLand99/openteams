@@ -28,6 +28,7 @@ import type {
   ChatQueueListResponse,
   ChatRunActivityResponse,
   ChatRunRetentionListResponse,
+  ChatRuntimeReplayResponse,
   ChatSessionRuntimeSnapshot,
   ChatSessionStatus,
   ChatSessionWorktreeMode,
@@ -1320,6 +1321,21 @@ export const chatRuntimeApi = {
       { cache: "no-store" },
     );
     return handleApiResponse<ChatSessionRuntimeSnapshot>(r);
+  },
+  replay: async (
+    sessionId: string,
+    afterRevision: number,
+    options?: { limit?: number; includeMessages?: boolean },
+  ): Promise<ChatRuntimeReplayResponse> => {
+    const r = await makeRequest(
+      `/api/chat/sessions/${encodeURIComponent(sessionId)}/runtime/replay${qs({
+        after_revision: afterRevision,
+        limit: options?.limit,
+        include_messages: options?.includeMessages,
+      })}`,
+      { cache: "no-store" },
+    );
+    return handleApiResponse<ChatRuntimeReplayResponse>(r);
   },
 };
 

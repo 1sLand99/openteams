@@ -788,4 +788,42 @@ const cardsFor = (state: ChatDeliveryRuntimeState, sessionId = 'session-1') =>
   );
 }
 
+{
+  // A member queue delta with a revision gap must not clear the resync flag;
+  // only replay completion at the newest observed revision may settle it.
+  const hydrated = dispatch(EMPTY_CHAT_DELIVERY_RUNTIME_STATE, {
+    type: 'snapshot_received',
+    sessionId: 'session-1',
+    deliveries: [],
+    revision: 7,
+    requestedAt: T0,
+    receivedAt: T0 + 1,
+  });
+  const gapped = dispatch(hydrated, {
+    type: 'member_queue_snapshot',
+    sessionId: 'session-1',
+    sessionAgentId: 'agent-alpha',
+    deliveries: deliveriesFromMemberQueue(
+      makeQueue({ revision: 9n, items: [] }),
+    ),
+    revision: 9,
+    receivedAt: T0 + 2,
+  });
+  assert.equal(gapped.sessions['session-1']?.needsResync, true);
+  const staleReplay = dispatch(gapped, {
+    type: 'replay_completed',
+    sessionId: 'session-1',
+    revision: 8,
+    receivedAt: T0 + 3,
+  });
+  assert.equal(staleReplay.sessions['session-1']?.needsResync, true);
+  const recovered = dispatch(staleReplay, {
+    type: 'replay_completed',
+    sessionId: 'session-1',
+    revision: 9,
+    receivedAt: T0 + 4,
+  });
+  assert.equal(recovered.sessions['session-1']?.needsResync, false);
+}
+
 console.log('chatDeliveryRuntime tests passed');

@@ -171,6 +171,7 @@ impl Deployment for LocalDeployment {
         let queued_message_service = QueuedMessageService::new();
         let chat_runner =
             ChatRunner::with_analytics(db.clone(), analytics.clone(), analytics_enabled.clone());
+        chat_runner.start_runtime_outbox_publisher();
         let recovered_orphaned_agents = chat_runner
             .recover_orphaned_session_agents()
             .await

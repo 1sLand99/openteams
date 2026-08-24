@@ -9,6 +9,7 @@ pub mod chat_message_queue;
 pub mod chat_message_target;
 pub mod chat_permission;
 pub mod chat_run;
+pub mod chat_runtime_outbox;
 pub mod chat_session;
 pub mod chat_session_agent;
 pub mod chat_session_path_index;

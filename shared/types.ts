@@ -621,7 +621,7 @@ export enum AcpConfigSource { none = "none", stable = "stable", legacy_model = "
 
 export type AcpCapabilityProbe = { protocol_version: string, agent_name: string | null, agent_version: string | null, auth_methods: Array<AcpAuthMethodInfo>, supports_session_list: boolean, supports_session_resume: boolean, supports_session_load: boolean, supports_session_close: boolean, supports_session_delete: boolean, supports_additional_directories: boolean, agent_capabilities: JsonValue, config_source: AcpConfigSource, config_options: Array<AcpConfigOptionSnapshot>, };
 
-export type ChatStreamEvent = { "type": "message_new", message: ChatMessage, } | { "type": "message_updated", message: ChatMessage, } | { "type": "work_item_new", work_item: ChatWorkItem, } | { "type": "agent_delta", session_id: string, session_agent_id: string, agent_id: string, run_id: string, stream_type: ChatStreamDeltaType, content: string, delta: boolean, is_final: boolean, } | { "type": "agent_run_started", session_id: string, session_agent_id: string, agent_id: string, agent_name: string, model: string | null,
+export type ChatStreamEvent = { "type": "runtime_delta", session_id: string, revision: bigint, event_type: ChatRuntimeOutboxEventType, payload: ChatRuntimeDeltaPayload, } | { "type": "runtime_resync_required", session_id: string, reason: string, } | { "type": "message_new", message: ChatMessage, } | { "type": "message_updated", message: ChatMessage, } | { "type": "work_item_new", work_item: ChatWorkItem, } | { "type": "agent_delta", session_id: string, session_agent_id: string, agent_id: string, run_id: string, stream_type: ChatStreamDeltaType, content: string, delta: boolean, is_final: boolean, } | { "type": "agent_run_started", session_id: string, session_agent_id: string, agent_id: string, agent_name: string, model: string | null,
 /**
  * Stable durable delivery identity (`chat_message_queue.id`) for this run.
  */
@@ -652,6 +652,18 @@ client_message_id: string | null, session_agent_id: string | null, project_membe
  * Source message whose processing triggered this run.
  */
 message_id: string, changed_files: Array<FileChangeEntry>, ts: string, };
+
+export type ChatRuntimeOutboxEventType = "delivery_created" | "delivery_updated" | "delivery_deleted";
+
+export type ChatRuntimeDeltaPayload = { delivery_id: string, delivery_revision: bigint,
+/**
+ * Authoritative projection for the affected member at publication time.
+ * Legacy outbox rows that predate persisted member identity leave this
+ * empty, which explicitly tells the client to request a full snapshot.
+ */
+queue: MemberQueueSnapshot | null, };
+
+export type ChatRuntimeDelta = { session_id: string, revision: bigint, event_type: ChatRuntimeOutboxEventType, payload: ChatRuntimeDeltaPayload, };
 
 export type ChatExecutorApprovalOption = { option_id: string, kind: string, label: string, };
 
@@ -817,6 +829,8 @@ export type ChatActiveRunStatus = "starting" | "running" | "stopping" | "waiting
 export type ChatActiveRun = { delivery_id: string, run_id: string, session_id: string, session_agent_id: string, agent_id: string, agent_name: string, display_name: string, avatar: string, model: string | null, status: ChatActiveRunStatus, source_message_id: string | null, client_message_id: string | null, created_at: string, };
 
 export type ChatSessionRuntimeSnapshot = { session_id: string, revision: bigint, messages: Array<ChatMessage> | null, active_runs: Array<ChatActiveRun>, queues: Array<MemberQueueSnapshot>, };
+
+export type ChatRuntimeReplayResponse = { session_id: string, after_revision: bigint, current_revision: bigint, next_revision: bigint, has_more: boolean, events: Array<ChatRuntimeDelta>, snapshot: ChatSessionRuntimeSnapshot | null, };
 
 export type ChatSessionRuntimeQuery = { include_messages: boolean | null, };
 

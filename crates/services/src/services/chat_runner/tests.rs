@@ -396,6 +396,21 @@ async fn setup_chat_runner_db() -> DBService {
             )
             "#,
         r#"
+            CREATE TABLE chat_runtime_outbox (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id BLOB NOT NULL,
+                revision INTEGER NOT NULL,
+                delivery_id BLOB NOT NULL,
+                delivery_revision INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                session_agent_id BLOB,
+                agent_id BLOB,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+                published_at TEXT,
+                UNIQUE(session_id, revision)
+            )
+            "#,
+        r#"
             CREATE TRIGGER chat_message_queue_runtime_revision_after_insert
             AFTER INSERT ON chat_message_queue
             BEGIN
@@ -404,6 +419,14 @@ async fn setup_chat_runner_db() -> DBService {
                 ON CONFLICT(session_id) DO UPDATE SET
                     revision = revision + 1,
                     updated_at = excluded.updated_at;
+                INSERT INTO chat_runtime_outbox (
+                    session_id, revision, delivery_id, delivery_revision, event_type,
+                    session_agent_id, agent_id
+                )
+                SELECT NEW.session_id, revision, NEW.id, NEW.revision, 'delivery_created',
+                       NEW.session_agent_id, NEW.agent_id
+                FROM chat_session_runtime_revisions
+                WHERE session_id = NEW.session_id;
             END
             "#,
         r#"
@@ -415,6 +438,14 @@ async fn setup_chat_runner_db() -> DBService {
                 ON CONFLICT(session_id) DO UPDATE SET
                     revision = revision + 1,
                     updated_at = excluded.updated_at;
+                INSERT INTO chat_runtime_outbox (
+                    session_id, revision, delivery_id, delivery_revision, event_type,
+                    session_agent_id, agent_id
+                )
+                SELECT NEW.session_id, revision, NEW.id, NEW.revision, 'delivery_updated',
+                       NEW.session_agent_id, NEW.agent_id
+                FROM chat_session_runtime_revisions
+                WHERE session_id = NEW.session_id;
             END
             "#,
         r#"
@@ -426,6 +457,14 @@ async fn setup_chat_runner_db() -> DBService {
                 ON CONFLICT(session_id) DO UPDATE SET
                     revision = revision + 1,
                     updated_at = excluded.updated_at;
+                INSERT INTO chat_runtime_outbox (
+                    session_id, revision, delivery_id, delivery_revision, event_type,
+                    session_agent_id, agent_id
+                )
+                SELECT OLD.session_id, revision, OLD.id, OLD.revision, 'delivery_deleted',
+                       OLD.session_agent_id, OLD.agent_id
+                FROM chat_session_runtime_revisions
+                WHERE session_id = OLD.session_id;
             END
             "#,
     ] {

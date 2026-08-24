@@ -9,6 +9,7 @@ pub mod build_stats;
 pub mod chat;
 pub mod chat_history_file;
 pub mod chat_runner;
+pub mod chat_runtime_outbox;
 pub mod cli_config;
 pub mod cli_manager;
 pub mod config;

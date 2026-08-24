@@ -182,9 +182,7 @@ pub async fn delete_queue_item(
     let session_agent =
         session_agent_for_session(pool, session.id, queue_item.session_agent_id).await?;
     let queue = snapshot_for_agent(&service, pool, &session_agent).await?;
-    deployment
-        .chat_runner()
-        .emit_queue_update(session.id, queue.clone());
+    deployment.chat_runner().publish_runtime_outbox().await?;
 
     Ok(ResponseJson(ApiResponse::success(
         DeleteQueuedMessageResponse {
@@ -209,10 +207,7 @@ pub async fn continue_member_queue(
     let resolved_failed_count = service
         .skip_failed_for_member(pool, session_agent_id)
         .await?;
-    let unblocked = snapshot_for_agent(&service, pool, &session_agent).await?;
-    deployment
-        .chat_runner()
-        .emit_queue_update(session.id, unblocked);
+    deployment.chat_runner().publish_runtime_outbox().await?;
 
     deployment
         .chat_runner()
@@ -220,9 +215,7 @@ pub async fn continue_member_queue(
         .await;
 
     let queue = snapshot_for_agent(&service, pool, &session_agent).await?;
-    deployment
-        .chat_runner()
-        .emit_queue_update(session.id, queue.clone());
+    deployment.chat_runner().publish_runtime_outbox().await?;
 
     Ok(ResponseJson(ApiResponse::success(
         ContinueQueuedMessageResponse {

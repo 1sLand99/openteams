@@ -246,6 +246,9 @@ pub struct ChatRunner {
     analytics: Option<AnalyticsService>,
     analytics_enabled: Arc<AtomicBool>,
     streams: Arc<DashMap<Uuid, broadcast::Sender<ChatStreamEvent>>>,
+    runtime_outbox_publish_lock: Arc<Mutex<()>>,
+    runtime_outbox_notify: Arc<Notify>,
+    runtime_outbox_publisher_started: Arc<AtomicBool>,
     // Store per-run lifecycle controls, key = session_agent_id
     run_controls: Arc<DashMap<Uuid, RunLifecycleControl>>,
     // Session-level background context compaction dedupe.
@@ -282,6 +285,9 @@ impl ChatRunner {
             analytics,
             analytics_enabled,
             streams: Arc::new(DashMap::new()),
+            runtime_outbox_publish_lock: Arc::new(Mutex::new(())),
+            runtime_outbox_notify: Arc::new(Notify::new()),
+            runtime_outbox_publisher_started: Arc::new(AtomicBool::new(false)),
             run_controls: Arc::new(DashMap::new()),
             background_compaction_inflight: Arc::new(DashMap::new()),
             workspace_live_log_bytes: Arc::new(DashMap::new()),
@@ -550,6 +556,97 @@ impl ChatRunner {
         self.sender_for(session_id).subscribe()
     }
 
+    /// Start the recovery publisher once. Database rows remain the source of
+    /// truth; the notification and interval merely reduce delivery latency.
+    pub fn start_runtime_outbox_publisher(&self) {
+        if self
+            .runtime_outbox_publisher_started
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let runner = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            let mut retention_interval =
+                tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+            loop {
+                let run_retention = tokio::select! {
+                    _ = interval.tick() => false,
+                    _ = runner.runtime_outbox_notify.notified() => false,
+                    _ = retention_interval.tick() => true,
+                };
+                if let Err(error) = runner.publish_runtime_outbox().await {
+                    tracing::warn!(%error, "failed to publish chat runtime outbox");
+                }
+                if run_retention
+                    && let Err(error) = ChatRuntimeOutboxService::new()
+                        .delete_published_before(
+                            &runner.db.pool,
+                            Utc::now() - chrono::Duration::days(7),
+                        )
+                        .await
+                {
+                    tracing::warn!(%error, "failed to prune published chat runtime outbox rows");
+                }
+            }
+        });
+    }
+
+    /// Drain committed runtime outbox rows in session/revision order. A row is
+    /// acknowledged only after its versioned event has been handed to the
+    /// process-local stream. Duplicate handoff is safe and expected after a
+    /// crash between send and acknowledgement.
+    pub async fn publish_runtime_outbox(&self) -> Result<usize, sqlx::Error> {
+        let _guard = self.runtime_outbox_publish_lock.lock().await;
+        let service = ChatRuntimeOutboxService::new();
+        let mut published = 0;
+        loop {
+            let records = service.unpublished(&self.db.pool, 256).await?;
+            if records.is_empty() {
+                break;
+            }
+            let batch_len = records.len();
+            for record in records {
+                let delta = service.delta_for_record(&self.db.pool, &record).await?;
+                self.emit(
+                    delta.session_id,
+                    ChatStreamEvent::RuntimeDelta {
+                        session_id: delta.session_id,
+                        revision: delta.revision,
+                        event_type: delta.event_type,
+                        payload: delta.payload.clone(),
+                    },
+                );
+                // Rolling-upgrade compatibility: legacy consumers still see
+                // the queue event, but it is now derived from the committed
+                // outbox rather than emitted by mutation call sites.
+                if let Some(queue) = delta.payload.queue {
+                    self.emit(
+                        delta.session_id,
+                        ChatStreamEvent::QueueUpdated {
+                            session_id: delta.session_id,
+                            session_agent_id: queue.session_agent_id,
+                            queue,
+                        },
+                    );
+                }
+                service
+                    .mark_published(&self.db.pool, record.sequence)
+                    .await?;
+                published += 1;
+            }
+            if batch_len < 256 {
+                break;
+            }
+        }
+        Ok(published)
+    }
+
+    fn notify_runtime_outbox_publisher(&self) {
+        self.runtime_outbox_notify.notify_one();
+    }
+
     pub fn emit_message_new(&self, session_id: Uuid, message: ChatMessage) {
         self.emit(session_id, ChatStreamEvent::MessageNew { message });
     }
@@ -562,53 +659,10 @@ impl ChatRunner {
         self.emit(session_id, ChatStreamEvent::WorkItemNew { work_item });
     }
 
-    pub fn emit_queue_update(&self, session_id: Uuid, queue: MemberQueueSnapshot) {
-        self.emit(
-            session_id,
-            ChatStreamEvent::QueueUpdated {
-                session_id,
-                session_agent_id: queue.session_agent_id,
-                queue,
-            },
-        );
-    }
-
-    async fn emit_member_queue_update(&self, session_id: Uuid, session_agent_id: Uuid) {
-        let Some(session_agent) =
-            (match ChatSessionAgent::find_by_id(&self.db.pool, session_agent_id).await {
-                Ok(agent) => agent,
-                Err(err) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        session_agent_id = %session_agent_id,
-                        error = %err,
-                        "failed to load member before queue update event"
-                    );
-                    return;
-                }
-            })
-        else {
-            return;
-        };
-
-        match QueuedMessageService::new()
-            .snapshot_for_member(
-                &self.db.pool,
-                session_id,
-                session_agent.id,
-                session_agent.agent_id,
-            )
-            .await
-        {
-            Ok(snapshot) => self.emit_queue_update(session_id, snapshot),
-            Err(err) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    session_agent_id = %session_agent_id,
-                    error = %err,
-                    "failed to build queue update event"
-                );
-            }
+    async fn emit_member_queue_update(&self, _session_id: Uuid, _session_agent_id: Uuid) {
+        self.notify_runtime_outbox_publisher();
+        if let Err(error) = self.publish_runtime_outbox().await {
+            tracing::warn!(%error, "failed to publish member queue runtime update");
         }
     }
 
