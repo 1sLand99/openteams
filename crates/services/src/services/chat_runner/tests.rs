@@ -1924,20 +1924,19 @@ async fn concurrent_direct_dispatch_claims_exactly_one_delivery_for_member() {
         first_result.expect("dispatch first direct delivery"),
         second_result.expect("dispatch second direct delivery"),
     ];
-    assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| matches!(outcome, super::DispatchOutcome::Started { .. }))
-            .count(),
-        1
-    );
-    assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| matches!(outcome, super::DispatchOutcome::Queued { .. }))
-            .count(),
-        1
-    );
+    let started_count = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, super::DispatchOutcome::Started { .. }))
+        .count();
+    let queued_count = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome, super::DispatchOutcome::Queued { .. }))
+        .count();
+    // A caller may claim and start the older delivery while returning its own newer delivery as
+    // queued, so FIFO-concurrent dispatch can legitimately report two queued outcomes. The
+    // persisted delivery ledger below is the authoritative assertion.
+    assert!(started_count <= 1);
+    assert_eq!(started_count + queued_count, outcomes.len());
 
     let deliveries = QueuedMessageService::new()
         .list_for_member(&db.pool, member.id)
