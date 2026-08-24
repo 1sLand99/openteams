@@ -2657,6 +2657,7 @@ dependencies = [
  "walkdir",
  "which 7.0.3",
  "winapi",
+ "windows-sys 0.61.2",
  "winsplit",
  "xdg",
 ]

@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fs::{self, File},
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -628,6 +628,7 @@ impl AsyncRead for ExecutorOutput {
 #[derive(Debug)]
 enum ExecutorRunCleanupResource {
     File(PathBuf),
+    LockedFile { path: PathBuf, _lock: File },
     PrivateDirectory(PathBuf),
 }
 
@@ -653,6 +654,12 @@ impl ExecutorRunCleanup {
         }
     }
 
+    pub(crate) fn locked_file(path: PathBuf, lock: File) -> Self {
+        Self {
+            resources: vec![ExecutorRunCleanupResource::LockedFile { path, _lock: lock }],
+        }
+    }
+
     pub fn combine(first: Option<Self>, second: Option<Self>) -> Option<Self> {
         match (first, second) {
             (Some(mut first), Some(second)) => {
@@ -672,8 +679,12 @@ impl ExecutorRunCleanup {
 impl Drop for ExecutorRunCleanup {
     fn drop(&mut self) {
         for resource in &self.resources {
-            if let ExecutorRunCleanupResource::File(path) = resource {
-                let _ = fs::remove_file(path);
+            match resource {
+                ExecutorRunCleanupResource::File(path)
+                | ExecutorRunCleanupResource::LockedFile { path, .. } => {
+                    let _ = fs::remove_file(path);
+                }
+                ExecutorRunCleanupResource::PrivateDirectory(_) => {}
             }
         }
         let mut directories = self
@@ -681,7 +692,8 @@ impl Drop for ExecutorRunCleanup {
             .iter()
             .filter_map(|resource| match resource {
                 ExecutorRunCleanupResource::PrivateDirectory(path) => Some(path),
-                ExecutorRunCleanupResource::File(_) => None,
+                ExecutorRunCleanupResource::File(_)
+                | ExecutorRunCleanupResource::LockedFile { .. } => None,
             })
             .collect::<Vec<_>>();
         directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
