@@ -1,19 +1,116 @@
 use std::{
     collections::{BTreeMap, HashSet},
     path::{Component, Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use tokio::{fs, process::Command};
 use uuid::Uuid;
 
 const OPENTEAMS_DIR: &str = ".openteams";
 
+#[derive(Clone)]
+struct WorkspaceChangeJournal {
+    _watcher: Arc<Mutex<RecommendedWatcher>>,
+    changed_paths: Arc<Mutex<HashSet<PathBuf>>>,
+    overflowed: Arc<AtomicBool>,
+    workspace_path: PathBuf,
+}
+
+impl std::fmt::Debug for WorkspaceChangeJournal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkspaceChangeJournal")
+            .field("workspace_path", &self.workspace_path)
+            .field("overflowed", &self.overflowed.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+impl WorkspaceChangeJournal {
+    fn start(workspace_path: &Path) -> Option<Self> {
+        let workspace_path = canonicalize_lossy(workspace_path);
+        let changed_paths = Arc::new(Mutex::new(HashSet::new()));
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let callback_paths = changed_paths.clone();
+        let callback_overflowed = overflowed.clone();
+
+        let mut watcher =
+            match notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+                match result {
+                    Ok(event) => {
+                        if matches!(event.kind, EventKind::Access(_)) {
+                            return;
+                        }
+                        let mut paths =
+                            callback_paths.lock().unwrap_or_else(|err| err.into_inner());
+                        paths.extend(event.paths);
+                    }
+                    Err(err) => {
+                        callback_overflowed.store(true, Ordering::Relaxed);
+                        tracing::warn!(error = %err, "workspace change journal reported an error");
+                    }
+                }
+            }) {
+                Ok(watcher) => watcher,
+                Err(err) => {
+                    tracing::warn!(
+                        workspace_path = %workspace_path.display(),
+                        error = %err,
+                        "failed to create workspace change journal; using untracked scan fallback"
+                    );
+                    return None;
+                }
+            };
+
+        if let Err(err) = watcher.watch(&workspace_path, RecursiveMode::Recursive) {
+            tracing::warn!(
+                workspace_path = %workspace_path.display(),
+                error = %err,
+                "failed to watch workspace changes; using untracked scan fallback"
+            );
+            return None;
+        }
+
+        Some(Self {
+            _watcher: Arc::new(Mutex::new(watcher)),
+            changed_paths,
+            overflowed,
+            workspace_path,
+        })
+    }
+
+    fn snapshot(&self) -> Result<Vec<String>, ()> {
+        if self.overflowed.load(Ordering::Relaxed) {
+            return Err(());
+        }
+
+        let paths = self
+            .changed_paths
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let mut relative_paths = paths
+            .iter()
+            .filter_map(|path| journal_relative_path(&self.workspace_path, path))
+            .collect::<Vec<_>>();
+        relative_paths.sort();
+        relative_paths.dedup();
+        Ok(relative_paths)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceChangeBaseline {
     pub git_tree: Option<String>,
     pub untracked_files: Vec<String>,
+    journal: Option<WorkspaceChangeJournal>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -21,6 +118,7 @@ pub struct WorkspaceChangeDelta {
     pub diff_patch: Option<String>,
     pub diff_paths: Vec<String>,
     pub untracked_files: Vec<String>,
+    pub untracked_capture_incomplete: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,18 +143,31 @@ pub fn run_records_prefix(session_agent_id: Uuid, run_index: i64) -> String {
 }
 
 pub async fn capture_workspace_change_baseline(workspace_path: &Path) -> WorkspaceChangeBaseline {
+    let journal = WorkspaceChangeJournal::start(workspace_path);
     let git_tree = capture_baseline_git_tree(workspace_path).await;
-    let untracked_files = capture_untracked_file_snapshot(workspace_path).await;
+    let untracked_files = if journal.is_some() {
+        Vec::new()
+    } else {
+        capture_untracked_file_snapshot(workspace_path).await
+    };
     tracing::debug!(
         workspace_path = %workspace_path.display(),
         baseline_has_git_tree = git_tree.is_some(),
         baseline_untracked_count = untracked_files.len(),
+        baseline_uses_change_journal = journal.is_some(),
         "[workspace_change_capture] Captured workspace change baseline"
     );
 
     WorkspaceChangeBaseline {
         git_tree,
         untracked_files,
+        journal,
+    }
+}
+
+impl WorkspaceChangeBaseline {
+    pub fn uses_change_journal(&self) -> bool {
+        self.journal.is_some()
     }
 }
 
@@ -101,12 +212,35 @@ pub async fn capture_workspace_change_delta(
         }
     }
 
-    let baseline_untracked = baseline.untracked_files.iter().collect::<HashSet<_>>();
-    let untracked_files = capture_untracked_file_snapshot(workspace_path)
-        .await
-        .into_iter()
-        .filter(|path| !baseline_untracked.contains(path))
-        .collect::<Vec<_>>();
+    let (untracked_files, untracked_capture_incomplete) =
+        if let Some(journal) = baseline.journal.as_ref() {
+            // Give native watcher callbacks a short opportunity to drain events queued immediately
+            // before the executor exited. This is completion-path latency, not baseline latency.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            match journal.snapshot() {
+                Ok(changed_paths) => (
+                    capture_untracked_files_for_paths(workspace_path, &changed_paths).await,
+                    false,
+                ),
+                Err(()) => {
+                    tracing::warn!(
+                        workspace_path = %workspace_path.display(),
+                        "workspace change journal overflowed; untracked capture is incomplete"
+                    );
+                    (Vec::new(), true)
+                }
+            }
+        } else {
+            let baseline_untracked = baseline.untracked_files.iter().collect::<HashSet<_>>();
+            (
+                capture_untracked_file_snapshot(workspace_path)
+                    .await
+                    .into_iter()
+                    .filter(|path| !baseline_untracked.contains(path))
+                    .collect::<Vec<_>>(),
+                false,
+            )
+        };
 
     tracing::debug!(
         workspace_path = %workspace_path.display(),
@@ -118,6 +252,7 @@ pub async fn capture_workspace_change_delta(
         diff_patch_bytes = diff_patch.len(),
         diff_patch_written,
         untracked_count = untracked_files.len(),
+        untracked_capture_incomplete,
         "[workspace_change_capture] Captured workspace change delta"
     );
 
@@ -125,6 +260,7 @@ pub async fn capture_workspace_change_delta(
         diff_patch: (!diff_patch.trim().is_empty() && !diff_paths.is_empty()).then_some(diff_patch),
         diff_paths,
         untracked_files,
+        untracked_capture_incomplete,
     }
 }
 
@@ -197,28 +333,8 @@ async fn capture_baseline_git_tree(workspace_path: &Path) -> Option<String> {
         Uuid::new_v4()
     ));
 
-    let head_tree = git_stdout(
-        workspace_path,
-        &["rev-parse", "--verify", "HEAD^{tree}"],
-        None,
-    )
-    .await
-    .map(|tree| tree.trim().to_string())
-    .filter(|tree| !tree.is_empty());
-
     let result = async {
-        let read_tree_ok = if let Some(head_tree) = head_tree.as_deref() {
-            run_git(workspace_path, &["read-tree", head_tree], Some(&index_path))
-                .await
-                .unwrap_or(false)
-        } else {
-            run_git(workspace_path, &["read-tree", "--empty"], Some(&index_path))
-                .await
-                .unwrap_or(false)
-        };
-        if !read_tree_ok {
-            return None;
-        }
+        seed_baseline_index(workspace_path, &index_path).await?;
         if !run_git(workspace_path, &["add", "-u", "--", "."], Some(&index_path))
             .await
             .unwrap_or(false)
@@ -230,9 +346,60 @@ async fn capture_baseline_git_tree(workspace_path: &Path) -> Option<String> {
     .await;
 
     let _ = fs::remove_file(&index_path).await;
+    let _ = fs::remove_file(index_path.with_extension("index.lock")).await;
     result
         .map(|tree| tree.trim().to_string())
         .filter(|tree| !tree.is_empty())
+}
+
+async fn seed_baseline_index(workspace_path: &Path, index_path: &Path) -> Option<()> {
+    let git_dir = git_stdout(workspace_path, &["rev-parse", "--absolute-git-dir"], None)
+        .await
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty());
+
+    if let Some(git_dir) = git_dir {
+        let source_index = PathBuf::from(git_dir).join("index");
+        let started_at = Instant::now();
+        match fs::copy(&source_index, index_path).await {
+            Ok(_) => {
+                tracing::debug!(
+                    workspace_path = %workspace_path.display(),
+                    source_index = %source_index.display(),
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "copied git index for workspace baseline"
+                );
+                return Some(());
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                tracing::warn!(
+                    workspace_path = %workspace_path.display(),
+                    source_index = %source_index.display(),
+                    error = %err,
+                    "failed to copy git index; falling back to read-tree"
+                );
+            }
+        }
+    }
+
+    let head_tree = git_stdout(
+        workspace_path,
+        &["rev-parse", "--verify", "HEAD^{tree}"],
+        None,
+    )
+    .await
+    .map(|tree| tree.trim().to_string())
+    .filter(|tree| !tree.is_empty());
+    let args = head_tree
+        .as_deref()
+        .map(|tree| vec!["read-tree", tree])
+        .unwrap_or_else(|| vec!["read-tree", "--empty"]);
+
+    run_git(workspace_path, &args, Some(index_path))
+        .await
+        .filter(|succeeded| *succeeded)
+        .map(|_| ())
 }
 
 async fn is_git_worktree(workspace_path: &Path) -> bool {
@@ -306,17 +473,71 @@ pub async fn capture_untracked_file_snapshot(workspace_path: &Path) -> Vec<Strin
     files
 }
 
+async fn capture_untracked_files_for_paths(
+    workspace_path: &Path,
+    changed_paths: &[String],
+) -> Vec<String> {
+    const PATHS_PER_GIT_CALL: usize = 64;
+
+    let mut files = Vec::new();
+    for chunk in changed_paths.chunks(PATHS_PER_GIT_CALL) {
+        let literal_pathspecs = chunk
+            .iter()
+            .map(|path| format!(":(literal){path}"))
+            .collect::<Vec<_>>();
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(workspace_path)
+            .args([
+                "-c",
+                "core.quotePath=false",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+            ])
+            .args(&literal_pathspecs)
+            .output()
+            .await;
+
+        let Ok(output) = output else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+
+        files.extend(
+            output
+                .stdout
+                .split(|byte| *byte == b'\0')
+                .filter(|raw| !raw.is_empty())
+                .filter_map(|raw| normalize_git_relative_path(&String::from_utf8_lossy(raw))),
+        );
+    }
+
+    files.sort();
+    files.dedup();
+    files
+}
+
 async fn run_git(workspace_path: &Path, args: &[&str], index_path: Option<&Path>) -> Option<bool> {
+    let started_at = Instant::now();
     let mut command = Command::new("git");
     command.arg("-C").arg(workspace_path).args(args);
     if let Some(index_path) = index_path {
         command.env("GIT_INDEX_FILE", index_path);
     }
-    command
-        .output()
-        .await
-        .ok()
-        .map(|output| output.status.success())
+    let output = command.output().await.ok()?;
+    tracing::debug!(
+        workspace_path = %workspace_path.display(),
+        args = ?args,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        exit_status = ?output.status.code(),
+        "workspace capture git command completed"
+    );
+    Some(output.status.success())
 }
 
 async fn git_stdout(
@@ -324,12 +545,20 @@ async fn git_stdout(
     args: &[&str],
     index_path: Option<&Path>,
 ) -> Option<String> {
+    let started_at = Instant::now();
     let mut command = Command::new("git");
     command.arg("-C").arg(workspace_path).args(args);
     if let Some(index_path) = index_path {
         command.env("GIT_INDEX_FILE", index_path);
     }
     let output = command.output().await.ok()?;
+    tracing::debug!(
+        workspace_path = %workspace_path.display(),
+        args = ?args,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        exit_status = ?output.status.code(),
+        "workspace capture git command completed"
+    );
     if !output.status.success() {
         return None;
     }
@@ -438,6 +667,28 @@ fn normalize_git_relative_path(raw: &str) -> Option<String> {
     Some(normalized.join("/"))
 }
 
+fn canonicalize_lossy(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn journal_relative_path(workspace_path: &Path, path: &Path) -> Option<String> {
+    let canonical_path;
+    let relative = if let Ok(relative) = path.strip_prefix(workspace_path) {
+        relative
+    } else {
+        canonical_path = canonicalize_lossy(path);
+        canonical_path.strip_prefix(workspace_path).ok()?
+    };
+    let normalized = normalize_git_relative_path(&relative.to_string_lossy())?;
+    let mut components = Path::new(&normalized).components();
+    if components.next().is_some_and(
+        |component| matches!(component, Component::Normal(part) if part == OPENTEAMS_DIR),
+    ) {
+        return None;
+    }
+    Some(normalized)
+}
+
 fn is_internal_openteams_runtime_path(path: &Path) -> bool {
     let components = path
         .components()
@@ -528,6 +779,8 @@ mod tests {
 
         std::fs::write(repo_path.join("other-session.txt"), "other\n").expect("write other");
         let baseline = capture_workspace_change_baseline(&repo_path).await;
+        assert!(baseline.uses_change_journal());
+        assert!(baseline.untracked_files.is_empty());
 
         std::fs::write(repo_path.join("current-session.txt"), "current\n").expect("write current");
         let run_dir = tempdir.path().join("run-record");
@@ -543,5 +796,63 @@ mod tests {
             delta.untracked_files,
             vec!["current-session.txt".to_string()]
         );
+        assert!(!delta.untracked_capture_incomplete);
+    }
+
+    #[tokio::test]
+    async fn baseline_copies_real_index_without_mutating_it() {
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let repo_path = tempdir.path().join("repo");
+        let git = GitService::new();
+        git.initialize_repo_with_main_branch(&repo_path)
+            .expect("init repo");
+        std::fs::write(repo_path.join("tracked.txt"), "committed\n").expect("write tracked");
+        git.commit(&repo_path, "baseline").expect("commit baseline");
+
+        std::fs::write(repo_path.join("tracked.txt"), "working tree\n")
+            .expect("write unstaged change");
+        std::fs::write(repo_path.join("staged.txt"), "staged\n").expect("write staged file");
+        let add_status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "--", "staged.txt"])
+            .status()
+            .expect("stage file");
+        assert!(add_status.success());
+
+        let git_dir = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["rev-parse", "--absolute-git-dir"])
+            .output()
+            .expect("resolve git dir");
+        assert!(git_dir.status.success());
+        let index_path =
+            PathBuf::from(String::from_utf8_lossy(&git_dir.stdout).trim()).join("index");
+        let index_before = std::fs::read(&index_path).expect("read index before capture");
+
+        let baseline = capture_workspace_change_baseline(&repo_path).await;
+        let tree = baseline.git_tree.expect("capture baseline tree");
+        let index_after = std::fs::read(&index_path).expect("read index after capture");
+        assert_eq!(index_before, index_after);
+
+        let tree_files = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["ls-tree", "-r", "--name-only", &tree])
+            .output()
+            .expect("list baseline tree");
+        assert!(tree_files.status.success());
+        let tree_files = String::from_utf8_lossy(&tree_files.stdout);
+        assert!(tree_files.lines().any(|path| path == "staged.txt"));
+
+        let tracked_contents = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["show", &format!("{tree}:tracked.txt")])
+            .output()
+            .expect("read tracked file from baseline tree");
+        assert!(tracked_contents.status.success());
+        assert_eq!(tracked_contents.stdout, b"working tree\n");
     }
 }

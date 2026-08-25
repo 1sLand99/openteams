@@ -2381,9 +2381,10 @@ impl ChatRunner {
             startup_timing.mark(
                 startup_timing::StartupMilestoneName::WorkspaceBaselineCaptured,
                 Some(format!(
-                    "has_git_tree={},untracked_count={}",
+                    "has_git_tree={},untracked_count={},change_journal={}",
                     workspace_change_baseline.git_tree.is_some(),
-                    workspace_change_baseline.untracked_files.len()
+                    workspace_change_baseline.untracked_files.len(),
+                    workspace_change_baseline.uses_change_journal()
                 )),
             );
             tracing::debug!(
@@ -2394,6 +2395,7 @@ impl ChatRunner {
                 workspace_path = %workspace_path,
                 baseline_has_git_tree = workspace_change_baseline.git_tree.is_some(),
                 baseline_untracked_count = workspace_change_baseline.untracked_files.len(),
+                baseline_uses_change_journal = workspace_change_baseline.uses_change_journal(),
                 "[chat_runner] Captured workspace change baseline for agent run"
             );
             let run_records_dir = Self::workspace_run_records_dir(
