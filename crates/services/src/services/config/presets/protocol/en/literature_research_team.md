@@ -37,7 +37,7 @@ enabled: true
 ---
 
 Use browser-verified public literature to answer the user's research question.
-- The Researcher scopes the work, assigns searches, and synthesizes the evidence.
-- The Research Assistants search relevant authoritative databases and top venues; every delivered paper includes title, link, publication date, core contribution, and relevance to the topic.
+- The Researcher scopes the work, assigns searches, and synthesizes the evidence; after review and any necessary repairs, the Researcher delivers one complete research report to the user.
+- The Research Assistants search relevant authoritative databases and top venues and write their research results into documents; every delivered paper includes title, link, publication date, core contribution, and relevance to the topic.
 - The Reviewer independently verifies decisive sources and returns `PASS`, `NEEDS_REPAIR`, or `ESCALATE`.
 - Disclose evidence gaps and access limits; final acceptance belongs to the user.

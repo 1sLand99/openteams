@@ -8,11 +8,10 @@
  * user-level configuration. OpenTeams' production ACP client drives this
  * process; this fixture only replaces the external CLI protocol.
  *
- * MCP isolation carrier: the production adapter writes the frozen canonical
- * member snapshot to the path in OPENTEAMS_ACP_MCP_SNAPSHOT_PATH and pins it
- * in both environment layers. This fixture reads that snapshot, spawns each
- * configured stdio MCP server (the local offline mcp-server), performs
- * initialize + tools/list, and records every server it connected to.
+ * MCP isolation carrier: most ACP adapters receive the frozen member snapshot
+ * through ACP session parameters. Kimi 0.38 cannot accept standard ACP stdio
+ * entries, so its production adapter installs the same snapshot in a native,
+ * member-scoped KIMI_CODE_HOME view and sends an empty ACP MCP list.
  *
  * Per-run control environment:
  *   FAKE_ACP_PROTOCOL_LOG    - JSONL protocol log (redacted of the fake secret)
@@ -25,7 +24,7 @@
  *   FAKE_ACP_STDIO_MCP_COMMAND - node binary used to launch the MCP server
  */
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 
@@ -43,6 +42,7 @@ const snapshotPath = process.env.OPENTEAMS_ACP_MCP_SNAPSHOT_PATH || process.env.
 const nodeBin = process.env.FAKE_ACP_STDIO_MCP_COMMAND || "node";
 
 let cancelled = false;
+const isKimiRuntime = basename(process.argv[1] || "").replace(/\.exe$/i, "") === "kimi";
 
 function redact(value) {
   if (!fakeSecret) return String(value);
@@ -58,12 +58,32 @@ function logProtocol(event) {
   }
 }
 
+function inspectKimiRuntimeMcp() {
+  if (!isKimiRuntime) {
+    return {};
+  }
+  const runtimeHome = process.env.KIMI_CODE_HOME || join(process.env.HOME || "", ".kimi-code");
+  try {
+    const raw = JSON.parse(readFileSync(join(runtimeHome, "mcp.json"), "utf8"));
+    const servers = raw?.mcpServers || {};
+    logProtocol({
+      event: "kimi_runtime_mcp_read",
+      server_names: Object.keys(servers),
+    });
+    return servers;
+  } catch (error) {
+    logProtocol({ event: "kimi_runtime_mcp_read_error", error: redact(error.message) });
+    return {};
+  }
+}
+
 logProtocol({
   event: "process_start",
   runner: RUNNER,
   argv: process.argv.slice(2),
   snapshot_path: snapshotPath || "",
 });
+const kimiRuntimeServers = inspectKimiRuntimeMcp();
 
 function send(message) {
   process.stdout.write(JSON.stringify(message) + "\n");
@@ -142,6 +162,24 @@ function mcpNamesFromParams(params) {
   return (Array.isArray(params?.mcpServers) ? params.mcpServers : [])
     .map((server) => server?.name)
     .filter((name) => typeof name === "string" && name.length > 0);
+}
+
+function rejectKimiAcpStdio(id, params) {
+  if (
+    !isKimiRuntime ||
+    !(params?.mcpServers || []).some((server) => !("type" in server))
+  ) {
+    return false;
+  }
+  send({
+    jsonrpc: "2.0",
+    id,
+    error: {
+      code: -32603,
+      message: "ACP stdio MCP server does not declare a runtime identity",
+    },
+  });
+  return true;
 }
 
 function readSnapshotServers() {
@@ -299,7 +337,7 @@ async function handlePrompt(id, params) {
   if (hangMode) {
     return;
   }
-  const servers = readSnapshotServers();
+  const servers = isKimiRuntime ? kimiRuntimeServers : readSnapshotServers();
   connectedServers = await connectToMcpServers(servers);
   const names = connectedServers.filter((r) => r.connected).map((r) => r.server);
   if (failPromptMode) {
@@ -370,6 +408,9 @@ rl.on("line", (line) => {
       break;
     }
     case "session/new": {
+      if (rejectKimiAcpStdio(id, params)) {
+        break;
+      }
       respond(id, {
         sessionId: SESSION_ID,
         configOptions: makeConfigOptions(),
@@ -378,6 +419,9 @@ rl.on("line", (line) => {
     }
     case "session/load":
     case "session/resume": {
+      if (rejectKimiAcpStdio(id, params)) {
+        break;
+      }
       respond(id, {
         sessionId: params?.sessionId || SESSION_ID,
         configOptions: makeConfigOptions(),

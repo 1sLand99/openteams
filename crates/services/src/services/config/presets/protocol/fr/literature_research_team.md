@@ -12,7 +12,7 @@ workflow_steps:
 ---
 
 Répondre à la question de recherche avec des publications publiques vérifiées dans le navigateur.
-- Le Researcher cadre le travail, répartit les recherches et synthétise les preuves.
-- L’Assistant consulte les bases reconnues et les principales revues ou conférences du domaine ; chaque publication livrée indique son titre, son lien, sa date, sa contribution essentielle et son rapport au sujet.
+- Le Researcher cadre le travail, répartit les recherches et synthétise les preuves ; après la revue et les corrections nécessaires, il remet à l’utilisateur un rapport de recherche complet.
+- L’Assistant consulte les bases reconnues et les principales revues ou conférences du domaine, et consigne ses résultats de recherche dans des documents ; chaque publication livrée indique son titre, son lien, sa date, sa contribution essentielle et son rapport au sujet.
 - Le Reviewer vérifie indépendamment les sources décisives et rend `PASS`, `NEEDS_REPAIR` ou `ESCALATE`.
 - Signaler les lacunes et limites d’accès ; l’acceptation finale appartient à l’utilisateur.

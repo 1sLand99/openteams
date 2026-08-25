@@ -194,6 +194,11 @@ impl AcpAgentHarness {
         self.config.empty_end_turn_auth_error.as_deref()
     }
 
+    #[cfg(test)]
+    pub(crate) fn mcp_server_count(&self) -> usize {
+        self.config.mcp_servers.len()
+    }
+
     pub fn with_full_access(mut self, full_access: bool) -> Self {
         self.config.client_services.full_access = full_access;
         self

@@ -1,5 +1,8 @@
 use std::{
     collections::BTreeSet,
+    ffi::OsStr,
+    fs::{self, DirBuilder, File, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -8,6 +11,7 @@ use async_trait::async_trait;
 use derivative::Derivative;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use ts_rs::TS;
 use workspace_utils::msg_store::MsgStore;
 
@@ -15,7 +19,10 @@ use super::acp::{
     AcpAccessMode, AcpAgentHarness, AcpApprovalMode, AcpApprovalPolicy, AcpAuthSelection,
     AcpCapabilityProbe, AcpClientServicePolicy, AcpConfigChoice, AcpConfigOptionKind,
     AcpConfigOptionSnapshot, AcpConfigSource, AcpExecutionOptions, AcpResumePolicy,
-    mcp::{AcpMcpPolicy, load_prepared_acp_mcp_config, prepare_acp_mcp_for_run},
+    mcp::{
+        AcpMcpPolicy, load_prepared_acp_mcp_config, pin_mcp_run_environment,
+        prepare_acp_mcp_for_run,
+    },
 };
 use crate::{
     approvals::ExecutorApprovalService,
@@ -63,6 +70,8 @@ pub struct KimiCode {
 impl KimiCode {
     const BASE_COMMAND: &'static str = "kimi";
     const TERMINAL_AUTH_METHOD: &'static str = "login";
+    const CODE_HOME_ENV: &'static str = "KIMI_CODE_HOME";
+    const SHARE_DIR_ENV: &'static str = "KIMI_SHARE_DIR";
     const EMPTY_END_TURN_AUTH_ERROR: &'static str = "Kimi ACP ended the turn without returning content or activity. The Kimi login may have expired; run `kimi login` and retry.";
 
     pub fn base_command() -> &'static str {
@@ -157,9 +166,13 @@ impl KimiCode {
         tracing::debug!(
             server_count = effective.servers.len(),
             config_hash = %effective.config_hash,
-            "resolved effective Kimi ACP MCP configuration"
+            "resolved effective Kimi native MCP configuration"
         );
-        Ok(harness.with_mcp_servers(effective.servers))
+        // Kimi 0.38 rejects the standard ACP stdio shape because stdio servers
+        // have no `type` discriminator. The same member snapshot is installed
+        // in the isolated native Kimi view during preparation, so no MCP server
+        // is duplicated through `session/new` or `session/load`.
+        Ok(harness.with_mcp_servers(Vec::new()))
     }
 
     async fn configured_default_model(&self, env: &ExecutionEnv) -> Option<String> {
@@ -242,6 +255,346 @@ impl KimiCode {
     }
 }
 
+const KIMI_MCP_VIEW_LOCK_FILE: &str = ".openteams-mcp-view.lock";
+
+fn is_shared_kimi_state_file(name: &OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some("session_index.jsonl" | "workspaces.json")
+    )
+}
+
+fn create_private_kimi_view_directory(path: &Path) -> Result<(), ExecutorError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => return Ok(()),
+        Ok(_) => {
+            return Err(ExecutorError::Configuration(
+                "Kimi MCP view path is not a private directory".to_string(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ExecutorError::Io(error)),
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(ExecutorError::Io)?;
+    }
+    let mut builder = DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path).map_err(ExecutorError::Io)?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                Ok(())
+            } else {
+                Err(ExecutorError::Configuration(
+                    "Kimi MCP view path is not a private directory".to_string(),
+                ))
+            }
+        }
+        Err(error) => Err(ExecutorError::Io(error)),
+    }
+}
+
+fn kimi_mcp_view_home(
+    context: &McpRunContext,
+    source_home: &Path,
+) -> Result<PathBuf, ExecutorError> {
+    let workspace = fs::canonicalize(context.current_dir()).map_err(ExecutorError::Io)?;
+    let runtime_root = context.current_dir().join(".openteams");
+    create_private_kimi_view_directory(&runtime_root)?;
+    let runtime_root = fs::canonicalize(&runtime_root).map_err(ExecutorError::Io)?;
+    if !runtime_root.starts_with(&workspace) {
+        return Err(ExecutorError::Configuration(
+            "Kimi MCP view escapes the workspace".to_string(),
+        ));
+    }
+    let state_root = runtime_root.join("executor-state").join("kimi-mcp-view");
+    create_private_kimi_view_directory(&runtime_root.join("executor-state"))?;
+    create_private_kimi_view_directory(&state_root)?;
+    let source_hash = format!(
+        "{:x}",
+        Sha256::digest(source_home.as_os_str().as_encoded_bytes())
+    );
+    let view_home = state_root.join(format!(
+        "{}-{}",
+        context.session_agent_id(),
+        &source_hash[..16]
+    ));
+    create_private_kimi_view_directory(&view_home)?;
+    Ok(view_home)
+}
+
+#[cfg(windows)]
+fn replace_kimi_view_file_atomically(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::{iter, os::windows::ffi::OsStrExt};
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let from = from
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let to = to
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_kimi_view_file_atomically(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::rename(from, to)
+}
+
+fn replace_private_kimi_view_file(path: &Path, contents: &[u8]) -> Result<(), ExecutorError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(ExecutorError::Configuration(
+                "Kimi MCP view file path is not a file".to_string(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ExecutorError::Io(error)),
+    }
+    let parent = path.parent().ok_or_else(|| {
+        ExecutorError::Configuration("Kimi MCP view file has no parent directory".to_string())
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        ExecutorError::Configuration("Kimi MCP view file has no name".to_string())
+    })?;
+    let temporary_path = parent.join(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&temporary_path).map_err(ExecutorError::Io)?;
+        file.write_all(contents).map_err(ExecutorError::Io)?;
+        file.sync_all().map_err(ExecutorError::Io)?;
+        replace_kimi_view_file_atomically(&temporary_path, path).map_err(ExecutorError::Io)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+fn lock_kimi_mcp_view(view_home: &Path) -> Result<File, ExecutorError> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options
+        .open(view_home.join(KIMI_MCP_VIEW_LOCK_FILE))
+        .map_err(ExecutorError::Io)?;
+    lock.lock().map_err(ExecutorError::Io)?;
+    Ok(lock)
+}
+
+fn link_kimi_shared_state(source: &Path, target: &Path) -> Result<(), ExecutorError> {
+    let source = fs::canonicalize(source).map_err(ExecutorError::Io)?;
+    let source_is_directory = fs::metadata(&source).map_err(ExecutorError::Io)?.is_dir();
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if fs::canonicalize(target).map_err(ExecutorError::Io)? == source {
+                return Ok(());
+            }
+            fs::remove_file(target).map_err(ExecutorError::Io)?;
+        }
+        Ok(metadata) if metadata.is_file() => {
+            fs::remove_file(target).map_err(ExecutorError::Io)?;
+        }
+        Ok(_) => {
+            return Err(ExecutorError::Configuration(
+                "Kimi shared state target is not a symbolic link".to_string(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ExecutorError::Io(error)),
+    }
+    #[cfg(unix)]
+    {
+        let _ = source_is_directory;
+        std::os::unix::fs::symlink(source, target).map_err(ExecutorError::Io)
+    }
+    #[cfg(windows)]
+    {
+        if source_is_directory {
+            std::os::windows::fs::symlink_dir(source, target).map_err(ExecutorError::Io)
+        } else {
+            std::os::windows::fs::symlink_file(source, target).map_err(ExecutorError::Io)
+        }
+    }
+}
+
+fn ensure_kimi_shared_session_state(source_home: &Path) -> Result<(), ExecutorError> {
+    let sessions = source_home.join("sessions");
+    match fs::metadata(&sessions) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(ExecutorError::Configuration(
+                "Kimi sessions path is not a directory".to_string(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_private_kimi_view_directory(&sessions)?;
+        }
+        Err(error) => return Err(ExecutorError::Io(error)),
+    }
+    let session_index = source_home.join("session_index.jsonl");
+    let mut options = OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(session_index).map_err(ExecutorError::Io)?;
+    Ok(())
+}
+
+/// Build a member-stable configuration view of Kimi's normal home whenever a
+/// native member MCP file is required or an ambient `mcp.json` must be hidden.
+/// Authentication and session resources remain linked to the canonical home,
+/// while the member MCP file exists only for the executor process lifetime.
+/// The stable view path is retained because Kimi persists absolute session
+/// paths below its code home.
+fn prepare_kimi_member_mcp_view_blocking(
+    source_home: Option<&Path>,
+    context: &McpRunContext,
+    member_mcp: &[u8],
+    has_member_mcp: bool,
+) -> Result<Option<(PathBuf, File)>, ExecutorError> {
+    let Some(source_home) = source_home else {
+        return Ok(None);
+    };
+    let has_ambient_mcp = match fs::symlink_metadata(source_home.join("mcp.json")) {
+        Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => true,
+        Ok(_) => {
+            return Err(ExecutorError::Configuration(
+                "Kimi ambient MCP path is not a file".to_string(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(ExecutorError::Io(error)),
+    };
+    if !has_member_mcp && !has_ambient_mcp {
+        return Ok(None);
+    }
+    match fs::symlink_metadata(source_home) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_private_kimi_view_directory(source_home)?;
+        }
+        Err(error) => return Err(ExecutorError::Io(error)),
+    }
+    let source_home = fs::canonicalize(source_home).map_err(ExecutorError::Io)?;
+    ensure_kimi_shared_session_state(&source_home)?;
+    let view_home = kimi_mcp_view_home(context, &source_home)?;
+    let view_lock = lock_kimi_mcp_view(&view_home)?;
+    let entries = fs::read_dir(source_home)
+        .map_err(ExecutorError::Io)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ExecutorError::Io)?;
+    let source_entry_names = entries
+        .iter()
+        .map(fs::DirEntry::file_name)
+        .collect::<BTreeSet<_>>();
+    for entry in fs::read_dir(&view_home).map_err(ExecutorError::Io)? {
+        let entry = entry.map_err(ExecutorError::Io)?;
+        let name = entry.file_name();
+        if name == OsStr::new("mcp.json")
+            || name == OsStr::new(KIMI_MCP_VIEW_LOCK_FILE)
+            || source_entry_names.contains(&name)
+        {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(ExecutorError::Io)?;
+        if file_type.is_file() || file_type.is_symlink() {
+            fs::remove_file(entry.path()).map_err(ExecutorError::Io)?;
+        }
+    }
+    for entry in entries {
+        let name = entry.file_name();
+        if name == OsStr::new("mcp.json") {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(ExecutorError::Io)?;
+        let metadata = if file_type.is_symlink() {
+            Some(fs::metadata(entry.path()).map_err(ExecutorError::Io)?)
+        } else {
+            None
+        };
+        let is_directory =
+            file_type.is_dir() || metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
+        if is_directory || is_shared_kimi_state_file(&name) {
+            link_kimi_shared_state(&entry.path(), &view_home.join(&name))?;
+            continue;
+        }
+        if file_type.is_file() || metadata.as_ref().is_some_and(std::fs::Metadata::is_file) {
+            let contents = fs::read(entry.path()).map_err(ExecutorError::Io)?;
+            replace_private_kimi_view_file(&view_home.join(&name), &contents)?;
+        }
+    }
+    replace_private_kimi_view_file(&view_home.join("mcp.json"), member_mcp)?;
+    Ok(Some((view_home, view_lock)))
+}
+
+async fn prepare_kimi_member_mcp_view(
+    source_home: Option<&Path>,
+    context: &McpRunContext,
+    member_mcp: Vec<u8>,
+    has_member_mcp: bool,
+) -> Result<Option<(PathBuf, File)>, ExecutorError> {
+    let source_home = source_home.map(Path::to_path_buf);
+    let context = context.clone();
+    tokio::task::spawn_blocking(move || {
+        prepare_kimi_member_mcp_view_blocking(
+            source_home.as_deref(),
+            &context,
+            &member_mcp,
+            has_member_mcp,
+        )
+    })
+    .await
+    .map_err(|error| {
+        ExecutorError::Io(std::io::Error::other(format!(
+            "Kimi MCP view preparation task failed: {error}"
+        )))
+    })?
+}
+
 #[async_trait]
 impl StandardCodingAgentExecutor for KimiCode {
     async fn prepare_mcp_for_run(
@@ -250,9 +603,36 @@ impl StandardCodingAgentExecutor for KimiCode {
         context: &McpRunContext,
         env: &mut ExecutionEnv,
     ) -> Result<PreparedMcpRun, ExecutorError> {
-        // Keep Kimi's normal home for authentication and session state. Member MCP
-        // isolation is provided by the private ACP snapshot prepared for this run.
-        prepare_acp_mcp_for_run(canonical, context, env, &mut self.cmd, "kimi-acp-mcp")
+        let source_env = env.clone().with_profile(&self.cmd);
+        let source_home = kimi_code_home(Some(&source_env));
+        let prepared =
+            prepare_acp_mcp_for_run(canonical, context, env, &mut self.cmd, "kimi-acp-mcp")?;
+        let member_mcp = serde_json::to_vec_pretty(canonical)?;
+        let Some((mcp_view_home, view_lock)) = prepare_kimi_member_mcp_view(
+            source_home.as_deref(),
+            context,
+            member_mcp,
+            !canonical.mcp_servers.is_empty(),
+        )
+        .await?
+        else {
+            return Ok(prepared);
+        };
+        let native_mcp_path = mcp_view_home.join("mcp.json");
+        let mcp_view_home = mcp_view_home.to_string_lossy().into_owned();
+        pin_mcp_run_environment(
+            env,
+            &mut self.cmd,
+            Self::CODE_HOME_ENV,
+            mcp_view_home.clone(),
+        );
+        pin_mcp_run_environment(env, &mut self.cmd, Self::SHARE_DIR_ENV, mcp_view_home);
+        Ok(
+            prepared.with_cleanup(crate::executors::ExecutorRunCleanup::locked_file(
+                native_mcp_path,
+                view_lock,
+            )),
+        )
     }
 
     fn overlay_acp_execution_options(&mut self, higher_priority: &AcpExecutionOptions) {
@@ -578,8 +958,11 @@ mod tests {
     use crate::env::RepoContext;
 
     fn run_context(workspace: &Path) -> McpRunContext {
-        McpRunContext::new(workspace, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
-            .expect("run context")
+        run_context_for(workspace, uuid::Uuid::new_v4())
+    }
+
+    fn run_context_for(workspace: &Path, session_agent_id: uuid::Uuid) -> McpRunContext {
+        McpRunContext::new(workspace, session_agent_id, uuid::Uuid::new_v4()).expect("run context")
     }
 
     fn kimi() -> KimiCode {
@@ -760,12 +1143,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preparation_keeps_canonical_home_and_uses_member_mcp_snapshot() {
+    async fn preparation_hides_ambient_home_mcp_and_shares_session_state() {
         let workspace = tempfile::tempdir().expect("workspace");
         let source_home = workspace.path().join("source-kimi-home");
         tokio::fs::create_dir_all(source_home.join("credentials"))
             .await
             .expect("credentials directory");
+        tokio::fs::create_dir_all(source_home.join("sessions"))
+            .await
+            .expect("sessions directory");
         let source_config_path = source_home.join("config.toml");
         let source_credentials_path = source_home.join("credentials/kimi-code.json");
         let source_mcp_path = source_home.join("mcp.json");
@@ -812,8 +1198,13 @@ mod tests {
         );
         env.insert("KIMI_CODE_HOME", source_home.to_string_lossy().into_owned());
 
+        let session_agent_id = uuid::Uuid::new_v4();
         let prepared = executor
-            .prepare_mcp_for_run(&canonical, &run_context(workspace.path()), &mut env)
+            .prepare_mcp_for_run(
+                &canonical,
+                &run_context_for(workspace.path(), session_agent_id),
+                &mut env,
+            )
             .await
             .expect("Kimi MCP preparation");
         let snapshot_path = PathBuf::from(
@@ -823,17 +1214,55 @@ mod tests {
         let effective = load_prepared_acp_mcp_config(&env)
             .await
             .expect("prepared member MCP");
+        let runtime_home = PathBuf::from(env.get("KIMI_CODE_HOME").expect("runtime Kimi home"));
+        let runtime_mcp: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(runtime_home.join("mcp.json"))
+                .await
+                .expect("read runtime Kimi MCP"),
+        )
+        .expect("parse runtime Kimi MCP");
 
+        assert_ne!(runtime_home, source_home);
         assert_eq!(
-            env.get("KIMI_CODE_HOME").map(String::as_str),
-            Some(source_home.to_string_lossy().as_ref())
+            env.get("KIMI_SHARE_DIR").map(PathBuf::from),
+            Some(runtime_home.clone())
         );
-        assert!(env.get("KIMI_SHARE_DIR").is_none());
+        assert_eq!(
+            runtime_mcp["mcpServers"]
+                .as_object()
+                .expect("runtime server map")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["member-only"]
+        );
+        assert_eq!(
+            tokio::fs::read(runtime_home.join("config.toml"))
+                .await
+                .expect("read runtime Kimi config"),
+            original_config
+        );
         assert!(
-            !workspace
-                .path()
-                .join(".openteams/executor-state/kimi-code")
-                .exists()
+            !std::fs::symlink_metadata(runtime_home.join("config.toml"))
+                .expect("runtime config metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::canonicalize(runtime_home.join("credentials"))
+                .expect("runtime credentials target"),
+            std::fs::canonicalize(source_home.join("credentials"))
+                .expect("source credentials target")
+        );
+        assert_eq!(
+            std::fs::canonicalize(runtime_home.join("sessions")).expect("runtime sessions target"),
+            std::fs::canonicalize(source_home.join("sessions")).expect("source sessions target")
+        );
+        assert_eq!(
+            std::fs::canonicalize(runtime_home.join("session_index.jsonl"))
+                .expect("runtime session index target"),
+            std::fs::canonicalize(source_home.join("session_index.jsonl"))
+                .expect("source session index target")
         );
         assert_eq!(
             tokio::fs::read(&source_config_path)
@@ -855,9 +1284,23 @@ mod tests {
         );
         assert!(executor.is_authenticated(&env));
         assert_eq!(effective.server_names(), ["member-only".to_string()].into());
+        assert_eq!(
+            executor
+                .acp_harness(&env)
+                .await
+                .expect("Kimi native MCP harness")
+                .mcp_server_count(),
+            0
+        );
+        tokio::fs::write(runtime_home.join("sessions/shared-state.json"), b"{}")
+            .await
+            .expect("write shared session state through runtime view");
+        assert!(source_home.join("sessions/shared-state.json").is_file());
 
         drop(prepared.into_cleanup());
         assert!(!snapshot_path.exists());
+        assert!(runtime_home.exists());
+        assert!(!runtime_home.join("mcp.json").exists());
         assert_eq!(
             tokio::fs::read(&source_config_path)
                 .await
@@ -876,10 +1319,124 @@ mod tests {
                 .expect("read source Kimi MCP after cleanup"),
             original_mcp
         );
+
+        let mut next_executor = kimi();
+        let mut next_env = ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+        next_env.insert("KIMI_CODE_HOME", source_home.to_string_lossy().into_owned());
+        tokio::fs::remove_file(&source_config_path)
+            .await
+            .expect("remove canonical Kimi config before refresh");
+        let next_prepared = next_executor
+            .prepare_mcp_for_run(
+                &canonical,
+                &run_context_for(workspace.path(), session_agent_id),
+                &mut next_env,
+            )
+            .await
+            .expect("next Kimi MCP preparation");
+        assert_eq!(
+            next_env.get("KIMI_CODE_HOME").map(PathBuf::from),
+            Some(runtime_home.clone())
+        );
+        assert!(
+            next_env
+                .get("KIMI_CODE_HOME")
+                .map(PathBuf::from)
+                .expect("next Kimi MCP view")
+                .join("sessions/shared-state.json")
+                .is_file()
+        );
+        assert!(!runtime_home.join("config.toml").exists());
+        drop(next_prepared.into_cleanup());
+        assert!(!runtime_home.join("mcp.json").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_preparation_reuses_one_member_runtime_view() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source_home = workspace.path().join("source-kimi-home");
+        tokio::fs::create_dir_all(&source_home)
+            .await
+            .expect("source Kimi home");
+        tokio::fs::write(
+            source_home.join("config.toml"),
+            "[providers.fixture]\ntype = \"openai\"\n",
+        )
+        .await
+        .expect("Kimi config");
+        tokio::fs::write(
+            source_home.join("mcp.json"),
+            r#"{"mcpServers":{"ambient":{"command":"must-not-run"}}}"#,
+        )
+        .await
+        .expect("ambient Kimi MCP");
+        let session_agent_id = uuid::Uuid::new_v4();
+        let workspace_path = workspace.path().to_path_buf();
+
+        let runtime_homes = futures::future::join_all((0..8).map(|_| {
+            let source_home = source_home.clone();
+            let workspace_path = workspace_path.clone();
+            async move {
+                let mut executor = kimi();
+                let mut env = ExecutionEnv::new(
+                    RepoContext::new(workspace_path.clone(), Vec::new()),
+                    false,
+                    String::new(),
+                );
+                env.insert("KIMI_CODE_HOME", source_home.to_string_lossy().into_owned());
+                let prepared = executor
+                    .prepare_mcp_for_run(
+                        &MemberMcpConfig::default(),
+                        &run_context_for(&workspace_path, session_agent_id),
+                        &mut env,
+                    )
+                    .await
+                    .expect("concurrent Kimi MCP preparation");
+                let runtime_home = PathBuf::from(
+                    env.get("KIMI_CODE_HOME")
+                        .expect("concurrent runtime Kimi home"),
+                );
+                let runtime_mcp: serde_json::Value = serde_json::from_slice(
+                    &tokio::fs::read(runtime_home.join("mcp.json"))
+                        .await
+                        .expect("concurrent runtime Kimi MCP"),
+                )
+                .expect("parse concurrent runtime Kimi MCP");
+                assert!(
+                    runtime_mcp["mcpServers"]
+                        .as_object()
+                        .expect("runtime server map")
+                        .is_empty()
+                );
+                drop(prepared.into_cleanup());
+                runtime_home
+            }
+        }))
+        .await;
+
+        assert!(
+            runtime_homes
+                .iter()
+                .all(|runtime_home| runtime_home == &runtime_homes[0])
+        );
+        assert!(
+            std::fs::read_dir(&runtime_homes[0])
+                .expect("runtime Kimi view")
+                .all(|entry| !entry
+                    .expect("runtime Kimi view entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp"))
+        );
+        assert!(!runtime_homes[0].join("mcp.json").exists());
     }
 
     #[tokio::test]
-    async fn explicit_empty_member_map_does_not_relocate_kimi_home() {
+    async fn explicit_empty_member_map_hides_ambient_kimi_mcp() {
         let workspace = tempfile::tempdir().expect("workspace");
         let source_home = workspace.path().join("source-kimi-home");
         tokio::fs::create_dir_all(&source_home)
@@ -914,14 +1471,27 @@ mod tests {
         let effective = load_prepared_acp_mcp_config(&env)
             .await
             .expect("prepared empty Kimi MCP");
+        let runtime_home = PathBuf::from(env.get("KIMI_CODE_HOME").expect("runtime Kimi home"));
+        let runtime_mcp: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(runtime_home.join("mcp.json"))
+                .await
+                .expect("read runtime Kimi MCP"),
+        )
+        .expect("parse runtime Kimi MCP");
 
         assert!(ambient_path.is_file());
+        assert_ne!(runtime_home, source_home);
         assert_eq!(
-            env.get("KIMI_CODE_HOME").map(String::as_str),
-            Some(source_home.to_string_lossy().as_ref())
+            env.get("KIMI_SHARE_DIR").map(PathBuf::from),
+            Some(runtime_home.clone())
         );
-        assert!(env.get("KIMI_SHARE_DIR").is_none());
         assert!(effective.server_names().is_empty());
+        assert!(
+            runtime_mcp["mcpServers"]
+                .as_object()
+                .expect("runtime server map")
+                .is_empty()
+        );
         assert!(
             !workspace
                 .path()
@@ -936,12 +1506,104 @@ mod tests {
         );
 
         drop(prepared.into_cleanup());
+        assert!(runtime_home.exists());
+        assert!(!runtime_home.join("mcp.json").exists());
         assert_eq!(
             tokio::fs::read(&ambient_path)
                 .await
                 .expect("read source Kimi MCP after cleanup"),
             original_mcp
         );
+    }
+
+    #[tokio::test]
+    async fn home_without_ambient_mcp_stays_canonical() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source_home = workspace.path().join("source-kimi-home");
+        tokio::fs::create_dir_all(&source_home)
+            .await
+            .expect("source Kimi home");
+        tokio::fs::write(
+            source_home.join("config.toml"),
+            "[providers.fixture]\ntype = \"openai\"\n",
+        )
+        .await
+        .expect("Kimi config");
+        let mut executor = kimi();
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+        env.insert("KIMI_CODE_HOME", source_home.to_string_lossy().into_owned());
+
+        let prepared = executor
+            .prepare_mcp_for_run(
+                &MemberMcpConfig::default(),
+                &run_context(workspace.path()),
+                &mut env,
+            )
+            .await
+            .expect("Kimi MCP preparation");
+
+        assert_eq!(
+            env.get("KIMI_CODE_HOME").map(String::as_str),
+            Some(source_home.to_string_lossy().as_ref())
+        );
+        assert!(env.get("KIMI_SHARE_DIR").is_none());
+
+        drop(prepared.into_cleanup());
+        assert!(source_home.join("config.toml").is_file());
+    }
+
+    #[tokio::test]
+    async fn member_stdio_mcp_uses_native_view_without_acp_injection() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let source_home = workspace.path().join("source-kimi-home");
+        let command = std::env::current_exe()
+            .expect("current executable")
+            .to_string_lossy()
+            .into_owned();
+        let canonical = MemberMcpConfig {
+            mcp_servers: [(
+                "playwright".to_string(),
+                serde_json::json!({"command": command}),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let mut executor = kimi();
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+        env.insert("KIMI_CODE_HOME", source_home.to_string_lossy().into_owned());
+
+        let prepared = executor
+            .prepare_mcp_for_run(&canonical, &run_context(workspace.path()), &mut env)
+            .await
+            .expect("Kimi native MCP preparation");
+        let runtime_home = PathBuf::from(env.get("KIMI_CODE_HOME").expect("runtime Kimi home"));
+        let runtime_mcp: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(runtime_home.join("mcp.json"))
+                .await
+                .expect("runtime Kimi MCP"),
+        )
+        .expect("parse runtime Kimi MCP");
+        let harness = executor
+            .acp_harness(&env)
+            .await
+            .expect("Kimi native MCP harness");
+
+        assert_ne!(runtime_home, source_home);
+        assert_eq!(runtime_mcp["mcpServers"]["playwright"]["command"], command);
+        assert_eq!(harness.mcp_server_count(), 0);
+
+        drop(prepared.into_cleanup());
+        assert!(!runtime_home.join("mcp.json").exists());
+        assert!(source_home.join("sessions").is_dir());
+        assert!(source_home.join("session_index.jsonl").is_file());
     }
 
     #[tokio::test]

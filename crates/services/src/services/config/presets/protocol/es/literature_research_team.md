@@ -12,7 +12,7 @@ workflow_steps:
 ---
 
 Responder la pregunta de investigación con literatura pública verificada mediante el navegador.
-- El Researcher delimita el trabajo, asigna búsquedas y sintetiza la evidencia.
-- El Assistant consulta bases autorizadas y las principales revistas o conferencias del área; cada publicación entregada incluye título, enlace, fecha, aporte principal y relación con el tema.
+- El Researcher delimita el trabajo, asigna búsquedas y sintetiza la evidencia; tras la revisión y las correcciones necesarias, entrega al usuario un informe de investigación completo.
+- El Assistant consulta bases autorizadas y las principales revistas o conferencias del área, y escribe los resultados de la investigación en documentos; cada publicación entregada incluye título, enlace, fecha, aporte principal y relación con el tema.
 - El Reviewer verifica de forma independiente las fuentes decisivas y devuelve `PASS`, `NEEDS_REPAIR` o `ESCALATE`.
 - Declarar vacíos de evidencia y límites de acceso; la aceptación final corresponde al usuario.

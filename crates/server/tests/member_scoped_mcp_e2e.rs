@@ -185,7 +185,7 @@ const MCP_E2E_REGISTRY: &[CliMcpE2eCase] = &[
         family: ProtocolFamily::AcpStdio,
         fixture_binary: "kimi",
         fixture_mode: "acp",
-        carrier: "OPENTEAMS_ACP_MCP_SNAPSHOT_PATH -> run/mcp.json + KIMI private home",
+        carrier: "frozen run snapshot -> transient mcp.json in stable member KIMI MCP view (empty ACP list)",
         global_config_rel: ".kimi-code/mcp.json",
     },
     CliMcpE2eCase {
@@ -792,6 +792,41 @@ fn parse_connected_servers(protocol: &str) -> Vec<String> {
         .collect()
 }
 
+fn assert_kimi_runtime_mcp_exactly(outcome: &RunOutcome, expected: &[&str]) -> Result<(), String> {
+    let protocol = read_optional(&outcome.protocol_log);
+    let mut observed = false;
+    let expected = expected
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    for line in protocol.lines().filter(|line| !line.trim().is_empty()) {
+        let value: Value = serde_json::from_str(line)
+            .map_err(|error| format!("Kimi protocol log contains invalid JSON: {error}"))?;
+        if value.get("event").and_then(Value::as_str) != Some("kimi_runtime_mcp_read") {
+            continue;
+        }
+        observed = true;
+        let names = value
+            .get("server_names")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Kimi runtime MCP evidence has no server_names array".to_string())?;
+        let names = names
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if names != expected {
+            return Err(format!(
+                "Kimi runtime view used {names:?}, expected {expected:?}"
+            ));
+        }
+    }
+    if !observed {
+        return Err("Kimi runtime MCP isolation evidence was not recorded".to_string());
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Secret scan and cleanup checks
 // ---------------------------------------------------------------------------
@@ -835,6 +870,29 @@ fn assert_tmp_clean(
         "cleanup {label}: PASS (no leftover private run dirs)"
     ));
     Ok(())
+}
+
+fn assert_kimi_runtime_mcp_cleaned(workspace: &Path) -> Result<(), String> {
+    let views = workspace
+        .join(".openteams")
+        .join("executor-state")
+        .join("kimi-mcp-view");
+    if !views.exists() {
+        return Ok(());
+    }
+    let leftover = fs::read_dir(&views)
+        .map_err(|error| format!("read Kimi runtime views: {error}"))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("mcp.json"))
+        .filter(|path| path.exists())
+        .collect::<Vec<_>>();
+    if leftover.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Kimi native member MCP files survived run cleanup: {leftover:?}"
+        ))
+    }
 }
 
 async fn collect_sqlite_secret_scan(pool: &SqlitePool, secret: &str) -> Vec<String> {
@@ -1328,6 +1386,10 @@ async fn e2e_005_global_invisible_and_byte_stable(
     }
     assert_connected_exactly(&outcome, &["member-mcp"])?;
     assert_no_connected(&outcome, &["global-sentinel"])?;
+    if case.runner == BaseCodingAgent::KimiCode {
+        assert_kimi_runtime_mcp_exactly(&outcome, &["member-mcp"])?;
+        assert_kimi_runtime_mcp_cleaned(&scenario.workspace)?;
+    }
 
     let after = fs::read(&global_path).expect("read global config after");
     if before != after {
