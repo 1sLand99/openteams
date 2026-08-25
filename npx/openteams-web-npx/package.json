@@ -1,6 +1,6 @@
 {
   "name": "openteams-web",
-  "version": "1.0.18-134",
+  "version": "1.0.19-135",
   "description": "AI Coding Agents Chatgroup - Alias package for @openteams-lab/openteams-web",
   "author": "openteams-lab",
   "license": "MIT",
@@ -42,6 +42,6 @@
     "arm64"
   ],
   "dependencies": {
-    "@openteams-lab/openteams-web": "^1.0.18-134"
+    "@openteams-lab/openteams-web": "^1.0.19-135"
   }
 }
