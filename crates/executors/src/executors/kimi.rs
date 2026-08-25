@@ -422,7 +422,50 @@ fn lock_kimi_mcp_view(view_home: &Path) -> Result<File, ExecutorError> {
     Ok(lock)
 }
 
-fn link_kimi_shared_state(source: &Path, target: &Path) -> Result<(), ExecutorError> {
+#[cfg(windows)]
+fn copy_kimi_directory_recursively(source: &Path, target: &Path) -> std::io::Result<()> {
+    for entry in walkdir::WalkDir::new(source).follow_links(true) {
+        let entry = entry.map_err(|error| std::io::Error::other(error.to_string()))?;
+        let relative = entry
+            .path()
+            .strip_prefix(source)
+            .map_err(std::io::Error::other)?;
+        let target_path = target.join(relative);
+        let metadata = fs::metadata(entry.path())?;
+        if metadata.is_dir() {
+            fs::create_dir_all(target_path)?;
+        } else if metadata.is_file() {
+            if let Some(parent) = target_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(entry.path(), target_path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_kimi_windows_shared_state_fallback(
+    source: &Path,
+    target: &Path,
+    source_is_directory: bool,
+) -> std::io::Result<()> {
+    let result = if source_is_directory {
+        copy_kimi_directory_recursively(source, target)
+    } else {
+        fs::copy(source, target).map(|_| ())
+    };
+    if result.is_err() {
+        if source_is_directory {
+            let _ = fs::remove_dir_all(target);
+        } else {
+            let _ = fs::remove_file(target);
+        }
+    }
+    result
+}
+
+fn materialize_kimi_shared_state(source: &Path, target: &Path) -> Result<(), ExecutorError> {
     let source = fs::canonicalize(source).map_err(ExecutorError::Io)?;
     let source_is_directory = fs::metadata(&source).map_err(ExecutorError::Io)?.is_dir();
     match fs::symlink_metadata(target) {
@@ -431,6 +474,12 @@ fn link_kimi_shared_state(source: &Path, target: &Path) -> Result<(), ExecutorEr
                 return Ok(());
             }
             fs::remove_file(target).map_err(ExecutorError::Io)?;
+        }
+        Ok(metadata) if cfg!(windows) && source_is_directory && metadata.is_dir() => {
+            return Ok(());
+        }
+        Ok(metadata) if cfg!(windows) && !source_is_directory && metadata.is_file() => {
+            return Ok(());
         }
         Ok(metadata) if metadata.is_file() => {
             fs::remove_file(target).map_err(ExecutorError::Io)?;
@@ -450,10 +499,28 @@ fn link_kimi_shared_state(source: &Path, target: &Path) -> Result<(), ExecutorEr
     }
     #[cfg(windows)]
     {
-        if source_is_directory {
-            std::os::windows::fs::symlink_dir(source, target).map_err(ExecutorError::Io)
+        let symlink_result = if source_is_directory {
+            std::os::windows::fs::symlink_dir(&source, target)
         } else {
-            std::os::windows::fs::symlink_file(source, target).map_err(ExecutorError::Io)
+            std::os::windows::fs::symlink_file(&source, target)
+        };
+        match symlink_result {
+            Ok(()) => Ok(()),
+            Err(symlink_error) => {
+                copy_kimi_windows_shared_state_fallback(&source, target, source_is_directory)
+                    .map_err(|fallback_error| {
+                        let fallback = if source_is_directory {
+                            "directory copy"
+                        } else {
+                            "file copy"
+                        };
+                        ExecutorError::Configuration(format!(
+                            "Kimi shared state could not use a Windows symlink or {fallback} fallback; enable Developer Mode or verify workspace write access and free space (symlink_os_error={:?}, fallback_os_error={:?})",
+                            symlink_error.raw_os_error(),
+                            fallback_error.raw_os_error()
+                        ))
+                    })
+            }
         }
     }
 }
@@ -486,8 +553,10 @@ fn ensure_kimi_shared_session_state(source_home: &Path) -> Result<(), ExecutorEr
 
 /// Build a member-stable configuration view of Kimi's normal home whenever a
 /// native member MCP file is required or an ambient `mcp.json` must be hidden.
-/// Authentication and session resources remain linked to the canonical home,
-/// while the member MCP file exists only for the executor process lifetime.
+/// Authentication and session resources remain linked to the canonical home
+/// when the platform permits it. Windows falls back to persistent member-local
+/// copies when symbolic-link privileges are unavailable. The member MCP file
+/// exists only for the executor process lifetime.
 /// The stable view path is retained because Kimi persists absolute session
 /// paths below its code home.
 fn prepare_kimi_member_mcp_view_blocking(
@@ -559,7 +628,7 @@ fn prepare_kimi_member_mcp_view_blocking(
         let is_directory =
             file_type.is_dir() || metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
         if is_directory || is_shared_kimi_state_file(&name) {
-            link_kimi_shared_state(&entry.path(), &view_home.join(&name))?;
+            materialize_kimi_shared_state(&entry.path(), &view_home.join(&name))?;
             continue;
         }
         if file_type.is_file() || metadata.as_ref().is_some_and(std::fs::Metadata::is_file) {
@@ -975,6 +1044,48 @@ mod tests {
             acp_mcp_policy: AcpMcpPolicy::default(),
             approvals: None,
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shared_state_copy_fallbacks_persist_in_the_member_view() {
+        let temp = TempDir::new().expect("create Windows Kimi link fixture");
+        let source_directory = temp.path().join("source-directory");
+        let directory_target = temp.path().join("directory-target");
+        fs::create_dir(&source_directory).expect("create source directory");
+        fs::write(source_directory.join("existing-session.json"), b"source")
+            .expect("write source directory state");
+
+        copy_kimi_windows_shared_state_fallback(&source_directory, &directory_target, true)
+            .expect("copy directory fallback");
+        assert_eq!(
+            fs::read(directory_target.join("existing-session.json"))
+                .expect("read copied directory state"),
+            b"source"
+        );
+        fs::write(directory_target.join("session.json"), b"{}")
+            .expect("write member-local directory state");
+        assert!(!source_directory.join("session.json").exists());
+        materialize_kimi_shared_state(&source_directory, &directory_target)
+            .expect("reuse existing directory copy");
+        assert!(directory_target.join("session.json").is_file());
+
+        let source_file = temp.path().join("session_index.jsonl");
+        let file_target = temp.path().join("session-index-target.jsonl");
+        fs::write(&source_file, b"before").expect("write source state file");
+        copy_kimi_windows_shared_state_fallback(&source_file, &file_target, false)
+            .expect("copy file fallback");
+        fs::write(&file_target, b"after").expect("write member-local file state");
+        assert_eq!(
+            fs::read(&source_file).expect("read shared source state file"),
+            b"before"
+        );
+        materialize_kimi_shared_state(&source_file, &file_target)
+            .expect("reuse existing file copy");
+        assert_eq!(
+            fs::read(file_target).expect("read persisted member-local file state"),
+            b"after"
+        );
     }
 
     #[test]
