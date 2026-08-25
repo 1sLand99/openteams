@@ -259,7 +259,11 @@ export function DropdownSelect(props: DropdownSelectProps) {
                   >
                     {option.leading}
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[14px] font-medium leading-tight">
+                      <span
+                        className="block truncate text-[14px] font-medium leading-tight"
+                        title={option.label}
+                        data-tooltip-break-all
+                      >
                         {option.label}
                       </span>
                       {option.description && (
