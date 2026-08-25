@@ -94,6 +94,14 @@ function renderWithRsvg(inputSvg, outputPng) {
   return true;
 }
 
+function isImageMagickConvert() {
+  const result = spawnSync('convert', ['--version'], { encoding: 'utf8' });
+  return (
+    result.status === 0 &&
+    `${result.stdout}${result.stderr}`.includes('ImageMagick')
+  );
+}
+
 function renderWithImageMagick(inputSvg, outputPng) {
   if (commandExists('magick')) {
     run('magick', [
@@ -107,7 +115,9 @@ function renderWithImageMagick(inputSvg, outputPng) {
     return true;
   }
 
-  if (commandExists('convert')) {
+  // On Windows, `convert` may resolve to the built-in disk conversion tool
+  // (C:\Windows\System32\convert.exe), not ImageMagick; verify before use.
+  if (commandExists('convert') && isImageMagickConvert()) {
     run('convert', [
       '-background',
       'none',
