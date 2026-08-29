@@ -710,7 +710,7 @@ impl Codex {
             .kill_on_drop(true)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .current_dir(current_dir)
             .env("NPM_CONFIG_LOGLEVEL", "error")
             .env("NODE_NO_WARNINGS", "1")
@@ -1053,7 +1053,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn codex_real_app_server_preserves_global_and_project_config_bytes() {
+    async fn codex_real_app_server_preserves_config_bytes_and_pipes_stderr() {
         let workspace = TempDir::new().expect("create workspace");
         let codex_home = workspace.path().join("user-codex-home");
         std::fs::create_dir_all(&codex_home).expect("create Codex home");
@@ -1120,6 +1120,10 @@ mod tests {
             )
             .await
             .expect("spawn fake Codex app server through real process boundary");
+        assert!(
+            spawned.child.inner().stderr.is_some(),
+            "Codex app server stderr must stay piped for workflow log forwarding"
+        );
         let exit_signal = spawned.exit_signal.take().expect("Codex exit signal");
         tokio::time::timeout(Duration::from_secs(5), exit_signal)
             .await
