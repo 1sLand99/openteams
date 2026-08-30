@@ -1,4 +1,5 @@
 use std::{
+    cmp,
     fs::{self, File},
     path::{Path, PathBuf},
     pin::Pin,
@@ -28,12 +29,12 @@ use crate::{
     actions::{ExecutorAction, review::RepoReviewContext},
     approvals::ExecutorApprovalService,
     command::{CommandBuildError, CommandParts},
-    env::ExecutionEnv,
+    env::{ExecutionEnv, SensitiveValueRedactor, SensitiveValueStreamRedactor},
     executors::{
         amp::Amp, claude::ClaudeCode, codex::Codex, copilot::Copilot, cursor::CursorAgent,
         deepseek_harness::DeepseekHarness, droid::Droid, gemini::Gemini, hermes::Hermes,
-        kimi::KimiCode, opencode::Opencode, openteams_cli::OpenTeamsCli, pi::Pi, qoder::QoderCli,
-        qwen::QwenCode,
+        kimi::KimiCode, kiro::KiroCli, opencode::Opencode, openteams_cli::OpenTeamsCli, pi::Pi,
+        qoder::QoderCli, qwen::QwenCode,
     },
     logs::utils::patch,
     mcp_config::{McpConfig, MemberMcpConfig},
@@ -55,6 +56,7 @@ pub mod droid;
 pub mod gemini;
 pub mod hermes;
 pub mod kimi;
+pub mod kiro;
 pub mod opencode;
 pub mod openteams_cli;
 pub mod pi;
@@ -177,6 +179,7 @@ pub enum CodingAgent {
     QoderCli,
     Pi,
     Hermes,
+    KiroCli,
     DeepseekHarness,
     #[cfg(feature = "qa-mode")]
     QaMock(QaMockExecutor),
@@ -193,6 +196,7 @@ impl CodingAgent {
             Self::QoderCli(config) => config.acp_mcp_policy = policy,
             Self::Pi(config) => config.acp_mcp_policy = policy,
             Self::Hermes(config) => config.acp_mcp_policy = policy,
+            Self::KiroCli(config) => config.acp_mcp_policy = policy,
             #[cfg(feature = "qa-mode")]
             Self::AcpQa(config) => config.acp_mcp_policy = policy,
             _ => {}
@@ -262,7 +266,7 @@ impl CodingAgent {
     }
 
     pub fn supports_mcp(&self) -> bool {
-        self.default_mcp_config_path().is_some()
+        StandardCodingAgentExecutor::supports_mcp(self)
     }
 
     pub fn capabilities(&self) -> Vec<BaseAgentCapability> {
@@ -290,7 +294,7 @@ impl CodingAgent {
                 BaseAgentCapability::SetupHelper,
             ],
             Self::Hermes(_) => vec![BaseAgentCapability::ContextUsage],
-            Self::DeepseekHarness(_) => vec![],
+            Self::KiroCli(_) | Self::DeepseekHarness(_) => vec![],
             #[cfg(feature = "qa-mode")]
             Self::QaMock(_) | Self::AcpQa(_) => vec![],
         }
@@ -401,6 +405,15 @@ pub trait StandardCodingAgentExecutor {
         Ok(None)
     }
 
+    /// Exact executor-owned version command shown by runtime diagnostics.
+    ///
+    /// Adapters whose version command differs from the generic `<base> --version`
+    /// shape can expose it without adding concrete-runner branches to shared
+    /// services.
+    fn version_command_for_diagnostics(&self) -> Result<Option<CommandParts>, ExecutorError> {
+        Ok(None)
+    }
+
     fn acp_model_fallback(&self) -> AcpModelFallback {
         AcpModelFallback::Allowed
     }
@@ -419,6 +432,19 @@ pub trait StandardCodingAgentExecutor {
             self.get_availability_info(),
             AvailabilityInfo::LoginDetected { .. }
         )
+    }
+
+    /// Probe whether the effective executor environment can authenticate.
+    ///
+    /// Most adapters can answer synchronously from their existing login
+    /// artifacts or environment variables. Adapters with a vendor-owned
+    /// account command can override this method without exposing account data.
+    async fn probe_authentication(
+        &self,
+        _current_dir: &Path,
+        env: &ExecutionEnv,
+    ) -> Result<bool, ExecutorError> {
+        Ok(self.is_authenticated(env))
     }
 
     /// Shared authentication primitive used by executor-specific detectors.
@@ -506,6 +532,15 @@ pub trait StandardCodingAgentExecutor {
 
     // MCP configuration methods
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf>;
+
+    /// Whether this executor accepts member MCP configuration for a run.
+    ///
+    /// The default preserves the historical behavior for adapters whose MCP
+    /// support is represented by a vendor config path. Pure runtime-injection
+    /// adapters can override this without claiming ownership of vendor files.
+    fn supports_mcp(&self) -> bool {
+        self.default_mcp_config_path().is_some()
+    }
 
     async fn prepare_mcp_for_run(
         &mut self,
@@ -603,6 +638,66 @@ impl ExecutorOutput {
     {
         Self {
             inner: Box::pin(reader),
+        }
+    }
+
+    pub(crate) fn new_redacted<R>(reader: R, redactor: SensitiveValueRedactor) -> Self
+    where
+        R: AsyncRead + Send + 'static,
+    {
+        Self::new(SensitiveValueRedactingReader {
+            reader: Box::pin(reader),
+            redactor: redactor.stream(),
+            ready: Vec::new(),
+            ready_offset: 0,
+            eof: false,
+        })
+    }
+}
+
+struct SensitiveValueRedactingReader<R> {
+    reader: Pin<Box<R>>,
+    redactor: SensitiveValueStreamRedactor,
+    ready: Vec<u8>,
+    ready_offset: usize,
+    eof: bool,
+}
+
+impl<R: AsyncRead> AsyncRead for SensitiveValueRedactingReader<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        loop {
+            if this.ready_offset < this.ready.len() {
+                let count = cmp::min(buffer.remaining(), this.ready.len() - this.ready_offset);
+                buffer.put_slice(&this.ready[this.ready_offset..this.ready_offset + count]);
+                this.ready_offset += count;
+                if this.ready_offset == this.ready.len() {
+                    this.ready.clear();
+                    this.ready_offset = 0;
+                }
+                return Poll::Ready(Ok(()));
+            }
+            if this.eof {
+                return Poll::Ready(Ok(()));
+            }
+
+            let mut chunk = [0_u8; 8192];
+            let mut chunk_buffer = ReadBuf::new(&mut chunk);
+            match this.reader.as_mut().poll_read(context, &mut chunk_buffer) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) if chunk_buffer.filled().is_empty() => {
+                    this.eof = true;
+                    this.ready = this.redactor.finish();
+                }
+                Poll::Ready(Ok(())) => {
+                    this.ready = this.redactor.push(chunk_buffer.filled());
+                }
+            }
         }
     }
 }
@@ -708,6 +803,8 @@ pub struct SpawnedChild {
     pub child: AsyncGroupChild,
     /// Optional executor-owned stdout. Falls back to the child process pipe when absent.
     pub stdout: Option<ExecutorOutput>,
+    /// Optional executor-owned stderr. Falls back to the child process pipe when absent.
+    pub stderr: Option<ExecutorOutput>,
     /// Executor → Container: signals when executor wants to exit
     pub exit_signal: Option<ExecutorExitSignal>,
     /// Container → Executor: signals when container wants to cancel the execution
@@ -721,6 +818,7 @@ impl From<AsyncGroupChild> for SpawnedChild {
         Self {
             child,
             stdout: None,
+            stderr: None,
             exit_signal: None,
             cancel: None,
             cleanup: None,
@@ -733,6 +831,12 @@ impl SpawnedChild {
         self.stdout
             .take()
             .or_else(|| self.child.inner().stdout.take().map(ExecutorOutput::new))
+    }
+
+    pub fn take_stderr(&mut self) -> Option<ExecutorOutput> {
+        self.stderr
+            .take()
+            .or_else(|| self.child.inner().stderr.take().map(ExecutorOutput::new))
     }
 }
 
@@ -789,9 +893,29 @@ pub fn build_review_prompt(
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{collections::VecDeque, str::FromStr};
+
+    use tokio::io::AsyncReadExt;
 
     use super::*;
+
+    struct ChunkedReader {
+        chunks: VecDeque<&'static [u8]>,
+    }
+
+    impl AsyncRead for ChunkedReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if let Some(chunk) = self.chunks.pop_front() {
+                assert!(chunk.len() <= buffer.remaining());
+                buffer.put_slice(chunk);
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn login_state_remains_available_for_legacy_executors() {
@@ -879,5 +1003,40 @@ mod tests {
             &["OPENTEAMS_TEST_AUTH_KEY"],
             false
         ));
+    }
+
+    #[tokio::test]
+    async fn executor_output_redacts_member_mcp_secrets_split_across_stderr_chunks() {
+        let api_key = "k3!";
+        let env_secret = "e!";
+        let header_secret = "h?";
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert("KIRO_API_KEY", api_key);
+        let redactor = env
+            .sensitive_value_redactor()
+            .with_sensitive_values([env_secret, header_secret]);
+        let reader = ChunkedReader {
+            chunks: VecDeque::from([
+                b"Kiro stderr echoed e".as_slice(),
+                b"! and h".as_slice(),
+                b"?; api=k".as_slice(),
+                b"3!".as_slice(),
+            ]),
+        };
+        let mut output = ExecutorOutput::new_redacted(reader, redactor);
+        let mut body = String::new();
+
+        output
+            .read_to_string(&mut body)
+            .await
+            .expect("read redacted stderr");
+
+        assert_eq!(
+            body,
+            "Kiro stderr echoed [redacted] and [redacted]; api=[redacted]"
+        );
+        assert!(!body.contains(api_key));
+        assert!(!body.contains(env_secret));
+        assert!(!body.contains(header_secret));
     }
 }

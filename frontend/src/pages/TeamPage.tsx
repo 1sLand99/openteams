@@ -1620,6 +1620,7 @@ export function TeamPage() {
               acpAuthMethodId={acpAuthMethodId}
               acpConfigOptions={acpConfigOptions}
               acpConfigOverrides={acpConfigOverrides}
+              acpProbe={acpProbeIsCurrent ? acpProbe : null}
               acpProbeLoading={acpProbeLoading}
               reasoningUnsupported={reasoningUnsupported}
               capability={capability}

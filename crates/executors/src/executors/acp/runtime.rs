@@ -35,7 +35,9 @@ use tokio_util::{compat::TokioAsyncReadCompatExt, sync::CancellationToken};
 use super::{
     AcpApprovalPolicy, AcpAuthMethodInfo, AcpCapabilityProbe, AcpClient, AcpConfigChoice,
     AcpConfigOptionKind, AcpConfigOptionSnapshot, AcpConfigSource, AcpEvent, AcpResumePolicy,
-    AcpRunConfig, AcpSessionPreferences, config::is_session_mode_key, mcp::validate_mcp_servers,
+    AcpRunConfig, AcpSessionPreferences,
+    config::is_session_mode_key,
+    mcp::{mcp_server_output_secrets, validate_mcp_servers},
     output::AcpOutput,
 };
 use crate::{
@@ -323,9 +325,11 @@ impl AcpAgentHarness {
             .env("NPM_CONFIG_LOGLEVEL", "error")
             .env("NODE_NO_WARNINGS", "1")
             .args(&args);
-        env.clone()
-            .with_profile(cmd_overrides)
-            .apply_to_command(&mut command);
+        let effective_env = env.clone().with_profile(cmd_overrides);
+        let output_redactor = effective_env
+            .sensitive_value_redactor()
+            .with_sensitive_values(mcp_server_output_secrets(&self.config.mcp_servers));
+        effective_env.apply_to_command(&mut command);
 
         let mut child = command.group_spawn()?;
         let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
@@ -339,14 +343,21 @@ impl AcpAgentHarness {
                 prompt_text,
                 exit_tx,
                 approvals,
-                env.vars.clone(),
+                effective_env.vars.clone(),
+                output_redactor.clone(),
                 cancel.clone(),
             )
             .await?;
+        let stderr = child
+            .inner()
+            .stderr
+            .take()
+            .map(|stderr| ExecutorOutput::new_redacted(stderr, output_redactor));
 
         Ok(SpawnedChild {
             child,
             stdout: Some(stdout),
+            stderr,
             exit_signal: Some(exit_rx),
             cancel: Some(cancel),
             cleanup: None,
@@ -364,6 +375,7 @@ impl AcpAgentHarness {
         exit_signal: tokio::sync::oneshot::Sender<ExecutorExitResult>,
         approvals: Option<Arc<dyn ExecutorApprovalService>>,
         terminal_env: std::collections::HashMap<String, String>,
+        output_redactor: crate::env::SensitiveValueRedactor,
         cancel: CancellationToken,
     ) -> Result<ExecutorOutput, ExecutorError> {
         let protocol_stdout = child.inner().stdout.take().ok_or_else(|| {
@@ -378,7 +390,7 @@ impl AcpAgentHarness {
                 "Child process has no stdin",
             ))
         })?;
-        let (output, executor_stdout) = AcpOutput::channel();
+        let (output, executor_stdout) = AcpOutput::channel(output_redactor.clone());
         let (startup_tx, startup_rx) = tokio::sync::oneshot::channel();
         let startup_tx = Arc::new(StdMutex::new(Some(startup_tx)));
 
@@ -519,24 +531,28 @@ impl AcpAgentHarness {
                 if let Err(error) = &result
                     && !was_cancelled
                 {
+                    let error_message = output_redactor.redact(&error.to_string());
                     let startup_error = match error.code {
                         agent_client_protocol::ErrorCode::AuthRequired => {
-                            BootstrapError::AuthRequired(error.to_string())
+                            BootstrapError::AuthRequired(error_message)
                         }
                         agent_client_protocol::ErrorCode::InvalidParams => {
-                            BootstrapError::Configuration(error.to_string())
+                            BootstrapError::Configuration(error_message)
                         }
-                        _ => BootstrapError::Other(error.to_string()),
+                        _ => BootstrapError::Other(error_message),
                     };
                     send_startup(&startup_tx, Err(startup_error));
                     let _ = output_for_runtime
-                        .send(AcpEvent::Error(protocol_error_message(error)))
+                        .send(AcpEvent::Error(
+                            output_redactor.redact(&protocol_error_message(error)),
+                        ))
                         .await;
                 }
 
                 drop(output_for_runtime);
                 let failure = result.as_ref().err().and_then(|error| {
-                    is_invalid_session_recovery_error(error).then(|| protocol_error_message(error))
+                    is_invalid_session_recovery_error(error)
+                        .then(|| output_redactor.redact(&protocol_error_message(error)))
                 });
                 let _ = exit_signal.send(if result.is_ok() || was_cancelled {
                     ExecutorExitResult::Success
@@ -641,9 +657,9 @@ async fn probe_acp_command_inner(
         .stderr(Stdio::piped())
         .current_dir(current_dir)
         .args(args);
-    env.clone()
-        .with_profile(cmd_overrides)
-        .apply_to_command(&mut command);
+    let effective_env = env.clone().with_profile(cmd_overrides);
+    let output_redactor = effective_env.sensitive_value_redactor();
+    effective_env.apply_to_command(&mut command);
     let mut child = command.group_spawn().map_err(|error| {
         acp_probe_diagnostic_error(&command_display, "start ACP probe process", error)
     })?;
@@ -675,7 +691,7 @@ async fn probe_acp_command_inner(
         (captured, read_result)
     });
     let (probe_tx, probe_rx) =
-        tokio::sync::oneshot::channel::<Result<AcpCapabilityProbe, String>>();
+        tokio::sync::oneshot::channel::<Result<AcpCapabilityProbe, agent_client_protocol::Error>>();
     let probe_tx = Arc::new(StdMutex::new(Some(probe_tx)));
     let probe_cwd = current_dir.to_path_buf();
 
@@ -819,7 +835,7 @@ async fn probe_acp_command_inner(
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .take()
             {
-                let _ = sender.send(Err(error.to_string()));
+                let _ = sender.send(Err(error));
             }
         });
     });
@@ -840,9 +856,7 @@ async fn probe_acp_command_inner(
                 "probe process exited without a response",
             )
         })?
-        .map_err(|error| {
-            acp_probe_diagnostic_error(&command_display, "initialize ACP connection", error)
-        });
+        .map_err(|error| acp_probe_connection_error(&command_display, error, &output_redactor));
     let process_status = match child.inner().try_wait() {
         Ok(Some(status)) => format!("exited ({status})"),
         Ok(None) => "running".to_string(),
@@ -858,11 +872,31 @@ async fn probe_acp_command_inner(
         Ok(Err(error)) => format!("[stderr capture task failed: {error}]"),
         Err(_) => "[stderr capture timed out]".to_string(),
     };
-    result.map_err(|error| {
-        ExecutorError::Io(std::io::Error::other(format!(
-            "{error}; outer_process_status={process_status}; outer_stderr={stderr_diagnostics:?}"
-        )))
-    })
+    let stderr_diagnostics = output_redactor.redact(&stderr_diagnostics);
+    match result {
+        Ok(probe) => Ok(probe),
+        Err(error @ ExecutorError::AuthRequired(_))
+        | Err(error @ ExecutorError::Configuration(_)) => Err(error),
+        Err(error) => {
+            let error = output_redactor.redact(&error.to_string());
+            Err(ExecutorError::Io(std::io::Error::other(format!(
+                "{error}; outer_process_status={process_status}; outer_stderr={stderr_diagnostics:?}"
+            ))))
+        }
+    }
+}
+
+fn acp_probe_connection_error(
+    command: &str,
+    error: agent_client_protocol::Error,
+    output_redactor: &crate::env::SensitiveValueRedactor,
+) -> ExecutorError {
+    let message = output_redactor.redact(&protocol_error_message(&error));
+    match error.code {
+        agent_client_protocol::ErrorCode::AuthRequired => ExecutorError::AuthRequired(message),
+        agent_client_protocol::ErrorCode::InvalidParams => ExecutorError::Configuration(message),
+        _ => acp_probe_diagnostic_error(command, "initialize ACP connection", message),
+    }
 }
 
 fn acp_probe_diagnostic_error(
@@ -1897,6 +1931,23 @@ mod tests {
         assert!(is_unknown_session_error(&unknown));
         assert!(is_unknown_session_error(&missing));
         assert!(!is_unknown_session_error(&unrelated));
+    }
+
+    #[test]
+    fn acp_probe_preserves_auth_required_and_redacts_sensitive_env_values() {
+        let mut env = crate::env::ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert("KIRO_API_KEY", "kiro-fixture-secret");
+        let redactor = env.sensitive_value_redactor();
+        let protocol_error = agent_client_protocol::Error::auth_required()
+            .data("credential rejected: kiro-fixture-secret");
+
+        let error = acp_probe_connection_error("kiro-cli acp", protocol_error, &redactor);
+
+        let ExecutorError::AuthRequired(message) = error else {
+            panic!("standard ACP auth errors must remain structured");
+        };
+        assert!(message.contains("[redacted]"));
+        assert!(!message.contains("kiro-fixture-secret"));
     }
 
     #[test]

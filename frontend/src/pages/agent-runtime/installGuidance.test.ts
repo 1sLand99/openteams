@@ -60,6 +60,7 @@ const guidedRunners: BaseCodingAgent[] = [
   "GEMINI",
   "HERMES",
   "KIMI_CODE",
+  "KIRO_CLI",
   "OPENCODE",
   "PI",
   "QODER_CLI",
@@ -300,6 +301,29 @@ check(
   getInstallGuideEntry("QODER_CLI")?.authEnvVars?.includes(
     "QODER_PERSONAL_ACCESS_TOKEN",
   ) === true,
+);
+
+const kiroOnMac = resolveInstallGuide(makeRunner("KIRO_CLI"), "macos");
+check(
+  "kiro install uses the official install script",
+  kiroOnMac?.steps[0]?.commands[0] ===
+    "curl -fsSL https://cli.kiro.dev/install | bash",
+);
+check(
+  "kiro skips the node step for script installs",
+  kiroOnMac?.steps.every((step) => step.kind !== "node") === true,
+);
+check(
+  "kiro auth uses the CLI login and documents KIRO_API_KEY for headless auth",
+  kiroOnMac?.steps[1]?.kind === "auth" &&
+    kiroOnMac?.steps[1]?.commands[0] === "kiro-cli login" &&
+    getInstallGuideEntry("KIRO_CLI")?.authEnvVars?.includes("KIRO_API_KEY") ===
+      true,
+);
+check(
+  "kiro installs natively on Windows via PowerShell",
+  resolveInstallGuide(makeRunner("KIRO_CLI"), "windows")?.steps[0]
+    ?.commands[0] === "irm https://cli.kiro.dev/install.ps1 | iex",
 );
 
 // --- Pi (pinned npx environment, no global install) -------------------

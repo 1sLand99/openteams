@@ -232,6 +232,19 @@ const INSTALL_GUIDES: Partial<Record<BaseCodingAgent, AgentInstallGuideEntry>> =
       },
       authCommands: ["kimi login"],
     },
+    KIRO_CLI: {
+      requiresNode: false,
+      requiresNpm: false,
+      requiresNpx: false,
+      documentationUrl: "https://kiro.dev/docs/cli/",
+      windowsSupport: "supported",
+      installCommands: {
+        posix: ["curl -fsSL https://cli.kiro.dev/install | bash"],
+        windows: ["irm https://cli.kiro.dev/install.ps1 | iex"],
+      },
+      authCommands: ["kiro-cli login"],
+      authEnvVars: ["KIRO_API_KEY"],
+    },
     // Pi runs through OpenTeams' pinned npx package set, so there is no
     // global install or interactive login step: Node.js with npm/npx (both
     // bundled with Node) is the only prerequisite.

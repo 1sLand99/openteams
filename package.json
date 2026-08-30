@@ -23,6 +23,7 @@
     "frontend:clean": "pnpm -C frontend run clean",
     "frontend:check": "pnpm -C frontend run lint",
     "frontend:test": "pnpm -C frontend run test",
+    "check-i18n.sh": "bash scripts/check-i18n.sh",
     "backend:lint": "cargo clippy --workspace --all-targets --features qa-mode -- -D warnings",
     "backend:format": "cargo fmt --all",
     "backend:format:check": "cargo fmt --all -- --check",

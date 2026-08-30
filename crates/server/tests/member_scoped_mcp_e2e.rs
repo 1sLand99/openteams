@@ -1,5 +1,5 @@
 #![cfg(feature = "qa-mode")]
-//! 14-runner offline member-scoped MCP E2E registry.
+//! 15-runner offline member-scoped MCP E2E registry.
 //!
 //! This suite exercises the production chat/workflow run-preparation chain
 //! (`services::member_execution::build_effective_member_executor_for_run`, the
@@ -7,7 +7,7 @@
 //! MCP-capable production runners across four offline CLI protocol families:
 //!
 //!   - stdio streaming:      CLAUDE_CODE, AMP, CURSOR_AGENT, COPILOT, DROID
-//!   - ACP stdio:            GEMINI, QWEN_CODE, KIMI_CODE, QODER_CLI, PI, HERMES
+//!   - ACP stdio:            GEMINI, KIRO_CLI, QWEN_CODE, KIMI_CODE, QODER_CLI, PI, HERMES
 //!   - Codex app-server:     CODEX
 //!   - OpenCode local HTTP:  OPENCODE, OPEN_TEAMS_CLI
 //!
@@ -123,6 +123,14 @@ const MCP_E2E_REGISTRY: &[CliMcpE2eCase] = &[
         fixture_mode: "acp",
         carrier: "OPENTEAMS_ACP_MCP_SNAPSHOT_PATH -> run/mcp.json + GEMINI_CLI_SYSTEM_SETTINGS_PATH",
         global_config_rel: ".gemini/settings.json",
+    },
+    CliMcpE2eCase {
+        runner: BaseCodingAgent::KiroCli,
+        family: ProtocolFamily::AcpStdio,
+        fixture_binary: "kiro-cli",
+        fixture_mode: "kiro",
+        carrier: "frozen run snapshot -> ACP session/new or session/load mcpServers",
+        global_config_rel: ".kiro/settings/mcp.json",
     },
     CliMcpE2eCase {
         runner: BaseCodingAgent::Codex,
@@ -295,13 +303,13 @@ fn verify_registry_gate(reports: &mut Vec<String>) -> Result<(), String> {
             "DEEPSEEK_HARNESS must not support MCP; got {deepseek:?}"
         ));
     }
-    if production.len() != 14 {
+    if production.len() != 15 {
         return Err(format!(
-            "expected exactly 14 MCP-capable production runners; got {}",
+            "expected exactly 15 MCP-capable production runners; got {}",
             production.len()
         ));
     }
-    reports.push("registry gate: PASS (14 runners, DeepSeek false, diff empty)".to_string());
+    reports.push("registry gate: PASS (15 runners, DeepSeek false, diff empty)".to_string());
     Ok(())
 }
 
@@ -338,6 +346,7 @@ fn install_fixture_bin(root: &Path) -> PathBuf {
 
     for (name, source) in [
         ("gemini", &acp_source),
+        ("kiro-cli", &acp_source),
         ("qwen", &acp_source),
         ("kimi", &acp_source),
         ("qodercli", &acp_source),
@@ -712,6 +721,9 @@ async fn run_member_with(
         protocol_log.to_string_lossy().into_owned(),
     );
     env.insert(family_secret_env(case), ctx.fake_secret.clone());
+    if case.runner == BaseCodingAgent::KiroCli {
+        env.insert("KIRO_API_KEY", ctx.fake_secret.clone());
+    }
     if let Some(key) = family_mode_env(case) {
         env.insert(key, case.fixture_mode.to_string());
     }
@@ -1491,6 +1503,9 @@ async fn e2e_006_failure_and_cancel_cleanup(
         cancel_protocol.to_string_lossy().into_owned(),
     );
     env.insert(family_secret_env(case), ctx.fake_secret.clone());
+    if case.runner == BaseCodingAgent::KiroCli {
+        env.insert("KIRO_API_KEY", ctx.fake_secret.clone());
+    }
     if let Some(key) = family_mode_env(case) {
         env.insert(key, case.fixture_mode.to_string());
     }
@@ -2122,19 +2137,21 @@ async fn e2e_009_one_time_migration(
         .await
         .map_err(|e| format!("{label}: read migrated config: {e}"))?
         .0;
+    let expected_mcp_count = usize::from(case.runner != BaseCodingAgent::KiroCli);
+    let has_migrated_server = migrated
+        .mcp
+        .as_ref()
+        .is_some_and(|m| m.mcp_servers.contains_key("migrated-mcp"));
     if migrated
         .mcp
         .as_ref()
         .map(|m| m.mcp_servers.len())
         .unwrap_or(0)
-        != 1
-        || !migrated
-            .mcp
-            .as_ref()
-            .is_some_and(|m| m.mcp_servers.contains_key("migrated-mcp"))
+        != expected_mcp_count
+        || has_migrated_server != (case.runner != BaseCodingAgent::KiroCli)
     {
         return Err(format!(
-            "{label}: migration did not move the legacy MCP server into the member config"
+            "{label}: migration did not preserve the runner's expected legacy MCP boundary"
         ));
     }
 
@@ -2169,9 +2186,12 @@ async fn e2e_009_one_time_migration(
     }
 
     *counters.entry("E2E-MCP-009".into()).or_default() += 1;
-    reports.push(format!(
-        "{label}: PASS (legacy MCP migrated once, second run no-op, vendor bytes stable)"
-    ));
+    let result = if case.runner == BaseCodingAgent::KiroCli {
+        "initialized empty member MCP without importing ambient Kiro config; second run no-op, vendor bytes stable"
+    } else {
+        "legacy MCP migrated once, second run no-op, vendor bytes stable"
+    };
+    reports.push(format!("{label}: PASS ({result})"));
     Ok(())
 }
 
@@ -2252,7 +2272,7 @@ fn main() {
             let runner = runner_label(case.runner);
             // E2E-MCP-009 owns a database-level one-shot migration marker.
             // Give every runner a fresh migrated database so the same ten
-            // cases actually execute for all fourteen registry entries.
+            // cases actually execute for all fifteen registry entries.
             let case_db_root = fixture_root
                 .path()
                 .join("case-databases")
@@ -2310,9 +2330,9 @@ fn main() {
             "execution counts: {:?} (total {total_executed} runner x scenario executions)",
             counters
         ));
-        if total_executed != 14 * 10 {
+        if total_executed != 15 * 10 {
             failures.push(format!(
-                "expected 140 runner x scenario executions, got {total_executed}"
+                "expected 150 runner x scenario executions, got {total_executed}"
             ));
         }
         if counters.len() != 10 {
@@ -2352,7 +2372,7 @@ fn main() {
 
     if failures.is_empty() {
         println!(
-            "member_scoped_mcp_e2e: ALL 14 runners x 10 scenarios PASSED (offline, deterministic)"
+            "member_scoped_mcp_e2e: ALL 15 runners x 10 scenarios PASSED (offline, deterministic)"
         );
         std::process::exit(0);
     }

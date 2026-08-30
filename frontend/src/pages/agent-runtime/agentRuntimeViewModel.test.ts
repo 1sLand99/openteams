@@ -258,6 +258,10 @@ check(
   getRunnerLabel("QODER_CLI") === "Qoder CLI",
 );
 check(
+  "getRunnerLabel keeps the Kiro CLI acronym uppercase",
+  getRunnerLabel("KIRO_CLI") === "Kiro CLI",
+);
+check(
   "getRunnerLabel title-cases other runners",
   getRunnerLabel("KIMI_CODE") === "Kimi Code",
 );

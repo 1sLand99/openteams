@@ -545,6 +545,7 @@ impl ClaudeCode {
         Ok(SpawnedChild {
             child,
             stdout: None,
+            stderr: None,
             exit_signal: Some(exit_signal_rx),
             cancel: Some(cancel),
             cleanup: None,

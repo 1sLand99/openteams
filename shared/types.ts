@@ -1418,9 +1418,9 @@ export type ScriptRequest = { script: string, language: ScriptRequestLanguage, c
 
 export type ScriptRequestLanguage = "Bash";
 
-export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", OPEN_TEAMS_CLI = "OPEN_TEAMS_CLI", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", COPILOT = "COPILOT", DROID = "DROID", KIMI_CODE = "KIMI_CODE", QODER_CLI = "QODER_CLI", PI = "PI", HERMES = "HERMES", DEEPSEEK_HARNESS = "DEEPSEEK_HARNESS" }
+export enum BaseCodingAgent { CLAUDE_CODE = "CLAUDE_CODE", AMP = "AMP", GEMINI = "GEMINI", CODEX = "CODEX", OPENCODE = "OPENCODE", OPEN_TEAMS_CLI = "OPEN_TEAMS_CLI", CURSOR_AGENT = "CURSOR_AGENT", QWEN_CODE = "QWEN_CODE", COPILOT = "COPILOT", DROID = "DROID", KIMI_CODE = "KIMI_CODE", QODER_CLI = "QODER_CLI", PI = "PI", HERMES = "HERMES", KIRO_CLI = "KIRO_CLI", DEEPSEEK_HARNESS = "DEEPSEEK_HARNESS" }
 
-export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli } | { "PI": Pi } | { "HERMES": Hermes } | { "DEEPSEEK_HARNESS": DeepseekHarness };
+export type CodingAgent = { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli } | { "PI": Pi } | { "HERMES": Hermes } | { "KIRO_CLI": KiroCli } | { "DEEPSEEK_HARNESS": DeepseekHarness };
 
 export type SlashCommandDescription = {
 /**
@@ -1450,7 +1450,7 @@ executor: BaseCodingAgent,
  */
 variant: string | null, };
 
-export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli } | { "PI": Pi } | { "HERMES": Hermes } | { "DEEPSEEK_HARNESS": DeepseekHarness } };
+export type ExecutorConfig = { [key in string]?: { "CLAUDE_CODE": ClaudeCode } | { "AMP": Amp } | { "GEMINI": Gemini } | { "CODEX": Codex } | { "OPENCODE": Opencode } | { "OPEN_TEAMS_CLI": OpenTeamsCli } | { "CURSOR_AGENT": CursorAgent } | { "QWEN_CODE": QwenCode } | { "COPILOT": Copilot } | { "DROID": Droid } | { "KIMI_CODE": KimiCode } | { "QODER_CLI": QoderCli } | { "PI": Pi } | { "HERMES": Hermes } | { "KIRO_CLI": KiroCli } | { "DEEPSEEK_HARNESS": DeepseekHarness } };
 
 export type ExecutorConfigs = { executors: { [key in BaseCodingAgent]?: ExecutorConfig }, };
 
@@ -1509,6 +1509,8 @@ export type KimiCode = { append_prompt: AppendPrompt, model?: string | null, thi
 export type Pi = { append_prompt: AppendPrompt, model?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type Hermes = { append_prompt: AppendPrompt, model?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
+
+export type KiroCli = { append_prompt: AppendPrompt, model?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 
 export type DeepseekHarness = { append_prompt: AppendPrompt, model?: string | null, harness_path?: string | null, acp_config_path?: string | null, acp?: AcpExecutionOptions | null, base_command_override?: string | null, additional_params?: Array<string> | null, env?: { [key in string]?: string } | null, };
 

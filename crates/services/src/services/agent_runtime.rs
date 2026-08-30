@@ -676,7 +676,8 @@ pub async fn runtime_diagnostics(
                 | CodingAgent::QwenCode(_)
                 | CodingAgent::KimiCode(_)
                 | CodingAgent::QoderCli(_)
-                | CodingAgent::Hermes(_) => "native",
+                | CodingAgent::Hermes(_)
+                | CodingAgent::KiroCli(_) => "native",
                 CodingAgent::Pi(_) => "npx",
                 _ => "default",
             }
@@ -932,19 +933,32 @@ async fn detect_cli_version(
     executor: &CodingAgent,
     env: &ExecutionEnv,
 ) -> Result<Option<String>, String> {
-    let Some(base) = version_command_base(executor) else {
-        return Ok(None);
-    };
-    let parts = CommandBuilder::new(base)
-        .extend_params(["--version"])
-        .build_initial()
+    let parts = match executor
+        .version_command_for_diagnostics()
         .map_err(|error| {
             command_failure_detail(
-                "<configured command could not be parsed>",
-                "parse version command",
+                "<configured command could not be built>",
+                "build version command",
                 error,
             )
-        })?;
+        })? {
+        Some(parts) => parts,
+        None => {
+            let Some(base) = version_command_base(executor) else {
+                return Ok(None);
+            };
+            CommandBuilder::new(base)
+                .extend_params(["--version"])
+                .build_initial()
+                .map_err(|error| {
+                    command_failure_detail(
+                        "<configured command could not be parsed>",
+                        "parse version command",
+                        error,
+                    )
+                })?
+        }
+    };
     let unresolved_command = parts.redacted_display();
     let parts = parts.into_resolved().await.map_err(|error| {
         command_failure_detail(&unresolved_command, "resolve version executable", error)
@@ -960,13 +974,13 @@ async fn detect_cli_version(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    if let Some(cmd_overrides) = cmd_overrides_for_executor(executor) {
-        env.clone()
-            .with_profile(cmd_overrides)
-            .apply_to_command(&mut command);
+    let effective_env = if let Some(cmd_overrides) = cmd_overrides_for_executor(executor) {
+        env.clone().with_profile(cmd_overrides)
     } else {
-        env.apply_to_command(&mut command);
-    }
+        env.clone()
+    };
+    let output_redactor = effective_env.sensitive_value_redactor();
+    effective_env.apply_to_command(&mut command);
 
     let output = timeout(Duration::from_secs(12), command.output())
         .await
@@ -987,7 +1001,7 @@ async fn detect_cli_version(
             .map(|code| format!("exit code {code}"))
             .unwrap_or_else(|| "terminated by signal".to_string());
         let evidence = normalize_cli_version_output(&output.stderr, &output.stdout)
-            .map(|line| format!(": {line}"))
+            .map(|line| format!(": {}", output_redactor.redact(&line)))
             .unwrap_or_default();
         return Err(command_failure_detail(
             &command_display,
@@ -997,6 +1011,7 @@ async fn detect_cli_version(
     }
 
     normalize_cli_version_output(&output.stdout, &output.stderr)
+        .map(|line| output_redactor.redact(&line))
         .map(Some)
         .ok_or_else(|| {
             command_failure_detail(
@@ -1049,7 +1064,7 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
         CodingAgent::KimiCode(_) => "kimi".to_string(),
         CodingAgent::QoderCli(_) => "qodercli".to_string(),
         CodingAgent::Hermes(_) => "hermes".to_string(),
-        CodingAgent::DeepseekHarness(_) => return None,
+        CodingAgent::KiroCli(_) | CodingAgent::DeepseekHarness(_) => return None,
         CodingAgent::Pi(_) => Pi::version_command(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => return None,
@@ -1074,6 +1089,7 @@ fn cmd_overrides_for_executor(executor: &CodingAgent) -> Option<&CmdOverrides> {
         CodingAgent::QoderCli(config) => Some(&config.cmd),
         CodingAgent::Pi(config) => Some(&config.cmd),
         CodingAgent::Hermes(config) => Some(&config.cmd),
+        CodingAgent::KiroCli(config) => Some(&config.cmd),
         CodingAgent::DeepseekHarness(config) => Some(&config.cmd),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => None,
@@ -1738,6 +1754,7 @@ fn reasoning_capability_for_runner(
         | BaseCodingAgent::Copilot
         | BaseCodingAgent::Pi
         | BaseCodingAgent::Hermes
+        | BaseCodingAgent::KiroCli
         | BaseCodingAgent::DeepseekHarness => None,
         #[cfg(feature = "qa-mode")]
         BaseCodingAgent::QaMock | BaseCodingAgent::AcpQa => None,
@@ -1840,6 +1857,7 @@ fn model_name(config: &CodingAgent) -> Option<&str> {
         CodingAgent::QoderCli(config) => config.model.as_deref(),
         CodingAgent::Pi(config) => config.model.as_deref(),
         CodingAgent::Hermes(config) => config.model.as_deref(),
+        CodingAgent::KiroCli(config) => config.model.as_deref(),
         CodingAgent::DeepseekHarness(config) => config.model.as_deref(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => None,
@@ -1943,6 +1961,7 @@ mod tests {
         acp::{AcpConfigChoice, AcpConfigOptionKind, AcpConfigOptionSnapshot, AcpConfigSource},
         deepseek_harness::DeepseekHarness,
         kimi::KimiCode,
+        kiro::KiroCli,
         pi::Pi,
         qoder::QoderCli,
     };
@@ -2147,6 +2166,7 @@ mod tests {
             BaseCodingAgent::KimiCode,
             BaseCodingAgent::QoderCli,
             BaseCodingAgent::Hermes,
+            BaseCodingAgent::KiroCli,
             BaseCodingAgent::DeepseekHarness,
         ] {
             assert_eq!(
@@ -3391,6 +3411,104 @@ mod tests {
             )),
             Some("hermes".to_string())
         );
+    }
+
+    #[test]
+    fn kiro_is_registered_as_a_native_acp_runner_without_static_reasoning() {
+        assert!(
+            ExecutorConfigs::from_defaults()
+                .executors
+                .contains_key(&BaseCodingAgent::KiroCli),
+            "Kiro CLI must have a default profile"
+        );
+        assert_eq!(
+            reasoning_capability_for_runner(BaseCodingAgent::KiroCli),
+            None,
+            "Kiro model choices come from the ACP probe"
+        );
+        assert_eq!(
+            runtime_dependency_requirement(BaseCodingAgent::KiroCli),
+            RuntimeDependencyRequirement::None,
+            "Kiro is a native CLI without node/npm/npx dependencies"
+        );
+
+        let executor = CodingAgent::KiroCli(KiroCli::default());
+        assert!(cmd_overrides_for_executor(&executor).is_some());
+        assert_eq!(version_command_base(&executor), None);
+        assert_eq!(model_name(&executor), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kiro_version_detection_uses_the_executor_owned_command() {
+        let mut kiro = KiroCli::default();
+        kiro.cmd.base_command_override = Some("sh -c 'printf \"kiro-cli 2.20.1\\n\"'".to_string());
+        kiro.cmd.additional_params = Some(vec!["--acp-only-option".to_string()]);
+        let executor = CodingAgent::KiroCli(kiro);
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert("KIRO_API_KEY", "fixture-secret-never-output");
+
+        let version = detect_cli_version(&executor, &env)
+            .await
+            .expect("Kiro version detection");
+
+        assert_eq!(version.as_deref(), Some("kiro-cli 2.20.1"));
+        assert!(
+            !version
+                .unwrap_or_default()
+                .contains("fixture-secret-never-output")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kiro_missing_auth_uses_the_existing_structured_probe_error() {
+        let mut kiro = KiroCli::default();
+        kiro.cmd.base_command_override = Some("sh -c 'exit 1'".to_string());
+        let executor = CodingAgent::KiroCli(kiro);
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let error = coordinated_probe_acp(
+            BaseCodingAgent::KiroCli,
+            &executor,
+            Path::new("."),
+            &env,
+            None,
+            CliProbeCachePolicy::Refresh,
+        )
+        .await
+        .expect_err("missing Kiro authentication must fail");
+        let detail = status_error_detail("acp_probe", error);
+
+        assert!(detail.starts_with("[acp_probe] Auth required:"));
+        assert!(detail.contains("kiro-cli login"));
+        assert!(detail.contains("KIRO_API_KEY"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kiro_probe_failure_redacts_api_key_from_cli_stderr() {
+        let short_api_key = "abc";
+        let mut kiro = KiroCli::default();
+        kiro.cmd.base_command_override =
+            Some("sh -c 'printf \"%s\" \"$KIRO_API_KEY\" >&2'".to_string());
+        let executor = CodingAgent::KiroCli(kiro);
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert("KIRO_API_KEY", short_api_key);
+
+        let error = coordinated_probe_acp(
+            BaseCodingAgent::KiroCli,
+            &executor,
+            Path::new("."),
+            &env,
+            None,
+            CliProbeCachePolicy::Refresh,
+        )
+        .await
+        .expect_err("invalid Kiro credentials must fail the ACP probe");
+
+        assert!(error.contains("[redacted]"), "{error}");
+        assert!(!error.contains(short_api_key));
     }
 
     #[test]
