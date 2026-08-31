@@ -143,7 +143,7 @@ const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
     logoClassName: "h-[22px] w-[22px]",
   },
   KIMI_CODE: { title: "Kimi", logoSrc: "/logos/kimi-logo.svg" },
-  KIRO_CLI: { title: "Kiro CLI", text: "Ki" },
+  KIRO_CLI: { title: "Kiro CLI", logoSrc: "/logos/kiro-logo.svg" },
   OPENCODE: {
     title: "OpenCode",
     logoSrc: "/logos/opencode.svg",

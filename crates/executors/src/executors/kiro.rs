@@ -205,10 +205,22 @@ fn whoami_reports_account(output: &[u8]) -> bool {
             return authenticated;
         }
     }
-    account
+    if account
         .get("account")
         .and_then(serde_json::Value::as_object)
         .is_some_and(|account| !account.is_empty())
+    {
+        return true;
+    }
+
+    // Kiro CLI 2.20 reports the active local login as top-level account
+    // metadata rather than an `account` object or authentication boolean.
+    ["accountType", "email"].iter().all(|key| {
+        account
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    })
 }
 
 #[async_trait]
@@ -439,6 +451,24 @@ impl StandardCodingAgentExecutor for KiroCli {
         super::acp::normalize_logs(msg_store, worktree_path);
     }
 
+    fn default_runtime_config_path(&self) -> Option<std::path::PathBuf> {
+        self.cmd
+            .env
+            .as_ref()
+            .and_then(|env| env.get("KIRO_HOME"))
+            .and_then(|value| {
+                let value = value.trim();
+                (!value.is_empty()).then(|| std::path::PathBuf::from(value))
+            })
+            .or_else(|| {
+                std::env::var_os("KIRO_HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(std::path::PathBuf::from)
+            })
+            .or_else(|| dirs::home_dir().map(|home| home.join(".kiro")))
+            .map(|home| home.join("settings").join("cli.json"))
+    }
+
     fn default_mcp_config_path(&self) -> Option<std::path::PathBuf> {
         None
     }
@@ -591,8 +621,12 @@ mod tests {
         assert!(whoami_reports_account(
             br#"{"account":{"email":"sensitive@example.com"}}"#
         ));
+        assert!(whoami_reports_account(
+            br#"{"accountType":"BuilderId","email":"sensitive@example.com"}"#
+        ));
         assert!(whoami_reports_account(br#"{"loggedIn":true}"#));
         assert!(!whoami_reports_account(br#"{"loggedIn":false}"#));
+        assert!(!whoami_reports_account(br#"{"accountType":"BuilderId"}"#));
         assert!(!whoami_reports_account(b"{}"));
         assert!(!whoami_reports_account(b"not json"));
     }
@@ -611,12 +645,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn runtime_config_path_honors_profile_kiro_home() {
+        let mut executor = kiro();
+        executor.cmd.env = Some(
+            [("KIRO_HOME".to_string(), "fixture-kiro-home".to_string())]
+                .into_iter()
+                .collect(),
+        );
+
+        assert_eq!(
+            executor.default_runtime_config_path(),
+            Some(
+                Path::new("fixture-kiro-home")
+                    .join("settings")
+                    .join("cli.json")
+            )
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
-    async fn local_login_probe_accepts_only_an_explicit_account_response() {
+    async fn local_login_probe_accepts_kiro_account_metadata() {
         let mut executor = kiro();
-        executor.cmd.base_command_override =
-            Some("sh -c 'printf \"{\\\"account\\\":{\\\"id\\\":\\\"fixture\\\"}}\"'".to_string());
+        executor.cmd.base_command_override = Some(
+            "sh -c 'printf \"{\\\"accountType\\\":\\\"BuilderId\\\",\\\"email\\\":\\\"fixture@example.com\\\"}\"'"
+                .to_string(),
+        );
         let env = ExecutionEnv::new(Default::default(), false, String::new());
 
         assert!(
@@ -732,6 +787,11 @@ mod tests {
                 .env
                 .as_ref()
                 .is_none_or(|values| !values.contains_key("KIRO_HOME"))
+        );
+        assert!(
+            executor
+                .default_runtime_config_path()
+                .is_some_and(|path| path.ends_with(Path::new("settings/cli.json")))
         );
         assert_eq!(executor.default_mcp_config_path(), None);
         assert!(executor.supports_mcp());

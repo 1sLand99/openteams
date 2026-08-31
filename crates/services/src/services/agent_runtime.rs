@@ -15,8 +15,8 @@ use executors::{
     env::ExecutionEnv,
     executors::{
         AcpModelFallback, AcpProbeAuthState, AvailabilityInfo, BaseCodingAgent, CodingAgent,
-        StandardCodingAgentExecutor, acp::AcpCapabilityProbe, codex::Codex, opencode::Opencode,
-        pi::Pi,
+        ExecutorError, StandardCodingAgentExecutor, acp::AcpCapabilityProbe, codex::Codex,
+        opencode::Opencode, pi::Pi,
     },
     profile::{ExecutorConfig, ExecutorConfigs, ProfileError},
 };
@@ -75,8 +75,14 @@ struct CliProbeCacheKey {
 enum CliProbeValue {
     Version(Option<String>),
     Models(Option<Vec<String>>),
-    Acp(Option<AcpCapabilityProbe>),
+    Acp(AcpProbeOutcome),
     Command(Option<ResolvedRuntimeCommand>),
+}
+
+#[derive(Debug, Clone)]
+enum AcpProbeOutcome {
+    Probed(Option<AcpCapabilityProbe>),
+    Unauthenticated,
 }
 
 #[derive(Debug, Clone)]
@@ -629,14 +635,14 @@ pub async fn runtime_diagnostics(
         return Err(AgentRuntimeError::UnknownRunner(runner.to_string()));
     };
 
-    let runtime_config_path = base
-        .default_runtime_config_path()
-        .map(|path| path.display().to_string());
     let dependency_availability = detect_runtime_dependency_availability();
     let status = build_status(runner, config, base, &store, dependency_availability);
     let mut runtime_executor = base.clone();
     let mut env = ExecutionEnv::new(Default::default(), false, String::new());
     apply_config_to_executor_and_env(runner, &mut runtime_executor, &mut env, &store)?;
+    let runtime_config_path = runtime_executor
+        .default_runtime_config_path()
+        .map(|path| path.display().to_string());
 
     let version_result = if status.installed {
         coordinated_detect_cli_version(
@@ -688,45 +694,49 @@ pub async fn runtime_diagnostics(
         .as_ref()
         .map(|command| command.executable_path.clone());
     let resolved_command = resolved_runtime_command.map(|command| command.rendered);
-    let (acp_probe, acp_probe_error, acp_probe_succeeded) = if status.installed {
-        match coordinated_probe_acp(
-            runner,
-            &runtime_executor,
-            probe_dir,
-            &env,
-            auth_method_id,
-            CliProbeCachePolicy::Reuse,
-        )
-        .await
-        {
-            Ok(probe) => {
-                let succeeded = probe.is_some();
-                (probe, None, succeeded)
+    let (acp_probe, acp_probe_error, acp_probe_completed, acp_auth_state_override) =
+        if status.installed {
+            match coordinated_probe_acp(
+                runner,
+                &runtime_executor,
+                probe_dir,
+                &env,
+                auth_method_id,
+                CliProbeCachePolicy::Reuse,
+            )
+            .await
+            {
+                Ok(AcpProbeOutcome::Probed(probe)) => (probe, None, true, None),
+                Ok(AcpProbeOutcome::Unauthenticated) => (
+                    None,
+                    None,
+                    true,
+                    Some(AgentRuntimeAuthState::Unauthenticated),
+                ),
+                Err(error) => (None, Some(error), false, None),
             }
-            Err(error) => (None, Some(error.to_string()), false),
-        }
-    } else {
-        (None, None, false)
-    };
+        } else {
+            (None, None, false, None)
+        };
     let acp_interpretation = acp_probe
         .as_ref()
         .map(|probe| runtime_executor.interpret_acp_probe(probe));
     let acp_probe_models = acp_interpretation
         .as_ref()
         .and_then(|interpretation| interpretation.models.clone());
-    let acp_auth_state = acp_interpretation
-        .as_ref()
-        .and_then(|interpretation| interpretation.auth_state)
-        .map(agent_runtime_auth_state);
-    let latest_store = if detected_version.is_some() || acp_probe_succeeded {
+    let acp_auth_state = acp_auth_state_override.or_else(|| {
+        acp_interpretation
+            .as_ref()
+            .and_then(|interpretation| interpretation.auth_state)
+            .map(agent_runtime_auth_state)
+    });
+    let latest_store = if detected_version.is_some() || acp_probe_completed {
         update_store(&path, |latest| {
             if let Some(version) = detected_version.as_deref() {
                 cache_runner_version(latest, runner, version.to_string());
             }
-            if acp_probe_succeeded {
-                if acp_auth_state != Some(AgentRuntimeAuthState::Unauthenticated) {
-                    clear_cached_authentication_required_error(latest, runner);
-                }
+            if acp_probe_completed {
+                clear_cached_authentication_required_error(latest, runner);
                 if let Some(models) = acp_probe_models.as_ref() {
                     cache_runner_acp_models(latest, runner, models.clone());
                 }
@@ -1352,21 +1362,23 @@ async fn coordinated_probe_acp(
     env: &ExecutionEnv,
     auth_method_id: Option<&str>,
     policy: CliProbeCachePolicy,
-) -> Result<Option<AcpCapabilityProbe>, String> {
+) -> Result<AcpProbeOutcome, String> {
     let key = CliProbeCacheKey {
         request: cli_probe_request_key(runner, executor, current_dir, env, auth_method_id)?,
         kind: CliProbeKind::Acp,
     };
     match run_coordinated_cli_probe(key, policy, || async {
-        executor
-            .probe_acp(current_dir, env, auth_method_id)
-            .await
-            .map(CliProbeValue::Acp)
-            .map_err(|error| error.to_string())
+        match executor.probe_acp(current_dir, env, auth_method_id).await {
+            Ok(probe) => Ok(CliProbeValue::Acp(AcpProbeOutcome::Probed(probe))),
+            Err(ExecutorError::AuthRequired(_)) => {
+                Ok(CliProbeValue::Acp(AcpProbeOutcome::Unauthenticated))
+            }
+            Err(error) => Err(error.to_string()),
+        }
     })
     .await
     {
-        Ok(CliProbeValue::Acp(probe)) => Ok(probe),
+        Ok(CliProbeValue::Acp(outcome)) => Ok(outcome),
         Ok(_) => Err("CLI probe coordinator returned an unexpected ACP result".to_string()),
         Err(error) => Err(error),
     }
@@ -1468,7 +1480,7 @@ async fn discover_models_for_executor(
     let mut auth_state = None;
     let mut model_fallback = executor.acp_model_fallback();
     let acp_error = match &acp_result {
-        Ok(Some(probe)) => {
+        Ok(AcpProbeOutcome::Probed(Some(probe))) => {
             let interpretation = executor.interpret_acp_probe(probe);
             auth_state = interpretation.auth_state.map(agent_runtime_auth_state);
             model_fallback = interpretation.model_fallback;
@@ -1477,7 +1489,10 @@ async fn discover_models_for_executor(
             }
             None
         }
-        Ok(None) => None,
+        Ok(AcpProbeOutcome::Probed(None)) => None,
+        Ok(AcpProbeOutcome::Unauthenticated) => {
+            return Ok((None, Some(AgentRuntimeAuthState::Unauthenticated)));
+        }
         Err(error) => Some(error.clone()),
     };
 
@@ -1655,9 +1670,9 @@ fn clear_cached_authentication_required_error(
             .into_iter()
             .flat_map(str::lines)
             .map(|line| {
-                (!line
-                    .to_ascii_lowercase()
-                    .contains("authentication required"))
+                let normalized = line.to_ascii_lowercase();
+                (!normalized.contains("authentication required")
+                    && !normalized.contains("auth required"))
                 .then(|| line.to_string())
             }),
     );
@@ -2022,7 +2037,10 @@ mod tests {
             (BaseCodingAgent::Pi, "settings.json", "mcp.json"),
             (BaseCodingAgent::Droid, "settings.json", "mcp.json"),
         ];
-        let runtime_only_paths = [(BaseCodingAgent::DeepseekHarness, "cordis.yml")];
+        let runtime_only_paths = [
+            (BaseCodingAgent::KiroCli, "cli.json"),
+            (BaseCodingAgent::DeepseekHarness, "cordis.yml"),
+        ];
 
         for (runner, runtime_file_name, mcp_file_name) in separate_paths {
             let executor = profiles
@@ -2349,7 +2367,7 @@ mod tests {
             move || async move {
                 first_starts.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(40)).await;
-                Ok(CliProbeValue::Acp(None))
+                Ok(CliProbeValue::Acp(AcpProbeOutcome::Probed(None)))
             },
         );
         let second_starts = Arc::clone(&starts);
@@ -2358,14 +2376,20 @@ mod tests {
             CliProbeCachePolicy::Refresh,
             move || async move {
                 second_starts.fetch_add(1, Ordering::SeqCst);
-                Ok(CliProbeValue::Acp(None))
+                Ok(CliProbeValue::Acp(AcpProbeOutcome::Probed(None)))
             },
         );
 
         let (first_result, second_result) = tokio::join!(first, second);
 
-        assert!(matches!(first_result, Ok(CliProbeValue::Acp(None))));
-        assert!(matches!(second_result, Ok(CliProbeValue::Acp(None))));
+        assert!(matches!(
+            first_result,
+            Ok(CliProbeValue::Acp(AcpProbeOutcome::Probed(None)))
+        ));
+        assert!(matches!(
+            second_result,
+            Ok(CliProbeValue::Acp(AcpProbeOutcome::Probed(None)))
+        ));
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         CLI_PROBE_CACHE.remove(&key);
     }
@@ -3462,13 +3486,13 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn kiro_missing_auth_uses_the_existing_structured_probe_error() {
+    async fn kiro_missing_auth_is_not_an_acp_or_discovery_error() {
         let mut kiro = KiroCli::default();
         kiro.cmd.base_command_override = Some("sh -c 'exit 1'".to_string());
         let executor = CodingAgent::KiroCli(kiro);
         let env = ExecutionEnv::new(Default::default(), false, String::new());
 
-        let error = coordinated_probe_acp(
+        let outcome = coordinated_probe_acp(
             BaseCodingAgent::KiroCli,
             &executor,
             Path::new("."),
@@ -3477,12 +3501,48 @@ mod tests {
             CliProbeCachePolicy::Refresh,
         )
         .await
-        .expect_err("missing Kiro authentication must fail");
-        let detail = status_error_detail("acp_probe", error);
+        .expect("missing Kiro authentication is a valid probe outcome");
+        assert!(matches!(outcome, AcpProbeOutcome::Unauthenticated));
 
-        assert!(detail.starts_with("[acp_probe] Auth required:"));
-        assert!(detail.contains("kiro-cli login"));
-        assert!(detail.contains("KIRO_API_KEY"));
+        let (models, auth_state) =
+            discover_models_for_executor(BaseCodingAgent::KiroCli, &executor, Path::new("."), &env)
+                .await
+                .expect("missing Kiro authentication must not fail discovery");
+        assert_eq!(models, None);
+        assert_eq!(auth_state, Some(AgentRuntimeAuthState::Unauthenticated));
+
+        let runner = BaseCodingAgent::KiroCli;
+        let preserved_models = vec!["kiro/model".to_string()];
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: preserved_models.clone(),
+                version: None,
+                auth_state: None,
+                last_checked_at: Utc::now(),
+                last_error: Some(
+                    "[model_discovery] ACP initialize failed: Auth required: login".to_string(),
+                ),
+            },
+        );
+        let errors = apply_discovery_outcomes(
+            &mut store,
+            vec![RunnerDiscoveryOutcome::Discovered {
+                runner,
+                models,
+                detected_version: None,
+                version_error: None,
+                auth_state,
+            }],
+        );
+        assert!(errors.is_empty());
+        assert_eq!(store.discoveries[&runner].models, preserved_models);
+        assert_eq!(
+            store.discoveries[&runner].auth_state,
+            Some(AgentRuntimeAuthState::Unauthenticated)
+        );
+        assert_eq!(store.discoveries[&runner].last_error, None);
     }
 
     #[cfg(unix)]
