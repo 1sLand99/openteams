@@ -900,25 +900,24 @@ impl ChatRunner {
 
         markdown.push_str("### Rules\n");
         markdown.push_str("1. Output only content directly related to the current task.\n");
-        markdown.push_str("2. Keep messages concise and precise.\n");
         if is_workflow_mode {
             markdown.push_str(
-                "3. Workflow mode: `send.to` may only be `\"you\"` (the user). Do not send direct group-chat messages to other agents; workflow orchestration will dispatch agent work through the workflow plan.\n",
+                "2. Workflow mode: `send.to` may only be `\"you\"` (the user). Do not send direct group-chat messages to other agents; workflow orchestration will dispatch agent work through the workflow plan.\n",
             );
         } else {
             markdown
-                .push_str("3. `send.to` must match a group member name or `\"you\"` (the user).\n");
+                .push_str("2. `send.to` must match a group member name or `\"you\"` (the user).\n");
         }
         markdown.push_str(
-            "4. Emit at most one `send` item for each `send.to` value per response, including `\"you\"` and every agent. Never emit multiple `send` items with the same `send.to`; combine their content into one complete Markdown message.\n",
+            "3. Emit at most one `send` item for each `send.to` value per response, including `\"you\"` and every agent. Never emit multiple `send` items with the same `send.to`; combine their content into one complete Markdown message.\n",
         );
-        markdown.push_str("5. `record`: long-lived shared facts only.\n");
-        markdown.push_str("6. `artifact.content`: a JSON array of file paths only. Include every file modified, added, or deleted in this turn. Paths may be workspace-relative or absolute, but must not include prose.\n");
+        markdown.push_str("4. `record`: long-lived shared facts only.\n");
+        markdown.push_str("5. `artifact.content`: a JSON array of file paths only. Include every file modified, added, or deleted in this turn. Paths may be workspace-relative or absolute, but must not include prose.\n");
         markdown.push_str(
-            "7. `conclusion`: current-turn summary only (completed work, blockers, next steps). Max 3 sentences.\n",
+            "6. `conclusion`: current-turn summary only (completed work, blockers, next steps). Max 3 sentences.\n",
         );
         if workflow_generation_available {
-            markdown.push_str("8. `workflow_generate`: \n");
+            markdown.push_str("7. `workflow_generate`: \n");
             markdown.push_str(
                 "- Emit `workflow_generate` only when the user explicitly asks to start generating an execution plan.\n",
             );
@@ -938,7 +937,7 @@ impl ChatRunner {
                 "- `design_doc_path` (optional, array of strings): file paths to design documents that were discussed and confirmed. If the chat history references design document files, include their paths here so the plan generator can read them for context. Leave empty or omit if no design documents are available.\n\n",
             );
         } else if is_workflow_mode {
-            markdown.push_str("8. Active workflow guard:\n");
+            markdown.push_str("7. Active workflow guard:\n");
             markdown.push_str(
                 "- A workflow execution is already active in this session, so `workflow_generate` is unavailable. Do not emit it in this response.\n",
             );
@@ -974,28 +973,30 @@ impl ChatRunner {
             markdown.push_str("\n```\n\n");
         }
 
-        let validation_section = if is_workflow_mode {
-            crate::services::output_validation::render_output_validation_instructions(
-                crate::services::output_validation::OutputValidationKind::ChatWorkflowProtocol,
-                &crate::services::output_validation::ChatWorkflowProtocolValidationContext {
-                    allowed_targets: vec![RESERVED_USER_HANDLE.to_string()],
-                    workflow_generation_allowed: workflow_generation_available,
-                },
-                crate::services::output_validation::OutputValidationReturnMode::JsonOnly,
-            )
-        } else {
-            let mut allowed_targets = vec![RESERVED_USER_HANDLE.to_string()];
-            allowed_targets.extend(visible_members.iter().map(|member| member.name.clone()));
-            crate::services::output_validation::render_output_validation_instructions(
-                crate::services::output_validation::OutputValidationKind::ChatProtocol,
-                &crate::services::output_validation::ChatProtocolValidationContext {
-                    allowed_targets,
-                },
-                crate::services::output_validation::OutputValidationReturnMode::JsonOnly,
-            )
-        };
-        markdown.push_str(&validation_section);
-        markdown.push_str("\n\n");
+        if is_protocol_retry {
+            let validation_section = if is_workflow_mode {
+                crate::services::output_validation::render_output_validation_instructions(
+                    crate::services::output_validation::OutputValidationKind::ChatWorkflowProtocol,
+                    &crate::services::output_validation::ChatWorkflowProtocolValidationContext {
+                        allowed_targets: vec![RESERVED_USER_HANDLE.to_string()],
+                        workflow_generation_allowed: workflow_generation_available,
+                    },
+                    crate::services::output_validation::OutputValidationReturnMode::JsonOnly,
+                )
+            } else {
+                let mut allowed_targets = vec![RESERVED_USER_HANDLE.to_string()];
+                allowed_targets.extend(visible_members.iter().map(|member| member.name.clone()));
+                crate::services::output_validation::render_output_validation_instructions(
+                    crate::services::output_validation::OutputValidationKind::ChatProtocol,
+                    &crate::services::output_validation::ChatProtocolValidationContext {
+                        allowed_targets,
+                    },
+                    crate::services::output_validation::OutputValidationReturnMode::JsonOnly,
+                )
+            };
+            markdown.push_str(&validation_section);
+            markdown.push_str("\n\n");
+        }
 
         if !is_protocol_retry {
             markdown.push_str("## Agent\n");

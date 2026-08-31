@@ -13,7 +13,7 @@ import { ShortcutProvider } from "@/shortcuts/ShortcutProvider";
 import { ShortcutOverlays } from "@/shortcuts/ShortcutOverlays";
 import { useCommandHandler } from "@/shortcuts/ShortcutProvider";
 import { detectShortcutRuntime } from "@/shortcuts/platform";
-import { getTauriInvoke } from "@/lib/tauriBridge";
+import { getTauriAppWindow, getTauriInvoke } from "@/lib/tauriBridge";
 import { WorkflowWorkspace } from "@/components/WorkflowWorkspace";
 import { CreateAgentSessionModal } from "@/components/CreateAgentSessionModal";
 import { DiffViewTab } from "@/components/DiffViewTab";
@@ -46,10 +46,12 @@ import {
   FileText,
   Github,
   Menu,
+  Minus,
   Network,
   Plus,
   Route,
   Settings2,
+  Square,
   Users,
   X,
   type LucideIcon,
@@ -478,6 +480,7 @@ function WorkspaceLayout() {
     projects,
     projectsAsync,
     config,
+    environment,
     selectedProjectId,
     setSelectedProjectId,
     refreshProjects,
@@ -695,6 +698,13 @@ function WorkspaceLayout() {
     },
     [t],
   );
+
+  // The desktop shell removes the native Windows title bar, so the header
+  // provides its own drag region and window controls on that platform only.
+  const tauriAppWindow = getTauriAppWindow();
+  const showWindowsWindowControls =
+    tauriAppWindow !== null &&
+    (environment?.os_type ?? "").toLowerCase().includes("windows");
 
   const overlayForOnboardingState = (
     nextState: OnboardingState,
@@ -2332,8 +2342,7 @@ function WorkspaceLayout() {
       <div className="flex-1 h-full min-w-0 overflow-hidden bg-[var(--canvas)] p-2 md:p-3">
         <section className="flex h-full min-h-0 flex-col overflow-hidden gap-1">
           <header className="h-8 bg-[var(--canvas)] flex items-center justify-between shrink-0 select-none z-10">
-            <div className="flex items-center gap-3 flex-1 min-w-0 h-full">
-              <button
+            <div className="flex items-center gap-3 flex-1 min-w-0 h-full">              <button
                 type="button"
                 onClick={() => setIsMobileSidebarOpen(true)}
                 className="p-1.5 rounded-md border border-[var(--hairline)] bg-[var(--surface-1)] md:hidden hover:bg-[var(--surface-2)] text-[var(--ink-subtle)] hover:text-[var(--ink)] cursor-pointer shrink-0"
@@ -2395,6 +2404,46 @@ function WorkspaceLayout() {
                 </div>
               </nav>
             </div>
+            {showWindowsWindowControls && tauriAppWindow && (
+              <>
+                <div
+                  data-tauri-drag-region
+                  className="h-full min-w-12 flex-1"
+                />
+                <div className="flex h-full shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => void tauriAppWindow.minimize()}
+                    className="flex h-8 w-10 items-center justify-center rounded-md border border-transparent text-[var(--ink-subtle)] transition hover:bg-[var(--surface-3)] hover:text-[var(--ink)]"
+                    aria-label={translate(
+                      "aria.minimizeWindow",
+                      "Minimize window",
+                    )}
+                  >
+                    <Minus className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void tauriAppWindow.toggleMaximize()}
+                    className="flex h-8 w-10 items-center justify-center rounded-md border border-transparent text-[var(--ink-subtle)] transition hover:bg-[var(--surface-3)] hover:text-[var(--ink)]"
+                    aria-label={translate(
+                      "aria.toggleMaximizeWindow",
+                      "Maximize or restore window",
+                    )}
+                  >
+                    <Square className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void tauriAppWindow.close()}
+                    className="flex h-8 w-10 items-center justify-center rounded-md border border-transparent text-[var(--ink-subtle)] transition hover:bg-[#e81123] hover:text-white"
+                    aria-label={translate("aria.closeWindow", "Close window")}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              </>
+            )}
           </header>
 
           <main

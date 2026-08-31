@@ -18,6 +18,12 @@ export type TauriListen = (
 ) => Promise<TauriUnlisten>;
 export type TauriShellOpen = (path: string, withApp?: string) => Promise<void>;
 
+export type TauriAppWindow = {
+  minimize: () => Promise<void>;
+  toggleMaximize: () => Promise<void>;
+  close: () => Promise<void>;
+};
+
 type TauriGlobal = {
   invoke?: TauriInvoke;
   tauri?: {
@@ -28,6 +34,9 @@ type TauriGlobal = {
   };
   shell?: {
     open?: TauriShellOpen;
+  };
+  window?: {
+    appWindow?: TauriAppWindow;
   };
 };
 
@@ -53,4 +62,12 @@ export const getTauriShellOpen = (): TauriShellOpen | null => {
   const tauriGlobal = (window as Window & { __TAURI__?: TauriGlobal })
     .__TAURI__;
   return tauriGlobal?.shell?.open ?? null;
+};
+
+export const getTauriAppWindow = (): TauriAppWindow | null => {
+  if (typeof window === 'undefined') return null;
+
+  const tauriGlobal = (window as Window & { __TAURI__?: TauriGlobal })
+    .__TAURI__;
+  return tauriGlobal?.window?.appWindow ?? null;
 };

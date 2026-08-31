@@ -442,6 +442,13 @@ fn main() {
             });
 
             if let Some(window) = app.get_window("main") {
+                #[cfg(windows)]
+                {
+                    // Hide the native Windows title bar; the frontend renders
+                    // its own drag region and window controls instead. macOS
+                    // keeps the Overlay titleBarStyle from the config.
+                    window.set_decorations(false)?;
+                }
                 apply_default_webview_zoom(&window);
                 wait_for_backend_then_navigate(window, port);
             }
