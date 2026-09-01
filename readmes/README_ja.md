@@ -8,7 +8,7 @@
   <h5>計画し、構築し、届ける——1つの AI エージェントではなく、AI チームとともに</h5>
 
   <p>
-    openteams は、個人開発者が自分で管理できる AI チームとともに、ソフトウェアをより速く計画、構築、リリースするための、オープンソースかつローカルファーストの AI デスクトップアプリです。
+    openteams は、個人開発者が自分で管理できる AI チームとともに、ソフトウェアをより速く計画、構築、リリースするための、オープンソースかつローカルファーストの AI デスクトップアプリです。Claude Code、Codex、Gemini CLI、組み込みの openteams-cli など、16 種類のコーディングエージェントに対応しています。
   </p>
 
   <p>
@@ -116,10 +116,21 @@ npx openteams-web
 | エージェント | インストール例 |
 | --- | --- |
 | Claude Code | `npm i -g @anthropic-ai/claude-code` |
-| Gemini CLI | `npm i -g @google/gemini-cli` |
 | Codex | `npm i -g @openai/codex` |
+| Gemini CLI | `npm i -g @google/gemini-cli` |
 | Qwen Code | `npm i -g @qwen-code/qwen-code` |
 | OpenCode | `npm i -g opencode-ai` |
+| Amp | `npm i -g @sourcegraph/amp` |
+| GitHub Copilot | `npm i -g @github/copilot` |
+| Cursor | `curl https://cursor.com/install -fsS \| bash` |
+| Droid | `curl -fsSL https://app.factory.ai/cli \| sh` |
+| Kimi Code | `curl -LsSf https://code.kimi.com/install.sh \| bash` |
+| Qoder CLI | `curl -fsSL https://qoder.com/install \| bash` |
+| Pi | インストール不要（`npx` 経由で実行） |
+| Hermes | `pip install hermes-agent` |
+| Kiro CLI | `curl -fsSL https://cli.kiro.dev/install \| bash` |
+| DeepSeek Harness（ACP プレビュー） | アプリ内のバージョン固定セットアップコマンドで[公式ソース](https://github.com/deepseek-ai/deepseek-harness)をビルドしてください。OpenTeams は ACP サーバーを Node で直接起動します（`npx` は使用しません） |
+| OpenTeams CLI | openteams に同梱 |
 
 📚 [その他のエージェントインストールガイド](https://doc.openteams-lab.com/getting-started)
 
@@ -149,7 +160,7 @@ openteams は活発に開発されています。今後は次の方向へ進ん�
 
 - [ ] **専門性を持つ AI ワーカー** — 専門領域の知識を持ち、専門的な課題を解決できる AI ワーカーをさらに提供します。
 - [ ] **高い成果を生み出す AI チーム** — 効率的な専門 AI ワーカーで構成され、特定のビジネス向けに生産ワークフローをカスタマイズし、要件をエンドツーエンドで成果物へ変換します。
-- [ ] **より多くのエージェント統合** — Kilo Code、hermes-agent、openclaw など、よく使われるエージェントをさらに統合します。
+- [ ] **より多くのエージェント統合** — Kilo Code、openclaw など、よく使われるエージェントをさらに統合します。
 
 ***ビジョン：トークン消費を本当の生産性へ変える。***
 

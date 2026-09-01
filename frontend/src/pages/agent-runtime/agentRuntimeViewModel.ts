@@ -43,6 +43,7 @@ const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
 export function getRunnerLabel(runner: BaseCodingAgent | string): string {
   if (runner === "DEEPSEEK_HARNESS") return "DeepSeek Harness";
+  if (runner === "KIRO_CLI") return "Kiro CLI";
   if (runner === "QODER_CLI") return "Qoder CLI";
   return runner
     .toString()

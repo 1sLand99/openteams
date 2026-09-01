@@ -582,6 +582,11 @@
         "HERMES": {}
       }
     },
+    "KIRO_CLI": {
+      "DEFAULT": {
+        "KIRO_CLI": {}
+      }
+    },
     "DEEPSEEK_HARNESS": {
       "DEFAULT": {
         "DEEPSEEK_HARNESS": {}

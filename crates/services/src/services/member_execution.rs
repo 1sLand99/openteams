@@ -428,7 +428,10 @@ mod tests {
     };
     use executors::{
         env::RepoContext,
-        executors::{BaseCodingAgent as RunnerKind, acp::AcpAccessMode},
+        executors::{
+            BaseCodingAgent as RunnerKind,
+            acp::{AcpAccessMode, mcp::PREPARED_ACP_MCP_SNAPSHOT_ENV},
+        },
     };
     use sqlx::types::Json;
     use uuid::Uuid;
@@ -644,6 +647,82 @@ mod tests {
 
         assert_eq!(effective.runner_type, RunnerKind::Codex);
         assert_eq!(prepared.server_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn kiro_prepares_member_mcp_and_overlays_acp_options_through_generic_run_path() {
+        const PREPARED_ACP_MCP_HASH_ENV: &str = "OPENTEAMS_ACP_MCP_SNAPSHOT_HASH";
+
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("test database");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let mut chat_agent = agent();
+        chat_agent.runner_type = "KIRO_CLI".to_string();
+        let fake_secret = "kiro-service-mcp-secret-never-log";
+        let member = session_agent(MemberExecutionConfig {
+            runner_type: Some(RunnerKind::KiroCli),
+            acp: Some(AcpExecutionOptions {
+                access_mode: Some(AcpAccessMode::WorkspaceOnly),
+                ..AcpExecutionOptions::default()
+            }),
+            mcp: Some(MemberMcpConfig {
+                mcp_servers: [(
+                    "member-only".to_string(),
+                    serde_json::json!({
+                        "command": std::env::current_exe()
+                            .expect("current test executable")
+                            .to_string_lossy(),
+                        "env": {"TOKEN": fake_secret}
+                    }),
+                )]
+                .into_iter()
+                .collect(),
+            }),
+            ..Default::default()
+        });
+        let mut env = ExecutionEnv::new(
+            RepoContext::new(workspace.path().to_path_buf(), Vec::new()),
+            false,
+            String::new(),
+        );
+
+        let (effective, executor, prepared) = build_effective_member_executor_for_run(
+            &pool,
+            &chat_agent,
+            &member,
+            workspace.path(),
+            Uuid::new_v4(),
+            &mut env,
+        )
+        .await
+        .expect("Kiro must use the generic run-scoped MCP path");
+
+        assert_eq!(effective.runner_type, RunnerKind::KiroCli);
+        assert_eq!(prepared.server_count(), 1);
+        assert_eq!(prepared.server_names(), ["member-only"]);
+        assert!(!format!("{prepared:?}").contains(fake_secret));
+        let CodingAgent::KiroCli(kiro) = executor else {
+            panic!("expected Kiro CLI executor");
+        };
+        assert_eq!(
+            kiro.acp.and_then(|options| options.access_mode),
+            Some(AcpAccessMode::WorkspaceOnly)
+        );
+        for key in [PREPARED_ACP_MCP_SNAPSHOT_ENV, PREPARED_ACP_MCP_HASH_ENV] {
+            assert_eq!(
+                kiro.cmd.env.as_ref().and_then(|values| values.get(key)),
+                env.get(key),
+                "generic member run preparation must pin Kiro MCP metadata in both environment layers"
+            );
+        }
+        assert!(!env.contains_key("KIRO_HOME"));
+        assert!(
+            kiro.cmd
+                .env
+                .as_ref()
+                .is_none_or(|values| !values.contains_key("KIRO_HOME"))
+        );
     }
 
     #[tokio::test]

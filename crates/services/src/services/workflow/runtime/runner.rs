@@ -1839,7 +1839,7 @@ fn spawn_log_forwarders(
             None,
         ))
     })?;
-    let stderr = spawned.child.inner().stderr.take().ok_or_else(|| {
+    let stderr = spawned.take_stderr().ok_or_else(|| {
         WorkflowRuntimeError::Validation(workflow_runtime_error_message(
             WorkflowRuntimeErrorCode::ChildStderrMissing,
             None,

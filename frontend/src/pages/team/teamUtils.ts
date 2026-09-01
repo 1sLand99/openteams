@@ -1,4 +1,5 @@
 import type {
+  AcpCapabilityProbe,
   BackendChatAgent,
   BackendChatSessionAgent,
   BaseCodingAgent,
@@ -61,6 +62,7 @@ export const normalizeRunnerType = (
     "COPILOT",
     "DROID",
     "KIMI_CODE",
+    "KIRO_CLI",
     "QODER_CLI",
     "PI",
   ];
@@ -82,8 +84,32 @@ export const runnerSupportsAcp = (runnerType: BaseCodingAgent): boolean =>
   runnerType === "GEMINI" ||
   runnerType === "QWEN_CODE" ||
   runnerType === "KIMI_CODE" ||
+  runnerType === "KIRO_CLI" ||
   runnerType === "QODER_CLI" ||
   runnerType === "PI";
+
+export type AcpCapabilityGates = {
+  /** The agent advertises at least one ACP auth method to select from. */
+  authMethodSelection: boolean;
+  /** The agent accepts additional directories in session/new. */
+  additionalDirectories: boolean;
+  /** The agent accepts session/load to resume follow-up conversations. */
+  sessionLoad: boolean;
+};
+
+/**
+ * Capability limits for the ACP config UI, consumed from the backend probe.
+ * A missing probe means the backend could not confirm support, so every gate
+ * stays closed instead of assuming the agent accepts the option.
+ */
+export const acpCapabilityGates = (
+  probe: AcpCapabilityProbe | null,
+): AcpCapabilityGates => ({
+  authMethodSelection: probe !== null && probe.auth_methods.length > 0,
+  additionalDirectories:
+    probe !== null && probe.supports_additional_directories,
+  sessionLoad: probe !== null && probe.supports_session_load,
+});
 
 export const trimOrNull = (value: string): string | null => {
   const trimmed = value.trim();

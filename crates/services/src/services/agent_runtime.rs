@@ -15,8 +15,8 @@ use executors::{
     env::ExecutionEnv,
     executors::{
         AcpModelFallback, AcpProbeAuthState, AvailabilityInfo, BaseCodingAgent, CodingAgent,
-        StandardCodingAgentExecutor, acp::AcpCapabilityProbe, codex::Codex, opencode::Opencode,
-        pi::Pi,
+        ExecutorError, StandardCodingAgentExecutor, acp::AcpCapabilityProbe, codex::Codex,
+        opencode::Opencode, pi::Pi,
     },
     profile::{ExecutorConfig, ExecutorConfigs, ProfileError},
 };
@@ -75,8 +75,14 @@ struct CliProbeCacheKey {
 enum CliProbeValue {
     Version(Option<String>),
     Models(Option<Vec<String>>),
-    Acp(Option<AcpCapabilityProbe>),
+    Acp(AcpProbeOutcome),
     Command(Option<ResolvedRuntimeCommand>),
+}
+
+#[derive(Debug, Clone)]
+enum AcpProbeOutcome {
+    Probed(Option<AcpCapabilityProbe>),
+    Unauthenticated,
 }
 
 #[derive(Debug, Clone)]
@@ -629,14 +635,14 @@ pub async fn runtime_diagnostics(
         return Err(AgentRuntimeError::UnknownRunner(runner.to_string()));
     };
 
-    let runtime_config_path = base
-        .default_runtime_config_path()
-        .map(|path| path.display().to_string());
     let dependency_availability = detect_runtime_dependency_availability();
     let status = build_status(runner, config, base, &store, dependency_availability);
     let mut runtime_executor = base.clone();
     let mut env = ExecutionEnv::new(Default::default(), false, String::new());
     apply_config_to_executor_and_env(runner, &mut runtime_executor, &mut env, &store)?;
+    let runtime_config_path = runtime_executor
+        .default_runtime_config_path()
+        .map(|path| path.display().to_string());
 
     let version_result = if status.installed {
         coordinated_detect_cli_version(
@@ -676,7 +682,8 @@ pub async fn runtime_diagnostics(
                 | CodingAgent::QwenCode(_)
                 | CodingAgent::KimiCode(_)
                 | CodingAgent::QoderCli(_)
-                | CodingAgent::Hermes(_) => "native",
+                | CodingAgent::Hermes(_)
+                | CodingAgent::KiroCli(_) => "native",
                 CodingAgent::Pi(_) => "npx",
                 _ => "default",
             }
@@ -687,45 +694,49 @@ pub async fn runtime_diagnostics(
         .as_ref()
         .map(|command| command.executable_path.clone());
     let resolved_command = resolved_runtime_command.map(|command| command.rendered);
-    let (acp_probe, acp_probe_error, acp_probe_succeeded) = if status.installed {
-        match coordinated_probe_acp(
-            runner,
-            &runtime_executor,
-            probe_dir,
-            &env,
-            auth_method_id,
-            CliProbeCachePolicy::Reuse,
-        )
-        .await
-        {
-            Ok(probe) => {
-                let succeeded = probe.is_some();
-                (probe, None, succeeded)
+    let (acp_probe, acp_probe_error, acp_probe_completed, acp_auth_state_override) =
+        if status.installed {
+            match coordinated_probe_acp(
+                runner,
+                &runtime_executor,
+                probe_dir,
+                &env,
+                auth_method_id,
+                CliProbeCachePolicy::Reuse,
+            )
+            .await
+            {
+                Ok(AcpProbeOutcome::Probed(probe)) => (probe, None, true, None),
+                Ok(AcpProbeOutcome::Unauthenticated) => (
+                    None,
+                    None,
+                    true,
+                    Some(AgentRuntimeAuthState::Unauthenticated),
+                ),
+                Err(error) => (None, Some(error), false, None),
             }
-            Err(error) => (None, Some(error.to_string()), false),
-        }
-    } else {
-        (None, None, false)
-    };
+        } else {
+            (None, None, false, None)
+        };
     let acp_interpretation = acp_probe
         .as_ref()
         .map(|probe| runtime_executor.interpret_acp_probe(probe));
     let acp_probe_models = acp_interpretation
         .as_ref()
         .and_then(|interpretation| interpretation.models.clone());
-    let acp_auth_state = acp_interpretation
-        .as_ref()
-        .and_then(|interpretation| interpretation.auth_state)
-        .map(agent_runtime_auth_state);
-    let latest_store = if detected_version.is_some() || acp_probe_succeeded {
+    let acp_auth_state = acp_auth_state_override.or_else(|| {
+        acp_interpretation
+            .as_ref()
+            .and_then(|interpretation| interpretation.auth_state)
+            .map(agent_runtime_auth_state)
+    });
+    let latest_store = if detected_version.is_some() || acp_probe_completed {
         update_store(&path, |latest| {
             if let Some(version) = detected_version.as_deref() {
                 cache_runner_version(latest, runner, version.to_string());
             }
-            if acp_probe_succeeded {
-                if acp_auth_state != Some(AgentRuntimeAuthState::Unauthenticated) {
-                    clear_cached_authentication_required_error(latest, runner);
-                }
+            if acp_probe_completed {
+                clear_cached_authentication_required_error(latest, runner);
                 if let Some(models) = acp_probe_models.as_ref() {
                     cache_runner_acp_models(latest, runner, models.clone());
                 }
@@ -932,19 +943,32 @@ async fn detect_cli_version(
     executor: &CodingAgent,
     env: &ExecutionEnv,
 ) -> Result<Option<String>, String> {
-    let Some(base) = version_command_base(executor) else {
-        return Ok(None);
-    };
-    let parts = CommandBuilder::new(base)
-        .extend_params(["--version"])
-        .build_initial()
+    let parts = match executor
+        .version_command_for_diagnostics()
         .map_err(|error| {
             command_failure_detail(
-                "<configured command could not be parsed>",
-                "parse version command",
+                "<configured command could not be built>",
+                "build version command",
                 error,
             )
-        })?;
+        })? {
+        Some(parts) => parts,
+        None => {
+            let Some(base) = version_command_base(executor) else {
+                return Ok(None);
+            };
+            CommandBuilder::new(base)
+                .extend_params(["--version"])
+                .build_initial()
+                .map_err(|error| {
+                    command_failure_detail(
+                        "<configured command could not be parsed>",
+                        "parse version command",
+                        error,
+                    )
+                })?
+        }
+    };
     let unresolved_command = parts.redacted_display();
     let parts = parts.into_resolved().await.map_err(|error| {
         command_failure_detail(&unresolved_command, "resolve version executable", error)
@@ -960,13 +984,13 @@ async fn detect_cli_version(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    if let Some(cmd_overrides) = cmd_overrides_for_executor(executor) {
-        env.clone()
-            .with_profile(cmd_overrides)
-            .apply_to_command(&mut command);
+    let effective_env = if let Some(cmd_overrides) = cmd_overrides_for_executor(executor) {
+        env.clone().with_profile(cmd_overrides)
     } else {
-        env.apply_to_command(&mut command);
-    }
+        env.clone()
+    };
+    let output_redactor = effective_env.sensitive_value_redactor();
+    effective_env.apply_to_command(&mut command);
 
     let output = timeout(Duration::from_secs(12), command.output())
         .await
@@ -987,7 +1011,7 @@ async fn detect_cli_version(
             .map(|code| format!("exit code {code}"))
             .unwrap_or_else(|| "terminated by signal".to_string());
         let evidence = normalize_cli_version_output(&output.stderr, &output.stdout)
-            .map(|line| format!(": {line}"))
+            .map(|line| format!(": {}", output_redactor.redact(&line)))
             .unwrap_or_default();
         return Err(command_failure_detail(
             &command_display,
@@ -997,6 +1021,7 @@ async fn detect_cli_version(
     }
 
     normalize_cli_version_output(&output.stdout, &output.stderr)
+        .map(|line| output_redactor.redact(&line))
         .map(Some)
         .ok_or_else(|| {
             command_failure_detail(
@@ -1049,7 +1074,7 @@ fn version_command_base(executor: &CodingAgent) -> Option<String> {
         CodingAgent::KimiCode(_) => "kimi".to_string(),
         CodingAgent::QoderCli(_) => "qodercli".to_string(),
         CodingAgent::Hermes(_) => "hermes".to_string(),
-        CodingAgent::DeepseekHarness(_) => return None,
+        CodingAgent::KiroCli(_) | CodingAgent::DeepseekHarness(_) => return None,
         CodingAgent::Pi(_) => Pi::version_command(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => return None,
@@ -1074,6 +1099,7 @@ fn cmd_overrides_for_executor(executor: &CodingAgent) -> Option<&CmdOverrides> {
         CodingAgent::QoderCli(config) => Some(&config.cmd),
         CodingAgent::Pi(config) => Some(&config.cmd),
         CodingAgent::Hermes(config) => Some(&config.cmd),
+        CodingAgent::KiroCli(config) => Some(&config.cmd),
         CodingAgent::DeepseekHarness(config) => Some(&config.cmd),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) => None,
@@ -1336,21 +1362,23 @@ async fn coordinated_probe_acp(
     env: &ExecutionEnv,
     auth_method_id: Option<&str>,
     policy: CliProbeCachePolicy,
-) -> Result<Option<AcpCapabilityProbe>, String> {
+) -> Result<AcpProbeOutcome, String> {
     let key = CliProbeCacheKey {
         request: cli_probe_request_key(runner, executor, current_dir, env, auth_method_id)?,
         kind: CliProbeKind::Acp,
     };
     match run_coordinated_cli_probe(key, policy, || async {
-        executor
-            .probe_acp(current_dir, env, auth_method_id)
-            .await
-            .map(CliProbeValue::Acp)
-            .map_err(|error| error.to_string())
+        match executor.probe_acp(current_dir, env, auth_method_id).await {
+            Ok(probe) => Ok(CliProbeValue::Acp(AcpProbeOutcome::Probed(probe))),
+            Err(ExecutorError::AuthRequired(_)) => {
+                Ok(CliProbeValue::Acp(AcpProbeOutcome::Unauthenticated))
+            }
+            Err(error) => Err(error.to_string()),
+        }
     })
     .await
     {
-        Ok(CliProbeValue::Acp(probe)) => Ok(probe),
+        Ok(CliProbeValue::Acp(outcome)) => Ok(outcome),
         Ok(_) => Err("CLI probe coordinator returned an unexpected ACP result".to_string()),
         Err(error) => Err(error),
     }
@@ -1452,7 +1480,7 @@ async fn discover_models_for_executor(
     let mut auth_state = None;
     let mut model_fallback = executor.acp_model_fallback();
     let acp_error = match &acp_result {
-        Ok(Some(probe)) => {
+        Ok(AcpProbeOutcome::Probed(Some(probe))) => {
             let interpretation = executor.interpret_acp_probe(probe);
             auth_state = interpretation.auth_state.map(agent_runtime_auth_state);
             model_fallback = interpretation.model_fallback;
@@ -1461,7 +1489,10 @@ async fn discover_models_for_executor(
             }
             None
         }
-        Ok(None) => None,
+        Ok(AcpProbeOutcome::Probed(None)) => None,
+        Ok(AcpProbeOutcome::Unauthenticated) => {
+            return Ok((None, Some(AgentRuntimeAuthState::Unauthenticated)));
+        }
         Err(error) => Some(error.clone()),
     };
 
@@ -1639,9 +1670,9 @@ fn clear_cached_authentication_required_error(
             .into_iter()
             .flat_map(str::lines)
             .map(|line| {
-                (!line
-                    .to_ascii_lowercase()
-                    .contains("authentication required"))
+                let normalized = line.to_ascii_lowercase();
+                (!normalized.contains("authentication required")
+                    && !normalized.contains("auth required"))
                 .then(|| line.to_string())
             }),
     );
@@ -1738,6 +1769,7 @@ fn reasoning_capability_for_runner(
         | BaseCodingAgent::Copilot
         | BaseCodingAgent::Pi
         | BaseCodingAgent::Hermes
+        | BaseCodingAgent::KiroCli
         | BaseCodingAgent::DeepseekHarness => None,
         #[cfg(feature = "qa-mode")]
         BaseCodingAgent::QaMock | BaseCodingAgent::AcpQa => None,
@@ -1840,6 +1872,7 @@ fn model_name(config: &CodingAgent) -> Option<&str> {
         CodingAgent::QoderCli(config) => config.model.as_deref(),
         CodingAgent::Pi(config) => config.model.as_deref(),
         CodingAgent::Hermes(config) => config.model.as_deref(),
+        CodingAgent::KiroCli(config) => config.model.as_deref(),
         CodingAgent::DeepseekHarness(config) => config.model.as_deref(),
         #[cfg(feature = "qa-mode")]
         CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => None,
@@ -1943,6 +1976,7 @@ mod tests {
         acp::{AcpConfigChoice, AcpConfigOptionKind, AcpConfigOptionSnapshot, AcpConfigSource},
         deepseek_harness::DeepseekHarness,
         kimi::KimiCode,
+        kiro::KiroCli,
         pi::Pi,
         qoder::QoderCli,
     };
@@ -2003,7 +2037,10 @@ mod tests {
             (BaseCodingAgent::Pi, "settings.json", "mcp.json"),
             (BaseCodingAgent::Droid, "settings.json", "mcp.json"),
         ];
-        let runtime_only_paths = [(BaseCodingAgent::DeepseekHarness, "cordis.yml")];
+        let runtime_only_paths = [
+            (BaseCodingAgent::KiroCli, "cli.json"),
+            (BaseCodingAgent::DeepseekHarness, "cordis.yml"),
+        ];
 
         for (runner, runtime_file_name, mcp_file_name) in separate_paths {
             let executor = profiles
@@ -2147,6 +2184,7 @@ mod tests {
             BaseCodingAgent::KimiCode,
             BaseCodingAgent::QoderCli,
             BaseCodingAgent::Hermes,
+            BaseCodingAgent::KiroCli,
             BaseCodingAgent::DeepseekHarness,
         ] {
             assert_eq!(
@@ -2329,7 +2367,7 @@ mod tests {
             move || async move {
                 first_starts.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(40)).await;
-                Ok(CliProbeValue::Acp(None))
+                Ok(CliProbeValue::Acp(AcpProbeOutcome::Probed(None)))
             },
         );
         let second_starts = Arc::clone(&starts);
@@ -2338,14 +2376,20 @@ mod tests {
             CliProbeCachePolicy::Refresh,
             move || async move {
                 second_starts.fetch_add(1, Ordering::SeqCst);
-                Ok(CliProbeValue::Acp(None))
+                Ok(CliProbeValue::Acp(AcpProbeOutcome::Probed(None)))
             },
         );
 
         let (first_result, second_result) = tokio::join!(first, second);
 
-        assert!(matches!(first_result, Ok(CliProbeValue::Acp(None))));
-        assert!(matches!(second_result, Ok(CliProbeValue::Acp(None))));
+        assert!(matches!(
+            first_result,
+            Ok(CliProbeValue::Acp(AcpProbeOutcome::Probed(None)))
+        ));
+        assert!(matches!(
+            second_result,
+            Ok(CliProbeValue::Acp(AcpProbeOutcome::Probed(None)))
+        ));
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         CLI_PROBE_CACHE.remove(&key);
     }
@@ -3391,6 +3435,140 @@ mod tests {
             )),
             Some("hermes".to_string())
         );
+    }
+
+    #[test]
+    fn kiro_is_registered_as_a_native_acp_runner_without_static_reasoning() {
+        assert!(
+            ExecutorConfigs::from_defaults()
+                .executors
+                .contains_key(&BaseCodingAgent::KiroCli),
+            "Kiro CLI must have a default profile"
+        );
+        assert_eq!(
+            reasoning_capability_for_runner(BaseCodingAgent::KiroCli),
+            None,
+            "Kiro model choices come from the ACP probe"
+        );
+        assert_eq!(
+            runtime_dependency_requirement(BaseCodingAgent::KiroCli),
+            RuntimeDependencyRequirement::None,
+            "Kiro is a native CLI without node/npm/npx dependencies"
+        );
+
+        let executor = CodingAgent::KiroCli(KiroCli::default());
+        assert!(cmd_overrides_for_executor(&executor).is_some());
+        assert_eq!(version_command_base(&executor), None);
+        assert_eq!(model_name(&executor), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kiro_version_detection_uses_the_executor_owned_command() {
+        let mut kiro = KiroCli::default();
+        kiro.cmd.base_command_override = Some("sh -c 'printf \"kiro-cli 2.20.1\\n\"'".to_string());
+        kiro.cmd.additional_params = Some(vec!["--acp-only-option".to_string()]);
+        let executor = CodingAgent::KiroCli(kiro);
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert("KIRO_API_KEY", "fixture-secret-never-output");
+
+        let version = detect_cli_version(&executor, &env)
+            .await
+            .expect("Kiro version detection");
+
+        assert_eq!(version.as_deref(), Some("kiro-cli 2.20.1"));
+        assert!(
+            !version
+                .unwrap_or_default()
+                .contains("fixture-secret-never-output")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kiro_missing_auth_is_not_an_acp_or_discovery_error() {
+        let mut kiro = KiroCli::default();
+        kiro.cmd.base_command_override = Some("sh -c 'exit 1'".to_string());
+        let executor = CodingAgent::KiroCli(kiro);
+        let env = ExecutionEnv::new(Default::default(), false, String::new());
+
+        let outcome = coordinated_probe_acp(
+            BaseCodingAgent::KiroCli,
+            &executor,
+            Path::new("."),
+            &env,
+            None,
+            CliProbeCachePolicy::Refresh,
+        )
+        .await
+        .expect("missing Kiro authentication is a valid probe outcome");
+        assert!(matches!(outcome, AcpProbeOutcome::Unauthenticated));
+
+        let (models, auth_state) =
+            discover_models_for_executor(BaseCodingAgent::KiroCli, &executor, Path::new("."), &env)
+                .await
+                .expect("missing Kiro authentication must not fail discovery");
+        assert_eq!(models, None);
+        assert_eq!(auth_state, Some(AgentRuntimeAuthState::Unauthenticated));
+
+        let runner = BaseCodingAgent::KiroCli;
+        let preserved_models = vec!["kiro/model".to_string()];
+        let mut store = AgentRuntimeStore::default();
+        store.discoveries.insert(
+            runner,
+            AgentRuntimeDiscovery {
+                models: preserved_models.clone(),
+                version: None,
+                auth_state: None,
+                last_checked_at: Utc::now(),
+                last_error: Some(
+                    "[model_discovery] ACP initialize failed: Auth required: login".to_string(),
+                ),
+            },
+        );
+        let errors = apply_discovery_outcomes(
+            &mut store,
+            vec![RunnerDiscoveryOutcome::Discovered {
+                runner,
+                models,
+                detected_version: None,
+                version_error: None,
+                auth_state,
+            }],
+        );
+        assert!(errors.is_empty());
+        assert_eq!(store.discoveries[&runner].models, preserved_models);
+        assert_eq!(
+            store.discoveries[&runner].auth_state,
+            Some(AgentRuntimeAuthState::Unauthenticated)
+        );
+        assert_eq!(store.discoveries[&runner].last_error, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kiro_probe_failure_redacts_api_key_from_cli_stderr() {
+        let short_api_key = "abc";
+        let mut kiro = KiroCli::default();
+        kiro.cmd.base_command_override =
+            Some("sh -c 'printf \"%s\" \"$KIRO_API_KEY\" >&2'".to_string());
+        let executor = CodingAgent::KiroCli(kiro);
+        let mut env = ExecutionEnv::new(Default::default(), false, String::new());
+        env.insert("KIRO_API_KEY", short_api_key);
+
+        let error = coordinated_probe_acp(
+            BaseCodingAgent::KiroCli,
+            &executor,
+            Path::new("."),
+            &env,
+            None,
+            CliProbeCachePolicy::Refresh,
+        )
+        .await
+        .expect_err("invalid Kiro credentials must fail the ACP probe");
+
+        assert!(error.contains("[redacted]"), "{error}");
+        assert!(!error.contains(short_api_key));
     }
 
     #[test]

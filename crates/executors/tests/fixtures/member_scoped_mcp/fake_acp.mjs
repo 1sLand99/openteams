@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Generic offline ACP server for the six ACP-stdio member-scoped MCP E2E
- * runners (GEMINI, QWEN_CODE, KIMI_CODE, QODER_CLI, PI, HERMES).
+ * Generic offline ACP server for the seven ACP-stdio member-scoped MCP E2E
+ * runners (GEMINI, KIRO_CLI, QWEN_CODE, KIMI_CODE, QODER_CLI, PI, HERMES).
  *
  * Implements the Agent Client Protocol (JSON-RPC 2.0 over line-delimited
  * stdio) without contacting the network, any real CLI, user login state, or
