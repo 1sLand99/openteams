@@ -1,6 +1,6 @@
 {
   "name": "openteams",
-  "version": "1.0.22",
+  "version": "1.0.23",
   "private": true,
   "bin": {
     "openteams": "npx/openteams-npx/bin/cli.js"
