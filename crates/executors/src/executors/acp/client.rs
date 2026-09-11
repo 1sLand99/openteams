@@ -33,6 +33,7 @@ use crate::{
         ExecutorApprovalError, ExecutorApprovalOption, ExecutorApprovalRequest,
         ExecutorApprovalService,
     },
+    env::is_sensitive_env_name,
     executors::acp::{
         AcpApprovalPolicy, AcpClientServicePolicy, AcpEvent, ApprovalResponse, events,
         output::AcpOutput, usage::AcpTokenUsageAccumulator,
@@ -889,22 +890,6 @@ fn terminal_exit_status(status: ExitStatus) -> TerminalExitStatus {
     TerminalExitStatus::new().exit_code(code)
 }
 
-fn is_sensitive_env_name(name: &str) -> bool {
-    let normalized = name.to_ascii_uppercase();
-    [
-        "TOKEN",
-        "SECRET",
-        "PASSWORD",
-        "PASSWD",
-        "API_KEY",
-        "PRIVATE_KEY",
-        "CREDENTIAL",
-        "AUTHORIZATION",
-    ]
-    .iter()
-    .any(|fragment| normalized.contains(fragment))
-}
-
 fn select_option(
     request: &RequestPermissionRequest,
     preference: &[PermissionOptionKind],
@@ -958,7 +943,67 @@ mod tests {
     };
 
     use super::*;
-    use crate::logs::NormalizedEntryError;
+    use crate::{env::SensitiveValueRedactor, logs::NormalizedEntryError};
+
+    #[tokio::test]
+    async fn session_updates_redact_sensitive_values_before_the_event_stream() {
+        let secret = "kiro-event-stream-secret";
+        let raw_output = serde_json::Value::Object(
+            [(secret.to_string(), serde_json::json!("echoed as a key"))]
+                .into_iter()
+                .collect(),
+        );
+        let terminal_env = HashMap::from([("KIRO_API_KEY".to_string(), secret.to_string())]);
+        let (writer, mut reader) = tokio::io::duplex(32 * 1024);
+        let (output, output_task) =
+            AcpOutput::start(writer, SensitiveValueRedactor::from_env(&terminal_env));
+        let client = AcpClient::new(
+            output.clone(),
+            None,
+            AcpApprovalPolicy::Ask,
+            CancellationToken::new(),
+            PathBuf::from("/workspace"),
+            Vec::new(),
+            AcpClientServicePolicy::default(),
+            terminal_env,
+        );
+
+        for update in [
+            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                TextContent::new(format!("message: {secret}")),
+            ))),
+            SessionUpdate::ToolCall(
+                ToolCall::new(ToolCallId::new("kiro-tool"), format!("tool: {secret}"))
+                    .raw_input(serde_json::json!({ "apiKey": secret })),
+            ),
+            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                ToolCallId::new("kiro-tool"),
+                ToolCallUpdateFields::new()
+                    .title(format!("result: {secret}"))
+                    .raw_output(raw_output),
+            )),
+        ] {
+            client
+                .handle_notification(SessionNotification::new(
+                    SessionId::new("kiro-session"),
+                    update,
+                ))
+                .await
+                .expect("forward session update");
+        }
+
+        drop(client);
+        drop(output);
+        output_task
+            .await
+            .expect("output task")
+            .expect("output flush");
+        let mut body = String::new();
+        reader.read_to_string(&mut body).await.expect("read output");
+
+        assert!(!body.contains(secret));
+        assert!(body.matches("[redacted]").count() >= 5, "{body}");
+    }
 
     fn request(kinds: &[PermissionOptionKind]) -> RequestPermissionRequest {
         RequestPermissionRequest::new(
@@ -1061,7 +1106,8 @@ mod tests {
                 (AcpApprovalPolicy::AutoAllow, "allow", 0),
                 (AcpApprovalPolicy::AutoReject, "reject", 0),
             ] {
-                let (output, output_task) = AcpOutput::start(tokio::io::sink());
+                let (output, output_task) =
+                    AcpOutput::start(tokio::io::sink(), SensitiveValueRedactor::default());
                 let approvals = Arc::new(CountingApprovalService::default());
                 let client = AcpClient::new(
                     output.clone(),
@@ -1129,7 +1175,8 @@ mod tests {
 
     #[tokio::test]
     async fn kimi_permission_update_recovers_cached_command() {
-        let (output, output_task) = AcpOutput::start(tokio::io::sink());
+        let (output, output_task) =
+            AcpOutput::start(tokio::io::sink(), SensitiveValueRedactor::default());
         let approvals = Arc::new(CapturingApprovalService::default());
         let client = AcpClient::new(
             output.clone(),
@@ -1321,7 +1368,8 @@ mod tests {
             .expect("secret");
         std::os::unix::fs::symlink(&outside, root.join("escape")).expect("symlink");
 
-        let (output, output_task) = AcpOutput::start(tokio::io::sink());
+        let (output, output_task) =
+            AcpOutput::start(tokio::io::sink(), SensitiveValueRedactor::default());
         let client = AcpClient::new(
             output.clone(),
             None,
@@ -1426,7 +1474,8 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("openteams-acp-terminal-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await.expect("root");
-        let (output, output_task) = AcpOutput::start(tokio::io::sink());
+        let (output, output_task) =
+            AcpOutput::start(tokio::io::sink(), SensitiveValueRedactor::default());
         let client = AcpClient::new(
             output.clone(),
             None,
@@ -1500,7 +1549,8 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         tokio::fs::create_dir_all(&root).await.expect("root");
-        let (output, output_task) = AcpOutput::start(tokio::io::sink());
+        let (output, output_task) =
+            AcpOutput::start(tokio::io::sink(), SensitiveValueRedactor::default());
         let client = AcpClient::new(
             output.clone(),
             None,

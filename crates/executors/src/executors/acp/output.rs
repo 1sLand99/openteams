@@ -11,7 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::StreamReader;
 
 use super::{AcpEvent, events::AcpRuntimeEvent};
-use crate::executors::ExecutorOutput;
+use crate::{env::SensitiveValueRedactor, executors::ExecutorOutput};
 
 const DEFAULT_OUTPUT_CAPACITY: usize = 256;
 
@@ -19,6 +19,7 @@ const DEFAULT_OUTPUT_CAPACITY: usize = 256;
 #[derive(Clone)]
 pub struct AcpOutput {
     state: Arc<Mutex<OutputState>>,
+    redactor: SensitiveValueRedactor,
 }
 
 struct OutputState {
@@ -29,7 +30,10 @@ struct OutputState {
 }
 
 impl AcpOutput {
-    pub fn start<W>(writer: W) -> (Self, JoinHandle<std::io::Result<()>>)
+    pub fn start<W>(
+        writer: W,
+        redactor: SensitiveValueRedactor,
+    ) -> (Self, JoinHandle<std::io::Result<()>>)
     where
         W: AsyncWrite + Unpin + Send + 'static,
     {
@@ -53,6 +57,7 @@ impl AcpOutput {
                     session_id: None,
                     next_sequence: 0,
                 })),
+                redactor,
             },
             task,
         )
@@ -61,7 +66,7 @@ impl AcpOutput {
     /// Create a bounded synthetic stdout stream. Replay notifications are filtered before they
     /// reach this bridge, so the small handshake can complete before the caller attaches its log
     /// forwarder while current-turn output still receives normal backpressure.
-    pub fn channel() -> (Self, ExecutorOutput) {
+    pub fn channel(redactor: SensitiveValueRedactor) -> (Self, ExecutorOutput) {
         let (tx, rx) = mpsc::channel::<AcpRuntimeEvent>(DEFAULT_OUTPUT_CAPACITY);
         let stream = ReceiverStream::new(rx).map(|event| {
             let mut line = serde_json::to_vec(&event)
@@ -78,12 +83,14 @@ impl AcpOutput {
                     session_id: None,
                     next_sequence: 0,
                 })),
+                redactor,
             },
             ExecutorOutput::new(reader),
         )
     }
 
     pub async fn send(&self, event: AcpEvent) -> Result<(), AcpEvent> {
+        let event = redact_event(event, &self.redactor);
         let mut state = self.state.lock().await;
         let explicit_session_id = match &event {
             AcpEvent::SessionStart(session_id) => Some(session_id.clone()),
@@ -129,6 +136,18 @@ impl AcpOutput {
     }
 }
 
+fn redact_event(event: AcpEvent, redactor: &SensitiveValueRedactor) -> AcpEvent {
+    if redactor.is_empty() {
+        return event;
+    }
+    let Ok(mut value) = serde_json::to_value(event) else {
+        return AcpEvent::Error("ACP output event redaction failed".to_string());
+    };
+    redactor.redact_json(&mut value);
+    serde_json::from_value(value)
+        .unwrap_or_else(|_| AcpEvent::Error("ACP output event redaction failed".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::schema::v1::{ContentBlock, ContentChunk, TextContent};
@@ -139,7 +158,7 @@ mod tests {
     #[tokio::test]
     async fn drain_flushes_tail_event_with_monotonic_sequence() {
         let (writer, mut reader) = tokio::io::duplex(4096);
-        let (output, task) = AcpOutput::start(writer);
+        let (output, task) = AcpOutput::start(writer, SensitiveValueRedactor::default());
         output
             .send(AcpEvent::SessionStart("session".to_string()))
             .await
@@ -171,5 +190,27 @@ mod tests {
         assert_eq!(events[2].sequence, 2);
         assert_eq!(events[2].session_id.as_deref(), Some("session"));
         assert!(matches!(events[2].payload, AcpEvent::Done(_)));
+    }
+
+    #[tokio::test]
+    async fn short_explicit_secret_is_redacted_without_corrupting_event_shape() {
+        let (writer, mut reader) = tokio::io::duplex(4096);
+        let redactor = SensitiveValueRedactor::default().with_sensitive_values(["a"]);
+        let (output, task) = AcpOutput::start(writer, redactor);
+        output
+            .send(AcpEvent::Message(ContentChunk::new(ContentBlock::Text(
+                TextContent::new("data=a"),
+            ))))
+            .await
+            .expect("message event");
+        drop(output);
+        task.await.expect("output task").expect("output flush");
+
+        let mut body = String::new();
+        reader.read_to_string(&mut body).await.expect("read output");
+        let event = serde_json::from_str::<AcpRuntimeEvent>(body.trim()).expect("runtime event");
+
+        assert!(matches!(event.payload, AcpEvent::Message(_)), "{body}");
+        assert!(body.contains("[redacted]"), "{body}");
     }
 }

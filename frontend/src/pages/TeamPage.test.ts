@@ -298,6 +298,17 @@ check(
 );
 
 check(
+  "Kiro CLI member permissions follow the ACP probe capability gates",
+  configTabsSource.includes("acpCapabilityGates(acpProbe)") &&
+    configTabsSource.includes("gates.authMethodSelection") &&
+    configTabsSource.includes("gates.additionalDirectories") &&
+    teamUtilsSource.includes("probe.supports_session_load") &&
+    source.includes("acpProbe={acpProbeIsCurrent ? acpProbe : null}") &&
+    !configTabsSource.includes('runnerType === "KIRO_CLI"'),
+  configTabsSource,
+);
+
+check(
   "member runtime options keep coming from the generic available-runtime filter",
   source.includes(
     ".filter((runner) => getRuntimeDisplayState(runner) === \"available\")",

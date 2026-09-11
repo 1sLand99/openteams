@@ -8,7 +8,7 @@
   <h5>Planifier, construire et livrer — avec une équipe d'agents IA plutôt qu'un seul</h5>
 
   <p>
-    openteams est une application de bureau IA open source et local-first qui aide les développeurs indépendants à planifier, construire et livrer plus vite avec une équipe IA qu'ils gardent sous leur contrôle.
+    openteams est une application de bureau IA open source et local-first qui aide les développeurs indépendants à planifier, construire et livrer plus vite avec une équipe IA qu'ils gardent sous leur contrôle, et prend en charge 16 agents de code, dont Claude Code, Codex, Gemini CLI et l'agent openteams-cli intégré.
   </p>
 
   <p>
@@ -116,10 +116,21 @@ Vous pouvez aussi connecter des agents de code pris en charge :
 | Agent | Exemple d'installation |
 | --- | --- |
 | Claude Code | `npm i -g @anthropic-ai/claude-code` |
-| Gemini CLI | `npm i -g @google/gemini-cli` |
 | Codex | `npm i -g @openai/codex` |
+| Gemini CLI | `npm i -g @google/gemini-cli` |
 | Qwen Code | `npm i -g @qwen-code/qwen-code` |
 | OpenCode | `npm i -g opencode-ai` |
+| Amp | `npm i -g @sourcegraph/amp` |
+| GitHub Copilot | `npm i -g @github/copilot` |
+| Cursor | `curl https://cursor.com/install -fsS \| bash` |
+| Droid | `curl -fsSL https://app.factory.ai/cli \| sh` |
+| Kimi Code | `curl -LsSf https://code.kimi.com/install.sh \| bash` |
+| Qoder CLI | `curl -fsSL https://qoder.com/install \| bash` |
+| Pi | Aucune installation requise (exécuté via `npx`) |
+| Hermes | `pip install hermes-agent` |
+| Kiro CLI | `curl -fsSL https://cli.kiro.dev/install \| bash` |
+| DeepSeek Harness (aperçu ACP) | Compilez le [dépôt source officiel](https://github.com/deepseek-ai/deepseek-harness) à l'aide des commandes de configuration épinglées dans l'application ; OpenTeams lance son serveur ACP directement avec Node (sans `npx`) |
+| OpenTeams CLI | Inclus avec openteams |
 
 📚 [Autres guides d'installation d'agents](https://doc.openteams-lab.com/getting-started)
 
@@ -149,7 +160,7 @@ openteams est en développement actif. Voici la direction que nous prenons :
 
 - [ ] **Travailleurs IA experts** — Lancer davantage de travailleurs IA dotés de connaissances métier spécialisées, capables de résoudre des problèmes experts.
 - [ ] **Équipes IA à haut rendement** — Composer des équipes de travailleurs IA experts efficaces, capables de personnaliser des workflows de production pour des besoins métier précis et de transformer les exigences en livrables de bout en bout.
-- [ ] **Intégrer davantage d'agents** — Intégrer davantage d'agents couramment utilisés, comme Kilo Code, hermes-agent et openclaw.
+- [ ] **Intégrer davantage d'agents** — Intégrer davantage d'agents couramment utilisés, comme Kilo Code et openclaw.
 
 ***Vision : transformer la consommation de tokens en productivité réelle.***
 

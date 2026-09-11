@@ -29,6 +29,7 @@ import {
 } from "@/shortcuts/ShortcutProvider";
 import { agentRuntimeApi } from "@/lib/api";
 import type {
+  AcpCapabilityProbe,
   AgentRuntimeDiagnostics,
   AgentRuntimeStatus,
   BaseCodingAgent,
@@ -48,7 +49,10 @@ import {
 } from "./agent-runtime/agentRuntimeViewModel";
 import { getMissingRuntimeTools } from "./agent-runtime/installGuidance";
 import { AgentInstallGuide } from "./agent-runtime/AgentInstallGuide";
-import { findAcpSelectConfigOption } from "./team/teamUtils";
+import {
+  acpCapabilityGates,
+  findAcpSelectConfigOption,
+} from "./team/teamUtils";
 import ampSchema from "../../../shared/schemas/amp.json";
 import claudeCodeSchema from "../../../shared/schemas/claude_code.json";
 import codexSchema from "../../../shared/schemas/codex.json";
@@ -59,6 +63,7 @@ import droidSchema from "../../../shared/schemas/droid.json";
 import geminiSchema from "../../../shared/schemas/gemini.json";
 import hermesSchema from "../../../shared/schemas/hermes.json";
 import kimiCodeSchema from "../../../shared/schemas/kimi_code.json";
+import kiroCliSchema from "../../../shared/schemas/kiro_cli.json";
 import openTeamsCliSchema from "../../../shared/schemas/open_teams_cli.json";
 import opencodeSchema from "../../../shared/schemas/opencode.json";
 import piSchema from "../../../shared/schemas/pi.json";
@@ -138,6 +143,7 @@ const agentBrandMarks: Record<BaseCodingAgent, AgentBrandMark> = {
     logoClassName: "h-[22px] w-[22px]",
   },
   KIMI_CODE: { title: "Kimi", logoSrc: "/logos/kimi-logo.svg" },
+  KIRO_CLI: { title: "Kiro CLI", logoSrc: "/logos/kiro-logo.svg" },
   OPENCODE: {
     title: "OpenCode",
     logoSrc: "/logos/opencode.svg",
@@ -193,6 +199,7 @@ const agentConfigSchemas: Record<BaseCodingAgent, AgentJsonSchema> = {
   GEMINI: geminiSchema,
   HERMES: hermesSchema,
   KIMI_CODE: kimiCodeSchema,
+  KIRO_CLI: kiroCliSchema,
   OPENCODE: opencodeSchema,
   OPEN_TEAMS_CLI: openTeamsCliSchema,
   PI: piSchema,
@@ -232,7 +239,8 @@ const isAcpRunner = (runner: BaseCodingAgent): boolean =>
   runner === "QWEN_CODE" ||
   runner === "KIMI_CODE" ||
   runner === "QODER_CLI" ||
-  runner === "PI";
+  runner === "PI" ||
+  runner === "KIRO_CLI";
 
 const formatRunnerKey = (runner: BaseCodingAgent): string =>
   runner.toLowerCase().replaceAll("_", " ");
@@ -610,14 +618,16 @@ function DetailRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function AcpRuntimeConfigField({
+export function AcpRuntimeConfigField({
   runner,
+  acpProbe,
   value,
   onChange,
   onCommit,
   t,
 }: {
   runner: BaseCodingAgent;
+  acpProbe: AcpCapabilityProbe | null;
   value: JsonValue | undefined;
   onChange: (key: string, value: JsonValue | undefined) => void;
   onCommit: () => void | Promise<void>;
@@ -625,6 +635,10 @@ function AcpRuntimeConfigField({
 }) {
   const isHermes = runner === "HERMES";
   const isDeepseekHarness = runner === "DEEPSEEK_HARNESS";
+  // Capability limits come from the backend ACP probe. A missing probe means
+  // the backend could not confirm support, so gated controls stay hidden.
+  const gates = acpCapabilityGates(acpProbe);
+  const showAuthMethodId = !isDeepseekHarness && gates.authMethodSelection;
   const [pendingRiskyChange, setPendingRiskyChange] = useState<
     "full_access" | "auto_allow" | null
   >(null);
@@ -724,14 +738,14 @@ function AcpRuntimeConfigField({
           value={authMode}
           options={[
             { id: "auto", label: t("agents.acp.auth.auto") },
-            ...(isDeepseekHarness
-              ? []
-              : [
+            ...(showAuthMethodId
+              ? [
                   {
                     id: "method_id",
                     label: t("agents.acp.auth.methodId"),
                   },
-                ]),
+                ]
+              : []),
           ]}
           showSearch={false}
           className={dropdownClass}
@@ -745,7 +759,7 @@ function AcpRuntimeConfigField({
           }
         />
       </div>
-      {!isDeepseekHarness && authMode === "method_id" && (
+      {showAuthMethodId && authMode === "method_id" && (
         <label className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
           <span className={labelClass}>
             {t("agents.acp.auth.methodIdLabel")}
@@ -769,7 +783,7 @@ function AcpRuntimeConfigField({
           />
         </label>
       )}
-      {!isHermes && !isDeepseekHarness && (
+      {!isHermes && !isDeepseekHarness && gates.additionalDirectories && (
         <label className="grid grid-cols-[128px_minmax(0,1fr)] items-start gap-3 py-1.5">
           <span className={`${labelClass} pt-1`}>
             {t("agents.acp.directories.label")}
@@ -794,6 +808,16 @@ function AcpRuntimeConfigField({
           />
         </label>
       )}
+      <div className="grid grid-cols-[128px_minmax(0,1fr)] items-center gap-3 py-1.5">
+        <span className={labelClass}>{t("agents.acp.sessionResume.label")}</span>
+        <span className="font-mono text-[12px] leading-[1.55] text-[var(--ink-muted)]">
+          {acpProbe === null
+            ? t("agents.acp.sessionResume.unknown")
+            : gates.sessionLoad
+              ? t("agents.acp.sessionResume.supported")
+              : t("agents.acp.sessionResume.unsupported")}
+        </span>
+      </div>
       {pendingRiskyChange && (
         <ConfirmationDialog
           idPrefix="agent-acp-permission-confirmation"
@@ -1666,6 +1690,7 @@ function AgentConfigSidebar({
                 {isAcpRunner(runner.runner_type) && (
                   <AcpRuntimeConfigField
                     runner={runner.runner_type}
+                    acpProbe={currentDiagnostics?.acp_probe ?? null}
                     value={formData.acp}
                     onChange={handleConfigFieldChange}
                     onCommit={runAutoSave}

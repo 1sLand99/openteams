@@ -26,6 +26,7 @@ import {
 import { ConfirmationDialog } from "@/components/ConfirmationDialog";
 import { AgentBrandAvatar } from "../agent-runtime/agentRuntimeBrand";
 import type {
+  AcpCapabilityProbe,
   AgentRuntimeReasoningCapability,
   BackendChatSkill,
   BaseCodingAgent,
@@ -38,6 +39,7 @@ import type {
   AcpConfigValue,
 } from "../../../../shared/types";
 import {
+  acpCapabilityGates,
   defaultOptionId,
   cx,
   effectiveAcpConfigValue,
@@ -67,6 +69,7 @@ type TeamConfigTabsProps = {
   acpAuthMethodId: string;
   acpConfigOptions: AcpConfigOptionSnapshot[];
   acpConfigOverrides: AcpConfigOverride[];
+  acpProbe: AcpCapabilityProbe | null;
   acpProbeLoading: boolean;
   reasoningUnsupported: boolean;
   allowedSkillIds: string[];
@@ -829,6 +832,7 @@ function PermissionsTab({
   acpApprovalMode,
   acpAuthMode,
   acpAuthMethodId,
+  acpProbe,
   runnerType,
   setAcpAccessMode,
   setAcpAdditionalDirectories,
@@ -845,6 +849,7 @@ function PermissionsTab({
   | "acpApprovalMode"
   | "acpAuthMode"
   | "acpAuthMethodId"
+  | "acpProbe"
   | "runnerType"
   | "setAcpAccessMode"
   | "setAcpAdditionalDirectories"
@@ -859,6 +864,11 @@ function PermissionsTab({
   >(null);
   const dropdownClassName =
     "[&>button]:h-9 [&>button]:bg-[var(--surface-1)] [&>button]:font-mono [&>button]:text-[13px]";
+  // Capability limits come from the backend ACP probe. A missing probe means
+  // the backend could not confirm support, so gated controls stay hidden.
+  const gates = acpCapabilityGates(acpProbe);
+  const showAuthMethodId =
+    runnerType !== "DEEPSEEK_HARNESS" && gates.authMethodSelection;
 
   return (
     <>
@@ -946,27 +956,26 @@ function PermissionsTab({
                     ? "自动（使用环境变量）"
                     : "自动（使用 CLI 登录态）",
               },
-              ...(runnerType === "DEEPSEEK_HARNESS"
-                ? []
-                : [{ id: "method_id", label: "指定 auth_method_id" }]),
+              ...(showAuthMethodId
+                ? [{ id: "method_id", label: "指定 auth_method_id" }]
+                : []),
             ]}
             showSearch={false}
             className={dropdownClassName}
             onChange={setAcpAuthMode}
           />
-          {runnerType !== "DEEPSEEK_HARNESS" &&
-            acpAuthMode === "method_id" && (
-              <input
-                value={acpAuthMethodId}
-                onChange={(event) => setAcpAuthMethodId(event.target.value)}
-                placeholder="auth_method_id"
-                className={inputClassName}
-              />
-            )}
+          {showAuthMethodId && acpAuthMode === "method_id" && (
+            <input
+              value={acpAuthMethodId}
+              onChange={(event) => setAcpAuthMethodId(event.target.value)}
+              placeholder="auth_method_id"
+              className={inputClassName}
+            />
+          )}
         </div>
       </SettingRow>
 
-      {runnerType !== "HERMES" && runnerType !== "DEEPSEEK_HARNESS" && (
+      {runnerType !== "HERMES" && runnerType !== "DEEPSEEK_HARNESS" && gates.additionalDirectories && (
         <SettingRow
           title="附加目录"
           description="启用覆盖后，每行一个绝对目录；空列表会显式清除全局附加目录。"

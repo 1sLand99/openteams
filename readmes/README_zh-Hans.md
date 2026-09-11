@@ -8,7 +8,7 @@
   <h5>规划、构建、交付——不再只靠一个 AI，而是与你的 AI 团队并肩完成</h5>
 
   <p>
-    openteams 是一款开源、本地优先的 AI 桌面应用，帮助独立开发者通过一支可控的 AI 团队，更快地规划、构建和交付软件。
+    openteams 是一款开源、本地优先的 AI 桌面应用，帮助独立开发者通过一支可控的 AI 团队，更快地规划、构建和交付软件，并支持 16 种编程 Agent，包括 Claude Code、Codex、Gemini CLI 和内置的 openteams-cli。
   </p>
 
   <p>
@@ -116,10 +116,21 @@ npx openteams-web
 | Agent | 安装示例 |
 | --- | --- |
 | Claude Code | `npm i -g @anthropic-ai/claude-code` |
-| Gemini CLI | `npm i -g @google/gemini-cli` |
 | Codex | `npm i -g @openai/codex` |
+| Gemini CLI | `npm i -g @google/gemini-cli` |
 | Qwen Code | `npm i -g @qwen-code/qwen-code` |
 | OpenCode | `npm i -g opencode-ai` |
+| Amp | `npm i -g @sourcegraph/amp` |
+| GitHub Copilot | `npm i -g @github/copilot` |
+| Cursor | `curl https://cursor.com/install -fsS \| bash` |
+| Droid | `curl -fsSL https://app.factory.ai/cli \| sh` |
+| Kimi Code | `curl -LsSf https://code.kimi.com/install.sh \| bash` |
+| Qoder CLI | `curl -fsSL https://qoder.com/install \| bash` |
+| Pi | 无需安装（通过 `npx` 运行） |
+| Hermes | `pip install hermes-agent` |
+| Kiro CLI | `curl -fsSL https://cli.kiro.dev/install \| bash` |
+| DeepSeek Harness（ACP 预览） | 使用应用内固定版本的设置命令构建[官方源码](https://github.com/deepseek-ai/deepseek-harness)；OpenTeams 直接使用 Node 启动其 ACP 服务器（不使用 `npx`） |
+| OpenTeams CLI | 已内置于 openteams |
 
 📚 [更多 Agent 安装指南](https://doc.openteams-lab.com/getting-started)
 
@@ -149,7 +160,7 @@ openteams 正在积极开发中。接下来我们会朝这些方向推进：
 
 - [ ] **领域专家型 AI 员工** — 推出更多具备专业领域知识、能够解决专业问题的 AI 员工。
 - [ ] **高产出的 AI 团队** — 由高效的专家型 AI 员工组成，可针对特定业务定制生产工作流，将需求端到端转化为可交付成果。
-- [ ] **集成更多 Agent** — 集成更多常用 Agent，例如 Kilo Code、hermes-agent 和 openclaw。
+- [ ] **集成更多 Agent** — 集成更多常用 Agent，例如 Kilo Code 和 openclaw。
 
 ***愿景：把 Token 消耗转化为真正的生产力。***
 

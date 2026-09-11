@@ -246,6 +246,7 @@ pub fn spawn_local_output_process()
     let spawned = SpawnedChild {
         child,
         stdout: None,
+        stderr: None,
         exit_signal: None,
         cancel: None,
         cleanup: None,

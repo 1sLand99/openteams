@@ -684,6 +684,7 @@ impl CodingAgent {
             | CodingAgent::QoderCli(_)
             | CodingAgent::Pi(_)
             | CodingAgent::Hermes(_)
+            | CodingAgent::KiroCli(_)
             | CodingAgent::DeepseekHarness(_) => Passthrough,
             #[cfg(feature = "qa-mode")]
             CodingAgent::QaMock(_) | CodingAgent::AcpQa(_) => Passthrough,

@@ -513,6 +513,7 @@ fn generate_types_content() -> String {
         executors::executors::kimi::KimiCode::decl(),
         executors::executors::pi::Pi::decl(),
         executors::executors::hermes::Hermes::decl(),
+        executors::executors::kiro::KiroCli::decl(),
         executors::executors::deepseek_harness::DeepseekHarness::decl(),
         executors::executors::droid::Autonomy::decl(),
         executors::executors::droid::ReasoningEffortLevel::decl(),
@@ -645,6 +646,10 @@ fn generate_schemas() -> Result<HashMap<&'static str, String>, serde_json::Error
         (
             "hermes",
             generate_json_schema::<executors::executors::hermes::Hermes>()?,
+        ),
+        (
+            "kiro_cli",
+            generate_json_schema::<executors::executors::kiro::KiroCli>()?,
         ),
         (
             "deepseek_harness",

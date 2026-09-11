@@ -1250,6 +1250,7 @@ export interface AcpCapabilityProbe {
   auth_methods: AcpAuthMethodInfo[];
   supports_session_list: boolean;
   supports_session_resume: boolean;
+  supports_session_load: boolean;
   supports_session_close: boolean;
   supports_session_delete: boolean;
   supports_additional_directories: boolean;

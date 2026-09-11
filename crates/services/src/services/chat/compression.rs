@@ -363,7 +363,7 @@ fn spawn_summary_log_forwarders(
     let stdout = spawned.take_stdout().ok_or_else(|| {
         ChatServiceError::Validation("summarization child missing stdout".to_string())
     })?;
-    let stderr = spawned.child.inner().stderr.take().ok_or_else(|| {
+    let stderr = spawned.take_stderr().ok_or_else(|| {
         ChatServiceError::Validation("summarization child missing stderr".to_string())
     })?;
 

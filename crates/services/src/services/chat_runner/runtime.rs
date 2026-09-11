@@ -530,7 +530,7 @@ impl ChatRunner {
         // and expose their normalized output through `SpawnedChild::stdout` instead. Treat that
         // as a supported capability shape rather than panicking the HTTP request that started
         // the run.
-        let stderr = spawned.child.inner().stderr.take();
+        let stderr = spawned.take_stderr();
 
         let stdout_store = msg_store.clone();
         let stdout_log = raw_log_spool.clone();

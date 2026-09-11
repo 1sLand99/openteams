@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import type { AcpConfigOptionSnapshot } from "../../../../shared/types";
-import type { BaseCodingAgent } from "@/types";
+import type { AcpCapabilityProbe, BaseCodingAgent } from "@/types";
 import {
+  acpCapabilityGates,
   acpOptionSemanticCategory,
   canonicalRuntimeModelId,
   effectiveAcpConfigValue,
@@ -112,6 +113,12 @@ assert.equal(normalizeRunnerType("PI"), "PI");
 assert.equal(normalizeRunnerType("pi"), "PI");
 assert.equal(normalizeRunnerType("Pi"), "PI");
 
+// --- Kiro CLI runner registration -----------------------------------------
+
+assert.equal(normalizeRunnerType("KIRO_CLI"), "KIRO_CLI");
+assert.equal(normalizeRunnerType("kiro-cli"), "KIRO_CLI");
+assert.equal(normalizeRunnerType("kiro_cli"), "KIRO_CLI");
+
 const piModelOption: AcpConfigOptionSnapshot = {
   ...modelOption,
   id: "model",
@@ -151,6 +158,7 @@ const acpRunners = [
   "HERMES",
   "QWEN_CODE",
   "KIMI_CODE",
+  "KIRO_CLI",
   "QODER_CLI",
   "PI",
 ];
@@ -181,3 +189,55 @@ for (const runner of nonAcpRunners) {
 }
 
 console.log("Runner ACP support classification: PASS");
+
+// --- ACP capability gates consume the backend probe ----------------------
+
+const acpProbeFixture = (
+  overrides: Partial<AcpCapabilityProbe>,
+): AcpCapabilityProbe => ({
+  protocol_version: "1",
+  agent_name: "kiro-cli",
+  agent_version: "2.20.1",
+  auth_methods: [],
+  supports_session_list: false,
+  supports_session_resume: false,
+  supports_session_load: false,
+  supports_session_close: false,
+  supports_session_delete: false,
+  supports_additional_directories: false,
+  agent_capabilities: null,
+  config_source: "none",
+  config_options: [],
+  ...overrides,
+});
+
+assert.deepEqual(acpCapabilityGates(null), {
+  authMethodSelection: false,
+  additionalDirectories: false,
+  sessionLoad: false,
+});
+// Kiro 2.20.1 ACP v1: no advertised auth methods, no additional
+// directories, session/load supported.
+assert.deepEqual(
+  acpCapabilityGates(acpProbeFixture({ supports_session_load: true })),
+  {
+    authMethodSelection: false,
+    additionalDirectories: false,
+    sessionLoad: true,
+  },
+);
+assert.deepEqual(
+  acpCapabilityGates(
+    acpProbeFixture({
+      auth_methods: [{ id: "oauth", name: "OAuth", description: null }],
+      supports_additional_directories: true,
+    }),
+  ),
+  {
+    authMethodSelection: true,
+    additionalDirectories: true,
+    sessionLoad: false,
+  },
+);
+
+console.log("ACP capability gates: PASS");

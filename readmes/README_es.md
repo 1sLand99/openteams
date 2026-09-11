@@ -8,7 +8,7 @@
   <h5>Planifica, construye y entrega — con un equipo de agentes de IA en lugar de uno solo</h5>
 
   <p>
-    openteams es una aplicación de escritorio de IA, de código abierto y local-first, que ayuda a desarrolladores independientes a planificar, construir y entregar software más rápido con un equipo de IA bajo su control.
+    openteams es una aplicación de escritorio de IA, de código abierto y local-first, que ayuda a desarrolladores independientes a planificar, construir y entregar software más rápido con un equipo de IA bajo su control, y es compatible con 16 agentes de código, incluidos Claude Code, Codex, Gemini CLI y el agente openteams-cli integrado.
   </p>
 
   <p>
@@ -116,10 +116,21 @@ También puedes conectar agentes de código compatibles como:
 | Agent | Ejemplo de instalación |
 | --- | --- |
 | Claude Code | `npm i -g @anthropic-ai/claude-code` |
-| Gemini CLI | `npm i -g @google/gemini-cli` |
 | Codex | `npm i -g @openai/codex` |
+| Gemini CLI | `npm i -g @google/gemini-cli` |
 | Qwen Code | `npm i -g @qwen-code/qwen-code` |
 | OpenCode | `npm i -g opencode-ai` |
+| Amp | `npm i -g @sourcegraph/amp` |
+| GitHub Copilot | `npm i -g @github/copilot` |
+| Cursor | `curl https://cursor.com/install -fsS \| bash` |
+| Droid | `curl -fsSL https://app.factory.ai/cli \| sh` |
+| Kimi Code | `curl -LsSf https://code.kimi.com/install.sh \| bash` |
+| Qoder CLI | `curl -fsSL https://qoder.com/install \| bash` |
+| Pi | No requiere instalación (se ejecuta mediante `npx`) |
+| Hermes | `pip install hermes-agent` |
+| Kiro CLI | `curl -fsSL https://cli.kiro.dev/install \| bash` |
+| DeepSeek Harness (vista previa de ACP) | Compila el [repositorio de código fuente oficial](https://github.com/deepseek-ai/deepseek-harness) con los comandos de configuración de versión fijada de la aplicación; OpenTeams inicia su servidor ACP directamente con Node (sin `npx`) |
+| OpenTeams CLI | Incluido con openteams |
 
 📚 [Más guías de instalación de agentes](https://doc.openteams-lab.com/getting-started)
 
@@ -149,7 +160,7 @@ openteams está en desarrollo activo. Hacia allí vamos:
 
 - [ ] **Trabajadores IA expertos** — Lanzar más trabajadores de IA con conocimiento profundo de dominios específicos, capaces de resolver problemas especializados.
 - [ ] **Equipos de IA de alto rendimiento** — Formar equipos con trabajadores de IA expertos y eficientes, capaces de personalizar workflows de producción para necesidades de negocio específicas y convertir requisitos en entregables de principio a fin.
-- [ ] **Integrar más agentes** — Integrar más agentes de uso común, como Kilo Code, hermes-agent y openclaw, entre otros.
+- [ ] **Integrar más agentes** — Integrar más agentes de uso común, como Kilo Code y openclaw, entre otros.
 
 ***Visión: transformar el consumo de tokens en productividad real.***
 

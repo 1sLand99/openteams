@@ -8,7 +8,7 @@
   <h5>Plan, Build, and Ship — with a team of AI agents instead of one</h5>
 
   <p>
-    openteams is an open-source, local-first AI desktop app that helps indie developers plan, build, and ship software faster with an AI team they can control, supporting 13 coding agents including Claude Code, Codex, Gemini CLI, and the bundled openteams-cli.
+    openteams is an open-source, local-first AI desktop app that helps indie developers plan, build, and ship software faster with an AI team they can control, supporting 16 coding agents including Claude Code, Codex, Gemini CLI, and the bundled openteams-cli.
   </p>
 
   <p>
@@ -126,6 +126,8 @@ You can also connect any of these supported coding agents:
 | Kimi Code | `curl -LsSf https://code.kimi.com/install.sh \| bash` |
 | Qoder CLI | `curl -fsSL https://qoder.com/install \| bash` |
 | Pi | No install needed (runs via `npx`) |
+| Hermes | `pip install hermes-agent` |
+| Kiro CLI | `curl -fsSL https://cli.kiro.dev/install \| bash` |
 | DeepSeek Harness (ACP preview) | Build the [official source checkout](https://github.com/deepseek-ai/deepseek-harness) using the in-app pinned setup commands; OpenTeams launches its ACP server directly with Node (no `npx`) |
 | OpenTeams CLI | Bundled with openteams |
 
@@ -156,7 +158,7 @@ openteams is under active development. Here is where we are heading:
 
 - [ ] **Expert AI workers** — Launch more AI workers with deep domain knowledge that can solve specialized problems.
 - [ ] **High-output AI teams** — Compose efficient expert AI workers into teams that can customize production workflows for specific business needs and turn requirements into deliverables end to end.
-- [ ] **Integrate more agents** — Add support for more commonly used agents, such as Kilo Code, hermes-agent, openclaw, and others.
+- [ ] **Integrate more agents** — Add support for more commonly used agents, such as Kilo Code, openclaw, and others.
 
 ***Vision: Transform token consumption into real productivity.***
 

@@ -21,6 +21,12 @@ const deepseekHarnessSchema = JSON.parse(
     'utf8',
   ),
 ) as { properties?: Record<string, { properties?: Record<string, unknown> }> };
+const kiroCliSchema = JSON.parse(
+  readFileSync(
+    new URL('../../../shared/schemas/kiro_cli.json', import.meta.url),
+    'utf8',
+  ),
+) as { properties?: Record<string, { properties?: Record<string, unknown> }> };
 
 assert.match(source, /useEffect\(\(\) => \{[\s\S]*?agentRuntimeApi[\s\S]*?\.getDiagnostics\(runner\.runner_type, \{ workspacePath \}\)[\s\S]*?\}, \[refreshRevision, runner\.runner_type, workspacePath\]\);/u);
 assert.doesNotMatch(source, /diagnosticsRefreshKey|refreshKey/iu);
@@ -144,6 +150,37 @@ assert.match(
   /import qoderCliSchema from "..\/..\/..\/shared\/schemas\/qoder_cli\.json";/u,
 );
 assert.match(source, /QODER_CLI: qoderCliSchema,/u);
+assert.match(
+  source,
+  /import kiroCliSchema from "..\/..\/..\/shared\/schemas\/kiro_cli\.json";/u,
+);
+assert.match(source, /KIRO_CLI: kiroCliSchema,/u);
+assert.match(
+  source,
+  /KIRO_CLI: \{[\s\S]*?title: "Kiro CLI"[\s\S]*?text: "Ki"/u,
+);
+assert.match(
+  sharedBrandSource,
+  /KIRO_CLI: \{[\s\S]*?title: "Kiro CLI"[\s\S]*?text: "Ki"/u,
+);
+assert.deepEqual(Object.keys(kiroCliSchema.properties ?? {}).sort(), [
+  'acp',
+  'additional_params',
+  'append_prompt',
+  'base_command_override',
+  'env',
+  'model',
+]);
+// Capability limits (auth method selection, additional directories, session
+// resume) must be consumed from the backend ACP probe through the shared
+// gates helper instead of runner-specific hardcoding.
+assert.match(source, /const gates = acpCapabilityGates\(acpProbe\);/u);
+assert.match(source, /gates\.authMethodSelection/u);
+assert.match(source, /gates\.additionalDirectories/u);
+assert.match(source, /gates\.sessionLoad/u);
+assert.match(source, /t\("agents\.acp\.sessionResume\.supported"\)/u);
+assert.match(source, /t\("agents\.acp\.sessionResume\.unsupported"\)/u);
+assert.doesNotMatch(source, /isKiro|runner === "KIRO_CLI" && /u);
 assert.match(
   source,
   /import piSchema from "..\/..\/..\/shared\/schemas\/pi\.json";/u,

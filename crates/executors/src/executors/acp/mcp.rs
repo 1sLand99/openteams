@@ -119,6 +119,25 @@ pub fn validate_mcp_servers(
     Ok(())
 }
 
+pub(crate) fn mcp_server_output_secrets(servers: &[McpServer]) -> Vec<String> {
+    let mut values = Vec::new();
+    for server in servers {
+        match server {
+            McpServer::Stdio(server) => {
+                values.extend(server.env.iter().map(|variable| variable.value.clone()));
+            }
+            McpServer::Http(server) => {
+                values.extend(server.headers.iter().map(|header| header.value.clone()));
+            }
+            McpServer::Sse(server) => {
+                values.extend(server.headers.iter().map(|header| header.value.clone()));
+            }
+            _ => {}
+        }
+    }
+    values
+}
+
 /// Load the complete MCP list that OpenTeams will pass on ACP session requests.
 pub fn resolve_effective_mcp_config(
     canonical_config: &Value,
@@ -442,16 +461,18 @@ mod tests {
 
     #[test]
     fn parses_enabled_stdio_and_http_servers() {
+        let env_secret = "e!";
+        let header_secret = "h?";
         let value = serde_json::json!({
             "mcpServers": {
                 "local": {
                     "command": "/bin/echo",
                     "args": ["hello"],
-                    "env": {"VISIBLE": "value"}
+                    "env": {"TOKEN": env_secret}
                 },
                 "remote": {
                     "httpUrl": "https://example.test/mcp",
-                    "headers": {"Authorization": "secret"}
+                    "headers": {"Authorization": header_secret}
                 },
                 "disabled": {
                     "command": "/bin/echo",
@@ -463,6 +484,10 @@ mod tests {
         assert_eq!(servers.len(), 2);
         assert!(matches!(servers[0], McpServer::Stdio(_)));
         assert!(matches!(servers[1], McpServer::Http(_)));
+        let redactor = crate::env::SensitiveValueRedactor::default()
+            .with_sensitive_values(mcp_server_output_secrets(&servers));
+        let output = redactor.redact(&format!("env={env_secret}; header={header_secret}"));
+        assert_eq!(output, "env=[redacted]; header=[redacted]");
     }
 
     #[test]
