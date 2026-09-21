@@ -388,6 +388,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn skipped_step_overrides_blocked_structured_result_for_downstream_use() {
+        let structured = serde_json::json!({
+            "type": "final_result",
+            "status": "blocked",
+            "issues": ["真实验收尚未完成"]
+        });
+        let mut step = sample_step(WorkflowStepStatus::Failed);
+        step.summary_text = Some(
+            serde_json::json!({
+                "summary": "上游结果",
+                "content": structured.to_string(),
+                "outputs": ["artifact.txt"]
+            })
+            .to_string(),
+        );
+
+        let blocked = result_aggregation::final_node_result_from_step(&step)
+            .expect("failed result should remain available for inspection");
+        assert_eq!(blocked.status, WorkflowTaskCompletionStatus::Blocked);
+
+        step.status = WorkflowStepStatus::Skipped;
+
+        let result = result_aggregation::final_node_result_from_step(&step)
+            .expect("skipped result should remain usable");
+
+        assert_eq!(
+            result.status,
+            WorkflowTaskCompletionStatus::DoneWithConcerns
+        );
+        assert_eq!(result.summary, "上游结果");
+        assert_eq!(result.outputs, vec!["artifact.txt"]);
+        assert_eq!(result.issues, vec!["真实验收尚未完成"]);
+    }
+
     fn sample_agent_views() -> (Vec<ChatSessionAgent>, Vec<ChatAgent>) {
         let now = Utc::now();
         let agent_id = Uuid::new_v4();

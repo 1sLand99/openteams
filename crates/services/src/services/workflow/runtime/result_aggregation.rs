@@ -277,10 +277,17 @@ pub fn final_node_result_from_step(
         .as_deref()
         .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok());
 
-    let status = structured
-        .as_ref()
-        .and_then(structured_status)
-        .unwrap_or_else(|| fallback_status(step));
+    // A user-issued skip explicitly waives the predecessor result for dependency
+    // purposes. Preserve its report for context, but do not let the report's
+    // original blocked/needs_context status contradict the persisted skip.
+    let status = if step.status == db::models::workflow_types::WorkflowStepStatus::Skipped {
+        WorkflowTaskCompletionStatus::DoneWithConcerns
+    } else {
+        structured
+            .as_ref()
+            .and_then(structured_status)
+            .unwrap_or_else(|| fallback_status(step))
+    };
 
     let outputs = if payload.outputs.is_empty() {
         structured_string_array(structured.as_ref(), "outputs")
