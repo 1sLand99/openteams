@@ -20,6 +20,27 @@ struct BackendState {
     child: Mutex<Option<CommandChild>>,
 }
 
+#[cfg(windows)]
+fn apply_windows_corner_preference(window: &tauri::Window) {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    };
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let preference = DWMWCP_ROUND;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd.0 as _,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &preference as *const _ as *const c_void,
+            size_of_val(&preference) as u32,
+        );
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct SelectDirectoryDialogRequest {
     #[serde(default)]
@@ -448,6 +469,7 @@ fn main() {
                     // its own drag region and window controls instead. macOS
                     // keeps the Overlay titleBarStyle from the config.
                     window.set_decorations(false)?;
+                    apply_windows_corner_preference(&window);
                 }
                 apply_default_webview_zoom(&window);
                 wait_for_backend_then_navigate(window, port);

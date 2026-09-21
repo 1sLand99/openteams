@@ -2410,7 +2410,7 @@ function WorkspaceLayout() {
                   data-tauri-drag-region
                   className="h-full min-w-12 flex-1"
                 />
-                <div className="flex h-full shrink-0 items-center gap-1">
+                <div className="flex h-full -translate-y-px shrink-0 items-center gap-1">
                   <button
                     type="button"
                     onClick={() => void tauriAppWindow.minimize()}
